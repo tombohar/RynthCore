@@ -1,0 +1,39 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v9.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v9.0": {
+      "NexCore.App/1.0.0": {
+        "dependencies": {
+          "NexCore.Injector": "1.0.0"
+        },
+        "runtime": {
+          "NexCore.App.dll": {}
+        }
+      },
+      "NexCore.Injector/1.0.0": {
+        "runtime": {
+          "NexCore.Injector.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "NexCore.App/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "NexCore.Injector/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

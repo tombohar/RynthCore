@@ -1,0 +1,5 @@
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Release\net9.0-windows\publish\NexCore.Injector.exe
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Release\net9.0-windows\publish\NexCore.Injector.dll
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Release\net9.0-windows\publish\NexCore.Injector.deps.json
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Release\net9.0-windows\publish\NexCore.Injector.runtimeconfig.json
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Release\net9.0-windows\publish\NexCore.Injector.pdb

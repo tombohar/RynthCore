@@ -1,0 +1,83 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <RootNamespace>NexCore.Engine</RootNamespace>
+    <AssemblyName>NexCore.Engine</AssemblyName>
+
+    <!-- NativeAOT settings -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <StackTraceSupport>false</StackTraceSupport>
+
+    <!-- Keep ImGui.NET's P/Invoke bindings intact -->
+    <TrimMode>link</TrimMode>
+
+    <Platforms>x86</Platforms>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <StackTraceSupport>true</StackTraceSupport>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+  </ItemGroup>
+
+  <!-- Prevent trimmer from removing ImGui.NET's DllImport methods -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="ImGui.NET" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <BundledNativeDll Include="Native\cimgui.dll" />
+  </ItemGroup>
+
+  <Target Name="CopyBundledNativeDlls" AfterTargets="Build">
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(OutputPath)Native\%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(OutputPath)Native\NexCore.%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(OutputPath)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(OutputPath)NexCore.%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyBundledNativeDllsToPublish" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(PublishDir)Native\%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(PublishDir)Native\NexCore.%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(PublishDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(PublishDir)NexCore.%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

@@ -1,0 +1,82 @@
+{
+  "runtimes": {
+    "freebsd-arm64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.freebsd-arm64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "freebsd-x64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.freebsd-x64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "linux-arm": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.linux-arm.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "linux-arm64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.linux-arm64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "linux-musl-arm": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.linux-musl-arm.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "linux-musl-arm64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.linux-musl-arm64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "linux-musl-x64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.linux-musl-x64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "linux-x64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.linux-x64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "osx-arm64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.osx-arm64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "osx-x64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.osx-x64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "win-arm64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.win-arm64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "win-x64": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.win-x64.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    },
+    "win-x86": {
+      "#import": [],
+      "Microsoft.DotNet.ILCompiler": {
+        "runtime.win-x86.Microsoft.DotNet.ILCompiler": "[9.0.14, )"
+      }
+    }
+  }
+}

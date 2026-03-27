@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <PlatformTarget>x86</PlatformTarget>
+    <RootNamespace>NexCore.App</RootNamespace>
+    <AssemblyName>NexCore.App</AssemblyName>
+    <Platforms>x86</Platforms>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NexCore.Injector\NexCore.Injector.csproj" />
+  </ItemGroup>
+
+</Project>

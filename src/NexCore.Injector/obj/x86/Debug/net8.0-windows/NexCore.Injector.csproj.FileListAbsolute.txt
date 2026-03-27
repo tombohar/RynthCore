@@ -1,0 +1,14 @@
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Debug\net8.0-windows\NexCore.Injector.exe
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Debug\net8.0-windows\NexCore.Injector.deps.json
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Debug\net8.0-windows\NexCore.Injector.runtimeconfig.json
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Debug\net8.0-windows\NexCore.Injector.dll
+C:\Projects\NexCore\src\NexCore.Injector\bin\x86\Debug\net8.0-windows\NexCore.Injector.pdb
+C:\Projects\NexCore\src\NexCore.Injector\obj\x86\Debug\net8.0-windows\NexCore.Injector.GeneratedMSBuildEditorConfig.editorconfig
+C:\Projects\NexCore\src\NexCore.Injector\obj\x86\Debug\net8.0-windows\NexCore.Injector.AssemblyInfoInputs.cache
+C:\Projects\NexCore\src\NexCore.Injector\obj\x86\Debug\net8.0-windows\NexCore.Injector.AssemblyInfo.cs
+C:\Projects\NexCore\src\NexCore.Injector\obj\x86\Debug\net8.0-windows\NexCore.Injector.csproj.CoreCompileInputs.cache
+C:\Projects\NexCore\src\NexCore.Injector\obj\x86\Debug\net8.0-windows\NexCore.Injector.dll
+C:\Projects\NexCore\src\NexCore.Injector\obj\x86\Debug\net8.0-windows\refint\NexCore.Injector.dll
+C:\Projects\NexCore\src\NexCore.Injector\obj\x86\Debug\net8.0-windows\NexCore.Injector.pdb
+C:\Projects\NexCore\src\NexCore.Injector\obj\x86\Debug\net8.0-windows\NexCore.Injector.genruntimeconfig.cache
+C:\Projects\NexCore\src\NexCore.Injector\obj\x86\Debug\net8.0-windows\ref\NexCore.Injector.dll

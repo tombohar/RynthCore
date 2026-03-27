@@ -1,0 +1,11 @@
+C:\Projects\NexCore\src\NexCore.Engine\obj\x86\Debug\net9.0-windows\win-x86\NexCore.Engine.GeneratedMSBuildEditorConfig.editorconfig
+C:\Projects\NexCore\src\NexCore.Engine\obj\x86\Debug\net9.0-windows\win-x86\NexCore.Engine.AssemblyInfoInputs.cache
+C:\Projects\NexCore\src\NexCore.Engine\obj\x86\Debug\net9.0-windows\win-x86\NexCore.Engine.AssemblyInfo.cs
+C:\Projects\NexCore\src\NexCore.Engine\obj\x86\Debug\net9.0-windows\win-x86\NexCore.Engine.csproj.CoreCompileInputs.cache
+C:\Projects\NexCore\src\NexCore.Engine\bin\x86\Debug\net9.0-windows\win-x86\NexCore.Engine.deps.json
+C:\Projects\NexCore\src\NexCore.Engine\bin\x86\Debug\net9.0-windows\win-x86\NexCore.Engine.dll
+C:\Projects\NexCore\src\NexCore.Engine\bin\x86\Debug\net9.0-windows\win-x86\NexCore.Engine.pdb
+C:\Projects\NexCore\src\NexCore.Engine\obj\x86\Debug\net9.0-windows\win-x86\NexCore.Engine.dll
+C:\Projects\NexCore\src\NexCore.Engine\obj\x86\Debug\net9.0-windows\win-x86\refint\NexCore.Engine.dll
+C:\Projects\NexCore\src\NexCore.Engine\obj\x86\Debug\net9.0-windows\win-x86\NexCore.Engine.pdb
+C:\Projects\NexCore\src\NexCore.Engine\obj\x86\Debug\net9.0-windows\win-x86\ref\NexCore.Engine.dll

@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep:*)",
+      "Bash(powershell -Command \"\nAdd-Type -Path 'C:\\\\Users\\\\tboha\\\\.nuget\\\\packages\\\\imgui.net\\\\1.91.6.1\\\\lib\\\\net8.0\\\\ImGui.NET.dll'\n\\\\$t = [ImGuiNET.ImDrawCmd]\nWrite-Host 'ImDrawCmd size:' \\([System.Runtime.InteropServices.Marshal]::SizeOf\\(\\\\$t\\)\\)\n\\\\$t.GetFields\\([System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Instance\\) | ForEach-Object { Write-Host \\\\$_.Name }\n\")",
+      "Bash(powershell -Command \"\n[System.Reflection.Assembly]::LoadFile\\('C:\\\\Users\\\\tboha\\\\.nuget\\\\packages\\\\imgui.net\\\\1.91.6.1\\\\lib\\\\net8.0\\\\ImGui.NET.dll'\\) | Out-Null\n\\\\$t = [System.Type]::GetType\\('ImGuiNET.ImDrawCmd, ImGui.NET'\\)\nif \\(\\\\$t\\) {\n    Write-Host 'Found type'\n    Write-Host 'Size:' \\([System.Runtime.InteropServices.Marshal]::SizeOf\\(\\\\$t\\)\\)\n} else {\n    \\\\$asm = [System.AppDomain]::CurrentDomain.GetAssemblies\\(\\) | Where-Object { \\\\$_.GetName\\(\\).Name -eq 'ImGui.NET' }\n    \\\\$t = \\\\$asm.GetType\\('ImGuiNET.ImDrawCmd'\\)\n    if \\(\\\\$t\\) {\n        Write-Host 'Size:' \\([System.Runtime.InteropServices.Marshal]::SizeOf\\(\\\\$t\\)\\)\n        \\\\$t.GetFields\\(\\) | % { Write-Host \\\\$_.Name }\n    }\n}\n\")",
+      "Bash(powershell -Command \"\n\\\\$bytes = [System.IO.File]::ReadAllBytes\\('C:\\\\Users\\\\tboha\\\\.nuget\\\\packages\\\\imgui.net\\\\1.91.6.1\\\\lib\\\\net8.0\\\\ImGui.NET.dll'\\)\n\\\\$text = [System.Text.Encoding]::ASCII.GetString\\(\\\\$bytes\\)\n\\\\$idx = \\\\$text.IndexOf\\('UserCallbackData'\\)\nif \\(\\\\$idx -ge 0\\) { Write-Host 'Found UserCallbackData at index' \\\\$idx } else { Write-Host 'NOT FOUND' }\n\\\\$idx2 = \\\\$text.IndexOf\\('UserCallbackDataSize'\\)\nif \\(\\\\$idx2 -ge 0\\) { Write-Host 'Found UserCallbackDataSize at index' \\\\$idx2 } else { Write-Host 'UserCallbackDataSize NOT FOUND' }\n\")",
+      "Bash(dotnet publish:*)",
+      "Bash(export PATH=\"/c/Program Files \\(x86\\)/Microsoft Visual Studio/Installer:$PATH\")",
+      "Read(//c/projects/NexCore/src/NexCore.Engine/$USERPROFILE/.nuget/packages/imgui.net/**)",
+      "Read(//c/projects/NexCore/src/NexCore.Engine/$USERPROFILE/.nuget/packages/**)",
+      "Bash(dotnet tool:*)",
+      "Bash(cd /tmp)",
+      "Bash(cp C:Userstboha.nugetpackagesimgui.net1.91.6.1imgui.net.1.91.6.1.nupkg imgui.zip)",
+      "Bash(unzip -l imgui.zip)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(python3)",
+      "Bash(py --version)",
+      "WebFetch(domain:github.com)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/ocornut/imgui/v1.91.6/imgui.h\")",
+      "Bash(grep -n -A2 \"WantCaptureMouse\\\\|MousePos\\\\|bool.*MouseDown\\\\|struct ImGuiIO$\\\\|^struct ImGuiIO\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/ocornut/imgui/v1.91.6-docking/imgui.h\")",
+      "Bash('/c/Program Files \\(x86\\)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.43.34808/bin/Hostx86/x86/dumpbin.exe' /exports C:/Games/NexCore/cimgui.dll)",
+      "Read(//c/projects/NexCore/src/NexCore.Engine/**)",
+      "Bash(dotnet build:*)",
+      "Bash(grep -i \"\\\\.cs$\")",
+      "Bash(dumpbin //exports /c/Games/NexCore/NexCore.Engine.dll)"
+    ]
+  }
+}

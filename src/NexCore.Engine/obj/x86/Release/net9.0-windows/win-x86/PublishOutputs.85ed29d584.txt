@@ -1,0 +1,2 @@
+C:\Projects\NexCore\src\NexCore.Engine\bin\x86\Release\net9.0-windows\win-x86\publish\NexCore.Engine.dll
+C:\Projects\NexCore\src\NexCore.Engine\bin\x86\Release\net9.0-windows\win-x86\publish\cimgui.dll
