@@ -7,13 +7,13 @@
 /LIBPATH:"C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\ucrt\x86"
 /LIBPATH:"C:\Program Files (x86)\Windows Kits\10\\lib\10.0.26100.0\\um\x86"
 /DLL
-"C:\Users\tboha\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\bootstrapperdll.obj"
-"C:\Users\tboha\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\Runtime.WorkstationGC.lib"
-"C:\Users\tboha\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\eventpipe-disabled.lib"
-"C:\Users\tboha\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\standalonegc-disabled.lib"
-"C:\Users\tboha\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\zlibstatic.lib"
-"C:\Users\tboha\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\System.Globalization.Native.Aot.lib"
-"C:\Users\tboha\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\System.IO.Compression.Native.Aot.lib"
+"C:\Projects\NexCore\.dotnet-home\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\bootstrapperdll.obj"
+"C:\Projects\NexCore\.dotnet-home\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\Runtime.WorkstationGC.lib"
+"C:\Projects\NexCore\.dotnet-home\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\eventpipe-disabled.lib"
+"C:\Projects\NexCore\.dotnet-home\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\standalonegc-disabled.lib"
+"C:\Projects\NexCore\.dotnet-home\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\zlibstatic.lib"
+"C:\Projects\NexCore\.dotnet-home\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\System.Globalization.Native.Aot.lib"
+"C:\Projects\NexCore\.dotnet-home\.nuget\packages\runtime.win-x86.microsoft.dotnet.ilcompiler\9.0.14\sdk\System.IO.Compression.Native.Aot.lib"
 "advapi32.lib"
 "bcrypt.lib"
 "crypt32.lib"
@@ -33,7 +33,7 @@
 /MERGE:.managedcode=.text /MERGE:hydrated=.bss
 /DEBUG
 /INCREMENTAL:NO
-/NATVIS:"C:\Users\tboha\.nuget\packages\microsoft.dotnet.ilcompiler\9.0.14\build\NativeAOT.natvis"
+/NATVIS:"C:\Projects\NexCore\.dotnet-home\.nuget\packages\microsoft.dotnet.ilcompiler\9.0.14\build\NativeAOT.natvis"
 /safeseh
 /IGNORE:4104
 /NODEFAULTLIB:libucrt.lib

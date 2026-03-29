@@ -59,13 +59,13 @@ internal static class D3D9Bootstrapper
         try
         {
             // If d3d9.dll is already loaded, the game's D3D device almost certainly
-            // exists already.  Skip the Direct3DCreate9 hook path and install from
-            // a throwaway vtable immediately — the vtable entries are the same.
+            // exists already. Skip the Direct3DCreate9 hook path and install from
+            // a throwaway vtable immediately - the vtable entries are the same.
             IntPtr earlyModule = GetModuleHandleA("d3d9.dll");
             if (earlyModule != IntPtr.Zero)
             {
-                EntryPoint.Log("D3D9Bootstrapper: d3d9.dll already loaded — installing EndScene hook via vtable discovery.");
-                EndSceneHook.Install();
+                EntryPoint.Log("D3D9Bootstrapper: d3d9.dll already loaded - installing EndScene hook via vtable discovery immediately.");
+                EndSceneHook.Install("loaded-d3d9-vtable");
                 return;
             }
 

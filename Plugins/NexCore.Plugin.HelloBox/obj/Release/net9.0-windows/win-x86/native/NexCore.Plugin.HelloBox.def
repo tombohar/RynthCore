@@ -1,0 +1,20 @@
+EXPORTS
+   DotNetRuntimeDebugHeader DATA
+   NexPluginInit
+   NexPluginShutdown
+   NexPluginOnUIInitialized
+   NexPluginOnLoginComplete
+   NexPluginOnBarAction
+   NexPluginOnChatWindowText
+   NexPluginOnChatBarEnter
+   NexPluginOnSelectedTargetChange
+   NexPluginOnSmartBoxEvent
+   NexPluginOnDeleteObject
+   NexPluginOnCreateObject
+   NexPluginOnUpdateObject
+   NexPluginOnUpdateObjectInventory
+   NexPluginOnViewObjectContents
+   NexPluginOnStopViewingObjectContents
+   NexPluginName
+   NexPluginVersion
+   NexPluginRender

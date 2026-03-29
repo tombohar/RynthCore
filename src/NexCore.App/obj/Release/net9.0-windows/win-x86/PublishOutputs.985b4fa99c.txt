@@ -1,0 +1,10 @@
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.Injector.exe
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.App.exe
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.Injector.deps.json
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.Injector.runtimeconfig.json
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.App.dll
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.App.deps.json
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.App.runtimeconfig.json
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.App.pdb
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.Injector.dll
+C:\Projects\NexCore\src\NexCore.App\bin\Release\net9.0-windows\win-x86\publish\NexCore.Injector.pdb

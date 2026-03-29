@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("NexCore.Engine")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+344711a6286ecd09f49c983cf7d188312ee471cc")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a9216d747761abe366c21c3d19587cd38feb54d6")]
 [assembly: System.Reflection.AssemblyProductAttribute("NexCore.Engine")]
 [assembly: System.Reflection.AssemblyTitleAttribute("NexCore.Engine")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

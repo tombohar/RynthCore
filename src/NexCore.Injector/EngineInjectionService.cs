@@ -16,6 +16,7 @@ public sealed class EngineInjectionService
     private const string InitExport = "NexCoreInit";
 
     private const uint ProcessAllAccess = 0x001F0FFF;
+    private const uint CreateSuspended = 0x00000004;
     private const uint MemCommit = 0x1000;
     private const uint MemReserve = 0x2000;
     private const uint MemRelease = 0x8000;
@@ -53,11 +54,28 @@ public sealed class EngineInjectionService
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr hObject);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessW(
+        string? lpApplicationName,
+        System.Text.StringBuilder lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string? lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
     private static extern IntPtr GetModuleHandleA(string lpModuleName);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
     private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(IntPtr hThread);
 
     public string? TryResolveEnginePath(string? explicitEnginePath)
     {
@@ -253,6 +271,106 @@ public sealed class EngineInjectionService
         finally
         {
             CloseHandle(hProcess);
+        }
+    }
+
+    public InjectionResult LaunchSuspendedAndInject(
+        string clientPath,
+        string arguments,
+        string enginePath,
+        Action<string>? log = null)
+    {
+        log ??= _ => { };
+
+        if (string.IsNullOrWhiteSpace(clientPath) || !File.Exists(clientPath))
+            return InjectionResult.Failure(1, $"AC client not found: {clientPath}", enginePath);
+
+        string workingDirectory = Path.GetDirectoryName(clientPath) ?? Environment.CurrentDirectory;
+        string commandLine = string.IsNullOrWhiteSpace(arguments)
+            ? $"\"{clientPath}\""
+            : $"\"{clientPath}\" {arguments}";
+
+        var startupInfo = new STARTUPINFO
+        {
+            cb = (uint)Marshal.SizeOf<STARTUPINFO>()
+        };
+
+        if (!CreateProcessW(
+                clientPath,
+                new System.Text.StringBuilder(commandLine),
+                IntPtr.Zero,
+                IntPtr.Zero,
+                false,
+                CreateSuspended,
+                IntPtr.Zero,
+                workingDirectory,
+                ref startupInfo,
+                out PROCESS_INFORMATION processInfo))
+        {
+            return InjectionResult.Failure(
+                1,
+                $"CreateProcessW failed (error {Marshal.GetLastWin32Error()}).",
+                enginePath);
+        }
+
+        bool resumed = false;
+
+        void ResumeMainThread()
+        {
+            if (resumed)
+                return;
+
+            uint resumeResult = ResumeThread(processInfo.hThread);
+            if (resumeResult == 0xFFFFFFFF)
+                throw new InvalidOperationException($"ResumeThread failed (error {Marshal.GetLastWin32Error()}).");
+
+            resumed = true;
+            log($"Resumed AC main thread (PID {processInfo.dwProcessId}).");
+        }
+
+        log($"Launched AC suspended (PID {processInfo.dwProcessId}).");
+        log("Launching suspended so NexCore can patch early startup gates before AC runs its single-instance checks.");
+
+        try
+        {
+            using var launchedProcess = Process.GetProcessById((int)processInfo.dwProcessId);
+            InjectionResult injectResult = InjectIntoProcess(launchedProcess, enginePath, log);
+            ResumeMainThread();
+
+            if (!injectResult.Success)
+                return InjectionResult.Failure(injectResult.ExitCode, injectResult.Summary, injectResult.EnginePath, (int)processInfo.dwProcessId);
+
+            return InjectionResult.SuccessResult(
+                "Launched AC and injected NexCore successfully.",
+                injectResult.EnginePath,
+                (int)processInfo.dwProcessId,
+                injectResult.InitResult ?? 0);
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                ResumeMainThread();
+            }
+            catch (Exception resumeEx)
+            {
+                return InjectionResult.Failure(
+                    1,
+                    $"Launch + inject failed: {ex.Message} ResumeThread also failed: {resumeEx.Message}",
+                    enginePath,
+                    (int)processInfo.dwProcessId);
+            }
+
+            return InjectionResult.Failure(
+                1,
+                $"Launch + inject failed: {ex.Message}",
+                enginePath,
+                (int)processInfo.dwProcessId);
+        }
+        finally
+        {
+            CloseHandle(processInfo.hThread);
+            CloseHandle(processInfo.hProcess);
         }
     }
 
@@ -483,5 +601,37 @@ public sealed class EngineInjectionService
         }
 
         return false;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct STARTUPINFO
+    {
+        public uint cb;
+        public string? lpReserved;
+        public string? lpDesktop;
+        public string? lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public ushort wShowWindow;
+        public ushort cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
     }
 }

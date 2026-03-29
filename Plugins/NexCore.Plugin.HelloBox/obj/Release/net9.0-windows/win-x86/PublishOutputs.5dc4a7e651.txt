@@ -1,0 +1,1 @@
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\bin\Release\net9.0-windows\win-x86\publish\NexCore.Plugin.HelloBox.dll

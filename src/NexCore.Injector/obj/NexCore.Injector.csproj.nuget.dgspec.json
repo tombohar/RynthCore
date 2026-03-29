@@ -10,7 +10,7 @@
         "projectUniqueName": "C:\\Projects\\NexCore\\src\\NexCore.Injector\\NexCore.Injector.csproj",
         "projectName": "NexCore.Injector",
         "projectPath": "C:\\Projects\\NexCore\\src\\NexCore.Injector\\NexCore.Injector.csproj",
-        "packagesPath": "C:\\Users\\tboha\\.nuget\\packages\\",
+        "packagesPath": "C:\\Projects\\NexCore\\.dotnet-home\\.nuget\\packages\\",
         "outputPath": "C:\\Projects\\NexCore\\src\\NexCore.Injector\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
@@ -39,7 +39,13 @@
           "warnAsError": [
             "NU1605"
           ]
-        }
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.200"
       },
       "frameworks": {
         "net9.0-windows7.0": {
@@ -55,7 +61,17 @@
           ],
           "assetTargetFallback": true,
           "warn": true,
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\7.0.302\\RuntimeIdentifierGraph.json"
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.201/PortableRuntimeIdentifierGraph.json"
+        }
+      },
+      "runtimes": {
+        "win-x86": {
+          "#import": []
         }
       }
     }

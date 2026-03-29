@@ -1,0 +1,13 @@
+C:\Projects\NexCore\src\NexCore.Engine\bin\Release\net9.0-windows\win-x86\NexCore.Engine.deps.json
+C:\Projects\NexCore\src\NexCore.Engine\bin\Release\net9.0-windows\win-x86\NexCore.Engine.dll
+C:\Projects\NexCore\src\NexCore.Engine\bin\Release\net9.0-windows\win-x86\NexCore.Engine.pdb
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\NexCore.Engine.csproj.AssemblyReference.cache
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\NexCore.Engine.GeneratedMSBuildEditorConfig.editorconfig
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\NexCore.Engine.AssemblyInfoInputs.cache
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\NexCore.Engine.AssemblyInfo.cs
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\NexCore.Engine.csproj.CoreCompileInputs.cache
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\NexCore.Engine.sourcelink.json
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\NexCore.Engine.dll
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\refint\NexCore.Engine.dll
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\NexCore.Engine.pdb
+C:\Projects\NexCore\src\NexCore.Engine\obj\compat-publish\ref\NexCore.Engine.dll

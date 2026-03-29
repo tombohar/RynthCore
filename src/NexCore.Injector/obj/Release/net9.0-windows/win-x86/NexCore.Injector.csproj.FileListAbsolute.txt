@@ -1,0 +1,15 @@
+C:\Projects\NexCore\src\NexCore.Injector\bin\Release\net9.0-windows\win-x86\NexCore.Injector.exe
+C:\Projects\NexCore\src\NexCore.Injector\bin\Release\net9.0-windows\win-x86\NexCore.Injector.deps.json
+C:\Projects\NexCore\src\NexCore.Injector\bin\Release\net9.0-windows\win-x86\NexCore.Injector.runtimeconfig.json
+C:\Projects\NexCore\src\NexCore.Injector\bin\Release\net9.0-windows\win-x86\NexCore.Injector.dll
+C:\Projects\NexCore\src\NexCore.Injector\bin\Release\net9.0-windows\win-x86\NexCore.Injector.pdb
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\NexCore.Injector.GeneratedMSBuildEditorConfig.editorconfig
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\NexCore.Injector.AssemblyInfoInputs.cache
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\NexCore.Injector.AssemblyInfo.cs
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\NexCore.Injector.csproj.CoreCompileInputs.cache
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\NexCore.Injector.sourcelink.json
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\NexCore.Injector.dll
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\refint\NexCore.Injector.dll
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\NexCore.Injector.pdb
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\NexCore.Injector.genruntimeconfig.cache
+C:\Projects\NexCore\src\NexCore.Injector\obj\Release\net9.0-windows\win-x86\ref\NexCore.Injector.dll

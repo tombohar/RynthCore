@@ -360,6 +360,8 @@ internal static unsafe class DX9Backend
 
         IntPtr currentRenderTarget = IntPtr.Zero;
         IntPtr backBuffer = IntPtr.Zero;
+        IntPtr currentIdentity = IntPtr.Zero;
+        IntPtr backBufferIdentity = IntPtr.Zero;
 
         try
         {
@@ -368,22 +370,22 @@ internal static unsafe class DX9Backend
             if (rtHr < 0 || bbHr < 0 || currentRenderTarget == IntPtr.Zero || backBuffer == IntPtr.Zero)
                 return true;
 
-            return currentRenderTarget == backBuffer;
+            if (currentRenderTarget == backBuffer)
+                return true;
+
+            currentIdentity = QueryIUnknown(currentRenderTarget);
+            backBufferIdentity = QueryIUnknown(backBuffer);
+            if (currentIdentity != IntPtr.Zero && backBufferIdentity != IntPtr.Zero)
+                return currentIdentity == backBufferIdentity;
+
+            return false;
         }
         finally
         {
-            if (currentRenderTarget != IntPtr.Zero)
-            {
-                IntPtr vtbl = Marshal.ReadIntPtr(currentRenderTarget);
-                var rel = Marshal.GetDelegateForFunctionPointer<ReleaseD>(Marshal.ReadIntPtr(vtbl, 2 * IntPtr.Size));
-                rel(currentRenderTarget);
-            }
-            if (backBuffer != IntPtr.Zero)
-            {
-                IntPtr vtbl = Marshal.ReadIntPtr(backBuffer);
-                var rel = Marshal.GetDelegateForFunctionPointer<ReleaseD>(Marshal.ReadIntPtr(vtbl, 2 * IntPtr.Size));
-                rel(backBuffer);
-            }
+            ReleaseComObject(currentIdentity);
+            ReleaseComObject(backBufferIdentity);
+            ReleaseComObject(currentRenderTarget);
+            ReleaseComObject(backBuffer);
         }
     }
 
@@ -958,5 +960,15 @@ internal static unsafe class DX9Backend
         var query = Marshal.GetDelegateForFunctionPointer<QueryInterfaceD>(Marshal.ReadIntPtr(vtable, 0));
         Guid iid = IID_IUnknown;
         return query(pObject, &iid, out IntPtr identity) >= 0 ? identity : IntPtr.Zero;
+    }
+
+    private static void ReleaseComObject(IntPtr pObject)
+    {
+        if (pObject == IntPtr.Zero)
+            return;
+
+        IntPtr vtable = Marshal.ReadIntPtr(pObject);
+        var release = Marshal.GetDelegateForFunctionPointer<ReleaseD>(Marshal.ReadIntPtr(vtable, 2 * IntPtr.Size));
+        release(pObject);
     }
 }

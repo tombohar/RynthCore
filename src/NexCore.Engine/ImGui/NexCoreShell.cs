@@ -2,6 +2,8 @@ using System;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using ImGuiNET;
+using NexCore.Engine.Compatibility;
+using NexCore.Engine.Plugins;
 
 namespace NexCore.Engine.ImGuiBackend;
 
@@ -39,6 +41,7 @@ internal static class NexCoreShell
     private static bool _showRoadmapWindow;
     private static bool _autoScrollLogs = true;
     private static int _selectedPlugin = 0;
+    private static bool _showPluginTips = true;
     private static readonly bool[] PluginBarButtonsVisible = [true, false, false, false];
     private static Vector2 _barPosition = new(12f, 12f);
     private static bool _barPositionInitialized;
@@ -270,6 +273,56 @@ internal static class NexCoreShell
             ImGui.EndDisabled();
         }
 
+        var loadedPlugins = PluginManager.Plugins;
+        bool anyLoadedPluginShortcut = false;
+        for (int i = 0; i < loadedPlugins.Count; i++)
+        {
+            var plugin = loadedPlugins[i];
+            if (string.IsNullOrWhiteSpace(plugin.DisplayName))
+                continue;
+
+            bool loginGated = plugin.OnLoginComplete != null;
+            if (loginGated && !plugin.LoginCompleteDispatched)
+                continue;
+
+            if (!anyLoadedPluginShortcut)
+            {
+                ImGui.SameLine();
+                ImGui.TextColored(TextMute, "|");
+                anyLoadedPluginShortcut = true;
+            }
+            else
+            {
+                ImGui.SameLine();
+            }
+
+            ImGui.BeginDisabled(!auxReady);
+            if (ImGui.SmallButton($"{BuildLoadedPluginBarLabel(plugin.DisplayName)}##LoadedPlugin{i}"))
+            {
+                if (plugin.OnBarAction != null)
+                {
+                    try
+                    {
+                        plugin.OnBarAction();
+                    }
+                    catch (Exception ex)
+                    {
+                        EntryPoint.Log($"NexCoreShell: {plugin.DisplayName} bar action threw {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+                else
+                {
+                    _showShellWindow = true;
+                }
+            }
+            ShowTooltip(auxReady
+                ? plugin.OnBarAction != null
+                    ? $"{plugin.DisplayName}: trigger the plugin's bar action."
+                    : $"{plugin.DisplayName}: open the shell while this plugin is loaded."
+                : "Loaded plugin shortcuts unlock after the client render pipeline has stabilized.");
+            ImGui.EndDisabled();
+        }
+
         ImGui.SameLine();
         if (ImGui.SmallButton("Rs"))
             ResetBarPosition();
@@ -394,6 +447,12 @@ internal static class NexCoreShell
         }
 
         ImGui.SameLine();
+        if (ImGui.Button("Rescan Plugins"))
+            PluginManager.RequestRescan();
+
+        ShowTooltip("Reload plugin DLLs from disk without restarting the client.");
+
+        ImGui.SameLine();
         ImGui.TextColored(TextMute, "Use the NexCore bar to reopen or focus windows.");
         ImGui.Separator();
     }
@@ -479,8 +538,11 @@ internal static class NexCoreShell
         DrawFeatureLine("Host dashboard", "Done", Good);
         DrawFeatureLine("Plugin registry", "Next scaffold", Gold);
         DrawFeatureLine("NexAi settings pane", "Adopt from NexSuite", Accent);
-        DrawFeatureLine("Client action hooks", "After host APIs", Warn);
+        DrawFeatureLine("Client action hooks", "Probe live in shell", Accent);
         ImGui.EndChild();
+
+        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 6f);
+        RenderCompatibilityDeck();
 
         ImGui.EndChild();
     }
@@ -491,6 +553,97 @@ internal static class NexCoreShell
         ImGui.TextColored(TextDim, "Plugin Deck");
         ImGui.Separator();
 
+        bool rescanQueued = PluginManager.IsRescanQueued;
+        if (rescanQueued)
+        {
+            ImGui.TextColored(Gold, "Rescan queued for this frame.");
+        }
+        else if (PluginManager.HasObservedLoginComplete)
+        {
+            ImGui.TextColored(TextMute, "OnLoginComplete has fired. Rebuild a plugin DLL, replace it in the Plugins folder, then click Rescan Plugins.");
+        }
+        else
+        {
+            ImGui.TextColored(Gold, "Loaded plugins that opt into OnLoginComplete will stay dormant until login finishes.");
+        }
+
+        string pluginDir = PluginManager.PluginDirectory;
+        if (!string.IsNullOrEmpty(pluginDir))
+        {
+            ImGui.TextColored(TextMute, pluginDir);
+        }
+
+        if (_showPluginTips)
+        {
+            ImGui.Spacing();
+            ImGui.BeginChild("PluginTips", new Vector2(0f, 76f), ImGuiChildFlags.Borders);
+            ImGui.TextColored(TextDim, "Live Dev Loop");
+            ImGui.BulletText("Publish the plugin so it has native exports.");
+            ImGui.BulletText("Copy the new DLL into the Plugins folder.");
+            ImGui.BulletText("Click Rescan Plugins to unload the old copy and load the new one.");
+            ImGui.EndChild();
+        }
+
+        ImGui.Spacing();
+
+        // Show dynamically loaded plugins first
+        var loadedPlugins = PluginManager.Plugins;
+        if (loadedPlugins.Count > 0)
+        {
+            ImGui.TextColored(Accent, "Loaded Plugins");
+            for (int i = 0; i < loadedPlugins.Count; i++)
+            {
+                var p = loadedPlugins[i];
+                ImGui.PushID($"loaded_{i}");
+
+                bool waitingForLogin = p.Initialized && !p.Failed && p.OnLoginComplete != null && !p.LoginCompleteDispatched;
+                Vector4 statusColor = p.Failed ? Warn : waitingForLogin ? Gold : p.Initialized ? Good : TextMute;
+                string statusText = p.Failed ? "FAILED" : waitingForLogin ? "WAIT LOGIN" : p.Initialized ? "ACTIVE" : "PENDING";
+
+                string ver = string.IsNullOrEmpty(p.VersionString) ? "" : $"  v{p.VersionString}";
+                ImGui.BulletText("");
+                ImGui.SameLine();
+                ImGui.TextColored(Accent, p.DisplayName);
+                ImGui.SameLine();
+                ImGui.TextColored(TextMute, ver);
+                ImGui.SameLine(300f);
+                ImGui.TextColored(statusColor, statusText);
+
+                if (!string.IsNullOrEmpty(p.SourceFilePath))
+                {
+                    ImGui.SameLine();
+                    ImGui.TextColored(TextMute, $"<{p.FileName}>");
+                }
+
+                string caps = "";
+                if (p.OnLoginComplete != null) caps += " login";
+                if (p.OnBarAction != null) caps += " bar";
+                if (p.Tick != null) caps += " tick";
+                if (p.Render != null) caps += " render";
+                if (caps.Length > 0)
+                {
+                    ImGui.SameLine();
+                    ImGui.TextColored(TextMute, $"[{caps.Trim()}]");
+                }
+
+                ImGui.PopID();
+            }
+
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+        }
+        else
+        {
+            ImGui.TextColored(TextMute, "No plugins loaded.");
+            ImGui.TextColored(TextMute, "Drop DLLs into the Plugins folder.");
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+        }
+
+        // Show static roadmap entries
+        ImGui.TextColored(TextDim, "Roadmap");
         for (int i = 0; i < PluginNames.Length; i++)
         {
             ImGui.PushID(i);
@@ -505,55 +658,81 @@ internal static class NexCoreShell
                 _selectedPlugin = i;
 
             ImGui.SameLine();
-            ImGui.TextColored(PluginBarButtonsVisible[i] ? Good : TextMute, PluginBarButtonsVisible[i] ? "Bar shortcut enabled" : "Hidden from bar");
-            ImGui.SameLine(360f);
-            ImGui.TextColored(i == 0 ? Accent : TextMute, PluginStatuses[i]);
+            ImGui.TextColored(TextMute, PluginStatuses[i]);
             ImGui.PopID();
         }
 
         ImGui.Spacing();
-        ImGui.BeginChild("PluginInspector", new Vector2(0f, 260f), ImGuiChildFlags.Borders);
+        ImGui.BeginChild("PluginInspector", new Vector2(0f, 200f), ImGuiChildFlags.Borders);
 
-        if (_selectedPlugin == 0)
+        if (_selectedPlugin >= 0 && _selectedPlugin < PluginNames.Length)
         {
-            ImGui.TextColored(Accent, "NexAi");
-            ImGui.TextWrapped("Primary adoption candidate. The goal is to lift NexAi out of the Utility Belt host model and give it a native NexCore shell, state bridge, and event surface.");
-            ImGui.Spacing();
-            DrawBulletRow("Current source", "NexSuite / Utility Belt plugin");
-            DrawBulletRow("UI maturity", "High");
-            DrawBulletRow("Migration strategy", "Adopt panels first, then events and actions");
-            DrawBulletRow("Best immediate step", "Host shell + plugin contract");
-            DrawBulletRow("Bar shortcut", PluginBarButtonsVisible[0] ? "Enabled" : "Hidden");
-        }
-        else if (_selectedPlugin == 1)
-        {
-            ImGui.TextColored(Gold, "NexTank Compatibility");
-            ImGui.TextWrapped("Useful as a behavior and data reference while the NexCore host contracts are still young.");
-            ImGui.Spacing();
-            DrawBulletRow("Role", "Reference implementation");
-            DrawBulletRow("Port approach", "Selective reuse, not hard dependency");
-            DrawBulletRow("Bar shortcut", PluginBarButtonsVisible[1] ? "Enabled" : "Hidden");
-        }
-        else if (_selectedPlugin == 2)
-        {
-            ImGui.TextColored(Gold, "Core Hooks");
-            ImGui.TextWrapped("The service layer that will expose world state, actions, and message hooks to adopted plugins.");
-            ImGui.Spacing();
-            DrawBulletRow("Status", "Not started");
-            DrawBulletRow("Dependency", "Needs host-facing API design");
-            DrawBulletRow("Bar shortcut", PluginBarButtonsVisible[2] ? "Enabled" : "Hidden");
-        }
-        else
-        {
-            ImGui.TextColored(Gold, "Telemetry");
-            ImGui.TextWrapped("Small but important: operational visibility for load state, hook health, and plugin diagnostics.");
-            ImGui.Spacing();
-            DrawBulletRow("Status", "Shell-ready");
-            DrawBulletRow("Surface", "Diagnostics window and host metrics");
-            DrawBulletRow("Bar shortcut", PluginBarButtonsVisible[3] ? "Enabled" : "Hidden");
+            ImGui.TextColored(Gold, PluginNames[_selectedPlugin]);
+            ImGui.TextColored(TextMute, PluginStatuses[_selectedPlugin]);
         }
 
         ImGui.EndChild();
+        ImGui.EndChild();
+    }
+
+    private static void RenderCompatibilityDeck()
+    {
+        ClientActionHookStatus status = ClientActionHooks.GetStatus();
+        bool uiHookInstalled = UiLifecycleHooks.IsInstalled;
+        bool uiObserved = UiLifecycleHooks.HasObservedUiInitialized;
+        bool chatHooksInstalled = ChatCallbackHooks.IsInstalled;
+        bool loginHookInstalled = LoginLifecycleHooks.IsInstalled;
+        bool loginObserved = LoginLifecycleHooks.HasObservedLoginComplete;
+        bool multiClientEnabled = MultiClientHooks.IsEnabled;
+        bool multiClientInstalled = MultiClientHooks.IsInstalled;
+
+        ImGui.BeginChild("CompatibilityDeck", new Vector2(0f, 192f), ImGuiChildFlags.Borders);
+        ImGui.TextColored(TextDim, "NexAi Compatibility Hooks");
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Probe Hooks"))
+            ClientActionHooks.Probe();
+        ShowTooltip("Rescan acclient.exe for the combat and movement helper entrypoints NexAi uses.");
+
+        ImGui.Separator();
+        DrawFeatureLine("Combat surface", status.CombatInitialized ? "READY" : "OFF", status.CombatInitialized ? Good : Warn);
+        DrawFeatureLine("Movement surface", status.MovementInitialized ? "READY" : "OFF", status.MovementInitialized ? Good : Warn);
+        DrawFeatureLine("Local motion", status.CommandInterpreterInitialized ? "READY" : "OFF", status.CommandInterpreterInitialized ? Good : Warn);
+        DrawFeatureLine("UI lifecycle", uiObserved ? "FIRED" : uiHookInstalled ? "HOOKED" : "OFF", uiObserved ? Good : uiHookInstalled ? Gold : Warn);
+        DrawFeatureLine("Chat callbacks", chatHooksInstalled ? "READY" : "OFF", chatHooksInstalled ? Good : Warn);
+        DrawFeatureLine("Multi-client gate", multiClientInstalled ? "BYPASS" : multiClientEnabled ? "FAILED" : "OFF", multiClientInstalled ? Good : multiClientEnabled ? Warn : TextMute);
+        DrawFeatureLine("Login lifecycle", loginObserved ? "FIRED" : loginHookInstalled ? "HOOKED" : "OFF", loginObserved ? Good : loginHookInstalled ? Gold : Warn);
+
+        ImGui.Spacing();
+        ImGui.TextColored(TextMute, "Combat");
+        ImGui.TextWrapped($"Melee {OnOff(status.MeleeAvailable)}  Missile {OnOff(status.MissileAvailable)}  Mode {OnOff(status.ChangeCombatModeAvailable)}  Cancel {OnOff(status.CancelAttackAvailable)}  Health {OnOff(status.QueryHealthAvailable)}");
+        ImGui.TextColored(TextMute, status.CombatStatus);
+
+        ImGui.Spacing();
+        ImGui.TextColored(TextMute, "Movement");
+        ImGui.TextWrapped($"Move {OnOff(status.DoMovementAvailable)}  Stop {OnOff(status.StopMovementAvailable)}  Jump {OnOff(status.JumpNonAutonomousAvailable)}  Autonomy {OnOff(status.AutonomyLevelAvailable)}");
+        ImGui.TextColored(TextMute, status.MovementStatus);
+
+        ImGui.Spacing();
+        ImGui.TextColored(TextMute, "Local");
+        ImGui.TextWrapped($"Autorun {OnOff(status.SetAutoRunAvailable)}  TapJump {OnOff(status.TapJumpAvailable)}");
+        ImGui.TextColored(TextMute, status.CommandInterpreterStatus);
+
+        ImGui.Spacing();
+        ImGui.TextColored(TextMute, "UI");
+        ImGui.TextColored(TextMute, UiLifecycleHooks.StatusMessage);
+
+        ImGui.Spacing();
+        ImGui.TextColored(TextMute, "Chat");
+        ImGui.TextColored(TextMute, ChatCallbackHooks.StatusMessage);
+
+        ImGui.Spacing();
+        ImGui.TextColored(TextMute, "Multi-client");
+        ImGui.TextColored(TextMute, MultiClientHooks.StatusMessage);
+
+        ImGui.Spacing();
+        ImGui.TextColored(TextMute, "Lifecycle");
+        ImGui.TextColored(TextMute, LoginLifecycleHooks.StatusMessage);
         ImGui.EndChild();
     }
 
@@ -630,6 +809,20 @@ internal static class NexCoreShell
         ImGui.TextColored(TextDim, name);
         ImGui.SameLine(190f);
         ImGui.TextColored(color, state);
+    }
+
+    private static string OnOff(bool value)
+    {
+        return value ? "ON" : "OFF";
+    }
+
+    private static string BuildLoadedPluginBarLabel(string displayName)
+    {
+        string label = displayName.Replace("NexCore ", "", StringComparison.OrdinalIgnoreCase).Trim();
+        if (label.Length <= 10)
+            return label;
+
+        return label[..10];
     }
 
     private static void DrawBulletRow(string label, string value)

@@ -1,0 +1,12 @@
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\bin\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.deps.json
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\bin\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.dll
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\bin\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.pdb
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\obj\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.GeneratedMSBuildEditorConfig.editorconfig
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\obj\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.AssemblyInfoInputs.cache
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\obj\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.AssemblyInfo.cs
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\obj\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.csproj.CoreCompileInputs.cache
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\obj\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.sourcelink.json
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\obj\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.dll
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\obj\Release\net9.0-windows\win-x86\refint\NexCore.Plugin.HelloBox.dll
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\obj\Release\net9.0-windows\win-x86\NexCore.Plugin.HelloBox.pdb
+C:\Projects\NexCore\Plugins\NexCore.Plugin.HelloBox\obj\Release\net9.0-windows\win-x86\ref\NexCore.Plugin.HelloBox.dll

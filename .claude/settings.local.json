@@ -24,7 +24,10 @@
       "Read(//c/projects/NexCore/src/NexCore.Engine/**)",
       "Bash(dotnet build:*)",
       "Bash(grep -i \"\\\\.cs$\")",
-      "Bash(dumpbin //exports /c/Games/NexCore/NexCore.Engine.dll)"
+      "Bash(dumpbin //exports /c/Games/NexCore/NexCore.Engine.dll)",
+      "Bash(grep -n \"namespace\" /c/projects/NexCore/src/NexCore.Engine/ImGui/*.cs)",
+      "Bash(grep:*)",
+      "Bash(wc -l /c/projects/NexCore/src/NexCore.Engine/Compatibility/*.cs)"
     ]
   }
 }

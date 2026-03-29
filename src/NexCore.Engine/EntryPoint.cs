@@ -11,12 +11,15 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Collections.Generic;
 using ImGuiNET;
+using NexCore.Engine.Compatibility;
 using NexCore.Engine.D3D9;
+using NexCore.Engine.Plugins;
 
 namespace NexCore.Engine;
 
 public static class EntryPoint
 {
+    private const string BuildStamp = "2026-03-29 ui-flicker-fix-v25";
     private const int MaxRecentLogLines = 256;
     private static int _initialized;
     private static bool _imGuiResolverConfigured;
@@ -32,7 +35,8 @@ public static class EntryPoint
 
         try
         {
-            Log("NexCoreInit called (build 2026-03-26T05:30) - spawning init thread...");
+            Log($"NexCoreInit called (build {BuildStamp}) - spawning init thread...");
+            RunInitStep("early multi-client hooks", () => MultiClientHooks.Initialize(Log));
 
             var thread = new Thread(InitWorker)
             {
@@ -209,12 +213,38 @@ public static class EntryPoint
                 Log("  Ship NexCore.cimgui.dll (or cimgui.dll) alongside NexCore.Engine.dll");
             }
 
+            RunInitStep("NexAi action hooks", ClientActionHooks.Initialize);
+            RunInitStep("login lifecycle hooks", () => LoginLifecycleHooks.Initialize(Log));
+            RunInitStep("UI lifecycle hooks", () => UiLifecycleHooks.Initialize(Log));
+            RunInitStep("selected-target hooks", () => SelectedTargetHooks.Initialize(Log));
+            RunInitStep("smartbox hooks", () => SmartBoxHooks.Initialize(Log));
+            RunInitStep("create-object hooks", () => CreateObjectHooks.Initialize(Log));
+            RunInitStep("delete-object hooks", () => DeleteObjectHooks.Initialize(Log));
+            RunInitStep("update-object hooks", () => UpdateObjectServerDispatchHooks.Initialize(Log));
+            RunInitStep("vector-update hooks", () => VectorUpdateServerDispatchHooks.Initialize(Log));
+            RunInitStep("update-object-inventory hooks", () => UpdateObjectInventoryHooks.Initialize(Log));
+            RunInitStep("view-object-contents hooks", () => ViewObjectContentsHooks.Initialize(Log));
+            RunInitStep("chat callback hooks", () => ChatCallbackHooks.Initialize(Log));
+            PluginManager.LoadPlugins(engineDir);
+
             D3D9Bootstrapper.Start();
             Log("NexCore bootstrap initialized.");
         }
         catch (Exception ex)
         {
             Log($"FATAL in InitWorker: {ex}");
+        }
+    }
+
+    private static void RunInitStep(string name, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            Log($"Compat: {name} failed during init - {ex}");
         }
     }
 

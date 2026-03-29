@@ -8,6 +8,7 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using ImGuiNET;
+using NexCore.Engine.Plugins;
 
 namespace NexCore.Engine.ImGuiBackend;
 
@@ -31,6 +32,7 @@ internal static class ImGuiController
 
     private static bool _initialized;
     private static bool _initFailed;
+    private static bool _pluginsInitialized;
     private static IntPtr _context;
     private static IntPtr _gameHwnd;
     private static long _lastFrameTicks;
@@ -108,6 +110,7 @@ internal static class ImGuiController
         {
             ImGuiNET.ImGui.SetCurrentContext(contextToDestroy);
 
+            PluginManager.ShutdownAll();
             DX9Backend.Shutdown();
             Win32Backend.Shutdown();
             ImGuiNET.ImGui.DestroyContext(contextToDestroy);
@@ -137,9 +140,18 @@ internal static class ImGuiController
 
         IntPtr previousContext = ImGuiNET.ImGui.GetCurrentContext();
         ImGuiNET.ImGui.SetCurrentContext(_context);
+        bool frameStarted = false;
+        bool frameEnded = false;
 
         try
         {
+            // Initialize plugins once ImGui is fully ready
+            if (!_pluginsInitialized)
+            {
+                _pluginsInitialized = true;
+                PluginManager.InitPlugins(_context, pDevice, _gameHwnd);
+            }
+
             _frameCount++;
             DX9Backend.NewFrame();
             Win32Backend.NewFrame();
@@ -159,8 +171,19 @@ internal static class ImGuiController
             _lastFrameTicks = now;
             io.DeltaTime = dt > 0f ? dt : 1f / 60f;
 
+            // Drain queued host/plugin callbacks before opening the Dear ImGui frame.
+            // This keeps heavy world-update bursts from stretching an already-active frame.
+            PluginManager.ProcessPendingActions(_context, pDevice, _gameHwnd);
+
+            // Plugin tick (per-frame logic, before ImGui drawing)
+            PluginManager.TickAll();
+
             ImGuiNET.ImGui.NewFrame();
+            frameStarted = true;
             NexCoreShell.Render(_frameCount);
+
+            // Plugin render (ImGui draw calls)
+            PluginManager.RenderAll();
 
             bool captureMouse =
                 ImGuiNET.ImGui.IsWindowHovered(ImGuiHoveredFlags.AnyWindow) ||
@@ -168,6 +191,7 @@ internal static class ImGuiController
             bool captureKeyboard = ImGuiNET.ImGui.IsAnyItemActive();
 
             ImGuiNET.ImGui.EndFrame();
+            frameEnded = true;
             ImGuiNET.ImGui.Render();
             Win32Backend.UpdateCaptureFlags(captureMouse, captureKeyboard);
 
@@ -182,6 +206,20 @@ internal static class ImGuiController
                 ImGuiNET.ImGui.UpdatePlatformWindows();
                 ImGuiNET.ImGui.RenderPlatformWindowsDefault();
             }
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                // Keep Dear ImGui's frame state balanced so the next frame does not assert.
+                if (frameStarted && !frameEnded && ImGuiNET.ImGui.GetCurrentContext() == _context)
+                    ImGuiNET.ImGui.EndFrame();
+            }
+            catch
+            {
+            }
+
+            EntryPoint.Log($"ImGuiController: frame {_frameCount} error: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {

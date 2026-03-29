@@ -7,7 +7,9 @@ namespace NexCore.Engine.D3D9;
 
 internal static class EndSceneHook
 {
-    private const int MaxOffscreenSkipsBeforeFallback = 3;
+    private const int MaxOffscreenSkipLogs = 3;
+    private const int MaxOffscreenSkipsBeforeFallback = 120;
+    private const int OffscreenFallbackDelayMs = 3000;
     private const int UiInitWarmupFrames = 180;
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -24,14 +26,21 @@ internal static class EndSceneHook
     private static bool _offscreenFilterDisabled;
     private static bool _uiActivated;
     private static bool _warmupLogged;
+    private static long _installTick;
+    private static long _firstOffscreenTick;
     private static string _installSource = "uninitialized";
 
     public static void Install()
     {
+        Install("fallback-vtable");
+    }
+
+    public static void Install(string installSource)
+    {
         if (_installed)
             return;
 
-        ResetInstallState("fallback-vtable");
+        ResetInstallState(installSource);
         EntryPoint.Log("EndSceneHook: Discovering D3D9 vtable for fallback install...");
 
         IntPtr[]? vtable = D3D9VTable.GetDeviceVTable();
@@ -114,40 +123,20 @@ internal static class EndSceneHook
         _offscreenFilterDisabled = false;
         _uiActivated = false;
         _warmupLogged = false;
+        _installTick = Environment.TickCount64;
+        _firstOffscreenTick = 0;
     }
 
     private static void InstallFromEndSceneAddress(IntPtr endSceneAddress)
     {
         _endSceneAddr = endSceneAddress;
 
-        EntryPoint.Log($"EndSceneHook: Creating detour delegate...");
         _hookDelegate = new EndSceneDelegate(EndSceneDetour);
         IntPtr hookPtr = Marshal.GetFunctionPointerForDelegate(_hookDelegate);
-        EntryPoint.Log($"EndSceneHook: Detour @ 0x{hookPtr:X8}, target @ 0x{_endSceneAddr:X8}");
 
         try
         {
-            EntryPoint.Log("EndSceneHook: Calling MH_Initialize...");
-            int status = MinHook.MH_Initialize();
-            EntryPoint.Log($"EndSceneHook: MH_Initialize = {status} ({MinHook.StatusString(status)})");
-
-            if (status != MinHook.MH_OK && status != MinHook.MH_ERROR_ALREADY_INITIALIZED)
-                throw new InvalidOperationException($"MH_Initialize failed: {MinHook.StatusString(status)}");
-
-            EntryPoint.Log("EndSceneHook: Calling MH_CreateHook...");
-            status = MinHook.MH_CreateHook(_endSceneAddr, hookPtr, out IntPtr originalPtr);
-            EntryPoint.Log($"EndSceneHook: MH_CreateHook = {status} ({MinHook.StatusString(status)}), original @ 0x{originalPtr:X8}");
-
-            if (status != MinHook.MH_OK)
-                throw new InvalidOperationException($"MH_CreateHook failed: {MinHook.StatusString(status)}");
-
-            EntryPoint.Log("EndSceneHook: Calling MH_EnableHook...");
-            status = MinHook.MH_EnableHook(_endSceneAddr);
-            EntryPoint.Log($"EndSceneHook: MH_EnableHook = {status} ({MinHook.StatusString(status)})");
-
-            if (status != MinHook.MH_OK)
-                throw new InvalidOperationException($"MH_EnableHook failed: {MinHook.StatusString(status)}");
-
+            IntPtr originalPtr = MinHook.Hook(_endSceneAddr, hookPtr);
             _originalEndScene = Marshal.GetDelegateForFunctionPointer<EndSceneDelegate>(originalPtr);
             _installed = true;
 
@@ -165,19 +154,29 @@ internal static class EndSceneHook
         {
             if (!_offscreenFilterDisabled && !DX9Backend.IsRenderingToBackBuffer(pDevice))
             {
-                if (_skipCount < MaxOffscreenSkipsBeforeFallback)
-                {
+                if (_firstOffscreenTick == 0)
+                    _firstOffscreenTick = Environment.TickCount64;
+
+                if (_skipCount < MaxOffscreenSkipLogs)
                     EntryPoint.Log("EndSceneHook: Skipping offscreen EndScene pass.");
-                    _skipCount++;
+                _skipCount++;
+
+                long offscreenElapsedMs = Environment.TickCount64 - _firstOffscreenTick;
+                if (_skipCount < MaxOffscreenSkipsBeforeFallback && offscreenElapsedMs < OffscreenFallbackDelayMs)
                     return _originalEndScene!(pDevice);
-                }
 
                 _offscreenFilterDisabled = true;
-                EntryPoint.Log($"EndSceneHook: Falling back to unfiltered EndScene after {_skipCount} skipped offscreen pass(es).");
+                EntryPoint.Log($"EndSceneHook: Falling back to unfiltered EndScene after {_skipCount} skipped offscreen pass(es) over {offscreenElapsedMs}ms.");
             }
 
             _renderCount++;
             _frameCount++;
+
+            if (_renderCount == 1 && _offscreenFilterDisabled && _skipCount > 0)
+            {
+                long installElapsedMs = Environment.TickCount64 - _installTick;
+                EntryPoint.Log($"EndSceneHook: First render after offscreen fallback ({_skipCount} skip(s), {installElapsedMs}ms since install).");
+            }
 
             if (_renderCount == 1 && _skipCount > 0)
                 EntryPoint.Log($"EndSceneHook: First backbuffer frame after skipping {_skipCount} offscreen pass(es).");

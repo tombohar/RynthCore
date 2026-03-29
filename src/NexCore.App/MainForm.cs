@@ -12,6 +12,8 @@ namespace NexCore.App;
 
 internal sealed class MainForm : Form
 {
+    private const string LauncherTabId = "launcher";
+    private const string RuntimeTabId = "runtime";
     private static readonly Color AppBack = Color.FromArgb(12, 18, 24);
     private static readonly Color PanelBack = Color.FromArgb(20, 28, 36);
     private static readonly Color PanelAlt = Color.FromArgb(15, 22, 30);
@@ -23,6 +25,9 @@ internal sealed class MainForm : Form
     private static readonly Color Good = Color.FromArgb(102, 214, 135);
 
     private readonly EngineInjectionService _injector = new();
+    private readonly AcClientLaunchSettingsService _launchSettings = new();
+    private readonly AcLaunchArgumentBuilder _launchArgumentBuilder = new();
+    private readonly AcClientLoginAutomationService _loginAutomation = new();
     private readonly List<PluginDefinition> _plugins =
     [
         new PluginDefinition
@@ -48,24 +53,37 @@ internal sealed class MainForm : Form
     private readonly HashSet<int> _pendingInjectionPids = [];
     private readonly HashSet<int> _autoInjectFailedPids = [];
     private readonly object _injectionStateLock = new();
+    private readonly object _activityLock = new();
     private readonly System.Windows.Forms.Timer _watchTimer = new() { Interval = 1500 };
+    private readonly System.Windows.Forms.Timer _activityFlushTimer = new() { Interval = 120 };
+    private readonly Queue<string> _pendingActivityLines = new();
 
     private AppSettings _settings = new();
+    private bool _loadingUiState;
+    private bool _rebindingLaunchAccountChecklist;
     private bool _watchTickBusy;
     private bool _operationBusy;
 
     private readonly TextBox _acPathTextBox = CreateTextBox();
     private readonly TextBox _enginePathTextBox = CreateTextBox();
     private readonly TextBox _launchArgsTextBox = CreateTextBox();
+    private readonly TextBox _generatedLaunchArgsTextBox = CreateTextBox(readOnly: true);
+    private readonly ComboBox _serverComboBox = CreateComboBox();
+    private readonly ComboBox _accountComboBox = CreateComboBox();
+    private readonly CheckedListBox _launchAccountsCheckedList = CreateCheckedListBox();
     private readonly CheckBox _autoInjectCheckBox = CreateCheckBox("Auto Inject");
+    private readonly CheckBox _allowMultipleClientsCheckBox = CreateCheckBox("Allow Multiple Clients");
+    private readonly CheckBox _skipIntroVideosCheckBox = CreateCheckBox("Skip Intro Videos");
+    private readonly CheckBox _skipLoginLogosCheckBox = CreateCheckBox("Skip Login Logos");
     private readonly Label _statusValueLabel = CreateValueLabel();
     private readonly Label _selectedValueLabel = CreateValueLabel();
+    private readonly Label _launchProfileValueLabel = CreateValueLabel();
     private readonly Label _hotReloadValueLabel = CreateValueLabel();
     private readonly ListBox _activityListBox = CreateActivityListBox();
+    private readonly TabControl _mainTabs = CreateMainTabs();
 
-    private readonly Button _launchButton = CreateActionButton("Launch AC");
-    private readonly Button _injectButton = CreateActionButton("Inject Into Running AC");
-    private readonly Button _launchAndInjectButton = CreateAccentButton("Launch + Apply Loadout");
+    private readonly Button _launchButton = CreateAccentButton("Launch");
+    private readonly Button _injectButton = CreateActionButton("Inject NexCore");
 
     public MainForm()
     {
@@ -76,21 +94,58 @@ internal sealed class MainForm : Form
         BackColor = AppBack;
         ForeColor = TextPrimary;
         Font = new Font("Segoe UI", 10f, FontStyle.Regular, GraphicsUnit.Point);
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        UpdateStyles();
 
         BuildLayout();
         LoadSettingsIntoUi();
 
         _watchTimer.Tick += WatchTimer_Tick;
         _watchTimer.Start();
+        _activityFlushTimer.Tick += (_, _) => FlushPendingActivity();
+        _activityFlushTimer.Start();
 
-        _launchButton.Click += async (_, _) => await LaunchAcAsync(injectAfterLaunch: false);
+        _launchButton.Click += async (_, _) => await LaunchAcAsync(injectAfterLaunch: true);
         _injectButton.Click += async (_, _) => await InjectIntoRunningAcAsync();
-        _launchAndInjectButton.Click += async (_, _) => await LaunchAcAsync(injectAfterLaunch: true);
         _autoInjectCheckBox.CheckedChanged += (_, _) =>
         {
             SaveUiState();
             UpdateStatusSummary();
         };
+        _launchArgsTextBox.TextChanged += (_, _) =>
+        {
+            SaveUiState();
+            UpdateLaunchPreview();
+            UpdateStatusSummary();
+        };
+        _serverComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            SaveUiState();
+            UpdateLaunchPreview();
+            UpdateStatusSummary();
+        };
+        _accountComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            SaveUiState();
+            UpdateLaunchPreview();
+            UpdateStatusSummary();
+        };
+        _launchAccountsCheckedList.ItemCheck += (_, _) =>
+        {
+            if (_rebindingLaunchAccountChecklist)
+                return;
+
+            BeginInvoke(new Action(() =>
+            {
+                SaveUiState();
+                UpdateStatusSummary();
+            }));
+        };
+        _mainTabs.SelectedIndexChanged += (_, _) => SaveUiState();
+        _allowMultipleClientsCheckBox.CheckedChanged += (_, _) => SaveAndApplyLaunchSettings();
+        _skipIntroVideosCheckBox.CheckedChanged += (_, _) => SaveAndApplyLaunchSettings();
+        _skipLoginLogosCheckBox.CheckedChanged += (_, _) => SaveUiState();
         FormClosing += (_, _) => SaveUiState();
 
         UpdateStatusSummary();
@@ -107,7 +162,7 @@ internal sealed class MainForm : Form
             RowCount = 2,
             Padding = new Padding(18)
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 118f));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 136f));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         Controls.Add(root);
 
@@ -126,54 +181,145 @@ internal sealed class MainForm : Form
         };
         hero.Paint += DrawPanelBorder;
 
+        var heroLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = PanelBack,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0),
+            Padding = new Padding(0)
+        };
+        heroLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        heroLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 240f));
+
+        var copyPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = PanelBack,
+            FlowDirection = FlowDirection.TopDown,
+            AutoSize = false,
+            WrapContents = false,
+            Margin = new Padding(0),
+            Padding = new Padding(0)
+        };
+
         var title = new Label
         {
             Text = "NEXCORE DESKTOP HOST",
             ForeColor = Accent,
             Font = new Font("Segoe UI Semibold", 22f, FontStyle.Bold),
             AutoSize = true,
-            Location = new Point(14, 10)
+            Margin = new Padding(14, 10, 0, 0)
         };
 
         var subtitle = new Label
         {
-            Text = "Pick the loadout in Windows, launch Asheron's Call, and let the host apply the selected runtime automatically.",
+            Text = "Launcher first: pick a server, choose the character/account slots you want, and start Asheron's Call from NexCore. Runtime paths and advanced settings live in the secondary tab.",
             ForeColor = TextPrimary,
             AutoSize = true,
-            MaximumSize = new Size(880, 0),
-            Location = new Point(16, 52)
+            MaximumSize = new Size(760, 0),
+            Margin = new Padding(16, 6, 0, 0)
         };
 
         var note = new Label
         {
-            Text = "Hot reload bonus path: the host already watches for new AC sessions and is structured so plugin reapply and future engine-side reload workflows have a place to live.",
+            Text = "Launch is now the default path. Runtime keeps the paths, toggles, and manual injection action for recovery cases, while normal play starts here with NexCore already in the process.",
             ForeColor = TextMuted,
             AutoSize = true,
-            MaximumSize = new Size(930, 0),
-            Location = new Point(16, 80)
+            MaximumSize = new Size(760, 0),
+            Margin = new Padding(16, 6, 0, 0)
         };
 
-        hero.Controls.Add(title);
-        hero.Controls.Add(subtitle);
-        hero.Controls.Add(note);
+        var actionHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = PanelBack,
+            Margin = new Padding(0),
+            Padding = new Padding(0)
+        };
+
+        _launchButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _launchButton.Width = 184;
+        _launchButton.Height = 42;
+        _launchButton.Location = new Point(32, 18);
+
+        var launchNote = new Label
+        {
+            Text = "Launch uses the selected server and checked targets, then injects NexCore before AC gets moving.",
+            ForeColor = TextMuted,
+            AutoSize = false,
+            Size = new Size(184, 50),
+            Location = new Point(32, 68),
+            TextAlign = ContentAlignment.TopRight
+        };
+
+        copyPanel.Controls.Add(title);
+        copyPanel.Controls.Add(subtitle);
+        copyPanel.Controls.Add(note);
+        actionHost.Controls.Add(_launchButton);
+        actionHost.Controls.Add(launchNote);
+        heroLayout.Controls.Add(copyPanel, 0, 0);
+        heroLayout.Controls.Add(actionHost, 1, 0);
+        hero.Controls.Add(heroLayout);
         return hero;
     }
 
     private Control BuildContentPanel()
     {
-        var content = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            BackColor = AppBack,
-            ColumnCount = 2,
-            RowCount = 1
-        };
-        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 41f));
-        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 59f));
+        var launcherPage = CreateTabPage("Launcher");
+        launcherPage.Tag = LauncherTabId;
+        launcherPage.Controls.Add(CreateScrollHost(BuildLauncherColumn()));
 
-        content.Controls.Add(CreateScrollHost(BuildPluginColumn()), 0, 0);
-        content.Controls.Add(CreateScrollHost(BuildHostColumn()), 1, 0);
-        return content;
+        var runtimePage = CreateTabPage("Runtime");
+        runtimePage.Tag = RuntimeTabId;
+        runtimePage.Controls.Add(CreateScrollHost(BuildRuntimeColumn()));
+
+        _mainTabs.TabPages.Add(launcherPage);
+        _mainTabs.TabPages.Add(runtimePage);
+        return _mainTabs;
+    }
+
+    private Control BuildLauncherColumn()
+    {
+        var host = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            BackColor = AppBack,
+            ColumnCount = 1,
+            RowCount = 3,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0)
+        };
+        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        host.Controls.Add(BuildLaunchProfilesPanel(), 0, 0);
+        host.Controls.Add(BuildSessionPanel(), 0, 1);
+        host.Controls.Add(BuildActivityPanel(), 0, 2);
+        return host;
+    }
+
+    private Control BuildRuntimeColumn()
+    {
+        var host = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            BackColor = AppBack,
+            ColumnCount = 1,
+            RowCount = 2,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0)
+        };
+        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        host.Controls.Add(BuildPathsPanel(), 0, 0);
+        host.Controls.Add(BuildPluginColumn(), 0, 1);
+        return host;
     }
 
     private Control BuildPluginColumn()
@@ -182,13 +328,13 @@ internal sealed class MainForm : Form
         host.Dock = DockStyle.Top;
         host.AutoSize = true;
         host.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        host.Margin = new Padding(0, 0, 10, 0);
+        host.Margin = new Padding(10, 0, 0, 0);
 
         var layout = CreateSectionLayout(5);
         host.Controls.Add(layout);
 
-        layout.Controls.Add(CreateSectionTitle("Plugin Loadout"), 0, 0);
-        layout.Controls.Add(CreateSectionBody("This is the desktop-side selection surface. Today it injects NexCore Engine and remembers the future adoption targets you want attached to the session."), 0, 1);
+        layout.Controls.Add(CreateSectionTitle("Runtime Loadout"), 0, 0);
+        layout.Controls.Add(CreateSectionBody("These runtime selections are still saved and applied when you launch from NexCore, but they now live behind the secondary tab so the launcher can stay front and center."), 0, 1);
 
         var pluginFlow = new FlowLayoutPanel
         {
@@ -206,7 +352,7 @@ internal sealed class MainForm : Form
 
         layout.Controls.Add(pluginFlow, 0, 2);
 
-        var footer = CreateFooterLabel("Selections are persisted in AppData so the host can reopen with your preferred loadout.");
+        var footer = CreateFooterLabel("Selections are persisted in AppData so NexCore can reopen with your preferred runtime loadout.");
         layout.Controls.Add(footer, 0, 3);
 
         return host;
@@ -219,7 +365,7 @@ internal sealed class MainForm : Form
             Dock = DockStyle.Top,
             BackColor = AppBack,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 4,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Margin = new Padding(0)
@@ -227,10 +373,12 @@ internal sealed class MainForm : Form
         host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         host.Controls.Add(BuildPathsPanel(), 0, 0);
-        host.Controls.Add(BuildSessionPanel(), 0, 1);
-        host.Controls.Add(BuildActivityPanel(), 0, 2);
+        host.Controls.Add(BuildLaunchProfilesPanel(), 0, 1);
+        host.Controls.Add(BuildSessionPanel(), 0, 2);
+        host.Controls.Add(BuildActivityPanel(), 0, 3);
         return host;
     }
 
@@ -242,15 +390,15 @@ internal sealed class MainForm : Form
         panel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         panel.Margin = new Padding(10, 0, 0, 10);
 
-        var layout = CreateSectionLayout(7);
+        var layout = CreateSectionLayout(8);
         panel.Controls.Add(layout);
 
-        layout.Controls.Add(CreateSectionTitle("Launcher + Runtime"), 0, 0);
-        layout.Controls.Add(CreateSectionBody("Point the host at your AC client and the published NexCore engine. Then you can launch, inject into a running client, or do both in one step."), 0, 1);
+        layout.Controls.Add(CreateSectionTitle("Runtime Settings"), 0, 0);
+        layout.Controls.Add(CreateSectionBody("These are the settings you rarely need to touch: client path, engine path, manual argument override, and the runtime behavior flags that NexCore applies before launch."), 0, 1);
 
         layout.Controls.Add(CreateFieldRow("Asheron's Call", _acPathTextBox, BrowseForAcClient), 0, 2);
         layout.Controls.Add(CreateFieldRow("NexCore Engine", _enginePathTextBox, BrowseForEngineDll), 0, 3);
-        layout.Controls.Add(CreateFieldRow("Launch Arguments", _launchArgsTextBox, null), 0, 4);
+        layout.Controls.Add(CreateFieldRow("Arguments Override (Optional)", _launchArgsTextBox, null), 0, 4);
 
         var optionsRow = new FlowLayoutPanel
         {
@@ -263,23 +411,40 @@ internal sealed class MainForm : Form
             Margin = new Padding(0, 8, 0, 0)
         };
         optionsRow.Controls.Add(_autoInjectCheckBox);
-        optionsRow.Controls.Add(CreateSectionBody("When enabled, NexCore injects clients it launches and newly detected AC clients."));
+        optionsRow.Controls.Add(CreateSectionBody("Launch from NexCore already injects early. Auto Inject only matters for AC sessions that appear outside the launcher."));
+        optionsRow.Controls.Add(_allowMultipleClientsCheckBox);
+        optionsRow.Controls.Add(CreateSectionBody("Writes ComputeUniquePort=True into Documents\\Asheron's Call\\UserPreferences.ini and, for NexCore-launched sessions, patches AC's already-running gate before startup."));
+        optionsRow.Controls.Add(_skipIntroVideosCheckBox);
+        optionsRow.Controls.Add(CreateSectionBody("Parks turbine_logo_ac.avi in the AC install folder so launches skip the intro movie. Turn it off to restore the file."));
+        optionsRow.Controls.Add(_skipLoginLogosCheckBox);
+        optionsRow.Controls.Add(CreateSectionBody("For NexCore-launched sessions, sends the same early login-screen clicks that Decal-style launchers use to bypass the logo screens after the client window appears."));
         layout.Controls.Add(optionsRow, 0, 5);
 
-        var buttonRow = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            BackColor = PanelBack,
-            FlowDirection = FlowDirection.LeftToRight,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            WrapContents = false,
-            Margin = new Padding(0, 10, 0, 0)
-        };
-        buttonRow.Controls.Add(_launchButton);
-        buttonRow.Controls.Add(_injectButton);
-        buttonRow.Controls.Add(_launchAndInjectButton);
-        layout.Controls.Add(buttonRow, 0, 6);
+        layout.Controls.Add(CreateRuntimeActionRow(), 0, 6);
+        layout.Controls.Add(CreateFooterLabel("The launcher tab is the normal entry point now. Come back here only when you need to change engine paths, toggles, recovery actions, or the advanced override."), 0, 7);
+
+        return panel;
+    }
+
+    private Control BuildLaunchProfilesPanel()
+    {
+        var panel = CreateSectionPanel();
+        panel.Dock = DockStyle.Top;
+        panel.AutoSize = true;
+        panel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        panel.Margin = new Padding(10, 0, 0, 10);
+
+        var layout = CreateSectionLayout(8);
+        panel.Controls.Add(layout);
+
+        layout.Controls.Add(CreateSectionTitle("Launcher"), 0, 0);
+        layout.Controls.Add(CreateSectionBody("Pick a server and the launch targets you want. NexCore will build the emulator-specific command line, launch suspended, and apply the runtime before AC gets to its single-instance checks."), 0, 1);
+        layout.Controls.Add(CreateProfileSelectorRow("Server", _serverComboBox, AddServerProfile, EditSelectedServerProfile, DeleteSelectedServerProfile), 0, 2);
+        layout.Controls.Add(CreateProfileSelectorRow("Primary Target", _accountComboBox, AddAccountProfile, EditSelectedAccountProfile, DeleteSelectedAccountProfile), 0, 3);
+        layout.Controls.Add(CreateSectionBody("These profiles can act like remembered character slots. Give them a character or slot label, check the ones you want to start, and NexCore will remember that launch set the next time you open the launcher."), 0, 4);
+        layout.Controls.Add(CreateCheckedListRow("Launch Targets", _launchAccountsCheckedList), 0, 5);
+        layout.Controls.Add(CreateFieldRow("Generated Launch Arguments", _generatedLaunchArgsTextBox, null), 0, 6);
+        layout.Controls.Add(CreateFooterLabel("The checked launch targets are persisted in AppData so you can reopen NexCore and hit Launch again without rebuilding the list."), 0, 7);
 
         return panel;
     }
@@ -302,7 +467,7 @@ internal sealed class MainForm : Form
             Dock = DockStyle.Top,
             BackColor = PanelBack,
             ColumnCount = 2,
-            RowCount = 3,
+            RowCount = 4,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Margin = new Padding(0, 6, 0, 0)
@@ -312,7 +477,8 @@ internal sealed class MainForm : Form
 
         AddStateRow(stateGrid, 0, "AC Status", _statusValueLabel);
         AddStateRow(stateGrid, 1, "Selected Loadout", _selectedValueLabel);
-        AddStateRow(stateGrid, 2, "Hot Reload Path", _hotReloadValueLabel);
+        AddStateRow(stateGrid, 2, "Launch Profile", _launchProfileValueLabel);
+        AddStateRow(stateGrid, 3, "Hot Reload Path", _hotReloadValueLabel);
 
         layout.Controls.Add(stateGrid, 0, 1);
         return panel;
@@ -386,15 +552,340 @@ internal sealed class MainForm : Form
         return card;
     }
 
+    private void AddServerProfile()
+    {
+        var draft = new LaunchServerProfile();
+        if (!LaunchProfileDialogs.TryEditServer(this, draft))
+            return;
+
+        _settings.ServerProfiles.Add(draft);
+        _settings.SelectedServerProfileId = draft.Id;
+        RebindLaunchProfiles();
+        SaveUiState();
+        UpdateLaunchPreview();
+        UpdateStatusSummary();
+        AppendActivity($"Saved server profile '{draft.DisplayName}'.");
+    }
+
+    private void EditSelectedServerProfile()
+    {
+        LaunchServerProfile? selected = GetSelectedServerProfile();
+        if (selected == null)
+        {
+            AppendActivity("Select a server profile first.");
+            return;
+        }
+
+        var draft = selected.Clone();
+        if (!LaunchProfileDialogs.TryEditServer(this, draft))
+            return;
+
+        selected.CopyFrom(draft);
+        _settings.SelectedServerProfileId = selected.Id;
+        RebindLaunchProfiles();
+        SaveUiState();
+        UpdateLaunchPreview();
+        UpdateStatusSummary();
+        AppendActivity($"Updated server profile '{selected.DisplayName}'.");
+    }
+
+    private void DeleteSelectedServerProfile()
+    {
+        LaunchServerProfile? selected = GetSelectedServerProfile();
+        if (selected == null)
+        {
+            AppendActivity("Select a server profile first.");
+            return;
+        }
+
+        if (MessageBox.Show(
+                this,
+                $"Delete server profile '{selected.DisplayName}'?",
+                "Delete Server Profile",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        _settings.ServerProfiles.RemoveAll(profile => string.Equals(profile.Id, selected.Id, StringComparison.OrdinalIgnoreCase));
+        _settings.SelectedServerProfileId = _settings.ServerProfiles.FirstOrDefault()?.Id ?? string.Empty;
+        RebindLaunchProfiles();
+        SaveUiState();
+        UpdateLaunchPreview();
+        UpdateStatusSummary();
+        AppendActivity($"Deleted server profile '{selected.DisplayName}'.");
+    }
+
+    private void AddAccountProfile()
+    {
+        var draft = new LaunchAccountProfile();
+        if (!LaunchProfileDialogs.TryEditAccount(this, draft))
+            return;
+
+        _settings.AccountProfiles.Add(draft);
+        _settings.SelectedAccountProfileId = draft.Id;
+        RebindLaunchProfiles();
+        SaveUiState();
+        UpdateLaunchPreview();
+        UpdateStatusSummary();
+        AppendActivity($"Saved account profile '{draft.DisplayName}'.");
+    }
+
+    private void EditSelectedAccountProfile()
+    {
+        LaunchAccountProfile? selected = GetSelectedAccountProfile();
+        if (selected == null)
+        {
+            AppendActivity("Select an account profile first.");
+            return;
+        }
+
+        var draft = selected.Clone();
+        if (!LaunchProfileDialogs.TryEditAccount(this, draft))
+            return;
+
+        selected.CopyFrom(draft);
+        _settings.SelectedAccountProfileId = selected.Id;
+        RebindLaunchProfiles();
+        SaveUiState();
+        UpdateLaunchPreview();
+        UpdateStatusSummary();
+        AppendActivity($"Updated account profile '{selected.DisplayName}'.");
+    }
+
+    private void DeleteSelectedAccountProfile()
+    {
+        LaunchAccountProfile? selected = GetSelectedAccountProfile();
+        if (selected == null)
+        {
+            AppendActivity("Select an account profile first.");
+            return;
+        }
+
+        if (MessageBox.Show(
+                this,
+                $"Delete account profile '{selected.DisplayName}'?",
+                "Delete Account Profile",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question) != DialogResult.Yes)
+        {
+            return;
+        }
+
+        _settings.AccountProfiles.RemoveAll(profile => string.Equals(profile.Id, selected.Id, StringComparison.OrdinalIgnoreCase));
+        _settings.SelectedAccountProfileId = _settings.AccountProfiles.FirstOrDefault()?.Id ?? string.Empty;
+        RebindLaunchProfiles();
+        SaveUiState();
+        UpdateLaunchPreview();
+        UpdateStatusSummary();
+        AppendActivity($"Deleted account profile '{selected.DisplayName}'.");
+    }
+
+    private void RebindLaunchProfiles()
+    {
+        _serverComboBox.DisplayMember = nameof(LaunchServerProfile.DisplayName);
+        _serverComboBox.ValueMember = nameof(LaunchServerProfile.Id);
+        _serverComboBox.DataSource = null;
+        _serverComboBox.DataSource = _settings.ServerProfiles;
+
+        _accountComboBox.DisplayMember = nameof(LaunchAccountProfile.DisplayName);
+        _accountComboBox.ValueMember = nameof(LaunchAccountProfile.Id);
+        _accountComboBox.DataSource = null;
+        _accountComboBox.DataSource = _settings.AccountProfiles;
+
+        SelectComboValue(_serverComboBox, _settings.SelectedServerProfileId);
+        SelectComboValue(_accountComboBox, _settings.SelectedAccountProfileId);
+
+        RebindLaunchAccountChecklist();
+    }
+
+    private void RebindLaunchAccountChecklist()
+    {
+        var validIds = _settings.AccountProfiles
+            .Select(account => account.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        _settings.CheckedLaunchAccountProfileIds = _settings.CheckedLaunchAccountProfileIds
+            .Where(id => validIds.Contains(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        _rebindingLaunchAccountChecklist = true;
+        _launchAccountsCheckedList.BeginUpdate();
+        try
+        {
+            _launchAccountsCheckedList.Items.Clear();
+            foreach (LaunchAccountProfile account in _settings.AccountProfiles)
+            {
+                bool isChecked = _settings.CheckedLaunchAccountProfileIds.Contains(account.Id, StringComparer.OrdinalIgnoreCase);
+                _launchAccountsCheckedList.Items.Add(account, isChecked);
+            }
+        }
+        finally
+        {
+            _launchAccountsCheckedList.EndUpdate();
+            _rebindingLaunchAccountChecklist = false;
+        }
+    }
+
+    private static void SelectComboValue(ComboBox comboBox, string selectedId)
+    {
+        if (comboBox.Items.Count == 0)
+            return;
+
+        if (string.IsNullOrWhiteSpace(selectedId))
+        {
+            comboBox.SelectedIndex = 0;
+            return;
+        }
+
+        comboBox.SelectedValue = selectedId;
+        if (comboBox.SelectedIndex < 0)
+            comboBox.SelectedIndex = 0;
+    }
+
+    private LaunchServerProfile? GetSelectedServerProfile()
+    {
+        return _serverComboBox.SelectedItem as LaunchServerProfile;
+    }
+
+    private LaunchAccountProfile? GetSelectedAccountProfile()
+    {
+        return _accountComboBox.SelectedItem as LaunchAccountProfile;
+    }
+
+    private List<LaunchAccountProfile> GetCheckedLaunchAccounts()
+    {
+        return _launchAccountsCheckedList.CheckedItems
+            .OfType<LaunchAccountProfile>()
+            .ToList();
+    }
+
+    private List<LaunchAccountProfile> GetAccountsToLaunch()
+    {
+        List<LaunchAccountProfile> checkedAccounts = GetCheckedLaunchAccounts();
+        if (checkedAccounts.Count > 0)
+            return checkedAccounts;
+
+        LaunchAccountProfile? selected = GetSelectedAccountProfile();
+        return selected == null ? [] : [selected];
+    }
+
+    private bool TryGetEffectiveLaunchArguments(out string arguments, out string launchSummary, out string error)
+    {
+        LaunchAccountProfile? account = GetSelectedAccountProfile();
+        if (account == null)
+        {
+            arguments = string.Empty;
+            launchSummary = string.Empty;
+            error = "Select an account profile, or create one first.";
+            return false;
+        }
+
+        return TryGetLaunchArgumentsForAccount(account, out arguments, out launchSummary, out error);
+    }
+
+    private bool TryGetLaunchArgumentsForAccount(LaunchAccountProfile account, out string arguments, out string launchSummary, out string error)
+    {
+        string overrideArguments = _launchArgsTextBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(overrideArguments))
+        {
+            arguments = overrideArguments;
+            launchSummary = string.IsNullOrWhiteSpace(account.DisplayName)
+                ? "Manual argument override"
+                : $"Manual argument override / {account.DisplayName}";
+            error = string.Empty;
+            return true;
+        }
+
+        LaunchServerProfile? server = GetSelectedServerProfile();
+        if (server == null)
+        {
+            arguments = string.Empty;
+            launchSummary = string.Empty;
+            error = "Select a server profile, or enter a manual arguments override.";
+            return false;
+        }
+
+        try
+        {
+            arguments = _launchArgumentBuilder.BuildArguments(server, account);
+            launchSummary = _launchArgumentBuilder.Describe(server, account);
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            arguments = string.Empty;
+            launchSummary = string.Empty;
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private void UpdateLaunchPreview()
+    {
+        LaunchServerProfile? selectedServer = GetSelectedServerProfile();
+        if (selectedServer != null)
+            _settings.SelectedServerProfileId = selectedServer.Id;
+
+        LaunchAccountProfile? selectedAccount = GetSelectedAccountProfile();
+        if (selectedAccount != null)
+            _settings.SelectedAccountProfileId = selectedAccount.Id;
+
+        if (TryGetEffectiveLaunchArguments(out string arguments, out string summary, out _))
+        {
+            if (!string.IsNullOrWhiteSpace(_launchArgsTextBox.Text.Trim()))
+                _generatedLaunchArgsTextBox.Text = $"Override active. Generated: {BuildGeneratedLaunchArgumentsPreview()}";
+            else
+                _generatedLaunchArgsTextBox.Text = arguments;
+
+            if (!string.IsNullOrWhiteSpace(summary))
+                _launchProfileValueLabel.Text = summary;
+        }
+        else
+        {
+            _generatedLaunchArgsTextBox.Text = BuildGeneratedLaunchArgumentsPreview();
+        }
+    }
+
+    private string BuildGeneratedLaunchArgumentsPreview()
+    {
+        LaunchServerProfile? server = GetSelectedServerProfile();
+        LaunchAccountProfile? account = GetSelectedAccountProfile();
+        if (server == null || account == null)
+            return "Choose a server and account to generate arguments.";
+
+        try
+        {
+            return _launchArgumentBuilder.BuildArguments(server, account);
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
+        }
+    }
+
     private void LoadSettingsIntoUi()
     {
+        _loadingUiState = true;
         _settings = AppSettingsStore.Load();
+        _settings.ServerProfiles ??= [];
+        _settings.AccountProfiles ??= [];
+        _settings.CheckedLaunchAccountProfileIds ??= [];
+        _settings.SelectedMainTabId = string.IsNullOrWhiteSpace(_settings.SelectedMainTabId)
+            ? LauncherTabId
+            : _settings.SelectedMainTabId;
 
         _acPathTextBox.Text = _settings.AcClientPath;
         _enginePathTextBox.Text = !string.IsNullOrWhiteSpace(_settings.EnginePath)
             ? _settings.EnginePath
             : _injector.TryResolveEnginePath(null) ?? string.Empty;
         _launchArgsTextBox.Text = _settings.LaunchArguments;
+        _allowMultipleClientsCheckBox.Checked = _settings.AllowMultipleClients;
+        _skipIntroVideosCheckBox.Checked = _settings.SkipIntroVideos;
+        _skipLoginLogosCheckBox.Checked = _settings.SkipLoginLogos;
         _autoInjectCheckBox.Checked = _settings.AutoInjectAfterLaunch || _settings.WatchForAcStart;
 
         foreach ((string pluginId, CheckBox checkBox) in _pluginChecks)
@@ -402,13 +893,28 @@ internal sealed class MainForm : Form
 
         if (!_pluginChecks.Values.Any(cb => cb.Checked) && _pluginChecks.TryGetValue("nexcore-engine", out CheckBox? engineCheck))
             engineCheck.Checked = true;
+
+        RebindLaunchProfiles();
+        UpdateLaunchPreview();
+        SelectMainTab(_settings.SelectedMainTabId);
+        _loadingUiState = false;
     }
 
     private void SaveUiState()
     {
+        if (_loadingUiState)
+            return;
+
         _settings.AcClientPath = _acPathTextBox.Text.Trim();
         _settings.EnginePath = _enginePathTextBox.Text.Trim();
         _settings.LaunchArguments = _launchArgsTextBox.Text.Trim();
+        _settings.SelectedServerProfileId = GetSelectedServerProfile()?.Id ?? _settings.SelectedServerProfileId;
+        _settings.SelectedAccountProfileId = GetSelectedAccountProfile()?.Id ?? _settings.SelectedAccountProfileId;
+        _settings.CheckedLaunchAccountProfileIds = GetCheckedLaunchAccounts().Select(profile => profile.Id).ToList();
+        _settings.SelectedMainTabId = GetSelectedMainTabId();
+        _settings.AllowMultipleClients = _allowMultipleClientsCheckBox.Checked;
+        _settings.SkipIntroVideos = _skipIntroVideosCheckBox.Checked;
+        _settings.SkipLoginLogos = _skipLoginLogosCheckBox.Checked;
         _settings.AutoInjectAfterLaunch = _autoInjectCheckBox.Checked;
         _settings.WatchForAcStart = _autoInjectCheckBox.Checked;
         _settings.EnabledPluginIds = GetSelectedPluginIds().ToList();
@@ -427,30 +933,88 @@ internal sealed class MainForm : Form
             return;
         }
 
+        List<LaunchAccountProfile> accountsToLaunch = GetAccountsToLaunch();
+        if (accountsToLaunch.Count == 0)
+        {
+            AppendActivity("Launch blocked: choose or check at least one account profile.");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_launchArgsTextBox.Text.Trim()) && accountsToLaunch.Count > 1)
+        {
+            AppendActivity("Launch blocked: manual argument override can only be used for one account at a time.");
+            return;
+        }
+
+        if (!TryGetLaunchArgumentsForAccount(accountsToLaunch[0], out _, out string firstLaunchSummary, out string launchError))
+        {
+            AppendActivity($"Launch blocked: {launchError}");
+            return;
+        }
+
         SaveUiState();
+        ApplyLaunchSettings();
 
         try
         {
             SetOperationState(true);
+            AppendActivity(accountsToLaunch.Count == 1
+                ? $"Preparing AC launch using {firstLaunchSummary}."
+                : $"Preparing {accountsToLaunch.Count} AC launches from the selected account checklist.");
 
-            var startInfo = new ProcessStartInfo(acPath)
+            bool shouldInject = injectAfterLaunch || _autoInjectCheckBox.Checked;
+            string[] selectedPluginIds = GetSelectedPluginIds().ToArray();
+            bool canLaunchInjected = selectedPluginIds.Contains("nexcore-engine", StringComparer.OrdinalIgnoreCase);
+            if (!canLaunchInjected)
             {
-                WorkingDirectory = Path.GetDirectoryName(acPath) ?? string.Empty,
-                Arguments = _launchArgsTextBox.Text.Trim()
-            };
-
-            Process? launched = Process.Start(startInfo);
-            if (launched == null)
-            {
-                AppendActivity("AC launch failed: Process.Start returned null.");
+                AppendActivity("Launch blocked: NexCore Engine must stay selected because Launch now always starts AC with the runtime injected.");
                 return;
             }
 
-            AppendActivity($"Launched AC (PID {launched.Id}).");
-
-            bool shouldInject = injectAfterLaunch || _autoInjectCheckBox.Checked;
             if (shouldInject)
-                QueueAutoInject(launched, "Applying selected loadout after launch");
+            {
+                string enginePath = _enginePathTextBox.Text.Trim();
+                for (int i = 0; i < accountsToLaunch.Count; i++)
+                {
+                    LaunchAccountProfile account = accountsToLaunch[i];
+                    if (!TryGetLaunchArgumentsForAccount(account, out string launchArguments, out string launchSummary, out string accountError))
+                    {
+                        AppendActivity($"Launch blocked for {account.DisplayName}: {accountError}");
+                        continue;
+                    }
+
+                    InjectionResult launchResult = await Task.Run(() =>
+                        _injector.LaunchSuspendedAndInject(
+                            acPath,
+                            launchArguments,
+                            enginePath,
+                            AppendActivity));
+
+                    if (launchResult.Success)
+                    {
+                        if (launchResult.ProcessId is int launchedPid)
+                        {
+                            lock (_injectionStateLock)
+                                _injectedPids.Add(launchedPid);
+
+                            AppendActivity($"Launch + inject complete for PID {launchedPid} using {launchSummary}.");
+                            QueueSkipLoginLogos(launchedPid);
+                        }
+                        else
+                        {
+                            AppendActivity($"Launch + inject completed using {launchSummary}, but no PID was reported.");
+                        }
+                    }
+                    else
+                    {
+                        AppendActivity($"Launch + inject failed for {launchSummary}: {launchResult.Summary}");
+                    }
+
+                    if (i < accountsToLaunch.Count - 1)
+                        await Task.Delay(500);
+                }
+                return;
+            }
         }
         catch (Exception ex)
         {
@@ -465,6 +1029,13 @@ internal sealed class MainForm : Form
 
     private async Task InjectIntoRunningAcAsync()
     {
+        if (!GetSelectedPluginIds().Contains("nexcore-engine", StringComparer.OrdinalIgnoreCase))
+        {
+            AppendActivity("Inject blocked: NexCore Engine is not selected in Runtime Loadout.");
+            UpdateStatusSummary();
+            return;
+        }
+
         Process[] targets = _injector.FindTargetProcesses();
         if (targets.Length == 0)
         {
@@ -474,6 +1045,14 @@ internal sealed class MainForm : Form
         }
 
         await ApplySelectedLoadoutAsync(targets[0], "Applying selected loadout to running AC");
+    }
+
+    private void QueueSkipLoginLogos(int processId)
+    {
+        if (!_skipLoginLogosCheckBox.Checked)
+            return;
+
+        _ = _loginAutomation.TryBypassLoginLogosAsync(processId, AppendActivity);
     }
 
     private async Task ApplySelectedLoadoutAsync(Process targetProcess, string reason)
@@ -591,9 +1170,10 @@ internal sealed class MainForm : Form
             .ToArray();
 
         _selectedValueLabel.Text = selectedNames.Length == 0 ? "None" : string.Join(", ", selectedNames);
+        _launchProfileValueLabel.Text = string.Join(", ", GetLaunchProfileParts());
         _hotReloadValueLabel.Text = _autoInjectCheckBox.Checked
-            ? "Auto Inject is on and now boots NexCore early so the engine can wait for the real D3D9 device in-process"
-            : "Auto Inject is off; use Launch + Apply Loadout or Inject Into Running AC";
+            ? "Launch always injects NexCore. Auto Inject is also watching for AC sessions started outside the launcher"
+            : "Launch always injects NexCore. Auto Inject is off for AC sessions started outside the launcher";
     }
 
     private void SetOperationState(bool busy)
@@ -601,7 +1181,6 @@ internal sealed class MainForm : Form
         _operationBusy = busy;
         _launchButton.Enabled = !busy;
         _injectButton.Enabled = !busy;
-        _launchAndInjectButton.Enabled = !busy;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
     }
 
@@ -618,6 +1197,7 @@ internal sealed class MainForm : Form
 
         _acPathTextBox.Text = dialog.FileName;
         SaveUiState();
+        ApplyLaunchSettings();
     }
 
     private void BrowseForEngineDll()
@@ -644,11 +1224,42 @@ internal sealed class MainForm : Form
         }
 
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
-        _activityListBox.Items.Add(line);
-        while (_activityListBox.Items.Count > 500)
-            _activityListBox.Items.RemoveAt(0);
+        lock (_activityLock)
+            _pendingActivityLines.Enqueue(line);
+    }
 
-        _activityListBox.TopIndex = _activityListBox.Items.Count - 1;
+    private void FlushPendingActivity()
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(FlushPendingActivity));
+            return;
+        }
+
+        string[] pending;
+        lock (_activityLock)
+        {
+            if (_pendingActivityLines.Count == 0)
+                return;
+
+            pending = _pendingActivityLines.ToArray();
+            _pendingActivityLines.Clear();
+        }
+
+        _activityListBox.BeginUpdate();
+        try
+        {
+            _activityListBox.Items.AddRange(pending);
+            while (_activityListBox.Items.Count > 500)
+                _activityListBox.Items.RemoveAt(0);
+
+            if (_activityListBox.Items.Count > 0)
+                _activityListBox.TopIndex = _activityListBox.Items.Count - 1;
+        }
+        finally
+        {
+            _activityListBox.EndUpdate();
+        }
     }
 
     private void QueueAutoInject(Process targetProcess, string reason)
@@ -727,6 +1338,91 @@ internal sealed class MainForm : Form
     {
         lock (_injectionStateLock)
             return _injectedPids.Contains(pid) || _pendingInjectionPids.Contains(pid);
+    }
+
+    private void SaveAndApplyLaunchSettings()
+    {
+        SaveUiState();
+        ApplyLaunchSettings();
+        UpdateStatusSummary();
+    }
+
+    private void ApplyLaunchSettings()
+    {
+        try
+        {
+            _launchSettings.Apply(
+                _acPathTextBox.Text.Trim(),
+                _allowMultipleClientsCheckBox.Checked,
+                _skipIntroVideosCheckBox.Checked,
+                AppendActivity);
+        }
+        catch (Exception ex)
+        {
+            AppendActivity($"Launch settings update failed: {ex.Message}");
+        }
+    }
+
+    private IEnumerable<string> GetLaunchProfileParts()
+    {
+        LaunchServerProfile? server = GetSelectedServerProfile();
+        LaunchAccountProfile? account = GetSelectedAccountProfile();
+        int checkedCount = GetCheckedLaunchAccounts().Count;
+
+        if (server != null)
+            yield return $"Server: {server.DisplayName}";
+        if (account != null)
+            yield return $"Account: {account.DisplayName}";
+        if (checkedCount > 0)
+            yield return $"Launch set: {checkedCount} checked";
+        if (!string.IsNullOrWhiteSpace(_launchArgsTextBox.Text.Trim()))
+            yield return "Manual args override";
+        yield return _allowMultipleClientsCheckBox.Checked ? "Multi-client on" : "Multi-client off";
+        yield return _skipIntroVideosCheckBox.Checked ? "Intro videos skipped" : "Intro videos normal";
+    }
+
+    private string GetSelectedMainTabId()
+    {
+        if (_mainTabs.SelectedTab == null)
+            return LauncherTabId;
+
+        return string.Equals(_mainTabs.SelectedTab.Tag as string, RuntimeTabId, StringComparison.Ordinal)
+            ? RuntimeTabId
+            : LauncherTabId;
+    }
+
+    private void SelectMainTab(string tabId)
+    {
+        foreach (TabPage page in _mainTabs.TabPages)
+        {
+            if (string.Equals(page.Tag as string, tabId, StringComparison.OrdinalIgnoreCase))
+            {
+                _mainTabs.SelectedTab = page;
+                return;
+            }
+        }
+
+        if (_mainTabs.TabPages.Count > 0)
+            _mainTabs.SelectedIndex = 0;
+    }
+
+    private static TabControl CreateMainTabs()
+    {
+        return new TabControl
+        {
+            Dock = DockStyle.Fill,
+            Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
+            Padding = new Point(18, 8)
+        };
+    }
+
+    private static TabPage CreateTabPage(string title)
+    {
+        return new TabPage(title)
+        {
+            BackColor = AppBack,
+            Padding = new Padding(8)
+        };
     }
 
     private static TableLayoutPanel CreateSectionLayout(int rowCount, int? fillRowIndex = null)
@@ -877,6 +1573,112 @@ internal sealed class MainForm : Form
         return row;
     }
 
+    private static Panel CreateProfileSelectorRow(
+        string labelText,
+        ComboBox comboBox,
+        Action addAction,
+        Action editAction,
+        Action deleteAction)
+    {
+        var row = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 78,
+            BackColor = PanelBack,
+            Margin = new Padding(0, 0, 0, 4)
+        };
+
+        var label = new Label
+        {
+            Text = labelText,
+            ForeColor = TextMuted,
+            AutoSize = true,
+            Location = new Point(0, 4)
+        };
+
+        comboBox.Location = new Point(0, 28);
+        comboBox.Width = 332;
+
+        var addButton = CreateActionButton("Add");
+        addButton.Location = new Point(comboBox.Right + 10, 26);
+        addButton.Width = 74;
+        addButton.Click += (_, _) => addAction();
+
+        var editButton = CreateActionButton("Edit");
+        editButton.Location = new Point(addButton.Right + 8, 26);
+        editButton.Width = 74;
+        editButton.Click += (_, _) => editAction();
+
+        var deleteButton = CreateActionButton("Delete");
+        deleteButton.Location = new Point(editButton.Right + 8, 26);
+        deleteButton.Width = 82;
+        deleteButton.Click += (_, _) => deleteAction();
+
+        row.Controls.Add(label);
+        row.Controls.Add(comboBox);
+        row.Controls.Add(addButton);
+        row.Controls.Add(editButton);
+        row.Controls.Add(deleteButton);
+        return row;
+    }
+
+    private static Panel CreateCheckedListRow(string labelText, CheckedListBox listBox)
+    {
+        var row = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 150,
+            BackColor = PanelBack,
+            Margin = new Padding(0, 0, 0, 4)
+        };
+
+        var label = new Label
+        {
+            Text = labelText,
+            ForeColor = TextMuted,
+            AutoSize = true,
+            Location = new Point(0, 4)
+        };
+
+        listBox.Location = new Point(0, 28);
+        listBox.Size = new Size(520, 112);
+
+        row.Controls.Add(label);
+        row.Controls.Add(listBox);
+        return row;
+    }
+
+    private Panel CreateRuntimeActionRow()
+    {
+        var row = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 86,
+            BackColor = PanelBack,
+            Margin = new Padding(0, 4, 0, 0)
+        };
+
+        var body = CreateSectionBody("Use this only when AC is already running and you need to attach NexCore manually. Normal play should start from the Launch button in the top-right header.");
+        body.Location = new Point(0, 46);
+        body.MaximumSize = new Size(860, 0);
+
+        var buttonRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            BackColor = PanelBack,
+            FlowDirection = FlowDirection.LeftToRight,
+            AutoSize = false,
+            WrapContents = false,
+            Margin = new Padding(0),
+            Height = 42
+        };
+
+        buttonRow.Controls.Add(_injectButton);
+        row.Controls.Add(buttonRow);
+        row.Controls.Add(body);
+        return row;
+    }
+
     private static void AddStateRow(TableLayoutPanel layout, int rowIndex, string labelText, Label valueLabel)
     {
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34f));
@@ -894,13 +1696,37 @@ internal sealed class MainForm : Form
         layout.Controls.Add(valueLabel, 1, rowIndex);
     }
 
-    private static TextBox CreateTextBox()
+    private static TextBox CreateTextBox(bool readOnly = false)
     {
         return new TextBox
         {
             BorderStyle = BorderStyle.FixedSingle,
             BackColor = PanelAlt,
+            ForeColor = TextPrimary,
+            ReadOnly = readOnly
+        };
+    }
+
+    private static ComboBox CreateComboBox()
+    {
+        return new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = PanelAlt,
             ForeColor = TextPrimary
+        };
+    }
+
+    private static CheckedListBox CreateCheckedListBox()
+    {
+        return new CheckedListBox
+        {
+            CheckOnClick = true,
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = PanelAlt,
+            ForeColor = TextPrimary,
+            IntegralHeight = false
         };
     }
 
@@ -962,7 +1788,7 @@ internal sealed class MainForm : Form
 
     private static ListBox CreateActivityListBox()
     {
-        return new ListBox
+        return new BufferedListBox
         {
             Dock = DockStyle.Fill,
             BackColor = PanelAlt,
@@ -983,5 +1809,15 @@ internal sealed class MainForm : Form
 
         using var accentPen = new Pen(Gold);
         e.Graphics.DrawLine(accentPen, 0, 0, Math.Min(86, control.Width - 1), 0);
+    }
+}
+
+internal sealed class BufferedListBox : ListBox
+{
+    public BufferedListBox()
+    {
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+        UpdateStyles();
     }
 }

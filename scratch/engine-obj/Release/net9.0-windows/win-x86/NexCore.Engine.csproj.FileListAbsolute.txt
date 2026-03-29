@@ -1,0 +1,6 @@
+C:\Projects\NexCore\scratch\engine-obj\Release\net9.0-windows\win-x86\NexCore.Engine.csproj.AssemblyReference.cache
+C:\Projects\NexCore\scratch\engine-obj\Release\net9.0-windows\win-x86\NexCore.Engine.GeneratedMSBuildEditorConfig.editorconfig
+C:\Projects\NexCore\scratch\engine-obj\Release\net9.0-windows\win-x86\NexCore.Engine.AssemblyInfoInputs.cache
+C:\Projects\NexCore\scratch\engine-obj\Release\net9.0-windows\win-x86\NexCore.Engine.AssemblyInfo.cs
+C:\Projects\NexCore\scratch\engine-obj\Release\net9.0-windows\win-x86\NexCore.Engine.csproj.CoreCompileInputs.cache
+C:\Projects\NexCore\scratch\engine-obj\Release\net9.0-windows\win-x86\NexCore.Engine.sourcelink.json

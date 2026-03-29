@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NexCore.Injector", "src\Nex
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NexCore.App", "src\NexCore.App\NexCore.App.csproj", "{A1B2C3D4-0003-0003-0003-000000000003}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NexCore.Plugin.HelloBox", "Plugins\NexCore.Plugin.HelloBox\NexCore.Plugin.HelloBox.csproj", "{A1B2C3D4-0004-0004-0004-000000000004}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x86 = Debug|x86
@@ -27,5 +29,9 @@ Global
 		{A1B2C3D4-0003-0003-0003-000000000003}.Debug|x86.Build.0 = Debug|x86
 		{A1B2C3D4-0003-0003-0003-000000000003}.Release|x86.ActiveCfg = Release|x86
 		{A1B2C3D4-0003-0003-0003-000000000003}.Release|x86.Build.0 = Release|x86
+		{A1B2C3D4-0004-0004-0004-000000000004}.Debug|x86.ActiveCfg = Debug|x86
+		{A1B2C3D4-0004-0004-0004-000000000004}.Debug|x86.Build.0 = Debug|x86
+		{A1B2C3D4-0004-0004-0004-000000000004}.Release|x86.ActiveCfg = Release|x86
+		{A1B2C3D4-0004-0004-0004-000000000004}.Release|x86.Build.0 = Release|x86
 	EndGlobalSection
 EndGlobal

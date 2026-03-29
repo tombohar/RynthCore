@@ -805,7 +805,7 @@
     ]
   },
   "packageFolders": {
-    "C:\\Users\\tboha\\.nuget\\packages\\": {},
+    "C:\\Projects\\NexCore\\.dotnet-home\\.nuget\\packages\\": {},
     "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages": {}
   },
   "project": {
@@ -814,7 +814,7 @@
       "projectUniqueName": "C:\\Projects\\NexCore\\src\\NexCore.Engine\\NexCore.Engine.csproj",
       "projectName": "NexCore.Engine",
       "projectPath": "C:\\Projects\\NexCore\\src\\NexCore.Engine\\NexCore.Engine.csproj",
-      "packagesPath": "C:\\Users\\tboha\\.nuget\\packages\\",
+      "packagesPath": "C:\\Projects\\NexCore\\.dotnet-home\\.nuget\\packages\\",
       "outputPath": "C:\\Projects\\NexCore\\src\\NexCore.Engine\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
