@@ -1,0 +1,39 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="RynthCore.App.Avalonia.AccountProfileDialog"
+        Width="520"
+        Height="360"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Title="Account Profile"
+        Background="#132028">
+  <Grid RowDefinitions="*,Auto" Margin="18">
+    <StackPanel Spacing="12">
+      <TextBlock Text="Server" Foreground="#EAF0F4" />
+      <ComboBox x:Name="ServerComboBox" HorizontalAlignment="Stretch" />
+      <TextBlock Text="Account" Foreground="#EAF0F4" />
+      <TextBox x:Name="AccountBox" />
+      <TextBlock Text="Password" Foreground="#EAF0F4" />
+      <TextBox x:Name="PasswordBox"
+               PasswordChar="*"
+               RevealPassword="False"
+               Watermark="Leave blank to keep the saved password hidden" />
+      <CheckBox x:Name="ClearPasswordCheckBox"
+                Content="Clear saved password"
+                Foreground="#EAF0F4" />
+      <TextBlock x:Name="PasswordHintText"
+                 Foreground="#9AA8B3"
+                 TextWrapping="Wrap" />
+      <TextBlock Text="Character / Slot" Foreground="#EAF0F4" />
+      <ComboBox x:Name="CharacterBox" HorizontalAlignment="Stretch" IsTextSearchEnabled="True" />
+      <TextBlock Text="Alias" Foreground="#EAF0F4" />
+      <TextBox x:Name="AliasBox" />
+      <TextBlock x:Name="ValidationText" Foreground="#E2B348" TextWrapping="Wrap" />
+    </StackPanel>
+
+    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
+      <Button x:Name="CancelButton" Content="Cancel" />
+      <Button x:Name="SaveButton" Content="Save" />
+    </StackPanel>
+  </Grid>
+</Window>

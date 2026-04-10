@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows7.0</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <Platforms>x86</Platforms>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <RootNamespace>RynthCore.App.Avalonia</RootNamespace>
+    <AssemblyName>RynthCore.App.Avalonia</AssemblyName>
+    <RuntimeIdentifiers>win-x86</RuntimeIdentifiers>
+    <ApplicationIcon>LogoCore.ico</ApplicationIcon>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="LogoCore.jpg" />
+    <AvaloniaResource Include="LogoCore.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.1.3" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.1.3" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.1.3" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.1.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\RynthCore.App\LaunchServerProfile.cs" Link="Shared\LaunchServerProfile.cs" />
+    <Compile Include="..\RynthCore.App\LaunchAccountProfile.cs" Link="Shared\LaunchAccountProfile.cs" />
+    <Compile Include="..\RynthCore.App\AcLaunchArgumentBuilder.cs" Link="Shared\AcLaunchArgumentBuilder.cs" />
+    <Compile Include="..\RynthCore.App\AcClientLaunchSettingsService.cs" Link="Shared\AcClientLaunchSettingsService.cs" />
+    <Compile Include="..\RynthCore.App\AcClientLoginAutomationService.cs" Link="Shared\AcClientLoginAutomationService.cs" />
+    <Compile Include="..\RynthCore.App\CharacterCacheStore.cs" Link="Shared\CharacterCacheStore.cs" />
+    <Compile Include="..\RynthCore.App\LaunchContextStore.cs" Link="Shared\LaunchContextStore.cs" />
+    <Compile Include="..\RynthCore.App\SessionStateStore.cs" Link="Shared\SessionStateStore.cs" />
+    <Compile Include="..\RynthCore.App\AppSettings.cs" Link="Shared\AppSettings.cs" />
+    <Compile Include="..\RynthCore.App\AppSettingsStore.cs" Link="Shared\AppSettingsStore.cs" />
+    <Compile Include="..\RynthCore.App\PluginDefinition.cs" Link="Shared\PluginDefinition.cs" />
+    <Compile Include="..\RynthCore.Injector\EngineInjectionService.cs" Link="Shared\EngineInjectionService.cs" />
+    <Compile Include="..\RynthCore.Injector\InjectionResult.cs" Link="Shared\InjectionResult.cs" />
+  </ItemGroup>
+
+</Project>

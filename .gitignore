@@ -1,0 +1,40 @@
+# Build outputs
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+
+# IDE and local tooling
+.vs/
+.vscode/
+.idea/
+.claude/
+Claude
+*.suo
+*.user
+*.userosscache
+*.rsuser
+
+# Local SDK/package caches
+.dotnet-home/
+.dotnet-home-*/
+packages/
+
+# Logs and transient files
+*.log
+*.tmp
+*.temp
+*.cache
+Thumbs.db
+Desktop.ini
+
+# Local secrets and machine-specific config
+.env
+.env.*
+*.secrets.json
+secrets.*
+appsettings.Local.json
+appsettings.*.local.json
+
+# Scratch space
+scratch/

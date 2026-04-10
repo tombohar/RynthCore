@@ -1,0 +1,31 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="RynthCore.App.Avalonia.ServerProfileDialog"
+        Width="520"
+        Height="420"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Title="Server Profile"
+        Background="#132028">
+  <Grid RowDefinitions="*,Auto" Margin="18">
+    <StackPanel Spacing="12">
+      <TextBlock Text="Server Name" Foreground="#EAF0F4" />
+      <TextBox x:Name="NameBox" />
+      <TextBlock Text="Alias" Foreground="#EAF0F4" />
+      <TextBox x:Name="AliasBox" />
+      <TextBlock Text="Host" Foreground="#EAF0F4" />
+      <TextBox x:Name="HostBox" />
+      <TextBlock Text="Port" Foreground="#EAF0F4" />
+      <TextBox x:Name="PortBox" />
+      <TextBlock Text="Emulator" Foreground="#EAF0F4" />
+      <ComboBox x:Name="EmulatorBox" />
+      <CheckBox x:Name="RodatCheck" Content="Enable Rodat" Foreground="#EAF0F4" />
+      <TextBlock x:Name="ValidationText" Foreground="#E2B348" TextWrapping="Wrap" />
+    </StackPanel>
+
+    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
+      <Button x:Name="CancelButton" Content="Cancel" />
+      <Button x:Name="SaveButton" Content="Save" />
+    </StackPanel>
+  </Grid>
+</Window>

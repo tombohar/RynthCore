@@ -1,0 +1,398 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="RynthCore.App.Avalonia.MainWindow"
+        Width="1280"
+        Height="860"
+        MinWidth="820"
+        MinHeight="560"
+        Title="RynthCore"
+        Background="#0B1218"
+        Icon="avares://RynthCore.App.Avalonia/LogoCore.ico">
+  <Window.Styles>
+    <Style Selector="TextBlock">
+      <Setter Property="FontSize" Value="12.5" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Padding" Value="12,8" />
+    </Style>
+    <Style Selector="CheckBox">
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="TextBox">
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="ListBox">
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="TabItem">
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="MinHeight" Value="34" />
+      <Setter Property="Padding" Value="16,8" />
+      <Setter Property="Margin" Value="0,0,4,0" />
+      <Setter Property="BorderBrush" Value="#243742" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="8,8,0,0" />
+      <Setter Property="Background" Value="#0F161D" />
+    </Style>
+    <Style Selector="TabItem:selected">
+      <Setter Property="Background" Value="#1A2E38" />
+      <Setter Property="BorderBrush" Value="#26C1A6" />
+      <Setter Property="Foreground" Value="#26C1A6" />
+    </Style>
+    <Style Selector="TabItem:pointerover">
+      <Setter Property="Background" Value="#1F3642" />
+    </Style>
+  </Window.Styles>
+
+  <Grid RowDefinitions="Auto,*" Margin="14">
+    <Border Grid.Row="0"
+            Padding="14"
+            CornerRadius="16"
+            Background="#132028"
+            BorderBrush="#26C1A6"
+            BorderThickness="1"
+            Margin="0,0,0,10">
+      <Grid ColumnDefinitions="Auto,*,Auto,Auto">
+        <Border Grid.Column="0"
+                Background="#102A2C"
+                CornerRadius="10"
+                Padding="0"
+                Width="82"
+                HorizontalAlignment="Left"
+                Margin="0,0,12,0"
+                ClipToBounds="True">
+          <Image Source="avares://RynthCore.App.Avalonia/LogoCore.jpg" Stretch="Uniform" />
+        </Border>
+
+        <StackPanel Grid.Column="1" Spacing="6" VerticalAlignment="Center">
+          <TextBlock Text="RynthCore"
+                     FontSize="24"
+                     FontWeight="Bold"
+                     Foreground="#26C1A6" />
+        </StackPanel>
+
+        <GridSplitter Grid.Column="2"
+                      Width="8"
+                      ResizeDirection="Columns"
+                      Background="Transparent" />
+
+        <StackPanel Grid.Column="3"
+                    Orientation="Horizontal"
+                    Spacing="12"
+                    VerticalAlignment="Center"
+                    Margin="10,0,0,0">
+          <CheckBox x:Name="AutoLaunchHeaderCheckBox"
+                    Content="Auto Launch"
+                    VerticalAlignment="Center"
+                    Foreground="#EAF0F4" />
+          <Button x:Name="HeaderLaunchButton"
+                  Content="LAUNCH"
+                  FontSize="16"
+                  FontWeight="Black"
+                  Background="#26C1A6"
+                  Foreground="#0B1218"
+                  Padding="16,8"
+                  VerticalAlignment="Center"
+                  CornerRadius="8" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <Grid Grid.Row="1" ColumnDefinitions="3*,Auto,2*">
+      <TabControl Grid.Column="0" Margin="14,0,0,0" Padding="0">
+        <TabItem Header="Launcher">
+          <ScrollViewer>
+            <StackPanel Spacing="12" Margin="6">
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Launch Targets" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                  <TextBlock Text="Check the account profiles you want remembered as launch targets. This is persisted using the same settings store as the current host."
+                             TextWrapping="Wrap"
+                             Foreground="#9AA8B3" />
+                  <ScrollViewer MaxHeight="240">
+                    <StackPanel x:Name="LaunchTargetsPanel" Spacing="2" Margin="0,6,0,0" />
+                  </ScrollViewer>
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="SelectAllTargetsButton" Content="Select All" />
+                    <Button x:Name="ClearTargetsButton" Content="Clear" />
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Launcher Surface" FontSize="19" FontWeight="Bold" Foreground="#EAF0F4" />
+                  <TextBlock Text="Configure your server and account profiles below. These are used to build the launch targets list above."
+                             TextWrapping="Wrap"
+                             Foreground="#9AA8B3" />
+                </StackPanel>
+              </Border>
+
+              <Grid ColumnDefinitions="*,Auto,*">
+                <Border Grid.Column="0" Background="#132028" CornerRadius="16" Padding="18" MinWidth="260">
+                  <Grid RowDefinitions="Auto,Auto,*,Auto">
+                    <TextBlock Text="Server Profiles" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                    <TextBlock Grid.Row="1"
+                               Text="Create and edit emulator/server definitions here."
+                               TextWrapping="Wrap"
+                               Foreground="#9AA8B3"
+                               Margin="0,8,0,0" />
+                    <ListBox Grid.Row="2"
+                             x:Name="ServerProfilesList"
+                             MinHeight="200"
+                             Background="#0F161D"
+                             BorderBrush="#243742"
+                             Foreground="#EAF0F4"
+                             Margin="0,8,0,0" />
+                    <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                      <Button x:Name="AddServerButton" Content="Add Server" />
+                      <Button x:Name="EditServerButton" Content="Edit Selected" />
+                      <Button x:Name="DeleteServerButton" Content="Delete" />
+                    </StackPanel>
+                  </Grid>
+                </Border>
+
+                <GridSplitter Grid.Column="1"
+                              Width="12"
+                              ResizeDirection="Columns"
+                              Background="Transparent" />
+
+                <Border Grid.Column="2" Background="#132028" CornerRadius="16" Padding="18" MinWidth="260">
+                  <Grid RowDefinitions="Auto,Auto,*,Auto">
+                    <TextBlock Text="Account Profiles" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                    <TextBlock Grid.Row="1"
+                               Text="Passwords stay persisted in settings."
+                               TextWrapping="Wrap"
+                               Foreground="#9AA8B3"
+                               Margin="0,8,0,0" />
+                    <ListBox Grid.Row="2"
+                             x:Name="AccountProfilesList"
+                             MinHeight="200"
+                             Background="#0F161D"
+                             BorderBrush="#243742"
+                             Foreground="#EAF0F4"
+                             Margin="0,8,0,0" />
+                    <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                      <Button x:Name="AddAccountButton" Content="Add Account" />
+                      <Button x:Name="EditAccountButton" Content="Edit Selected" />
+                      <Button x:Name="DeleteAccountButton" Content="Delete" />
+                    </StackPanel>
+                  </Grid>
+                </Border>
+              </Grid>
+
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <Grid ColumnDefinitions="*,Auto,*">
+                  <StackPanel Grid.Column="0" Spacing="8">
+                    <TextBlock Text="Quick Actions" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                    <TextBlock Text="This stays password-safe, but gives us the next useful launcher step: a clear primary pair and remembered targets."
+                               TextWrapping="Wrap"
+                               Foreground="#9AA8B3" />
+                    <WrapPanel Orientation="Horizontal" ItemWidth="176" ItemHeight="40">
+                      <Button x:Name="LaunchPrimaryButton" Content="Launch Primary Pair" HorizontalAlignment="Left" Margin="0,0,8,8" />
+                      <Button x:Name="LaunchCheckedTargetsButton" Content="Launch Checked Targets" HorizontalAlignment="Left" Margin="0,0,8,8" />
+                      <Button x:Name="MarkSelectedTargetButton" Content="Add Primary To Targets" HorizontalAlignment="Left" Margin="0,0,8,0" />
+                    </WrapPanel>
+                  </StackPanel>
+
+                  <GridSplitter Grid.Column="1"
+                                Width="12"
+                                ResizeDirection="Columns"
+                                Background="Transparent" />
+
+                  <StackPanel Grid.Column="2" Spacing="8">
+                    <TextBlock Text="Launch Preview" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                    <TextBlock x:Name="LaunchPreviewText"
+                               Text="Choose a valid server and account profile to preview the launch command shape."
+                               TextWrapping="Wrap"
+                               Foreground="#EAF0F4" />
+                    <TextBlock Text="Passwords stay masked in this preview."
+                               Foreground="#9AA8B3" />
+                  </StackPanel>
+                </Grid>
+              </Border>
+
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Selection Summary" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                  <TextBlock x:Name="SummaryText"
+                             Text="Choose a server and account profile to preview the launch pair."
+                             TextWrapping="Wrap"
+                             Foreground="#EAF0F4" />
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+        </TabItem>
+
+        <TabItem Header="Runtime">
+          <ScrollViewer>
+            <StackPanel Spacing="12" Margin="6">
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Runtime Surface" FontSize="19" FontWeight="Bold" Foreground="#EAF0F4" />
+                  <TextBlock Text="Runtime controls are also safe to migrate because they live in the desktop host, not the game overlay. This is the start of that second wave so we can make the launcher genuinely usable."
+                             TextWrapping="Wrap"
+                             Foreground="#9AA8B3" />
+                </StackPanel>
+              </Border>
+
+              <Grid ColumnDefinitions="*,Auto,*">
+                <Border Grid.Column="0" Background="#132028" CornerRadius="16" Padding="18" MinWidth="280">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="Paths" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                    <TextBlock Text="These values are backed by the shared app settings store, so they persist across the WinForms and Avalonia hosts."
+                               TextWrapping="Wrap"
+                               Foreground="#9AA8B3" />
+                    <TextBlock Text="AC Client Path" Foreground="#EAF0F4" />
+                    <TextBox x:Name="AcClientPathTextBox" Watermark="C:\Games\Asheron's Call\acclient.exe" />
+                    <TextBlock Text="Engine Path" Foreground="#EAF0F4" />
+                    <TextBox x:Name="EnginePathTextBox" Watermark="C:\Games\RynthCore\Runtime\RynthCore.Engine.dll" />
+                    <TextBlock Text="Extra Launch Arguments" Foreground="#EAF0F4" />
+                    <TextBox x:Name="LaunchArgumentsTextBox"
+                             Watermark="Optional arguments appended by the host"
+                             AcceptsReturn="True"
+                             MinHeight="64"
+                             TextWrapping="Wrap" />
+                    <Button x:Name="SavePathsButton"
+                            Content="Save Runtime Paths"
+                            HorizontalAlignment="Left" />
+                  </StackPanel>
+                </Border>
+
+                <GridSplitter Grid.Column="1"
+                              Width="12"
+                              ResizeDirection="Columns"
+                              Background="Transparent" />
+
+                <Border Grid.Column="2" Background="#132028" CornerRadius="16" Padding="18" MinWidth="280">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="Launch Behavior" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                    <TextBlock Text="These are the same host-side toggles the current launcher uses. They are safe to migrate independently of the injected engine."
+                               TextWrapping="Wrap"
+                               Foreground="#9AA8B3" />
+                    <CheckBox x:Name="AllowMultipleClientsCheckBox" Content="Allow multiple clients" />
+                    <CheckBox x:Name="SkipIntroVideosCheckBox" Content="Skip intro videos" />
+                    <CheckBox x:Name="SkipLoginLogosCheckBox" Content="Skip login logos" />
+                    <CheckBox x:Name="AutoInjectAfterLaunchCheckBox" Content="Auto inject after launch" />
+                    <CheckBox x:Name="WatchForAcStartCheckBox" Content="Watch for AC start" />
+                    <Button x:Name="SaveBehaviorButton"
+                            Content="Save Launch Behavior"
+                            HorizontalAlignment="Left" />
+                  </StackPanel>
+                </Border>
+              </Grid>
+
+              <Grid ColumnDefinitions="*,Auto,*">
+                <Border Grid.Column="0" Background="#132028" CornerRadius="16" Padding="18" MinWidth="280">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="Runtime Loadout" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                    <TextBlock Text="This is the first pass of plugin selection in Avalonia. RynthCore Engine remains the required injectable runtime; future loadout items can layer in beside it."
+                               TextWrapping="Wrap"
+                               Foreground="#9AA8B3" />
+                    <StackPanel x:Name="PluginLoadoutPanel" Spacing="10" />
+                  </StackPanel>
+                </Border>
+
+                <GridSplitter Grid.Column="1"
+                              Width="12"
+                              ResizeDirection="Columns"
+                              Background="Transparent" />
+
+                <Border Grid.Column="2" Background="#132028" CornerRadius="16" Padding="18" MinWidth="280">
+                  <StackPanel Spacing="8">
+                    <TextBlock Text="Recovery Actions" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                    <TextBlock Text="Use these when AC is already running and you need to attach RynthCore manually or refresh the live session readout."
+                               TextWrapping="Wrap"
+                               Foreground="#9AA8B3" />
+                    <WrapPanel Orientation="Horizontal" ItemWidth="176" ItemHeight="40">
+                      <Button x:Name="InjectRunningAcButton" Content="Inject Into Running AC" Margin="0,0,8,8" />
+                      <Button x:Name="RefreshSessionsButton" Content="Refresh Sessions" Margin="0,0,8,8" />
+                    </WrapPanel>
+                    <TextBlock Text="Manual inject targets the first detected acclient.exe session."
+                               TextWrapping="Wrap"
+                               Foreground="#9AA8B3" />
+                  </StackPanel>
+                </Border>
+              </Grid>
+            </StackPanel>
+          </ScrollViewer>
+        </TabItem>
+
+        <TabItem Header="Activity">
+          <ScrollViewer>
+            <StackPanel Spacing="12" Margin="6">
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Session Activity" FontSize="19" FontWeight="Bold" Foreground="#EAF0F4" />
+                  <TextBlock Text="Launcher actions, profile edits, runtime decisions, injection output, and future host events surface here."
+                             TextWrapping="Wrap"
+                             Foreground="#9AA8B3" />
+                  <ListBox x:Name="ActivityList"
+                           MinHeight="440"
+                           Background="#0F161D"
+                           BorderBrush="#243742"
+                           Foreground="#EAF0F4" />
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+        </TabItem>
+
+        <TabItem Header="Notes">
+          <ScrollViewer>
+            <StackPanel Spacing="12" Margin="6">
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Important Constraint" FontSize="19" FontWeight="Bold" Foreground="#EAF0F4" />
+                  <TextBlock Text="Switching the desktop host to Avalonia does not replace the in-game ImGui overlay. If ImGui is causing client crashes, we should keep treating that as a separate engine-side stabilization track."
+                             TextWrapping="Wrap"
+                             Foreground="#9AA8B3" />
+                </StackPanel>
+              </Border>
+
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Phase 1 Exit Criteria" FontSize="16" FontWeight="SemiBold" Foreground="#E2B348" />
+                  <TextBlock Text="• Avalonia app builds in the solution&#x0A;• Shared launcher styling direction is established&#x0A;• One real launcher workflow is ported end to end&#x0A;• Current WinForms host stays available until parity is good enough to cut over"
+                             Foreground="#EAF0F4" />
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+        </TabItem>
+      </TabControl>
+
+      <GridSplitter Grid.Column="1"
+                    Width="12"
+                    ResizeDirection="Columns"
+                    Background="Transparent" />
+
+      <StackPanel Grid.Column="2" Spacing="12" Margin="14,0,0,0">
+        <Border Background="#132028" CornerRadius="16" Padding="18">
+          <StackPanel Spacing="8">
+            <TextBlock Text="Session State" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+            <TextBlock Text="AC Status" Foreground="#9AA8B3" />
+            <TextBlock x:Name="AcStatusText"
+                       Text="No running AC clients detected."
+                       Foreground="#EAF0F4"
+                       TextWrapping="Wrap" />
+            <TextBlock Text="Launch Profile" Foreground="#9AA8B3" Margin="0,4,0,0" />
+            <TextBlock x:Name="LaunchProfileStatusText"
+                       Text="Choose a server and account profile to preview the launch pair."
+                       Foreground="#EAF0F4"
+                       TextWrapping="Wrap" />
+            <TextBlock Text="Live Sessions" Foreground="#9AA8B3" Margin="0,4,0,0" />
+            <ListBox x:Name="SessionList"
+                     MinHeight="140"
+                     MaxHeight="260"
+                     Background="#0F161D"
+                     BorderBrush="#243742"
+                     Foreground="#EAF0F4" />
+          </StackPanel>
+        </Border>
+      </StackPanel>
+    </Grid>
+  </Grid>
+</Window>

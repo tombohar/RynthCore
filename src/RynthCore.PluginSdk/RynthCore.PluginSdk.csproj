@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <PackageId>RynthCore.PluginSdk</PackageId>
+    <Version>0.2.0</Version>
+    <Authors>RynthCore</Authors>
+    <Company>RynthCore</Company>
+    <Description>Managed plugin SDK for RynthCore's native plugin ABI with validated helper and action surfaces.</Description>
+    <PackageTags>rynthcore;plugin;sdk;asherons-call</PackageTags>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://example.invalid/RynthCore</RepositoryUrl>
+    <RootNamespace>RynthCore.PluginSdk</RootNamespace>
+    <AssemblyName>RynthCore.PluginSdk</AssemblyName>
+  </PropertyGroup>
+
+</Project>

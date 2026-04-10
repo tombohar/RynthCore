@@ -1,0 +1,174 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">x86</Platform>
+    <ProjectGuid>{AA060CDA-5478-4BFD-8CC3-B24827E19FC7}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <RootNamespace>NexSuite.Plugins.RynthAi</RootNamespace>
+    <AssemblyName>RynthAi</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <LangVersion>8.0</LangVersion>
+    <FileAlignment>512</FileAlignment>
+    <NuGetPackageImportStamp>
+    </NuGetPackageImportStamp>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x86'">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <PlatformTarget>x86</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x86'">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Decal.Adapter">
+      <HintPath>..\..\..\..\Program Files (x86)\Decal 3.0\Decal.Adapter.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Decal.FileService">
+      <HintPath>..\..\..\..\Program Files (x86)\Decal 3.0\Decal.FileService.dll</HintPath>
+    </Reference>
+    <Reference Include="Decal.Interop.D3DService, Version=2.9.8.3, Culture=neutral, PublicKeyToken=481f17d392f1fb65, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
+      <EmbedInteropTypes>False</EmbedInteropTypes>
+      <HintPath>..\..\..\..\Program Files (x86)\Decal 3.0\.NET 4.0 PIA\Decal.Interop.D3DService.DLL</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="KeraLua, Version=1.4.9.0, Culture=neutral, PublicKeyToken=6a194c04b9c89217, processorArchitecture=MSIL">
+      <HintPath>..\..\packages\KeraLua.1.4.9\lib\net46\KeraLua.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="Newtonsoft.Json, Version=13.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
+      <HintPath>..\..\packages\Newtonsoft.Json.13.0.4\lib\net45\Newtonsoft.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="NLua, Version=1.7.8.0, Culture=neutral, PublicKeyToken=6a194c04b9c89217, processorArchitecture=MSIL">
+      <HintPath>..\..\packages\NLua.1.7.8\lib\net46\NLua.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Numerics" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.Xml.Serialization" />
+    <Reference Include="utank2-i">
+      <HintPath>..\..\..\..\Games\VirindiPlugins\VirindiTank\utank2-i.dll</HintPath>
+    </Reference>
+    <Reference Include="UtilityBelt.Scripting">
+      <HintPath>..\..\..\..\Games\DecalPlugins\UtilityBelt.Service\UtilityBelt.Scripting.dll</HintPath>
+    </Reference>
+    <Reference Include="UtilityBelt.Service">
+      <HintPath>..\..\..\..\Games\DecalPlugins\UtilityBelt.Service\UtilityBelt.Service.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="VTClassic">
+      <HintPath>..\..\..\..\Games\VirindiPlugins\VirindiTankClassicLooter\VTClassic.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\Shared\NexSuite.Shared.csproj">
+      <Project>{11111111-1111-1111-1111-111111111111}</Project>
+      <Name>NexSuite.Shared</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\..\Core\NexSuite.Core.csproj">
+      <Project>{22222222-2222-2222-2222-222222222222}</Project>
+      <Name>NexSuite.Core</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Combat\BuffManager.cs" />
+    <Compile Include="Combat\SpellDatabase.cs" />
+    <Compile Include="Combat\SpellManager.cs" />
+    <Compile Include="DecalInspector.cs" />
+    <Compile Include="Logic\BackgroundFpsUnlocker.cs" />
+    <Compile Include="Logic\CommandProcessor.cs" />
+    <Compile Include="Logic\RynthJumper.cs" />
+    <Compile Include="Loot\LootManager.cs" />
+    <Compile Include="Loot\VTankLootParser.cs" />
+    <Compile Include="Lua\LuaBridge.cs" />
+    <Compile Include="Lua\LuaManager.cs" />
+    <Compile Include="Meta\MetaManager.cs" />
+    <Compile Include="Meta\VTankMetaParser.cs" />
+    <Compile Include="Nav\NavigationManager.cs" />
+    <Compile Include="Nav\MovementActionHelper.cs" />
+    <Compile Include="Nav\Tier2Log.cs" />
+    <Compile Include="Nav\Tier2MovementHelper.cs" />
+    <Compile Include="Nav\VTankNavParser.cs" />
+    <Compile Include="Combat\CombatManager.cs" />
+    <Compile Include="Combat\MissileCraftingManager.cs" />
+    <Compile Include="Combat\CombatActionHelper.cs" />
+    <Compile Include="Combat\FellowshipTracker.cs" />
+    <Compile Include="PluginCore.cs" />
+    <Compile Include="Raycasting\DatDatabase.cs" />
+    <Compile Include="Raycasting\DungeonLOS.cs" />
+    <Compile Include="Raycasting\LandblockStructs.cs" />
+    <Compile Include="Raycasting\ScatterSystem.cs" />
+    <Compile Include="Raycasting\Vector3Helper.cs" />
+    <Compile Include="UI\AdvancedSettingsUI.cs" />
+    <Compile Include="UI\LuaUI.cs" />
+    <Compile Include="UI\MetaUI.cs" />
+    <Compile Include="UI\MonstersUI.cs" />
+    <Compile Include="UI\RynthAiUI.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="UI\RynthAiUI.Rendering.cs" />
+    <Compile Include="Raycasting\RaycastEngine.cs" />
+    <Compile Include="Raycasting\BoundingVolume.cs" />
+    <Compile Include="Raycasting\TargetingFSM.cs" />
+    <Compile Include="Raycasting\BlacklistManager.cs" />
+    <Compile Include="Raycasting\GeometryLoader.cs" />
+    <Compile Include="Raycasting\MainLogic.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="UI\RouteUI.cs" />
+    <Compile Include="UI\UISettings.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="app.config" />
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Combat\Vtank spelldump.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <COMReference Include="Decal">
+      <Guid>{FF7F5F6D-34E0-4B6F-B3BB-8141DE2EF732}</Guid>
+      <VersionMajor>2</VersionMajor>
+      <VersionMinor>0</VersionMinor>
+      <Lcid>0</Lcid>
+      <WrapperTool>primary</WrapperTool>
+      <Isolated>False</Isolated>
+      <EmbedInteropTypes>True</EmbedInteropTypes>
+    </COMReference>
+    <COMReference Include="DecalNet">
+      <Guid>{572B87C4-93BD-46B3-A291-CD58181D25DC}</Guid>
+      <VersionMajor>2</VersionMajor>
+      <VersionMinor>0</VersionMinor>
+      <Lcid>0</Lcid>
+      <WrapperTool>primary</WrapperTool>
+      <Isolated>False</Isolated>
+      <EmbedInteropTypes>True</EmbedInteropTypes>
+    </COMReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Import Project="..\..\packages\KeraLua.1.4.9\build\net46\KeraLua.targets" Condition="Exists('..\..\packages\KeraLua.1.4.9\build\net46\KeraLua.targets')" />
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('..\..\packages\KeraLua.1.4.9\build\net46\KeraLua.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\..\packages\KeraLua.1.4.9\build\net46\KeraLua.targets'))" />
+  </Target>
+</Project>

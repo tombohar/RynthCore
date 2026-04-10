@@ -1,0 +1,77 @@
+using System;
+using System.Runtime.InteropServices;
+
+namespace RynthCore.PluginSdk;
+
+[StructLayout(LayoutKind.Sequential)]
+public struct RynthCoreApiNative
+{
+    public uint Version;
+    public IntPtr ImGuiContext;
+    public IntPtr D3DDevice;
+    public IntPtr GameHwnd;
+    public IntPtr LogFn;
+    public IntPtr ProbeClientHooksFn;
+    public IntPtr GetClientHookFlagsFn;
+    public IntPtr ChangeCombatModeFn;
+    public IntPtr CancelAttackFn;
+    public IntPtr QueryHealthFn;
+    public IntPtr MeleeAttackFn;
+    public IntPtr MissileAttackFn;
+    public IntPtr DoMovementFn;
+    public IntPtr StopMovementFn;
+    public IntPtr JumpNonAutonomousFn;
+    public IntPtr SetAutonomyLevelFn;
+    public IntPtr SetAutoRunFn;
+    public IntPtr TapJumpFn;
+    public IntPtr SetIncomingChatSuppressionFn;
+    public IntPtr SelectItemFn;
+    public IntPtr SetSelectedObjectIdFn;
+    public IntPtr GetSelectedItemIdFn;
+    public IntPtr GetPreviousSelectedItemIdFn;
+    public IntPtr GetPlayerIdFn;
+    public IntPtr GetGroundContainerIdFn;
+    public IntPtr GetCurCoordsFn;
+    public IntPtr UseObjectFn;
+    public IntPtr UseObjectOnFn;
+    public IntPtr UseEquippedItemFn;
+    public IntPtr MoveItemExternalFn;
+    public IntPtr MoveItemInternalFn;
+    public IntPtr WriteToChatFn;
+    public IntPtr GetPlayerPoseFn;
+    public IntPtr SetMotionFn;
+    public IntPtr StopCompletelyFn;
+    public IntPtr TurnToHeadingFn;
+    public IntPtr GetPlayerHeadingFn;
+    public IntPtr GetObjectNameFn;
+    public IntPtr GetPlayerVitalsFn;
+    public IntPtr GetObjectPositionFn;
+    public IntPtr RequestIdFn;
+    public IntPtr GetTargetVitalsFn;
+    public IntPtr CastSpellFn;
+    public IntPtr GetItemTypeFn;
+    public IntPtr GetObjectIntPropertyFn;
+    public IntPtr GetObjectBoolPropertyFn;
+    public IntPtr ObjectIsAttackableFn;
+    public IntPtr GetObjectSkillFn;
+    public IntPtr IsSpellKnownFn;
+    public IntPtr ReadPlayerEnchantmentsFn;
+    public IntPtr GetServerTimeFn;
+    public IntPtr ReadObjectEnchantmentsFn;
+    public IntPtr WorldToScreenFn;
+    public IntPtr GetViewportSizeFn;
+    public IntPtr Nav3DClearFn;
+    public IntPtr Nav3DAddRingFn;
+    public IntPtr Nav3DAddLineFn;
+    public IntPtr InvokeChatParserFn;
+    public IntPtr GetObjectDoublePropertyFn;
+    public IntPtr GetObjectStringPropertyFn;
+    public IntPtr GetObjectWielderInfoFn;
+    public IntPtr NativeAttackFn;
+    public IntPtr IsPlayerReadyFn;
+    public IntPtr SetFpsLimitFn;
+    public IntPtr GetContainerContentsFn;
+    public IntPtr GetObjectOwnershipInfoFn;
+    public IntPtr SplitStackInternalFn;
+    public IntPtr MergeStackInternalFn;
+}

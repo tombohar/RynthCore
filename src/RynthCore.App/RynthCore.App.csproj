@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <PlatformTarget>x86</PlatformTarget>
+    <RootNamespace>RynthCore.App</RootNamespace>
+    <AssemblyName>RynthCore.App</AssemblyName>
+    <Platforms>x86</Platforms>
+    <Nullable>enable</Nullable>
+    <ApplicationIcon>Assets\RynthCore.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RynthCore.Injector\RynthCore.Injector.csproj" />
+  </ItemGroup>
+
+</Project>

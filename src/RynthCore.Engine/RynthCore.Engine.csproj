@@ -1,0 +1,114 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <RootNamespace>RynthCore.Engine</RootNamespace>
+    <AssemblyName>RynthCore.Engine</AssemblyName>
+
+    <!-- NativeAOT settings -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+    <StackTraceSupport>false</StackTraceSupport>
+
+    <!-- Keep ImGui.NET's P/Invoke bindings intact -->
+    <TrimMode>link</TrimMode>
+
+    <Platforms>x86</Platforms>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <StackTraceSupport>true</StackTraceSupport>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+    <PackageReference Include="Avalonia" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Skia" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Themes.Simple" Version="11.2.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\RynthCore.App\CharacterCacheStore.cs" Link="Shared\CharacterCacheStore.cs" />
+    <Compile Include="..\RynthCore.App\SessionStateStore.cs" Link="Shared\SessionStateStore.cs" />
+  </ItemGroup>
+
+  <!-- Prevent trimmer from removing ImGui.NET's DllImport methods -->
+  <!-- Root Avalonia assemblies so the AOT trimmer keeps them intact -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="ImGui.NET" />
+    <TrimmerRootAssembly Include="Avalonia" />
+    <TrimmerRootAssembly Include="Avalonia.Base" />
+    <TrimmerRootAssembly Include="Avalonia.Desktop" />
+    <TrimmerRootAssembly Include="Avalonia.Win32" />
+    <TrimmerRootAssembly Include="Avalonia.Skia" />
+    <TrimmerRootAssembly Include="Avalonia.Themes.Simple" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <BundledNativeDll Include="Native\cimgui.dll" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <BundledSupportDll Include="Native\minhook.x86.dll" />
+  </ItemGroup>
+
+  <Target Name="CopyBundledNativeDlls" AfterTargets="Build">
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(OutputPath)Native\%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(OutputPath)Native\RynthCore.%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(OutputPath)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(OutputPath)RynthCore.%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyBundledNativeDllsToPublish" AfterTargets="Publish" Condition="'$(PublishDir)' != ''">
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(PublishDir)Native\%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(PublishDir)Native\RynthCore.%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(PublishDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledNativeDll)"
+      DestinationFiles="@(BundledNativeDll->'$(PublishDir)RynthCore.%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(BundledSupportDll)"
+      DestinationFiles="@(BundledSupportDll->'$(PublishDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyBundledSupportDlls" AfterTargets="Build">
+    <Copy
+      SourceFiles="@(BundledSupportDll)"
+      DestinationFiles="@(BundledSupportDll->'$(OutputPath)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

@@ -1,0 +1,104 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Reflection;
+using Decal.Adapter.Wrappers;
+
+namespace NexSuite.Plugins.RynthAi
+{
+    public static class SpellDatabase
+    {
+        private static Dictionary<int, string> _spellNames = new Dictionary<int, string>();
+        private static bool _loaded = false;
+
+        private static readonly Dictionary<int, string> _builtinSpells = new Dictionary<int, string>
+        {
+            { 47, "Primary Portal Tie" }, { 48, "Primary Portal Recall" },
+            { 157, "Summon Primary Portal I" }, { 158, "Summon Primary Portal II" },
+            { 1634, "Portal Sending" }, { 1635, "Lifestone Recall" },
+            { 1636, "Lifestone Sending" }, { 1637, "Summon Primary Portal III" },
+            { 2023, "Recall the Sanctuary" }, { 2041, "Aerlinthe Recall" },
+            { 2358, "Lyceum Recall" }, { 2644, "Lifestone Tie" },
+            { 2645, "Portal Recall" }, { 2646, "Secondary Portal Tie" },
+            { 2647, "Secondary Portal Recall" }, { 2648, "Summon Secondary Portal I" },
+            { 2649, "Summon Secondary Portal II" }, { 2650, "Summon Secondary Portal III" },
+            { 2813, "Mount Lethe Recall" }, { 2931, "Recall Aphus Lassel" },
+            { 2941, "Ulgrim's Recall" }, { 2943, "Recall to the Singularity Caul" },
+            { 3865, "Glenden Wood Recall" }, { 3929, "Rossu Morta Chapterhouse Recall" },
+            { 3930, "Whispering Blade Chapterhouse Recall" }, { 4084, "Bur Recall" },
+            { 4198, "Paradox-touched Olthoi Infested Area Recall" }, { 4213, "Colosseum Recall" },
+            { 4907, "Celestial Hand Stronghold Recall" }, { 4908, "Eldrytch Web Stronghold Recall" },
+            { 4909, "Radiant Blood Stronghold Recall" }, { 5175, "Facility Hub Recall" },
+            { 5330, "Gear Knight Invasion Area Camp Recall" }, { 5541, "Lost City of Neftet Recall" },
+            { 6150, "Rynthid Recall" }, { 6321, "Viridian Rise Recall" },
+            { 6322, "Viridian Rise Great Tree Recall" },
+        };
+
+        public static bool IsLoaded => _loaded;
+
+        public static void Load(PluginHost host)
+        {
+            _spellNames.Clear();
+            _loaded = false;
+
+            try
+            {
+                Assembly assembly = Assembly.GetExecutingAssembly();
+                string resourceName = "NexSuite.Plugins.RynthAi.Combat.Vtank spelldump.txt";
+
+                using (Stream stream = assembly.GetManifestResourceStream(resourceName))
+                {
+                    if (stream == null)
+                    {
+                        host.Actions.AddChatText($"[RynthAi] ERROR: Could not find embedded resource: {resourceName}", 2);
+                        return;
+                    }
+
+                    using (StreamReader reader = new StreamReader(stream, true))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            if (string.IsNullOrWhiteSpace(line)) continue;
+
+                            // Split the line by tabs to isolate the columns
+                            string[] columns = line.Split('\t');
+
+                            // Column 0 is ID, Column 1 is Name
+                            if (columns.Length >= 2)
+                            {
+                                if (int.TryParse(columns[0].Trim(), out int spellId))
+                                {
+                                    string spellName = columns[1].Trim();
+                                    _spellNames[spellId] = spellName;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                _loaded = _spellNames.Count > 0;
+                
+            }
+            catch (Exception ex)
+            {
+                host.Actions.AddChatText($"[RynthAi] Spell Load Error: {ex.Message}", 2);
+            }
+        }
+
+        public static string GetSpellName(int spellId)
+        {
+            if (_spellNames.TryGetValue(spellId, out string name)) return name;
+            if (_builtinSpells.TryGetValue(spellId, out string builtin)) return builtin;
+            return $"Unknown Spell ({spellId})";
+        }
+
+        public static string GetSpellNameOrId(int spellId)
+        {
+            if (_spellNames.TryGetValue(spellId, out string name)) return name;
+            if (_builtinSpells.TryGetValue(spellId, out string builtin)) return builtin;
+            return spellId.ToString();
+        }
+    }
+}

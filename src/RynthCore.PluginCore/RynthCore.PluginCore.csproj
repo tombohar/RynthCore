@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <PackageId>RynthCore.PluginCore</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>RynthCore</Authors>
+    <Company>RynthCore</Company>
+    <Description>Higher-level plugin base classes and runtime dispatch helpers for RynthCore plugins.</Description>
+    <PackageTags>rynthcore;plugin;core;asherons-call</PackageTags>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://example.invalid/RynthCore</RepositoryUrl>
+    <RootNamespace>RynthCore.PluginCore</RootNamespace>
+    <AssemblyName>RynthCore.PluginCore</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+  </ItemGroup>
+
+</Project>
