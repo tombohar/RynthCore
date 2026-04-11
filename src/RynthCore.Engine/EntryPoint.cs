@@ -325,10 +325,6 @@ public static class EntryPoint
         }
     }
 
-    private static readonly string LogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
-        "RynthCore.log");
-
     internal static void Log(string message)
     {
         try
@@ -341,8 +337,6 @@ public static class EntryPoint
                 while (RecentLogLines.Count > MaxRecentLogLines)
                     RecentLogLines.Dequeue();
             }
-
-            File.AppendAllText(LogPath, line + Environment.NewLine);
         }
         catch
         {

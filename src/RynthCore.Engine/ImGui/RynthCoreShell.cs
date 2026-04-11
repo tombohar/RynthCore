@@ -104,7 +104,7 @@ internal static class RynthCoreShell
         style.GrabRounding = 8f;
         style.TabRounding = 8f;
         style.WindowBorderSize = 1f;
-        style.FrameBorderSize = 0f;
+        style.FrameBorderSize = 1f;
         style.ItemSpacing = new Vector2(10f, 10f);
         style.ItemInnerSpacing = new Vector2(8f, 6f);
         style.WindowPadding = new Vector2(14f, 14f);
@@ -112,29 +112,30 @@ internal static class RynthCoreShell
         var colors = style.Colors;
         colors[(int)ImGuiCol.WindowBg] = new Vector4(0.04f, 0.06f, 0.08f, 0.97f);
         colors[(int)ImGuiCol.ChildBg] = Panel;
-        colors[(int)ImGuiCol.PopupBg] = new Vector4(0.05f, 0.07f, 0.10f, 0.98f);
+        colors[(int)ImGuiCol.PopupBg] = new Vector4(0.06f, 0.12f, 0.18f, 1.00f);
         colors[(int)ImGuiCol.Border] = new Vector4(0.16f, 0.23f, 0.28f, 1.00f);
         colors[(int)ImGuiCol.FrameBg] = new Vector4(0.08f, 0.11f, 0.15f, 1.00f);
         colors[(int)ImGuiCol.FrameBgHovered] = new Vector4(0.11f, 0.16f, 0.22f, 1.00f);
         colors[(int)ImGuiCol.FrameBgActive] = new Vector4(0.14f, 0.20f, 0.26f, 1.00f);
         colors[(int)ImGuiCol.TitleBg] = new Vector4(0.05f, 0.07f, 0.10f, 1.00f);
         colors[(int)ImGuiCol.TitleBgActive] = new Vector4(0.07f, 0.10f, 0.14f, 1.00f);
-        colors[(int)ImGuiCol.Button] = new Vector4(0.10f, 0.14f, 0.18f, 1.00f);
-        colors[(int)ImGuiCol.ButtonHovered] = new Vector4(0.14f, 0.21f, 0.27f, 1.00f);
-        colors[(int)ImGuiCol.ButtonActive] = new Vector4(0.11f, 0.26f, 0.24f, 1.00f);
-        colors[(int)ImGuiCol.Header] = new Vector4(0.10f, 0.14f, 0.18f, 1.00f);
-        colors[(int)ImGuiCol.HeaderHovered] = new Vector4(0.13f, 0.20f, 0.26f, 1.00f);
-        colors[(int)ImGuiCol.HeaderActive] = new Vector4(0.12f, 0.24f, 0.22f, 1.00f);
+        colors[(int)ImGuiCol.Button] = new Vector4(0.06f, 0.12f, 0.18f, 1.00f);
+        colors[(int)ImGuiCol.ButtonHovered] = new Vector4(0.10f, 0.18f, 0.25f, 1.00f);
+        colors[(int)ImGuiCol.ButtonActive] = new Vector4(0.08f, 0.15f, 0.22f, 1.00f);
+        colors[(int)ImGuiCol.Header] = new Vector4(0.06f, 0.12f, 0.18f, 1.00f);
+        colors[(int)ImGuiCol.HeaderHovered] = new Vector4(0.10f, 0.18f, 0.25f, 1.00f);
+        colors[(int)ImGuiCol.HeaderActive] = new Vector4(0.08f, 0.15f, 0.22f, 1.00f);
+        colors[(int)ImGuiCol.Border] = new Vector4(0.15f, 0.25f, 0.35f, 1.00f);
         colors[(int)ImGuiCol.CheckMark] = Accent;
-        colors[(int)ImGuiCol.SliderGrab] = Accent;
-        colors[(int)ImGuiCol.SliderGrabActive] = Gold;
-        colors[(int)ImGuiCol.Tab] = new Vector4(0.08f, 0.11f, 0.15f, 1.00f);
-        colors[(int)ImGuiCol.TabHovered] = new Vector4(0.13f, 0.20f, 0.26f, 1.00f);
-        colors[(int)ImGuiCol.TabSelected] = new Vector4(0.11f, 0.25f, 0.22f, 1.00f);
-        colors[(int)ImGuiCol.Separator] = new Vector4(0.16f, 0.23f, 0.28f, 1.00f);
-        colors[(int)ImGuiCol.ResizeGrip] = AccentSoft;
-        colors[(int)ImGuiCol.ResizeGripHovered] = Accent;
-        colors[(int)ImGuiCol.ResizeGripActive] = Gold;
+        colors[(int)ImGuiCol.SliderGrab] = new Vector4(0.15f, 0.30f, 0.45f, 1.00f);
+        colors[(int)ImGuiCol.SliderGrabActive] = new Vector4(0.20f, 0.40f, 0.60f, 1.00f);
+        colors[(int)ImGuiCol.Tab] = new Vector4(0.06f, 0.12f, 0.18f, 1.00f);
+        colors[(int)ImGuiCol.TabHovered] = new Vector4(0.10f, 0.18f, 0.25f, 1.00f);
+        colors[(int)ImGuiCol.TabSelected] = new Vector4(0.15f, 0.25f, 0.35f, 1.00f);
+        colors[(int)ImGuiCol.Separator] = new Vector4(0.15f, 0.25f, 0.35f, 1.00f);
+        colors[(int)ImGuiCol.ResizeGrip] = new Vector4(0.06f, 0.12f, 0.18f, 0.40f);
+        colors[(int)ImGuiCol.ResizeGripHovered] = new Vector4(0.10f, 0.18f, 0.25f, 1.00f);
+        colors[(int)ImGuiCol.ResizeGripActive] = new Vector4(0.15f, 0.25f, 0.35f, 1.00f);
         colors[(int)ImGuiCol.ModalWindowDimBg] = new Vector4(0, 0, 0, 0);
     }
 
@@ -157,7 +158,7 @@ internal static class RynthCoreShell
             ImGui.SetNextWindowPos(_barPosition, ImGuiCond.FirstUseEver);
         }
 
-        ImGui.SetNextWindowBgAlpha(0.96f);
+        ImGui.SetNextWindowBgAlpha(1.0f);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(6f, 4f));
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(4f, 3f));
         ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(5f, 2f));
@@ -184,35 +185,10 @@ internal static class RynthCoreShell
 
         ImGui.SameLine();
         ImGui.BeginDisabled(!auxReady);
-        if (ImGui.SmallButton(_showShellWindow ? "Hd" : "Op"))
-            _showShellWindow = !_showShellWindow;
-        ShowTooltip(auxReady
-            ? (_showShellWindow ? "Hide RynthCore shell." : "Open RynthCore shell.")
-            : "Shell unlocks after the client render pipeline has stabilized.");
-        ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        ImGui.BeginDisabled(!auxReady);
         DrawCompactToggle("Lg", ref _showLogWindow);
         ShowTooltip(auxReady
             ? "Open or close the diagnostics window."
             : "Diagnostics unlock after the client render pipeline has stabilized.");
-        ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        ImGui.BeginDisabled(!auxReady);
-        DrawCompactToggle("Mp", ref _showRoadmapWindow);
-        ShowTooltip(auxReady
-            ? "Open or close the roadmap window."
-            : "Roadmap unlocks after the client render pipeline has stabilized.");
-        ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        ImGui.BeginDisabled(!auxReady);
-        DrawCompactToggle("Dm", ref _showDemoWindow);
-        ShowTooltip(auxReady
-            ? "Open or close the ImGui demo window."
-            : "Demo unlocks after the client render pipeline has stabilized.");
         ImGui.EndDisabled();
 
         ImGui.SameLine();
@@ -222,80 +198,6 @@ internal static class RynthCoreShell
             ? "Open or close the raw packet sniffer."
             : "Packet sniffer unlocks after the client render pipeline has stabilized.");
         ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        ImGui.BeginDisabled(!auxReady);
-        if (ImGui.SmallButton("+"))
-            OpenAllWindows();
-        ShowTooltip(auxReady
-            ? "Open the shell, logs, roadmap, and demo windows."
-            : "Bulk window controls unlock after the client render pipeline has stabilized.");
-        ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        ImGui.BeginDisabled(!auxReady);
-        if (ImGui.SmallButton("-"))
-            CloseAllWindows();
-        ShowTooltip(auxReady
-            ? "Close the shell, logs, roadmap, and demo windows."
-            : "Bulk window controls unlock after the client render pipeline has stabilized.");
-        ImGui.EndDisabled();
-
-        ImGui.SameLine();
-        ImGui.BeginDisabled(!auxReady);
-        if (ImGui.SmallButton("Plg"))
-            ImGui.OpenPopup("PluginBarPopup");
-        ShowTooltip(auxReady
-            ? "Choose which plugin shortcuts appear on the bar."
-            : "Plugin shortcuts unlock after the client render pipeline has stabilized.");
-        ImGui.EndDisabled();
-
-        if (ImGui.BeginPopup("PluginBarPopup"))
-        {
-            ImGui.TextColored(TextDim, "Plugin Shortcuts");
-            ImGui.Separator();
-
-            for (int i = 0; i < PluginNames.Length; i++)
-            {
-                bool visible = PluginBarButtonsVisible[i];
-                if (ImGui.Checkbox(PluginNames[i], ref visible))
-                    PluginBarButtonsVisible[i] = visible;
-
-                ImGui.SameLine(220f);
-                ImGui.TextColored(TextMute, PluginStatuses[i]);
-            }
-
-            ImGui.EndPopup();
-        }
-
-        bool anyPluginShortcut = false;
-        for (int i = 0; i < PluginNames.Length; i++)
-        {
-            if (!PluginBarButtonsVisible[i])
-                continue;
-
-            if (!anyPluginShortcut)
-            {
-                ImGui.SameLine();
-                ImGui.TextColored(TextMute, "|");
-                anyPluginShortcut = true;
-            }
-            else
-            {
-                ImGui.SameLine();
-            }
-
-            ImGui.BeginDisabled(!auxReady);
-            if (ImGui.SmallButton(PluginNames[i]))
-            {
-                _selectedPlugin = i;
-                _showShellWindow = true;
-            }
-            ShowTooltip(auxReady
-                ? $"{PluginNames[i]}: focus this plugin in the RynthCore shell."
-                : "Plugin shortcuts unlock after the client render pipeline has stabilized.");
-            ImGui.EndDisabled();
-        }
 
         var loadedPlugins = PluginManager.Plugins;
         bool anyLoadedPluginShortcut = false;
@@ -346,6 +248,15 @@ internal static class RynthCoreShell
                 : "Loaded plugin shortcuts unlock after the client render pipeline has stabilized.");
             ImGui.EndDisabled();
         }
+
+        ImGui.SameLine();
+        ImGui.BeginDisabled(!auxReady);
+        if (ImGui.SmallButton("RL"))
+            PluginManager.RequestRescan();
+        ShowTooltip(auxReady
+            ? "Hot-reload all plugins: unloads, copies new DLLs, reloads."
+            : "Hot-reload unlocks after the client render pipeline has stabilized.");
+        ImGui.EndDisabled();
 
         ImGui.SameLine();
         if (ImGui.SmallButton("Rs"))
@@ -440,9 +351,9 @@ internal static class RynthCoreShell
         bool wasActive = value;
         if (wasActive)
         {
-            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.12f, 0.32f, 0.28f, 1.00f));
-            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.15f, 0.40f, 0.34f, 1.00f));
-            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.18f, 0.46f, 0.39f, 1.00f));
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.15f, 0.30f, 0.35f, 1.00f));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0.18f, 0.36f, 0.42f, 1.00f));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0.20f, 0.40f, 0.46f, 1.00f));
         }
 
         if (ImGui.SmallButton(label))
@@ -452,14 +363,18 @@ internal static class RynthCoreShell
             ImGui.PopStyleColor(3);
     }
 
+    private static readonly Vector4 TooltipBg = new(0.06f, 0.12f, 0.18f, 1.0f);
+
     private static void ShowTooltip(string text)
     {
         if (!ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
             return;
 
+        ImGui.PushStyleColor(ImGuiCol.PopupBg, TooltipBg);
         ImGui.BeginTooltip();
         ImGui.TextUnformatted(text);
         ImGui.EndTooltip();
+        ImGui.PopStyleColor();
     }
 
     private static void RenderHostWindow(int frameCount)
@@ -1021,17 +936,11 @@ internal static class RynthCoreShell
 
     private static void OpenAllWindows()
     {
-        _showShellWindow = true;
         _showLogWindow = true;
-        _showRoadmapWindow = true;
-        _showDemoWindow = true;
     }
 
     private static void CloseAllWindows()
     {
-        _showShellWindow = false;
         _showLogWindow = false;
-        _showRoadmapWindow = false;
-        _showDemoWindow = false;
     }
 }

@@ -1,0 +1,204 @@
+# Plan: Port Loot System from NexSuite2 NexAi to NexCore NexAi
+
+## Context
+
+Porting the Loot subsystem (LootManager + VTankLootParser) from the old Decal-dependent NexAi at C:\Projects\NexSuite2\Plugins\NexAi\Loot\ to the new NexCore-based NexAi at C:\Projects\NexSuite\Plugins\NexCore.Plugin.NexAi\. The goal is to copy the files and adapt them to use NexCore's API instead of Decal's.
+
+### Decisions
+- Salvage: Implement now — find VAs for SalvagePanelAdd/SalvagePanelSalvage in acclient.exe
+- Loot evaluation: VTankLootParser IS the reimplemented VTank loot engine (handles UTL rule trees). Remove VTClassic/uTank2 code — our parser is the sole evaluator. Can add more VTank node types later if profiles need them.
+- NeedsID: Always call RequestId on corpse items, wait up to assess window
+
+---
+
+## Files to Copy
+
+Source (NexSuite2)                              -> Destination (NexSuite)
+Plugins\NexAi\Loot\VTankLootParser.cs (284 ln) -> Plugins\NexCore.Plugin.NexAi\Loot\VTankLootParser.cs
+Plugins\NexAi\Loot\LootManager.cs (1149 ln)    -> Plugins\NexCore.Plugin.NexAi\Loot\LootManager.cs
+
+---
+
+## Gap Analysis: What NexCore Has vs. What Loot Needs
+
+### Already Available (no engine work needed)
+
+Loot Requirement                                -> NexCore Equivalent
+WorldObject.Id, .Name, .ObjectClass             -> WorldObjectCache[id] returns WorldObject
+WorldObject.Values(LongValueKey, default)       -> WorldObject.Values() -> WorldObjectCache.GetIntProperty() -> TryGetObjectIntProperty()
+WorldFilter.GetInventory()                      -> WorldObjectCache.GetInventory()
+WorldFilter.GetLandscape()                      -> WorldObjectCache.GetLandscape()
+WorldFilter.Distance(id1, id2)                  -> WorldObjectCache.Distance(id1, id2)
+Actions.SelectItem(id)                          -> Host.SelectItem(uint)
+Actions.UseItem(id, param)                      -> Host.UseObject(uint)
+Actions.RequestId(id)                           -> Host.RequestId(uint)
+Actions.MoveItem(...)                           -> Host.MoveItemExternal() + Host.MoveItemInternal()
+CharacterFilter.Id                              -> Host.GetPlayerId()
+AddChatText(text, color)                        -> Host.WriteToChat(text, chatType)
+OnCreateObject / OnDeleteObject                 -> NexPluginBase virtual methods
+OnUpdateObjectInventory                         -> NexPluginBase virtual method
+OnViewObjectContents / OnStopViewing            -> NexPluginBase virtual methods
+OnBusyCountIncremented/Decremented              -> NexPluginBase virtual methods
+FellowshipTracker                               -> Already in NexCore.Plugin.NexAi/Combat/FellowshipTracker.cs
+
+### Plugin-Side Tracking (no engine changes)
+
+BusyState (is player idle?)                     -> Track _busyCount via OnBusyCountIncremented/Decremented events
+OpenedContainer (which corpse is open?)         -> Track _openedContainerId via OnViewObjectContents/OnStopViewing events
+
+---
+
+## Must Add to NexCore Engine + SDK
+
+### 1. InqString — String Property Reading
+File: src/NexCore.Engine/Compatibility/ClientObjectHooks.cs
+
+Why: VTank rule type 1 (StringValueMatch) reads string properties. Corpse ownership reads StringValueKey 16 (LongDesc = "Killed by {name}.").
+
+- Find VA for CBaseQualities::InqString (near InqInt 0x00590C20 / InqBool 0x00590CA0)
+- Add delegate: int InqString(IntPtr qualitiesPtr, uint stype, IntPtr* retval) (ThisCall)
+- Add method: TryGetObjectStringProperty(uint objectId, uint stype, out string value)
+- Wire through NexCoreApiNative.GetObjectStringPropertyFn -> NexCoreHost.TryGetObjectStringProperty()
+
+### 2. InqFloat — Float/Double Property Reading
+File: src/NexCore.Engine/Compatibility/ClientObjectHooks.cs
+
+Why: VTank rule types 4 & 5 (DoubleValKeyLE/GE) compare double properties (weapon damage variance, attack mod, etc.).
+
+- Find VA for CBaseQualities::InqFloat (near InqInt/InqBool)
+- Add delegate + method: TryGetObjectFloatProperty(uint objectId, uint stype, out double value)
+- Wire through SDK
+
+### 3. Container Contents API
+File: src/NexCore.Engine/Compatibility/ClientObjectHooks.cs or UpdateObjectInventoryHooks.cs
+
+Why: After opening a corpse, need to enumerate items inside via GetByContainer(corpseId).
+
+- Expose existing GetExhaustiveContainedItemsList as SDK function: GetContainerContents(uint containerId, uint* outIds, int maxCount) -> int
+- Wire through NexCoreApiNative.GetContainerContentsFn -> NexCoreHost.GetContainerContents()
+
+### 4. Salvage Panel APIs
+File: New src/NexCore.Engine/Compatibility/SalvagePanelHooks.cs (or add to ClientHelperHooks)
+
+Why: Auto-salvage system needs SalvagePanelAdd(itemId) and SalvagePanelSalvage().
+
+- Find VAs in acclient.exe APIManager__IAsheronsCallImpl_vtbl (documented as "declared but not yet validated")
+- Implement as direct function calls via delegates
+- Wire through SDK
+
+### 5. ObjectClass Expansion
+File: Plugins/NexCore.Plugin.NexAi/Combat/AcStubs.cs + WorldObjectCache.cs
+
+Why: Loot system checks ObjectClass.Corpse, .Salvage, .Container, .Foci.
+
+- Expand AcObjectClass enum with Corpse, Container, Salvage, Foci values
+- Add ITEM_TYPE constants: TYPE_CORPSE=0x00000020, TYPE_CONTAINER=0x00000040
+- Update WorldObjectCache.ClassifyByItemType() to detect these types
+
+### 6. String + Double Property Access on WorldObject
+File: Plugins/NexCore.Plugin.NexAi/Combat/AcStubs.cs
+
+- Add StringValueKey enum (at minimum key 16 = LongDesc)
+- Add DoubleValueKey enum
+- Add WorldObject.Values(StringValueKey, default) -> delegates to cache -> SDK
+- Add WorldObject.Values(DoubleValueKey, default) -> delegates to cache -> SDK
+- Add WorldObjectCache.GetStringProperty() and WorldObjectCache.GetFloatProperty() methods
+
+---
+
+## LootManager Adaptation Summary
+
+When copying LootManager.cs, these are the specific changes:
+
+Old (Decal)                                     -> New (NexCore)
+CoreManager _core + PluginHost _host            -> NexCoreHost _host + WorldObjectCache _cache
+_core.Actions.BusyState                         -> _busyCount > 0 (tracked via events)
+_core.Actions.OpenedContainer                   -> _openedContainerId (tracked via events)
+_core.Actions.SelectItem(id)                    -> _host.SelectItem((uint)id)
+_core.Actions.UseItem(id, 0)                    -> _host.UseObject((uint)id)
+_core.Actions.RequestId(id)                     -> _host.RequestId((uint)id)
+_core.Actions.MoveItem(id, dest, slot, true)    -> _host.MoveItemInternal((uint)id, (uint)dest, slot, 0) for stacking
+_host.Actions.AddChatText(text, color)          -> _host.WriteToChat(text, color)
+_host.Actions.SalvagePanelAdd(id)               -> _host.SalvagePanelAdd((uint)id) (new SDK method)
+_host.Actions.SalvagePanelSalvage()             -> _host.SalvagePanelSalvage() (new SDK method)
+_core.WorldFilter[id]                           -> _cache[id]
+_core.WorldFilter.GetByContainer(id)            -> _host.GetContainerContents(id, ...) (new SDK method)
+_core.WorldFilter.GetInventory()                -> _cache.GetInventory()
+_core.WorldFilter.GetLandscape()                -> _cache.GetLandscape()
+_core.WorldFilter.Distance(a, b)               -> _cache.Distance(a, b)
+_core.CharacterFilter.Id                        -> (int)_host.GetPlayerId()
+_core.CharacterFilter.Name                      -> _host.TryGetObjectName(_host.GetPlayerId(), out name)
+VTClassic.LootCore (Path 1)                     -> REMOVED — VTankLootParser handles all UTL evaluation
+uTank2.PluginCore.PC.* (Path 3)                -> REMOVED — single evaluation path
+FLootPluginQueryNeedsID(id)                     -> Always true — always RequestId
+WorldObject.Values((StringValueKey)k, "")       -> wo.Values((StringValueKey)k, "") (new method on WorldObject)
+WorldObject.Values((DoubleValueKey)k, 0.0)      -> wo.Values((DoubleValueKey)k, 0.0) (new method on WorldObject)
+
+---
+
+## Implementation Order
+
+### Phase 1: Engine — Property APIs
+1. Find VAs for CBaseQualities::InqString and CBaseQualities::InqFloat
+2. Add to ClientObjectHooks.cs: delegates, TryGetObjectStringProperty(), TryGetObjectFloatProperty()
+3. Add to NexCoreApiNative.cs: GetObjectStringPropertyFn, GetObjectFloatPropertyFn
+4. Add to NexCoreHost.cs: wrapper methods
+5. Wire function pointers in EntryPoint.cs
+
+### Phase 2: Engine — Container Contents API
+1. Add GetContainerContents() wrapper around existing GetExhaustiveContainedItemsList
+2. Wire through SDK
+
+### Phase 3: Engine — Salvage Panel APIs
+1. Find VAs for salvage panel functions in acclient.exe vtable
+2. Implement + wire through SDK
+
+### Phase 4: Plugin — Expand Type System
+1. AcStubs.cs: Add StringValueKey, DoubleValueKey enums
+2. AcStubs.cs: Expand AcObjectClass (Corpse, Container, Salvage, Foci)
+3. WorldObject: Add Values(StringValueKey), Values(DoubleValueKey) methods
+4. WorldObjectCache: Add GetStringProperty(), GetFloatProperty(), expand classification
+
+### Phase 5: Plugin — Copy & Adapt Loot Files
+1. Copy VTankLootParser.cs -> update namespace, replace Decal types with local types
+2. Copy LootManager.cs -> apply all substitutions from table above
+3. Simplify to single loot evaluation path (VTankLootParser only)
+4. Always-RequestId for NeedsID
+
+### Phase 6: Plugin — Integration
+1. Wire LootManager into NexAiPlugin.cs
+2. Add settings to LegacyUiSettings.cs
+3. Add chat commands for profile loading
+
+---
+
+## Key Files to Modify
+
+### Engine (C:\Projects\nexcore\src\NexCore.Engine\)
+- Compatibility/ClientObjectHooks.cs — InqString, InqFloat
+- Compatibility/UpdateObjectInventoryHooks.cs — GetContainerContents export
+- Compatibility/SalvagePanelHooks.cs — NEW: salvage APIs
+- EntryPoint.cs — Wire new API function pointers
+
+### SDK (C:\Projects\nexcore\src\NexCore.PluginSdk\)
+- NexCoreApiNative.cs — New function pointer fields
+- NexCoreHost.cs — New wrapper methods
+
+### Plugin (C:\Projects\NexSuite\Plugins\NexCore.Plugin.NexAi\)
+- Combat/AcStubs.cs — StringValueKey, DoubleValueKey, expanded ObjectClass
+- Combat/WorldObjectCache.cs — Classification expansion, container tracking, new property methods
+- Loot/VTankLootParser.cs — NEW (copy + adapt)
+- Loot/LootManager.cs — NEW (copy + adapt)
+- NexAiPlugin.cs — Wire LootManager
+- LegacyUi/LegacyUiSettings.cs — Loot settings
+
+---
+
+## Verification
+1. cd src\NexCore.Engine && dotnet publish -c Release — engine builds
+2. cd Plugins\NexCore.Plugin.NexAi && dotnet publish -c Release — plugin builds
+3. Deploy to C:\Games\NexCore\ + inject into AC client
+4. Load a VTank UTL profile via /na lootprofile <path>
+5. Verify: corpse detection -> item scanning -> RequestId -> loot evaluation -> pickup
+6. Verify: salvage queue processes items correctly
+7. Check %USERPROFILE%\Desktop\NexCore.log for errors
