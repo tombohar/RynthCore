@@ -39,6 +39,7 @@ public struct RynthCoreApiNative
     public IntPtr MoveItemInternalFn;
     public IntPtr WriteToChatFn;
     public IntPtr GetPlayerPoseFn;
+    public IntPtr IsPortalingFn;
     public IntPtr SetMotionFn;
     public IntPtr StopCompletelyFn;
     public IntPtr TurnToHeadingFn;
@@ -74,4 +75,12 @@ public struct RynthCoreApiNative
     public IntPtr GetObjectOwnershipInfoFn;
     public IntPtr SplitStackInternalFn;
     public IntPtr MergeStackInternalFn;
+    public IntPtr GetCurrentCombatModeFn;
+    public IntPtr SalvagePanelOpenFn;
+    public IntPtr SalvagePanelAddItemFn;
+    public IntPtr SalvagePanelExecuteFn;
+    public IntPtr GetVitaeFn;
+    public IntPtr GetAccountNameFn;
+    public IntPtr GetWorldNameFn;
+    public IntPtr GetObjectWcidFn;
 }

@@ -21,6 +21,21 @@ internal static class ClientHelperHooks
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte UseWithTargetEventDelegate(uint objectId, uint targetId);
 
+    // CM_Inventory::SendNotice_OpenSalvagePanel(uint toolId) — cdecl
+    // Map: 002AC4F0 → live VA: 0x006AD4F0
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte SendNoticeOpenSalvagePanelDelegate(uint toolId);
+
+    // gmSalvageUI::AddNewItem(uint itemId) — thiscall
+    // Map: 000CB020 → live VA: 0x004CC020
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate void GmSalvageUIAddNewItemDelegate(IntPtr thisPtr, uint itemId);
+
+    // gmSalvageUI::Salvage(void) — thiscall
+    // Map: 000CB430 → live VA: 0x004CC430
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate void GmSalvageUISalvageDelegate(IntPtr thisPtr);
+
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void UseEquippedItemDelegate(IntPtr acPlugin, uint sourceObjectId, uint targetObjectId);
 
@@ -87,6 +102,9 @@ internal static class ClientHelperHooks
     private const int CommunicationSystemVa = 0x00870BE4;
     private const int AddTextToScrollVa = 0x005649F0;
     private const int UseWithTargetEventVa = 0x006AD3E0;
+    private const int SendNoticeOpenSalvagePanelVa = 0x006AD4F0;
+    private const int GmSalvageUIAddNewItemVa = 0x004CC020;
+    private const int GmSalvageUISalvageVa = 0x004CC430;
 
     private static SetSelectedObjectDelegate? _setSelectedObject;
     private static UseObjectDelegate? _useObject;
@@ -100,6 +118,9 @@ internal static class ClientHelperHooks
     private static GetPlayerIdDelegate? _getPlayerId;
     private static AddTextToScrollDelegate? _addTextToScroll;
     private static UseWithTargetEventDelegate? _useWithTargetEvent;
+    private static SendNoticeOpenSalvagePanelDelegate? _sendNoticeOpenSalvagePanel;
+    private static GmSalvageUIAddNewItemDelegate? _gmSalvageUIAddNewItem;
+    private static GmSalvageUISalvageDelegate? _gmSalvageUISalvage;
     private static bool _initialized;
     private static string _statusMessage = "Not probed yet.";
     private static int _interactionLogCount;
@@ -122,6 +143,7 @@ internal static class ClientHelperHooks
     public static bool HasGetGroundContainerId => true;
     public static bool HasWriteToChat => _addTextToScroll != null;
     public static bool HasInvokeParser => true;
+    public static bool HasSalvagePanel => _sendNoticeOpenSalvagePanel != null && _gmSalvageUIAddNewItem != null && _gmSalvageUISalvage != null;
     private static int _currentGroundContainerId;
 
     public static bool Probe()
@@ -140,6 +162,9 @@ internal static class ClientHelperHooks
             _getPlayerId = Marshal.GetDelegateForFunctionPointer<GetPlayerIdDelegate>(new IntPtr(GetPlayerIdVa));
             _addTextToScroll = Marshal.GetDelegateForFunctionPointer<AddTextToScrollDelegate>(new IntPtr(AddTextToScrollVa));
             _useWithTargetEvent = Marshal.GetDelegateForFunctionPointer<UseWithTargetEventDelegate>(new IntPtr(UseWithTargetEventVa));
+            _sendNoticeOpenSalvagePanel = Marshal.GetDelegateForFunctionPointer<SendNoticeOpenSalvagePanelDelegate>(new IntPtr(SendNoticeOpenSalvagePanelVa));
+            _gmSalvageUIAddNewItem = Marshal.GetDelegateForFunctionPointer<GmSalvageUIAddNewItemDelegate>(new IntPtr(GmSalvageUIAddNewItemVa));
+            _gmSalvageUISalvage = Marshal.GetDelegateForFunctionPointer<GmSalvageUISalvageDelegate>(new IntPtr(GmSalvageUISalvageVa));
             _initialized = true;
             _statusMessage = "Ready.";
             RynthLog.Compat("Compat: helper hooks ready - validated select/state/chat helpers plus mapped interaction and inventory helpers.");
@@ -506,6 +531,86 @@ internal static class ClientHelperHooks
         }
     }
 
+    /// <summary>
+    /// Open the salvage panel for the given salvage tool.
+    /// Calls CM_Inventory::SendNotice_OpenSalvagePanel (cdecl) which dispatches
+    /// the UI notice asynchronously; allow ~400 ms before calling AddItem.
+    /// </summary>
+    public static bool SalvagePanelOpen(uint toolId)
+    {
+        if (_sendNoticeOpenSalvagePanel == null || toolId == 0)
+            return false;
+
+        try
+        {
+            _sendNoticeOpenSalvagePanel(toolId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"Compat: SalvagePanelOpen threw - {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Add an item to the salvage panel.
+    /// Calls gmSalvageUI::AddNewItem (thiscall) via the captured singleton.
+    /// Requires the panel to have been opened at least once so SalvageHooks
+    /// has captured the gmSalvageUI instance pointer.
+    /// </summary>
+    public static bool SalvagePanelAddItem(uint itemId)
+    {
+        if (_gmSalvageUIAddNewItem == null || itemId == 0)
+            return false;
+
+        IntPtr inst = SalvageHooks.GmSalvageUIInstance;
+        if (inst == IntPtr.Zero)
+        {
+            RynthLog.Compat("Compat: SalvagePanelAddItem - gmSalvageUI instance not captured yet");
+            return false;
+        }
+
+        try
+        {
+            _gmSalvageUIAddNewItem(inst, itemId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"Compat: SalvagePanelAddItem threw - {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Execute the salvage operation (click Salvage button).
+    /// Calls gmSalvageUI::Salvage (thiscall) via the captured singleton.
+    /// </summary>
+    public static bool SalvagePanelExecute()
+    {
+        if (_gmSalvageUISalvage == null)
+            return false;
+
+        IntPtr inst = SalvageHooks.GmSalvageUIInstance;
+        if (inst == IntPtr.Zero)
+        {
+            RynthLog.Compat("Compat: SalvagePanelExecute - gmSalvageUI instance not captured yet");
+            return false;
+        }
+
+        try
+        {
+            _gmSalvageUISalvage(inst);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"Compat: SalvagePanelExecute threw - {ex.Message}");
+            return false;
+        }
+    }
+
     public static bool InvokeParser(string? text)
     {
         if (string.IsNullOrEmpty(text))
@@ -541,6 +646,9 @@ internal static class ClientHelperHooks
         _getPlayerId = null;
         _addTextToScroll = null;
         _useWithTargetEvent = null;
+        _sendNoticeOpenSalvagePanel = null;
+        _gmSalvageUIAddNewItem = null;
+        _gmSalvageUISalvage = null;
         _initialized = false;
     }
 

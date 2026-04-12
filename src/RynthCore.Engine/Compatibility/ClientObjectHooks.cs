@@ -49,6 +49,10 @@ internal static class ClientObjectHooks
     // CACQualities::InqSkillAdvancementClass(uint stype, SKILL_ADVANCEMENT_CLASS* retval)
     // SKILL_ADVANCEMENT_CLASS: UNDEF=0, UNTRAINED=1, TRAINED=2, SPECIALIZED=3
     private const int ReferenceInqSkillAdvancementClass = 0x00592B70;
+
+    // CACQualities::GetVitaeValue() — ThisCall, no args, returns float (1.0=no vitae, 0.95=5% penalty)
+    // Map: 0018EE80 → live VA: 0x0058FE80
+    private const int ReferenceGetVitaeValue = 0x0058FE80;
     private const int NameTypeSingular = 0;
     private const int MaxLookupLogs = 12;
 
@@ -175,6 +179,10 @@ internal static class ClientObjectHooks
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate int IsSpellKnownDelegate(IntPtr qualitiesPtr, uint spellId);
 
+    // float __thiscall CACQualities::GetVitaeValue()
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate float GetVitaeValueDelegate(IntPtr qualitiesPtr);
+
     // ClientCombatSystem* __cdecl ClientCombatSystem::GetCombatSystem()
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate IntPtr GetCombatSystemDelegate();
@@ -233,6 +241,7 @@ internal static class ClientObjectHooks
     private static InqSkillLevelDelegate? _inqSkillLevel;
     private static InqSkillAdvancementClassDelegate? _inqSkillAdvancementClass;
     private static IsSpellKnownDelegate? _isSpellKnown;
+    private static GetVitaeValueDelegate? _getVitaeValue;
     private static int _lookupLogCount;
 
     public static bool IsInitialized { get; private set; }
@@ -309,6 +318,7 @@ internal static class ClientObjectHooks
         _inqSkillLevel = Marshal.GetDelegateForFunctionPointer<InqSkillLevelDelegate>(new IntPtr(ReferenceInqSkillLevel));
         _inqSkillAdvancementClass = Marshal.GetDelegateForFunctionPointer<InqSkillAdvancementClassDelegate>(new IntPtr(ReferenceInqSkillAdvancementClass));
         _isSpellKnown = Marshal.GetDelegateForFunctionPointer<IsSpellKnownDelegate>(new IntPtr(ReferenceIsSpellKnown));
+        _getVitaeValue = Marshal.GetDelegateForFunctionPointer<GetVitaeValueDelegate>(new IntPtr(ReferenceGetVitaeValue));
         RynthLog.Compat(
             $"Compat: client object hooks ready - getWeenie=0x{getWeeniePtr.ToInt32():X8}, getNameStatic=0x{getNameStaticPtr.ToInt32():X8}, getNameInstance=0x{getNameInstancePtr.ToInt32():X8}");
         return true;
@@ -335,6 +345,36 @@ internal static class ClientObjectHooks
                 return false;
 
             known = _isSpellKnown(qualitiesPtr, spellId) != 0;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Returns the player's vitae multiplier via CACQualities::GetVitaeValue.
+    /// Returns 1.0 when there is no vitae penalty. 0.95 = 5% penalty, etc.
+    /// </summary>
+    public static bool TryGetVitae(uint playerId, out float value)
+    {
+        value = 1.0f;
+        if (_getVitaeValue == null || _getWeenieObject == null)
+        {
+            if (!Probe() || _getVitaeValue == null || _getWeenieObject == null)
+                return false;
+        }
+        try
+        {
+            IntPtr weeniePtr = _getWeenieObject(playerId);
+            if (weeniePtr == IntPtr.Zero)
+                return false;
+
+            if (!TryGetQualitiesPtr(weeniePtr, out IntPtr qualitiesPtr))
+                return false;
+
+            value = _getVitaeValue(qualitiesPtr);
             return true;
         }
         catch
@@ -584,6 +624,40 @@ internal static class ClientObjectHooks
         }
     }
 
+    /// <summary>
+    /// Reads PublicWeenieDesc._wcid directly from the weenie struct.
+    /// Returns the Weenie Class ID (WCID) for the given object.
+    /// Layout: ACCWeenieObject + _phys_obj_offset + 4 = start of PublicWeenieDesc.
+    /// PublicWeenieDesc+12 = _wcid: WeenieDesc(4) + _name(4) + _plural_name(4) = 12.
+    /// </summary>
+    public static bool TryGetObjectWcid(uint objectId, out uint wcid)
+    {
+        wcid = 0;
+        if (_getWeenieObject == null)
+        {
+            if (!Probe() || _getWeenieObject == null)
+                return false;
+        }
+        if (_weeniePhysicsObjOffset < 0)
+            return false;
+        try
+        {
+            IntPtr weeniePtr = _getWeenieObject(objectId);
+            if (weeniePtr == IntPtr.Zero)
+                return false;
+            int pwdBase = _weeniePhysicsObjOffset + 4;
+            IntPtr fieldAddr = weeniePtr + pwdBase + 12;
+            if (!IsReadablePointer(fieldAddr))
+                return false;
+            wcid = (uint)Marshal.ReadInt32(fieldAddr);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool TryGetObjectQualitiesPtr(uint objectId, out IntPtr qualitiesPtr)
     {
         qualitiesPtr = IntPtr.Zero;
@@ -710,16 +784,20 @@ internal static class ClientObjectHooks
         // Fast path: stypes whose values live in PublicWeenieDesc.
         // PWD starts at weenie + _phys_obj_offset + 4. Layout (Chorizite Weenie.cs:1734):
         //   +28 _containerID, +32 _wielderID, +40 _valid_locations, +44 _location,
-        //   +48 _itemsCapacity, +52 _containersCapacity, +96 _stackSize, +100 _maxStackSize
+        //   +48 _itemsCapacity, +52 _containersCapacity, +96 _stackSize, +100 _maxStackSize,
+        //   +148 _material_type
+        // CBaseQualities::InqInt fails for inventory/corpse items (m_pQualities is null on pack wienies).
+        // Any stype whose value lives in PWD must be served from here instead.
         int pwdFieldOffset = stype switch
         {
-            6  => 48,   // ITEMS_CAPACITY → _itemsCapacity
-            7  => 52,   // CONTAINERS_CAPACITY → _containersCapacity
-            9  => 40,   // LOCATIONS → _valid_locations
-            10 => 44,   // CURRENT_WIELDED_LOCATION → _location
-            11 => 100,  // MAX_STACK_SIZE → _maxStackSize
-            12 => 96,   // STACK_SIZE → _stackSize
-            _  => -1,
+            6   => 48,   // ITEMS_CAPACITY → _itemsCapacity
+            7   => 52,   // CONTAINERS_CAPACITY → _containersCapacity
+            9   => 40,   // LOCATIONS → _valid_locations
+            10  => 44,   // CURRENT_WIELDED_LOCATION → _location
+            11  => 100,  // MAX_STACK_SIZE → _maxStackSize
+            12  => 96,   // STACK_SIZE → _stackSize
+            131 => 148,  // MATERIAL_TYPE → _material_type (4 bytes, int)
+            _   => -1,
         };
 
         if (pwdFieldOffset >= 0 && _weeniePhysicsObjOffset >= 0)
@@ -782,13 +860,44 @@ internal static class ClientObjectHooks
     /// <summary>
     /// Calls CBaseQualities::InqFloat on the object's weenie to read a STypeFloat property.
     /// AC stores these as doubles despite the "Float" name.
+    /// Fast path: stype 280 (ITEM_WORKMANSHIP) is read from PublicWeenieDesc._workmanship
+    /// (Single at PWD+152) because it lives in the weenie descriptor, not CBaseQualities,
+    /// and InqFloat fails for pack/inventory items that have no m_pQualities pointer.
     /// </summary>
     public static unsafe bool TryGetObjectDoubleProperty(uint objectId, uint stype, out double value)
     {
         value = 0;
-        if (_inqFloat == null || _getWeenieObject == null)
+        if (_getWeenieObject == null)
         {
-            if (!Probe() || _inqFloat == null || _getWeenieObject == null)
+            if (!Probe() || _getWeenieObject == null)
+                return false;
+        }
+
+        // Fast path: ITEM_WORKMANSHIP (STypeFloat=280) → PublicWeenieDesc._workmanship (Single at PWD+152)
+        if (stype == 280u && _weeniePhysicsObjOffset >= 0)
+        {
+            try
+            {
+                IntPtr weeniePtr = _getWeenieObject(objectId);
+                if (weeniePtr == IntPtr.Zero)
+                    return false;
+                int pwdBase = _weeniePhysicsObjOffset + 4;
+                IntPtr fieldAddr = weeniePtr + pwdBase + 152;
+                if (!IsReadablePointer(fieldAddr))
+                    return false;
+                int bits = Marshal.ReadInt32(fieldAddr);
+                float f = BitConverter.Int32BitsToSingle(bits);
+                if (f == 0f)
+                    return false;
+                value = f;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        if (_inqFloat == null)
+        {
+            if (!Probe() || _inqFloat == null)
                 return false;
         }
         try
@@ -825,6 +934,12 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectBoolProperty(uint objectId, uint stype, out bool value)
     {
         value = false;
+
+        // Appraisal cache covers inventory items where m_pQualities is null
+        // (CBaseQualities::InqBool always returns 0 for such objects).
+        if (AppraisalHooks.TryGetCachedBoolProperty(objectId, stype, out value))
+            return true;
+
         if (_inqBool == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqBool == null || _getWeenieObject == null)

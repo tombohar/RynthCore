@@ -46,6 +46,9 @@ internal static class PluginManager
     private const int MaxPendingStopViewingObjectContents = 128;
     private const int MaxPendingUpdateHealth = 512;
     private const int MaxPendingEnchantmentEvents = 256;
+    private const int MaxPrePluginCreateObjects = 4096;
+    private static readonly Queue<uint> _prePluginCreateObjects = new();
+    private static readonly object PrePluginCreateObjectsLock = new();
     private static readonly List<LoadedPlugin> _plugins = new();
     private static readonly Queue<PendingIncomingChat> _pendingIncomingChats = new();
     private static readonly Queue<PendingBusyCountIncremented> _pendingBusyCountIncremented = new();
@@ -123,6 +126,7 @@ internal static class PluginManager
     private static MergeStackInternalCallbackDelegate? _mergeStackInternalCallback;
     private static WriteToChatCallbackDelegate? _writeToChatCallback;
     private static GetPlayerPoseCallbackDelegate? _getPlayerPoseCallback;
+    private static IsPortalingCallbackDelegate? _isPortalingCallback;
     private static GetObjectNameCallbackDelegate? _getObjectNameCallback;
     private static GetPlayerVitalsCallbackDelegate? _getPlayerVitalsCallback;
     private static GetObjectPositionCallbackDelegate? _getObjectPositionCallback;
@@ -152,6 +156,16 @@ internal static class PluginManager
     private static SetFpsLimitCallbackDelegate? _setFpsLimitCallback;
     private static GetContainerContentsCallbackDelegate? _getContainerContentsCallback;
     private static GetObjectOwnershipInfoCallbackDelegate? _getObjectOwnershipInfoCallback;
+    private static GetCurrentCombatModeCallbackDelegate? _getCurrentCombatModeCallback;
+    private static SalvagePanelOpenCallbackDelegate? _salvagePanelOpenCallback;
+    private static SalvagePanelAddItemCallbackDelegate? _salvagePanelAddItemCallback;
+    private static SalvagePanelExecuteCallbackDelegate? _salvagePanelExecuteCallback;
+    private static GetVitaeCallbackDelegate? _getVitaeCallback;
+    private static GetAccountNameCallbackDelegate? _getAccountNameCallback;
+    private static GetWorldNameCallbackDelegate? _getWorldNameCallback;
+    private static GetObjectWcidCallbackDelegate? _getObjectWcidCallback;
+    private static IntPtr _accountNameScratchPtr;
+    private static IntPtr _worldNameScratchPtr;
     [ThreadStatic] private static IntPtr _objectNameScratchPtr;
     private static string _pluginsDir = "";
     private static string _shadowRootDir = "";
@@ -208,6 +222,29 @@ internal static class PluginManager
         InitializeLoadedPlugins();
         DispatchUIInitializedToLoadedPlugins();
         DispatchLoginCompleteToLoadedPlugins();
+        ReplayPrePluginCreateObjects();
+    }
+
+    private static void ReplayPrePluginCreateObjects()
+    {
+        uint[] prePending;
+        lock (PrePluginCreateObjectsLock)
+        {
+            if (_prePluginCreateObjects.Count == 0) return;
+            prePending = _prePluginCreateObjects.ToArray();
+            // Do NOT clear — keep accumulating so hot-reloads can replay the full snapshot.
+        }
+
+        RynthLog.Plugin($"PluginManager: Replaying {prePending.Length} pre-plugin CreateObject event(s).");
+        lock (PendingCreateObjectsLock)
+        {
+            foreach (uint objectId in prePending)
+            {
+                if (_pendingCreateObjects.Count >= MaxPendingCreateObjects)
+                    _pendingCreateObjects.Dequeue();
+                _pendingCreateObjects.Enqueue(new PendingCreateObject(objectId));
+            }
+        }
     }
 
     public static void RequestRescan()
@@ -416,6 +453,14 @@ internal static class PluginManager
 
     public static void QueueCreateObject(uint objectId)
     {
+        // Always buffer for replay — covers the race between hook install and plugin load
+        lock (PrePluginCreateObjectsLock)
+        {
+            if (_prePluginCreateObjects.Count >= MaxPrePluginCreateObjects)
+                _prePluginCreateObjects.Dequeue();
+            _prePluginCreateObjects.Enqueue(objectId);
+        }
+
         if (_plugins.Count == 0)
             return;
 
@@ -704,6 +749,7 @@ internal static class PluginManager
         InitializeLoadedPlugins();
         DispatchUIInitializedToLoadedPlugins();
         DispatchLoginCompleteToLoadedPlugins();
+        ReplayPrePluginCreateObjects();
     }
 
     private static void DispatchQueuedChatWindowText()
@@ -1455,6 +1501,12 @@ internal static class PluginManager
             CombatActionHooks.RequestId(playerId);
             RynthLog.Plugin($"PluginManager: sent self-identify for player 0x{playerId:X8} to seed max vitals.");
         }
+
+        // Sync the actual current combat mode to newly initialized plugins.
+        // Reads directly from ClientCombatSystem so this is accurate even at first inject.
+        int actualCombatMode = CombatModeHooks.ReadCurrentCombatMode();
+        QueueCombatModeChange(actualCombatMode, CombatActionHooks.CombatModeNonCombat);
+        RynthLog.Plugin($"PluginManager: synced combat mode {actualCombatMode} to plugins.");
     }
 
     private static unsafe void EnsureHostCallbacks()
@@ -1494,6 +1546,7 @@ internal static class PluginManager
         _mergeStackInternalCallback ??= MergeStackInternal;
         _writeToChatCallback ??= WriteToChat;
         _getPlayerPoseCallback ??= GetPlayerPose;
+        _isPortalingCallback ??= IsPortalingCallback;
         _getObjectNameCallback ??= GetObjectName;
         _getPlayerVitalsCallback ??= GetPlayerVitals;
         _getObjectPositionCallback ??= GetObjectPosition;
@@ -1523,6 +1576,14 @@ internal static class PluginManager
         _setFpsLimitCallback ??= SetFpsLimitAction;
         _getContainerContentsCallback ??= GetContainerContentsAction;
         _getObjectOwnershipInfoCallback ??= GetObjectOwnershipInfoAction;
+        _getCurrentCombatModeCallback ??= GetCurrentCombatModeAction;
+        _salvagePanelOpenCallback ??= SalvagePanelOpenAction;
+        _salvagePanelAddItemCallback ??= SalvagePanelAddItemAction;
+        _salvagePanelExecuteCallback ??= SalvagePanelExecuteAction;
+        _getVitaeCallback ??= GetVitaeAction;
+        _getAccountNameCallback ??= GetAccountNameAction;
+        _getWorldNameCallback ??= GetWorldNameAction;
+        _getObjectWcidCallback ??= GetObjectWcidAction;
 
         _api.Version = PluginContractVersion.Current;
         _api.LogFn = Marshal.GetFunctionPointerForDelegate(_logCallback);
@@ -1558,6 +1619,7 @@ internal static class PluginManager
         _api.MoveItemInternalFn = Marshal.GetFunctionPointerForDelegate(_moveItemInternalCallback);
         _api.WriteToChatFn = Marshal.GetFunctionPointerForDelegate(_writeToChatCallback);
         _api.GetPlayerPoseFn = Marshal.GetFunctionPointerForDelegate(_getPlayerPoseCallback);
+        _api.IsPortalingFn = Marshal.GetFunctionPointerForDelegate(_isPortalingCallback);
         _api.GetObjectNameFn = Marshal.GetFunctionPointerForDelegate(_getObjectNameCallback);
         _api.GetPlayerVitalsFn = Marshal.GetFunctionPointerForDelegate(_getPlayerVitalsCallback);
         _api.GetObjectPositionFn = Marshal.GetFunctionPointerForDelegate(_getObjectPositionCallback);
@@ -1589,6 +1651,14 @@ internal static class PluginManager
         _api.GetObjectOwnershipInfoFn = Marshal.GetFunctionPointerForDelegate(_getObjectOwnershipInfoCallback);
         _api.SplitStackInternalFn = Marshal.GetFunctionPointerForDelegate(_splitStackInternalCallback);
         _api.MergeStackInternalFn = Marshal.GetFunctionPointerForDelegate(_mergeStackInternalCallback);
+        _api.GetCurrentCombatModeFn = Marshal.GetFunctionPointerForDelegate(_getCurrentCombatModeCallback);
+        _api.SalvagePanelOpenFn = Marshal.GetFunctionPointerForDelegate(_salvagePanelOpenCallback);
+        _api.SalvagePanelAddItemFn = Marshal.GetFunctionPointerForDelegate(_salvagePanelAddItemCallback);
+        _api.SalvagePanelExecuteFn = Marshal.GetFunctionPointerForDelegate(_salvagePanelExecuteCallback);
+        _api.GetVitaeFn = Marshal.GetFunctionPointerForDelegate(_getVitaeCallback);
+        _api.GetAccountNameFn = Marshal.GetFunctionPointerForDelegate(_getAccountNameCallback);
+        _api.GetWorldNameFn = Marshal.GetFunctionPointerForDelegate(_getWorldNameCallback);
+        _api.GetObjectWcidFn = Marshal.GetFunctionPointerForDelegate(_getObjectWcidCallback);
     }
 
     private static void ProbeClientHooks()
@@ -1762,6 +1832,17 @@ internal static class PluginManager
         *location = loc;
         return 1;
     }
+
+    private static int GetCurrentCombatModeAction() => CombatModeHooks.ReadCurrentCombatMode();
+
+    private static int SalvagePanelOpenAction(uint toolId)
+        => ToAbiBool(ClientHelperHooks.SalvagePanelOpen(toolId));
+
+    private static int SalvagePanelAddItemAction(uint itemId)
+        => ToAbiBool(ClientHelperHooks.SalvagePanelAddItem(itemId));
+
+    private static int SalvagePanelExecuteAction()
+        => ToAbiBool(ClientHelperHooks.SalvagePanelExecute());
 
     private static unsafe int GetContainerContentsAction(uint containerId, uint* itemIds, int maxCount)
     {
@@ -1981,6 +2062,51 @@ internal static class PluginManager
     {
         string? text = textUtf16 != IntPtr.Zero ? Marshal.PtrToStringUni(textUtf16) : null;
         return ToAbiBool(ClientHelperHooks.InvokeParser(text));
+    }
+
+    private static int IsPortalingCallback()
+    {
+        return TeleportStateHooks.IsPortaling ? 1 : 0;
+    }
+
+    private static float GetVitaeAction(uint playerId)
+    {
+        return ClientObjectHooks.TryGetVitae(playerId, out float v) ? v : 1.0f;
+    }
+
+    private static IntPtr GetAccountNameAction()
+    {
+        if (!AccountHooks.TryGetAccountName(out string name) || string.IsNullOrEmpty(name))
+            return IntPtr.Zero;
+
+        if (_accountNameScratchPtr != IntPtr.Zero)
+        {
+            Marshal.FreeHGlobal(_accountNameScratchPtr);
+            _accountNameScratchPtr = IntPtr.Zero;
+        }
+
+        _accountNameScratchPtr = Marshal.StringToHGlobalAnsi(name);
+        return _accountNameScratchPtr;
+    }
+
+    private static IntPtr GetWorldNameAction()
+    {
+        if (!AccountHooks.TryGetWorldName(out string name) || string.IsNullOrEmpty(name))
+            return IntPtr.Zero;
+
+        if (_worldNameScratchPtr != IntPtr.Zero)
+        {
+            Marshal.FreeHGlobal(_worldNameScratchPtr);
+            _worldNameScratchPtr = IntPtr.Zero;
+        }
+
+        _worldNameScratchPtr = Marshal.StringToHGlobalAnsi(name);
+        return _worldNameScratchPtr;
+    }
+
+    private static uint GetObjectWcidAction(uint objectId)
+    {
+        return ClientObjectHooks.TryGetObjectWcid(objectId, out uint wcid) ? wcid : 0u;
     }
 
     private static unsafe int GetPlayerPose(

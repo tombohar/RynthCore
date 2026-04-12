@@ -125,6 +125,9 @@ internal struct RynthCoreAPI
     /// <summary>Function pointer: int GetPlayerPose(uint* objCellId, float* x, float* y, float* z, float* qw, float* qx, float* qy, float* qz)</summary>
     public IntPtr GetPlayerPoseFn;
 
+    /// <summary>Function pointer: int IsPortaling() — returns 1 if SmartBox::teleport_in_progress, 0 otherwise</summary>
+    public IntPtr IsPortalingFn;
+
     /// <summary>Function pointer: int SetMotion(uint motion, int enabled)</summary>
     public IntPtr SetMotionFn;
 
@@ -301,12 +304,71 @@ internal struct RynthCoreAPI
     /// creates new stacks instead of merging, so AutoStack must use this entry point.
     /// </summary>
     public IntPtr MergeStackInternalFn;
+
+    /// <summary>
+    /// Function pointer: int GetCurrentCombatMode()
+    /// Reads the current combat mode directly from ClientCombatSystem in AC memory.
+    /// Returns 1=NonCombat, 2=Melee, 4=Missile, 8=Magic.
+    /// </summary>
+    public IntPtr GetCurrentCombatModeFn;
+
+    /// <summary>
+    /// Function pointer: int SalvagePanelOpen(uint toolId)
+    /// Calls CM_Inventory::SendNotice_OpenSalvagePanel to open the salvage panel
+    /// for the given salvage tool. Returns 1 on success. The panel opens
+    /// asynchronously — wait ~400 ms before calling SalvagePanelAddItem.
+    /// </summary>
+    public IntPtr SalvagePanelOpenFn;
+
+    /// <summary>
+    /// Function pointer: int SalvagePanelAddItem(uint itemId)
+    /// Calls gmSalvageUI::AddNewItem to add an item to the open salvage panel.
+    /// Requires the panel to have been opened at least once.
+    /// Returns 1 on success, 0 if the gmSalvageUI instance is not yet captured.
+    /// </summary>
+    public IntPtr SalvagePanelAddItemFn;
+
+    /// <summary>
+    /// Function pointer: int SalvagePanelExecute()
+    /// Calls gmSalvageUI::Salvage to execute the salvage operation.
+    /// Requires the panel to have been opened at least once.
+    /// Returns 1 on success, 0 if the gmSalvageUI instance is not yet captured.
+    /// </summary>
+    public IntPtr SalvagePanelExecuteFn;
+
+    /// <summary>
+    /// Function pointer: float GetVitae(uint playerId)
+    /// Returns the player's vitae multiplier via CACQualities::GetVitaeValue.
+    /// 1.0 = no vitae, 0.95 = 5% penalty. Returns 1.0 if unavailable.
+    /// </summary>
+    public IntPtr GetVitaeFn;
+
+    /// <summary>
+    /// Function pointer: const char* GetAccountName()
+    /// Returns a pointer to the cached ANSI account name string, or IntPtr.Zero if not available.
+    /// The pointer is valid until the next call.
+    /// </summary>
+    public IntPtr GetAccountNameFn;
+
+    /// <summary>
+    /// Function pointer: const char* GetWorldName()
+    /// Returns a pointer to the cached UTF-8 world/server name string, or IntPtr.Zero if not available.
+    /// The pointer is valid until the next call.
+    /// </summary>
+    public IntPtr GetWorldNameFn;
+
+    /// <summary>
+    /// Function pointer: uint GetObjectWcid(uint objectId)
+    /// Returns the Weenie Class ID (WCID) from PublicWeenieDesc._wcid for the given object.
+    /// Returns 0 if the object is not found or the phys_obj offset is not yet probed.
+    /// </summary>
+    public IntPtr GetObjectWcidFn;
 }
 
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 34;
+    public const uint Current = 40;
 }
 
 internal static class ClientActionHookFlags
@@ -432,6 +494,9 @@ internal delegate int NativeAttackCallbackDelegate(int attackHeight, float power
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int IsPlayerReadyCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int IsPortalingCallbackDelegate();
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void SetFpsLimitCallbackDelegate(int enabled, int focusedFps, int backgroundFps);
@@ -615,3 +680,27 @@ internal unsafe delegate int GetContainerContentsCallbackDelegate(uint container
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int GetObjectOwnershipInfoCallbackDelegate(uint objectId, uint* containerID, uint* wielderID, uint* location);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int GetCurrentCombatModeCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int SalvagePanelOpenCallbackDelegate(uint toolId);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int SalvagePanelAddItemCallbackDelegate(uint itemId);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int SalvagePanelExecuteCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate float GetVitaeCallbackDelegate(uint playerId);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate IntPtr GetAccountNameCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate IntPtr GetWorldNameCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate uint GetObjectWcidCallbackDelegate(uint objectId);

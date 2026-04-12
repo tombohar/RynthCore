@@ -270,6 +270,10 @@ public static class EntryPoint
             RunInitStep("logo bypass", LogoBypassHooks.Start);
             RunInitStep("busy-count hooks", BusyCountHooks.Initialize);
             RunInitStep("combat-mode hooks", CombatModeHooks.Initialize);
+            RunInitStep("teleport-state hooks", TeleportStateHooks.Initialize);
+            RunInitStep("salvage hooks", SalvageHooks.Initialize);
+            RunInitStep("appraisal hooks", AppraisalHooks.Initialize);
+            RunInitStep("account hooks", AccountHooks.Initialize);
             RunInitStep("client combat hooks", () => ClientCombatHooks.Probe());
             RunInitStep("selected-target hooks", SelectedTargetHooks.Initialize);
             RunInitStep("smartbox hooks", SmartBoxHooks.Initialize);

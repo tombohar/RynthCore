@@ -19,8 +19,35 @@ internal static class CombatModeHooks
     private static string _statusMessage = "Not probed yet.";
     private static int _lastObservedCombatMode;
 
+    // ClientCombatSystem::s_pCombatSystem — pointer to the singleton in .data
+    private const uint CombatSystemPtrVa = 0x0087166C;
+    // Offset of combatMode (COMBAT_MODE) within ClientCombatSystem:
+    //   ClientSystem(8) + IInputActionCallback(4) + QualityChangeHandler(4)
+    //   + Turbine_RefCount(8) + jump_pending(1) + m_bTrackingTarget(1) + pad(2) = 28
+    private const int CombatModeOffset = 28;
+
     public static bool IsInstalled { get; private set; }
     public static string StatusMessage => _statusMessage;
+
+    /// <summary>
+    /// Reads the current combat mode directly from ClientCombatSystem::combatMode.
+    /// Returns NonCombat if the pointer is null or unreadable.
+    /// </summary>
+    public static unsafe int ReadCurrentCombatMode()
+    {
+        try
+        {
+            IntPtr combatSystem = *(IntPtr*)CombatSystemPtrVa;
+            if (combatSystem == IntPtr.Zero)
+                return CombatActionHooks.CombatModeNonCombat;
+            int raw = *(int*)(combatSystem + CombatModeOffset);
+            return NormalizeCombatMode(raw);
+        }
+        catch
+        {
+            return CombatActionHooks.CombatModeNonCombat;
+        }
+    }
 
     public static void Initialize()
     {

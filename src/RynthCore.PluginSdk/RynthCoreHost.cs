@@ -5,7 +5,7 @@ namespace RynthCore.PluginSdk;
 
 public readonly unsafe struct RynthCoreHost
 {
-    public const uint CurrentApiVersion = 32;
+    public const uint CurrentApiVersion = 40;
 
     private readonly RynthCoreApiNative _api;
 
@@ -50,6 +50,11 @@ public readonly unsafe struct RynthCoreHost
     public bool HasMergeStackInternal => _api.MergeStackInternalFn != IntPtr.Zero;
     public bool HasWriteToChat => _api.WriteToChatFn != IntPtr.Zero;
     public bool HasGetPlayerPose => _api.GetPlayerPoseFn != IntPtr.Zero;
+    public bool HasIsPortaling      => _api.IsPortalingFn      != IntPtr.Zero;
+    public bool HasGetVitae         => _api.GetVitaeFn         != IntPtr.Zero;
+    public bool HasGetAccountName   => _api.GetAccountNameFn   != IntPtr.Zero;
+    public bool HasGetWorldName     => _api.GetWorldNameFn     != IntPtr.Zero;
+    public bool HasGetObjectWcid    => _api.GetObjectWcidFn    != IntPtr.Zero;
     public bool HasSetMotion => _api.SetMotionFn != IntPtr.Zero;
     public bool HasStopCompletely => _api.StopCompletelyFn != IntPtr.Zero;
     public bool HasTurnToHeading => _api.TurnToHeadingFn != IntPtr.Zero;
@@ -81,6 +86,8 @@ public readonly unsafe struct RynthCoreHost
     public bool HasSetFpsLimit => _api.SetFpsLimitFn != IntPtr.Zero;
     public bool HasGetContainerContents => _api.GetContainerContentsFn != IntPtr.Zero;
     public bool HasGetObjectOwnershipInfo => _api.GetObjectOwnershipInfoFn != IntPtr.Zero;
+    public bool HasGetCurrentCombatMode => _api.GetCurrentCombatModeFn != IntPtr.Zero;
+    public bool HasSalvagePanel => _api.SalvagePanelOpenFn != IntPtr.Zero && _api.SalvagePanelAddItemFn != IntPtr.Zero && _api.SalvagePanelExecuteFn != IntPtr.Zero;
 
     // ─── Methods ────────────────────────────────────────────────────────────
 
@@ -120,6 +127,29 @@ public readonly unsafe struct RynthCoreHost
         return _api.ChangeCombatModeFn != IntPtr.Zero &&
                ((delegate* unmanaged[Cdecl]<int, int>)_api.ChangeCombatModeFn)(combatMode) != 0;
     }
+
+    /// <summary>Reads the current combat mode directly from AC client memory (1=NonCombat 2=Melee 4=Missile 8=Magic).</summary>
+    public int GetCurrentCombatMode()
+    {
+        return _api.GetCurrentCombatModeFn != IntPtr.Zero
+            ? ((delegate* unmanaged[Cdecl]<int>)_api.GetCurrentCombatModeFn)()
+            : 1; // NonCombat fallback
+    }
+
+    /// <summary>Open the salvage panel for the given salvage tool (async — wait ~400 ms before adding items).</summary>
+    public bool SalvagePanelOpen(uint toolId)
+        => _api.SalvagePanelOpenFn != IntPtr.Zero &&
+           ((delegate* unmanaged[Cdecl]<uint, int>)_api.SalvagePanelOpenFn)(toolId) != 0;
+
+    /// <summary>Add an item to the open salvage panel. Requires the panel to have been opened at least once.</summary>
+    public bool SalvagePanelAddItem(uint itemId)
+        => _api.SalvagePanelAddItemFn != IntPtr.Zero &&
+           ((delegate* unmanaged[Cdecl]<uint, int>)_api.SalvagePanelAddItemFn)(itemId) != 0;
+
+    /// <summary>Execute the salvage operation (equivalent to clicking the Salvage button).</summary>
+    public bool SalvagePanelExecute()
+        => _api.SalvagePanelExecuteFn != IntPtr.Zero &&
+           ((delegate* unmanaged[Cdecl]<int>)_api.SalvagePanelExecuteFn)() != 0;
 
     public bool CancelAttack()
     {
@@ -383,6 +413,46 @@ public readonly unsafe struct RynthCoreHost
                 qyPtr,
                 qzPtr) != 0;
         }
+    }
+
+    public bool IsPortaling()
+    {
+        if (_api.IsPortalingFn == IntPtr.Zero) return false;
+        return ((delegate* unmanaged[Cdecl]<int>)_api.IsPortalingFn)() != 0;
+    }
+
+    public float GetVitae(uint playerId)
+    {
+        if (_api.GetVitaeFn == IntPtr.Zero) return 1.0f;
+        return ((delegate* unmanaged[Cdecl]<uint, float>)_api.GetVitaeFn)(playerId);
+    }
+
+    public bool TryGetAccountName(out string name)
+    {
+        name = string.Empty;
+        if (_api.GetAccountNameFn == IntPtr.Zero) return false;
+        IntPtr ptr = ((delegate* unmanaged[Cdecl]<IntPtr>)_api.GetAccountNameFn)();
+        if (ptr == IntPtr.Zero) return false;
+        name = Marshal.PtrToStringAnsi(ptr) ?? string.Empty;
+        return !string.IsNullOrEmpty(name);
+    }
+
+    public bool TryGetWorldName(out string name)
+    {
+        name = string.Empty;
+        if (_api.GetWorldNameFn == IntPtr.Zero) return false;
+        IntPtr ptr = ((delegate* unmanaged[Cdecl]<IntPtr>)_api.GetWorldNameFn)();
+        if (ptr == IntPtr.Zero) return false;
+        name = Marshal.PtrToStringAnsi(ptr) ?? string.Empty;
+        return !string.IsNullOrEmpty(name);
+    }
+
+    public bool TryGetObjectWcid(uint objectId, out uint wcid)
+    {
+        wcid = 0;
+        if (_api.GetObjectWcidFn == IntPtr.Zero) return false;
+        wcid = ((delegate* unmanaged[Cdecl]<uint, uint>)_api.GetObjectWcidFn)(objectId);
+        return wcid != 0;
     }
 
     public bool TryGetObjectName(uint objectId, out string name)
