@@ -66,6 +66,9 @@ public struct RynthCoreApiNative
     public IntPtr Nav3DAddLineFn;
     public IntPtr InvokeChatParserFn;
     public IntPtr GetObjectDoublePropertyFn;
+    public IntPtr GetObjectQuadPropertyFn;
+    public IntPtr GetObjectAttribute2ndBaseLevelFn;
+    public IntPtr GetPlayerBaseVitalsFn;
     public IntPtr GetObjectStringPropertyFn;
     public IntPtr GetObjectWielderInfoFn;
     public IntPtr NativeAttackFn;
@@ -83,4 +86,11 @@ public struct RynthCoreApiNative
     public IntPtr GetAccountNameFn;
     public IntPtr GetWorldNameFn;
     public IntPtr GetObjectWcidFn;
+    public IntPtr HasAppraisalDataFn;
+    public IntPtr GetLastIdTimeFn;
+    public IntPtr GetObjectHeadingFn;
+    public IntPtr GetBusyStateFn;
+    public IntPtr GetObjectSpellIdsFn;
+    public IntPtr GetObjectSkillBuffedFn;
+    public IntPtr GetObjectAttributeFn;
 }

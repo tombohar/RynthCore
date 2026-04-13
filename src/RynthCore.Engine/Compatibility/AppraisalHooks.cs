@@ -53,12 +53,38 @@ internal static class AppraisalHooks
     private static bool _hookInstalled;
     private static string _statusMessage = "Not initialized.";
 
+    // Tracks every guid for which we've received a SendNotice_SetAppraiseInfo (has assess data)
+    private static readonly HashSet<uint> _appraisedGuids = new();
+    // Unix timestamp (seconds) of last appraisal receipt per guid
+    private static readonly Dictionary<uint, long> _lastIdTime = new();
     // Bool property cache: guid → (stype → value)
     private static readonly Dictionary<uint, Dictionary<uint, bool>> _boolCache = new();
+    // String property cache: guid → (stype → value)
+    private static readonly Dictionary<uint, Dictionary<uint, string>> _stringCache = new();
+    // Spell book cache: guid → spell ID array (from AppraisalProfile._spellBook PSmartArray<UInt32> at +0x30)
+    private static readonly Dictionary<uint, uint[]> _spellIdCache = new();
     private static readonly object _cacheLock = new();
 
     public static bool IsInstalled => _hookInstalled;
     public static string StatusMessage => _statusMessage;
+
+    /// <summary>
+    /// Returns true if a SendNotice_SetAppraiseInfo has been received for this guid this session.
+    /// </summary>
+    public static bool HasAppraisalData(uint guid)
+    {
+        lock (_cacheLock)
+            return _appraisedGuids.Contains(guid);
+    }
+
+    /// <summary>
+    /// Returns the Unix timestamp (seconds) of when appraisal data was last received for this guid, or 0 if never.
+    /// </summary>
+    public static long GetLastIdTime(uint guid)
+    {
+        lock (_cacheLock)
+            return _lastIdTime.TryGetValue(guid, out long t) ? t : 0L;
+    }
 
     /// <summary>
     /// Returns a bool property from the last server appraisal for this object.
@@ -72,6 +98,21 @@ internal static class AppraisalHooks
             if (!_boolCache.TryGetValue(guid, out Dictionary<uint, bool>? props))
                 return false;
             return props.TryGetValue(stype, out value);
+        }
+    }
+
+    /// <summary>
+    /// Returns a string property from the last server appraisal for this object.
+    /// Only populated after the player has identified the item (RequestId).
+    /// </summary>
+    public static bool TryGetCachedStringProperty(uint guid, uint stype, out string value)
+    {
+        value = string.Empty;
+        lock (_cacheLock)
+        {
+            if (!_stringCache.TryGetValue(guid, out Dictionary<uint, string>? props))
+                return false;
+            return props.TryGetValue(stype, out value!);
         }
     }
 
@@ -128,6 +169,12 @@ internal static class AppraisalHooks
         // Call original first — notification fires, profile is still live in our frame
         int result = _originalSendNotice!(guid, profilePtr);
 
+        lock (_cacheLock)
+        {
+            _appraisedGuids.Add(guid);
+            _lastIdTime[guid] = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        }
+
         try
         {
             CacheBoolProps(guid, profilePtr);
@@ -135,6 +182,24 @@ internal static class AppraisalHooks
         catch (Exception ex)
         {
             try { RynthLog.Compat($"Compat: appraisal bool cache error guid=0x{guid:X8} - {ex.GetType().Name}: {ex.Message}"); } catch { }
+        }
+
+        try
+        {
+            CacheStringProps(guid, profilePtr);
+        }
+        catch (Exception ex)
+        {
+            try { RynthLog.Compat($"Compat: appraisal string cache error guid=0x{guid:X8} - {ex.GetType().Name}: {ex.Message}"); } catch { }
+        }
+
+        try
+        {
+            CacheSpellIds(guid, profilePtr);
+        }
+        catch (Exception ex)
+        {
+            try { RynthLog.Compat($"Compat: appraisal spell cache error guid=0x{guid:X8} - {ex.GetType().Name}: {ex.Message}"); } catch { }
         }
 
         return result;
@@ -180,5 +245,111 @@ internal static class AppraisalHooks
         }
 
         RynthLog.Compat($"Compat: cached {props.Count} bool prop(s) for guid=0x{guid:X8}");
+    }
+
+    private static void CacheStringProps(uint guid, IntPtr profilePtr)
+    {
+        if (profilePtr == IntPtr.Zero)
+            return;
+
+        // AppraisalProfile._strStatsTable* is at offset +0x28
+        IntPtr strTablePtr = Marshal.ReadIntPtr(profilePtr + 0x28);
+        if (strTablePtr == IntPtr.Zero)
+            return;
+
+        // PackableHashTable<uint, PStringBase<char>>: bucket_array at +0x8, bucket_count at +0xC
+        IntPtr bucketArray = Marshal.ReadIntPtr(strTablePtr + 0x08);
+        int bucketCount = Marshal.ReadInt32(strTablePtr + 0x0C);
+
+        if (bucketArray == IntPtr.Zero || bucketCount <= 0 || bucketCount > 65536)
+            return;
+
+        var props = new Dictionary<uint, string>(4);
+
+        for (int i = 0; i < bucketCount; i++)
+        {
+            IntPtr node = Marshal.ReadIntPtr(bucketArray + i * 4);
+            while (node != IntPtr.Zero)
+            {
+                uint key = (uint)Marshal.ReadInt32(node);
+
+                // Node value at +4: PStringBase<char>.m_buffer (PSRefBuffer<char>*)
+                // PSRefBuffer<char> layout: vtable(4) + m_cRef(4) + m_len(4) + m_size(4) + m_hash(4) + m_data[]
+                IntPtr bufferPtr = Marshal.ReadIntPtr(node + 4);
+                if (bufferPtr != IntPtr.Zero)
+                {
+                    int len = Marshal.ReadInt32(bufferPtr + 8);
+                    if (len > 1)
+                    {
+                        string? str = Marshal.PtrToStringAnsi(bufferPtr + 20, len - 1);
+                        if (!string.IsNullOrEmpty(str))
+                            props[key] = str;
+                    }
+                }
+
+                node = Marshal.ReadIntPtr(node + 8);
+            }
+        }
+
+        if (props.Count == 0)
+            return;
+
+        lock (_cacheLock)
+        {
+            _stringCache[guid] = props;
+        }
+
+        RynthLog.Compat($"Compat: cached {props.Count} string prop(s) for guid=0x{guid:X8}");
+    }
+
+    private static void CacheSpellIds(uint guid, IntPtr profilePtr)
+    {
+        if (profilePtr == IntPtr.Zero)
+            return;
+
+        // AppraisalProfile._spellBook (PSmartArray<UInt32>*) is at offset +0x30
+        // PSmartArray layout: +0x00 vtable, +0x04 m_data*, +0x08 m_sizeAndDeallocate, +0x0C m_num
+        IntPtr spellBookPtr = Marshal.ReadIntPtr(profilePtr + 0x30);
+        if (spellBookPtr == IntPtr.Zero)
+            return;
+
+        IntPtr mData = Marshal.ReadIntPtr(spellBookPtr + 0x04);
+        int mNum = Marshal.ReadInt32(spellBookPtr + 0x0C);
+
+        if (mNum == 0)
+        {
+            RynthLog.Compat($"Compat: guid=0x{guid:X8} spell book present but empty (mNum=0)");
+            return;
+        }
+        if (mData == IntPtr.Zero || mNum < 0 || mNum > 512)
+        {
+            RynthLog.Compat($"Compat: guid=0x{guid:X8} spell book invalid (mData=0x{mData.ToInt32():X8} mNum={mNum})");
+            return;
+        }
+
+        var ids = new uint[mNum];
+        for (int i = 0; i < mNum; i++)
+            ids[i] = (uint)Marshal.ReadInt32(mData + i * 4);
+
+        lock (_cacheLock)
+            _spellIdCache[guid] = ids;
+
+        RynthLog.Compat($"Compat: cached {mNum} spell ID(s) for guid=0x{guid:X8}");
+    }
+
+    /// <summary>
+    /// Fills <paramref name="output"/> with spell IDs from the last appraisal spell book.
+    /// Returns the total number of spell IDs (may exceed <paramref name="maxCount"/>), or -1 if no data.
+    /// </summary>
+    public static int GetObjectSpellIds(uint guid, uint[] output, int maxCount)
+    {
+        lock (_cacheLock)
+        {
+            if (!_spellIdCache.TryGetValue(guid, out uint[]? cached))
+                return -1;
+            int count = Math.Min(cached.Length, Math.Min(maxCount, output.Length));
+            Array.Copy(cached, output, count);
+            return cached.Length;
+        }
     }
 }

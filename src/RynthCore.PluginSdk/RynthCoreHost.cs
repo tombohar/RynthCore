@@ -54,7 +54,12 @@ public readonly unsafe struct RynthCoreHost
     public bool HasGetVitae         => _api.GetVitaeFn         != IntPtr.Zero;
     public bool HasGetAccountName   => _api.GetAccountNameFn   != IntPtr.Zero;
     public bool HasGetWorldName     => _api.GetWorldNameFn     != IntPtr.Zero;
-    public bool HasGetObjectWcid    => _api.GetObjectWcidFn    != IntPtr.Zero;
+    public bool HasGetObjectWcid       => _api.GetObjectWcidFn       != IntPtr.Zero;
+    public bool HasHasAppraisalData    => _api.HasAppraisalDataFn    != IntPtr.Zero;
+    public bool HasGetLastIdTime       => _api.GetLastIdTimeFn       != IntPtr.Zero;
+    public bool HasGetObjectHeading    => _api.GetObjectHeadingFn    != IntPtr.Zero;
+    public bool HasGetBusyState        => _api.GetBusyStateFn        != IntPtr.Zero;
+    public bool HasGetObjectSpellIds   => _api.GetObjectSpellIdsFn   != IntPtr.Zero;
     public bool HasSetMotion => _api.SetMotionFn != IntPtr.Zero;
     public bool HasStopCompletely => _api.StopCompletelyFn != IntPtr.Zero;
     public bool HasTurnToHeading => _api.TurnToHeadingFn != IntPtr.Zero;
@@ -79,6 +84,9 @@ public readonly unsafe struct RynthCoreHost
     public bool HasNav3D => _api.Nav3DClearFn != IntPtr.Zero && _api.Nav3DAddRingFn != IntPtr.Zero && _api.Nav3DAddLineFn != IntPtr.Zero;
     public bool HasInvokeChatParser => _api.InvokeChatParserFn != IntPtr.Zero;
     public bool HasGetObjectDoubleProperty => _api.GetObjectDoublePropertyFn != IntPtr.Zero;
+    public bool HasGetObjectQuadProperty => _api.GetObjectQuadPropertyFn != IntPtr.Zero;
+    public bool HasGetObjectAttribute2ndBaseLevel => _api.GetObjectAttribute2ndBaseLevelFn != IntPtr.Zero;
+    public bool HasGetPlayerBaseVitals => _api.GetPlayerBaseVitalsFn != IntPtr.Zero;
     public bool HasGetObjectStringProperty => _api.GetObjectStringPropertyFn != IntPtr.Zero;
     public bool HasGetObjectWielderInfo => _api.GetObjectWielderInfoFn != IntPtr.Zero;
     public bool HasNativeAttack => _api.NativeAttackFn != IntPtr.Zero;
@@ -455,6 +463,32 @@ public readonly unsafe struct RynthCoreHost
         return wcid != 0;
     }
 
+    public bool HasAppraisalData(uint objectId)
+    {
+        if (_api.HasAppraisalDataFn == IntPtr.Zero) return false;
+        return ((delegate* unmanaged[Cdecl]<uint, int>)_api.HasAppraisalDataFn)(objectId) != 0;
+    }
+
+    public long GetLastIdTime(uint objectId)
+    {
+        if (_api.GetLastIdTimeFn == IntPtr.Zero) return 0L;
+        return ((delegate* unmanaged[Cdecl]<uint, long>)_api.GetLastIdTimeFn)(objectId);
+    }
+
+    public bool TryGetObjectHeading(uint objectId, out float headingDegrees)
+    {
+        headingDegrees = 0;
+        if (_api.GetObjectHeadingFn == IntPtr.Zero) return false;
+        fixed (float* hPtr = &headingDegrees)
+            return ((delegate* unmanaged[Cdecl]<uint, float*, int>)_api.GetObjectHeadingFn)(objectId, hPtr) != 0;
+    }
+
+    public int GetBusyState()
+    {
+        if (_api.GetBusyStateFn == IntPtr.Zero) return 0;
+        return ((delegate* unmanaged[Cdecl]<int>)_api.GetBusyStateFn)();
+    }
+
     public bool TryGetObjectName(uint objectId, out string name)
     {
         name = string.Empty;
@@ -612,6 +646,27 @@ public readonly unsafe struct RynthCoreHost
         }
     }
 
+    public bool HasGetObjectSkillBuffed => _api.GetObjectSkillBuffedFn != IntPtr.Zero;
+
+    /// <summary>raw=0 → buffed (with enchantments), raw=1 → base (no enchantments, includes attribute contribution).</summary>
+    public bool TryGetObjectSkillLevel(uint objectId, uint skillStype, int raw, out int level)
+    {
+        level = 0;
+        if (_api.GetObjectSkillBuffedFn == IntPtr.Zero) return false;
+        fixed (int* p = &level)
+            return ((delegate* unmanaged[Cdecl]<uint, uint, int, int*, int>)_api.GetObjectSkillBuffedFn)(objectId, skillStype, raw, p) != 0;
+    }
+
+    public bool HasGetObjectAttribute => _api.GetObjectAttributeFn != IntPtr.Zero;
+
+    public bool TryGetObjectAttribute(uint objectId, uint stype, int raw, out uint value)
+    {
+        value = 0;
+        if (_api.GetObjectAttributeFn == IntPtr.Zero) return false;
+        fixed (uint* p = &value)
+            return ((delegate* unmanaged[Cdecl]<uint, uint, int, uint*, int>)_api.GetObjectAttributeFn)(objectId, stype, raw, p) != 0;
+    }
+
     public bool IsSpellKnown(uint objectId, uint spellId, out bool known)
     {
         known = true;
@@ -719,6 +774,29 @@ public readonly unsafe struct RynthCoreHost
         }
     }
 
+    public int GetObjectSpellIds(uint objectId, uint[] spellIds, int maxCount)
+    {
+        if (_api.GetObjectSpellIdsFn == IntPtr.Zero || spellIds == null || maxCount <= 0)
+            return -1;
+
+        IntPtr spellBuf = Marshal.AllocHGlobal(maxCount * sizeof(uint));
+        try
+        {
+            int result = ((delegate* unmanaged[Cdecl]<uint, uint*, int, int>)_api.GetObjectSpellIdsFn)(
+                objectId, (uint*)spellBuf, maxCount);
+
+            int count = result > 0 ? Math.Min(result, Math.Min(maxCount, spellIds.Length)) : 0;
+            uint* sp = (uint*)spellBuf;
+            for (int i = 0; i < count; i++)
+                spellIds[i] = sp[i];
+            return result;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(spellBuf);
+        }
+    }
+
     // ─── World projection & viewport ────────────────────────────────────────
 
     public bool WorldToScreen(float worldX, float worldY, float worldZ, out float screenX, out float screenY)
@@ -792,6 +870,44 @@ public readonly unsafe struct RynthCoreHost
     }
 
     // ─── Extended object properties ─────────────────────────────────────────
+
+    public bool TryGetObjectAttribute2ndBaseLevel(uint objectId, uint stype2nd, out uint value)
+    {
+        value = 0;
+        if (_api.GetObjectAttribute2ndBaseLevelFn == IntPtr.Zero)
+            return false;
+
+        fixed (uint* valuePtr = &value)
+        {
+            return ((delegate* unmanaged[Cdecl]<uint, uint, uint*, int>)_api.GetObjectAttribute2ndBaseLevelFn)(objectId, stype2nd, valuePtr) != 0;
+        }
+    }
+
+    public bool TryGetPlayerBaseVitals(out uint baseMaxHp, out uint baseMaxStam, out uint baseMaxMana)
+    {
+        baseMaxHp = baseMaxStam = baseMaxMana = 0;
+        if (_api.GetPlayerBaseVitalsFn == IntPtr.Zero)
+            return false;
+
+        fixed (uint* hpPtr = &baseMaxHp)
+        fixed (uint* stamPtr = &baseMaxStam)
+        fixed (uint* manaPtr = &baseMaxMana)
+        {
+            return ((delegate* unmanaged[Cdecl]<uint*, uint*, uint*, int>)_api.GetPlayerBaseVitalsFn)(hpPtr, stamPtr, manaPtr) != 0;
+        }
+    }
+
+    public bool TryGetObjectQuadProperty(uint objectId, uint stype, out long value)
+    {
+        value = 0;
+        if (_api.GetObjectQuadPropertyFn == IntPtr.Zero)
+            return false;
+
+        fixed (long* valuePtr = &value)
+        {
+            return ((delegate* unmanaged[Cdecl]<uint, uint, long*, int>)_api.GetObjectQuadPropertyFn)(objectId, stype, valuePtr) != 0;
+        }
+    }
 
     public bool TryGetObjectDoubleProperty(uint objectId, uint stype, out double value)
     {

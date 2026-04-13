@@ -170,7 +170,8 @@ internal struct RynthCoreAPI
     /// <summary>Function pointer: int ObjectIsAttackable(uint objectId) — calls ClientCombatSystem::ObjectIsAttackable, returns 1 if attackable</summary>
     public IntPtr ObjectIsAttackableFn;
 
-    /// <summary>Function pointer: int GetObjectSkill(uint objectId, uint skillStype, int* buffed, int* training)</summary>
+    /// <summary>Function pointer: int GetObjectSkill(uint objectId, uint skillStype, int* base, int* training)
+    /// base = InitialLevel + LevelFromPracticePoints (no enchantments). training: 0=Unusable,1=Untrained,2=Trained,3=Specialized.</summary>
     public IntPtr GetObjectSkillFn;
 
     /// <summary>Function pointer: int IsSpellKnown(uint objectId, uint spellId) — returns 1 if in spell book</summary>
@@ -243,6 +244,29 @@ internal struct RynthCoreAPI
     /// Returns 1 on success, 0 if undefined.
     /// </summary>
     public IntPtr GetObjectDoublePropertyFn;
+
+    /// <summary>
+    /// Function pointer: int GetObjectQuadProperty(uint objectId, uint stype, __int64* value)
+    /// Reads an STypeInt64 (quad) property from any game object.
+    /// Returns 1 on success, 0 if undefined.
+    /// </summary>
+    public IntPtr GetObjectQuadPropertyFn;
+
+    /// <summary>
+    /// Function pointer: int GetObjectAttribute2ndBaseLevel(uint objectId, uint stype2nd, ulong* value)
+    /// Reads the unbuffed base maximum vital via CACQualities::InqAttribute2ndBaseLevel.
+    /// stype2nd: 1=MAX_HEALTH, 3=MAX_STAMINA, 5=MAX_MANA.
+    /// Returns 1 on success, 0 if unavailable.
+    /// </summary>
+    public IntPtr GetObjectAttribute2ndBaseLevelFn;
+
+    /// <summary>
+    /// Function pointer: int GetPlayerBaseVitals(uint* baseMaxHp, uint* baseMaxStam, uint* baseMaxMana)
+    /// Returns unbuffed base maximum vitals via InqAttribute2ndStruct(_initLevel + _levelFromCp).
+    /// Excludes spell enchantments; includes base training, gear, and augmentations.
+    /// Returns 1 on success, 0 if player qualities not yet available.
+    /// </summary>
+    public IntPtr GetPlayerBaseVitalsFn;
 
     /// <summary>
     /// Function pointer: IntPtr GetObjectStringProperty(uint objectId, uint stype)
@@ -363,12 +387,55 @@ internal struct RynthCoreAPI
     /// Returns 0 if the object is not found or the phys_obj offset is not yet probed.
     /// </summary>
     public IntPtr GetObjectWcidFn;
+
+    /// <summary>
+    /// Function pointer: int HasAppraisalData(uint objectId)
+    /// Returns 1 if a SendNotice_SetAppraiseInfo has been received for this guid this session, 0 otherwise.
+    /// </summary>
+    public IntPtr HasAppraisalDataFn;
+
+    /// <summary>
+    /// Function pointer: long GetLastIdTime(uint objectId)
+    /// Returns the Unix timestamp (seconds) of the last appraisal receipt for this guid, or 0 if never.
+    /// </summary>
+    public IntPtr GetLastIdTimeFn;
+
+    /// <summary>
+    /// Function pointer: int GetObjectHeading(uint objectId, float* headingDegrees)
+    /// Returns the object's facing direction (0–360°, clockwise, 0=North). Returns 1 on success, 0 on failure.
+    /// </summary>
+    public IntPtr GetObjectHeadingFn;
+
+    /// <summary>
+    /// Function pointer: int GetBusyState()
+    /// Returns 0 if the character is idle, positive if a UI action is in progress.
+    /// </summary>
+    public IntPtr GetBusyStateFn;
+
+    /// <summary>
+    /// Function pointer: int GetObjectSpellIds(uint objectId, uint* spellIds, int maxCount)
+    /// Fills spellIds with the spell book IDs from the last server appraisal for this object.
+    /// Returns total count (may exceed maxCount), or -1 if no appraisal data is cached.
+    /// Requires the player to have identified (RequestId) the object this session.
+    /// </summary>
+    public IntPtr GetObjectSpellIdsFn;
+
+    /// <summary>Function pointer: int GetObjectSkillBuffed(uint objectId, uint skillStype, int* buffed)
+    /// Returns the live buffed skill level (with spell enchantments) via InqSkill(raw=0).</summary>
+    public IntPtr GetObjectSkillBuffedFn;
+
+    /// <summary>Function pointer: int GetObjectAttribute(uint objectId, uint stype, int raw, uint* value)
+    /// Reads a primary attribute via InqAttribute. raw=0→buffed, raw=1→base.
+    /// stype: 1=Strength, 2=Endurance, 3=Quickness, 4=Coordination, 5=Focus, 6=Self.</summary>
+    public IntPtr GetObjectAttributeFn;
 }
+
+
 
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 40;
+    public const uint Current = 46;
 }
 
 internal static class ClientActionHookFlags
@@ -672,6 +739,15 @@ internal delegate int InvokeChatParserCallbackDelegate(IntPtr textUtf16);
 internal unsafe delegate int GetObjectDoublePropertyCallbackDelegate(uint objectId, uint stype, double* value);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectQuadPropertyCallbackDelegate(uint objectId, uint stype, long* value);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectAttribute2ndBaseLevelCallbackDelegate(uint objectId, uint stype2nd, uint* value);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetPlayerBaseVitalsCallbackDelegate(uint* baseMaxHp, uint* baseMaxStam, uint* baseMaxMana);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate IntPtr GetObjectStringPropertyCallbackDelegate(uint objectId, uint stype);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -704,3 +780,24 @@ internal delegate IntPtr GetWorldNameCallbackDelegate();
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate uint GetObjectWcidCallbackDelegate(uint objectId);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int HasAppraisalDataCallbackDelegate(uint objectId);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate long GetLastIdTimeCallbackDelegate(uint objectId);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectHeadingCallbackDelegate(uint objectId, float* headingDegrees);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int GetBusyStateCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectSpellIdsCallbackDelegate(uint guid, uint* spellIds, int maxCount);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectSkillLevelCallbackDelegate(uint objectId, uint skillStype, int raw, int* level);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectAttributeCallbackDelegate(uint objectId, uint stype, int raw, uint* value);

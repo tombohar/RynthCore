@@ -149,6 +149,9 @@ internal static class PluginManager
     private static Nav3DAddLineCallbackDelegate? _nav3DAddLineCallback;
     private static InvokeChatParserCallbackDelegate? _invokeChatParserCallback;
     private static GetObjectDoublePropertyCallbackDelegate? _getObjectDoublePropertyCallback;
+    private static GetObjectQuadPropertyCallbackDelegate? _getObjectQuadPropertyCallback;
+    private static GetObjectAttribute2ndBaseLevelCallbackDelegate? _getObjectAttribute2ndBaseLevelCallback;
+    private static GetPlayerBaseVitalsCallbackDelegate? _getPlayerBaseVitalsCallback;
     private static GetObjectStringPropertyCallbackDelegate? _getObjectStringPropertyCallback;
     private static GetObjectWielderInfoCallbackDelegate? _getObjectWielderInfoCallback;
     private static NativeAttackCallbackDelegate? _nativeAttackCallback;
@@ -164,6 +167,13 @@ internal static class PluginManager
     private static GetAccountNameCallbackDelegate? _getAccountNameCallback;
     private static GetWorldNameCallbackDelegate? _getWorldNameCallback;
     private static GetObjectWcidCallbackDelegate? _getObjectWcidCallback;
+    private static HasAppraisalDataCallbackDelegate? _hasAppraisalDataCallback;
+    private static GetLastIdTimeCallbackDelegate? _getLastIdTimeCallback;
+    private static GetObjectHeadingCallbackDelegate? _getObjectHeadingCallback;
+    private static GetBusyStateCallbackDelegate? _getBusyStateCallback;
+    private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
+    private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
+    private static GetObjectAttributeCallbackDelegate? _getObjectAttributeCallback;
     private static IntPtr _accountNameScratchPtr;
     private static IntPtr _worldNameScratchPtr;
     [ThreadStatic] private static IntPtr _objectNameScratchPtr;
@@ -1569,6 +1579,9 @@ internal static class PluginManager
         _nav3DAddLineCallback ??= D3D9.Nav3DRenderer.Nav3DAddLineCallback;
         _invokeChatParserCallback ??= InvokeChatParser;
         _getObjectDoublePropertyCallback ??= GetObjectDoublePropertyAction;
+        _getObjectQuadPropertyCallback ??= GetObjectQuadPropertyAction;
+        _getObjectAttribute2ndBaseLevelCallback ??= GetObjectAttribute2ndBaseLevelAction;
+        _getPlayerBaseVitalsCallback ??= GetPlayerBaseVitalsAction;
         _getObjectStringPropertyCallback ??= GetObjectStringPropertyAction;
         _getObjectWielderInfoCallback ??= GetObjectWielderInfoAction;
         _nativeAttackCallback ??= NativeAttackAction;
@@ -1584,6 +1597,13 @@ internal static class PluginManager
         _getAccountNameCallback ??= GetAccountNameAction;
         _getWorldNameCallback ??= GetWorldNameAction;
         _getObjectWcidCallback ??= GetObjectWcidAction;
+        _hasAppraisalDataCallback ??= HasAppraisalDataAction;
+        _getLastIdTimeCallback ??= GetLastIdTimeAction;
+        _getObjectHeadingCallback ??= GetObjectHeadingAction;
+        _getBusyStateCallback ??= GetBusyStateAction;
+        _getObjectSpellIdsCallback ??= GetObjectSpellIdsAction;
+        _getObjectSkillBuffedCallback ??= GetObjectSkillLevelAction;
+        _getObjectAttributeCallback ??= GetObjectAttributeAction;
 
         _api.Version = PluginContractVersion.Current;
         _api.LogFn = Marshal.GetFunctionPointerForDelegate(_logCallback);
@@ -1642,6 +1662,9 @@ internal static class PluginManager
         _api.Nav3DAddLineFn = Marshal.GetFunctionPointerForDelegate(_nav3DAddLineCallback);
         _api.InvokeChatParserFn = Marshal.GetFunctionPointerForDelegate(_invokeChatParserCallback);
         _api.GetObjectDoublePropertyFn = Marshal.GetFunctionPointerForDelegate(_getObjectDoublePropertyCallback);
+        _api.GetObjectQuadPropertyFn = Marshal.GetFunctionPointerForDelegate(_getObjectQuadPropertyCallback);
+        _api.GetObjectAttribute2ndBaseLevelFn = Marshal.GetFunctionPointerForDelegate(_getObjectAttribute2ndBaseLevelCallback);
+        _api.GetPlayerBaseVitalsFn = Marshal.GetFunctionPointerForDelegate(_getPlayerBaseVitalsCallback);
         _api.GetObjectStringPropertyFn = Marshal.GetFunctionPointerForDelegate(_getObjectStringPropertyCallback);
         _api.GetObjectWielderInfoFn = Marshal.GetFunctionPointerForDelegate(_getObjectWielderInfoCallback);
         _api.NativeAttackFn = Marshal.GetFunctionPointerForDelegate(_nativeAttackCallback);
@@ -1659,6 +1682,13 @@ internal static class PluginManager
         _api.GetAccountNameFn = Marshal.GetFunctionPointerForDelegate(_getAccountNameCallback);
         _api.GetWorldNameFn = Marshal.GetFunctionPointerForDelegate(_getWorldNameCallback);
         _api.GetObjectWcidFn = Marshal.GetFunctionPointerForDelegate(_getObjectWcidCallback);
+        _api.HasAppraisalDataFn = Marshal.GetFunctionPointerForDelegate(_hasAppraisalDataCallback);
+        _api.GetLastIdTimeFn = Marshal.GetFunctionPointerForDelegate(_getLastIdTimeCallback);
+        _api.GetObjectHeadingFn = Marshal.GetFunctionPointerForDelegate(_getObjectHeadingCallback);
+        _api.GetBusyStateFn = Marshal.GetFunctionPointerForDelegate(_getBusyStateCallback);
+        _api.GetObjectSpellIdsFn = Marshal.GetFunctionPointerForDelegate(_getObjectSpellIdsCallback);
+        _api.GetObjectSkillBuffedFn = Marshal.GetFunctionPointerForDelegate(_getObjectSkillBuffedCallback);
+        _api.GetObjectAttributeFn = Marshal.GetFunctionPointerForDelegate(_getObjectAttributeCallback);
     }
 
     private static void ProbeClientHooks()
@@ -1779,6 +1809,35 @@ internal static class PluginManager
         return 1;
     }
 
+    private static unsafe int GetObjectQuadPropertyAction(uint objectId, uint stype, long* value)
+    {
+        if (!ClientObjectHooks.TryGetObjectQuadProperty(objectId, stype, out long v))
+            return 0;
+
+        *value = v;
+        return 1;
+    }
+
+    private static unsafe int GetObjectAttribute2ndBaseLevelAction(uint objectId, uint stype2nd, uint* value)
+    {
+        if (!ClientObjectHooks.TryGetObjectAttribute2ndBaseLevel(objectId, stype2nd, out uint v))
+            return 0;
+
+        *value = v;
+        return 1;
+    }
+
+    private static unsafe int GetPlayerBaseVitalsAction(uint* baseMaxHp, uint* baseMaxStam, uint* baseMaxMana)
+    {
+        if (!PlayerVitalsHooks.TryGetPlayerBaseVitals(out uint hp, out uint stam, out uint mana))
+            return 0;
+
+        *baseMaxHp = hp;
+        *baseMaxStam = stam;
+        *baseMaxMana = mana;
+        return 1;
+    }
+
     private static unsafe int GetObjectBoolPropertyAction(uint objectId, uint stype, int* value)
     {
         if (!ClientObjectHooks.TryGetObjectBoolProperty(objectId, stype, out bool v))
@@ -1860,6 +1919,22 @@ internal static class PluginManager
 
         *buffed = b;
         *training = t;
+        return 1;
+    }
+
+    private static unsafe int GetObjectSkillLevelAction(uint objectId, uint skillStype, int raw, int* level)
+    {
+        if (!ClientObjectHooks.TryGetObjectSkillLevel(objectId, skillStype, raw, out int v))
+            return 0;
+        *level = v;
+        return 1;
+    }
+
+    private static unsafe int GetObjectAttributeAction(uint objectId, uint stype, int raw, uint* value)
+    {
+        if (!ClientObjectHooks.TryGetObjectAttribute(objectId, stype, raw, out uint v))
+            return 0;
+        *value = v;
         return 1;
     }
 
@@ -2107,6 +2182,41 @@ internal static class PluginManager
     private static uint GetObjectWcidAction(uint objectId)
     {
         return ClientObjectHooks.TryGetObjectWcid(objectId, out uint wcid) ? wcid : 0u;
+    }
+
+    private static int HasAppraisalDataAction(uint objectId)
+    {
+        return AppraisalHooks.HasAppraisalData(objectId) ? 1 : 0;
+    }
+
+    private static long GetLastIdTimeAction(uint objectId)
+    {
+        return AppraisalHooks.GetLastIdTime(objectId);
+    }
+
+    private static unsafe int GetObjectHeadingAction(uint objectId, float* headingDegrees)
+    {
+        if (!ClientObjectHooks.TryGetObjectHeading(objectId, out float h))
+            return 0;
+        *headingDegrees = h;
+        return 1;
+    }
+
+    private static int GetBusyStateAction() => BusyCountHooks.GetBusyState();
+
+    private static unsafe int GetObjectSpellIdsAction(uint guid, uint* spellIds, int maxCount)
+    {
+        if (spellIds == null || maxCount <= 0)
+            return -1;
+        var output = new uint[maxCount];
+        int result = AppraisalHooks.GetObjectSpellIds(guid, output, maxCount);
+        if (result > 0)
+        {
+            int count = Math.Min(result, maxCount);
+            for (int i = 0; i < count; i++)
+                spellIds[i] = output[i];
+        }
+        return result;
     }
 
     private static unsafe int GetPlayerPose(

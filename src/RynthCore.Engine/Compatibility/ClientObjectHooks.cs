@@ -19,6 +19,15 @@ internal static class ClientObjectHooks
     // CBaseQualities::InqFloat(UInt32 stype, double* retval, int raw) — ThisCall
     private const int ReferenceInqFloat = 0x00590CD0;
 
+    // CBaseQualities::InqInt64(UInt32 stype, __int64* retval) — ThisCall
+    private const int ReferenceInqInt64 = 0x00590C70;
+
+    // CACQualities::InqAttribute2nd(ulong stype, uint* retval, int raw) — ThisCall on CACQualities* (no CBaseQualitiesOffset)
+    // stype: 1=MAX_HEALTH, 3=MAX_STAMINA, 5=MAX_MANA. raw=0 returns base+gear+aug (no spell enchants).
+    // Map: 00191D20 → live VA: 0x00592D20 (offset +0x401000)
+    private const int ReferenceInqAttribute2ndBaseLevel = 0x00592D20;
+
+
     // CBaseQualities::InqBool(UInt32 stype, int* retval) — ThisCall
     private const int ReferenceInqBool = 0x00590CA0;
 
@@ -49,6 +58,10 @@ internal static class ClientObjectHooks
     // CACQualities::InqSkillAdvancementClass(uint stype, SKILL_ADVANCEMENT_CLASS* retval)
     // SKILL_ADVANCEMENT_CLASS: UNDEF=0, UNTRAINED=1, TRAINED=2, SPECIALIZED=3
     private const int ReferenceInqSkillAdvancementClass = 0x00592B70;
+
+    // CACQualities::InqAttribute(uint stype, uint* retval, int raw) — raw=0→buffed, raw=1→base
+    // stype: 1=Strength, 2=Endurance, 3=Quickness, 4=Coordination, 5=Focus, 6=Self
+    private const int ReferenceInqAttribute = 0x00592700;
 
     // CACQualities::GetVitaeValue() — ThisCall, no args, returns float (1.0=no vitae, 0.95=5% penalty)
     // Map: 0018EE80 → live VA: 0x0058FE80
@@ -98,6 +111,8 @@ internal static class ClientObjectHooks
     // CPhysicsObj.m_position offset (same as PlayerPhysicsHooks.PhysicsPositionOffset)
     private const int PhysicsPositionOffset = 0x48;
     private const int PositionObjCellIdOffset = 0x04;
+    private const int PositionQwOffset = 0x08;
+    private const int PositionQzOffset = 0x14;
     private const int PositionOriginXOffset = 0x3C;
     private const int PositionOriginYOffset = 0x40;
     private const int PositionOriginZOffset = 0x44;
@@ -155,6 +170,15 @@ internal static class ClientObjectHooks
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private unsafe delegate int InqIntDelegate(IntPtr qualitiesPtr, uint stype, int* retval, int raw, int allowNegative);
 
+    // int __thiscall CBaseQualities::InqInt64(unsigned int stype, __int64* retval)
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private unsafe delegate int InqInt64Delegate(IntPtr qualitiesPtr, uint stype, long* retval);
+
+    // int __thiscall CACQualities::InqAttribute2nd(ulong stype, uint* retval, int raw)
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private unsafe delegate int InqAttribute2ndBaseLevelDelegate(IntPtr cacQualitiesPtr, uint stype, uint* retval, int raw);
+
+
     // int __thiscall CBaseQualities::InqFloat(unsigned int stype, double* retval, int raw)
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private unsafe delegate int InqFloatDelegate(IntPtr qualitiesPtr, uint stype, double* retval, int raw);
@@ -174,6 +198,10 @@ internal static class ClientObjectHooks
     // int __thiscall CACQualities::InqSkillAdvancementClass(unsigned int stype, int* retval)
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private unsafe delegate int InqSkillAdvancementClassDelegate(IntPtr qualitiesPtr, uint stype, int* retval);
+
+    // int __thiscall CACQualities::InqAttribute(unsigned int stype, unsigned int* retval, int raw)  raw=0→buffed, raw=1→base
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private unsafe delegate int InqAttributeDelegate(IntPtr qualitiesPtr, uint stype, uint* retval, int raw);
 
     // int __thiscall CACQualities::IsSpellKnown(uint spellId)
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
@@ -233,6 +261,8 @@ internal static class ClientObjectHooks
     private static GetObjectNameInstanceDelegate? _getObjectNameInstance;
     private static InqTypeDelegate? _inqType;
     private static InqIntDelegate? _inqInt;
+    private static InqInt64Delegate? _inqInt64;
+    private static InqAttribute2ndBaseLevelDelegate? _inqAttribute2ndBaseLevel;
     private static InqFloatDelegate? _inqFloat;
     private static InqBoolDelegate? _inqBool;
     private static InqStringDelegate? _inqString;
@@ -240,6 +270,7 @@ internal static class ClientObjectHooks
     private static ObjectIsAttackableDelegate? _objectIsAttackable;
     private static InqSkillLevelDelegate? _inqSkillLevel;
     private static InqSkillAdvancementClassDelegate? _inqSkillAdvancementClass;
+    private static InqAttributeDelegate? _inqAttribute;
     private static IsSpellKnownDelegate? _isSpellKnown;
     private static GetVitaeValueDelegate? _getVitaeValue;
     private static int _lookupLogCount;
@@ -269,13 +300,16 @@ internal static class ClientObjectHooks
                 _getObjectNameStatic = null;
                 _getObjectNameInstance = null;
                 _inqType = null;
-                _inqInt  = null;
-                _inqBool = null;
+                _inqInt   = null;
+                _inqInt64 = null;
+                _inqAttribute2ndBaseLevel = null;
+                _inqBool  = null;
                 _inqString = null;
                 _getCombatSystem = null;
                 _objectIsAttackable = null;
                 _inqSkillLevel = null;
                 _inqSkillAdvancementClass = null;
+                _inqAttribute = null;
                 _isSpellKnown = null;
             }
 
@@ -310,6 +344,8 @@ internal static class ClientObjectHooks
         _getObjectNameInstance = Marshal.GetDelegateForFunctionPointer<GetObjectNameInstanceDelegate>(getNameInstancePtr);
         _inqType = Marshal.GetDelegateForFunctionPointer<InqTypeDelegate>(new IntPtr(ReferenceInqType));
         _inqInt   = Marshal.GetDelegateForFunctionPointer<InqIntDelegate>(new IntPtr(ReferenceInqInt));
+        _inqInt64 = Marshal.GetDelegateForFunctionPointer<InqInt64Delegate>(new IntPtr(ReferenceInqInt64));
+        _inqAttribute2ndBaseLevel = Marshal.GetDelegateForFunctionPointer<InqAttribute2ndBaseLevelDelegate>(new IntPtr(ReferenceInqAttribute2ndBaseLevel));
         _inqFloat = Marshal.GetDelegateForFunctionPointer<InqFloatDelegate>(new IntPtr(ReferenceInqFloat));
         _inqBool  = Marshal.GetDelegateForFunctionPointer<InqBoolDelegate>(new IntPtr(ReferenceInqBool));
         _inqString = Marshal.GetDelegateForFunctionPointer<InqStringDelegate>(new IntPtr(ReferenceInqString));
@@ -317,6 +353,7 @@ internal static class ClientObjectHooks
         _objectIsAttackable = Marshal.GetDelegateForFunctionPointer<ObjectIsAttackableDelegate>(new IntPtr(ReferenceObjectIsAttackable));
         _inqSkillLevel = Marshal.GetDelegateForFunctionPointer<InqSkillLevelDelegate>(new IntPtr(ReferenceInqSkillLevel));
         _inqSkillAdvancementClass = Marshal.GetDelegateForFunctionPointer<InqSkillAdvancementClassDelegate>(new IntPtr(ReferenceInqSkillAdvancementClass));
+        _inqAttribute = Marshal.GetDelegateForFunctionPointer<InqAttributeDelegate>(new IntPtr(ReferenceInqAttribute));
         _isSpellKnown = Marshal.GetDelegateForFunctionPointer<IsSpellKnownDelegate>(new IntPtr(ReferenceIsSpellKnown));
         _getVitaeValue = Marshal.GetDelegateForFunctionPointer<GetVitaeValueDelegate>(new IntPtr(ReferenceGetVitaeValue));
         RynthLog.Compat(
@@ -533,6 +570,57 @@ internal static class ClientObjectHooks
             RynthLog.Compat($"TryGetObjectSkill exception: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Returns a skill level via CACQualities::InqSkill(stype, retval, raw).
+    /// raw=0 → buffed (with enchantments), raw=1 → base (no enchantments, includes attribute contribution).
+    /// </summary>
+    public static unsafe bool TryGetObjectSkillLevel(uint objectId, uint skillStype, int raw, out int level)
+    {
+        level = 0;
+        if (_inqSkillLevel == null || _getWeenieObject == null)
+        {
+            if (!Probe() || _inqSkillLevel == null || _getWeenieObject == null)
+                return false;
+        }
+        try
+        {
+            if (!TryGetObjectQualitiesPtr(objectId, out IntPtr qualitiesPtr))
+                return false;
+            int retval = 0;
+            if (_inqSkillLevel(qualitiesPtr, skillStype, &retval, raw) == 0)
+                return false;
+            level = retval;
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Reads a primary attribute via CACQualities::InqAttribute(stype, retval, raw).
+    /// raw=0 → buffed (with enchantments), raw=1 → base (no enchantments).
+    /// stype: 1=Strength, 2=Endurance, 3=Quickness, 4=Coordination, 5=Focus, 6=Self.
+    /// </summary>
+    public static unsafe bool TryGetObjectAttribute(uint objectId, uint stype, int raw, out uint value)
+    {
+        value = 0;
+        if (_inqAttribute == null || _getWeenieObject == null)
+        {
+            if (!Probe() || _inqAttribute == null || _getWeenieObject == null)
+                return false;
+        }
+        try
+        {
+            if (!TryGetObjectQualitiesPtr(objectId, out IntPtr qualitiesPtr))
+                return false;
+            uint retval = 0;
+            if (_inqAttribute(qualitiesPtr, stype, &retval, raw) == 0)
+                return false;
+            value = retval;
+            return true;
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -928,6 +1016,82 @@ internal static class ClientObjectHooks
     }
 
     /// <summary>
+    /// Calls CBaseQualities::InqInt64 on the object's weenie to read a STypeInt64 (quad) property.
+    /// Example: stype=1 = TOTAL_EXPERIENCE.
+    /// </summary>
+    public static unsafe bool TryGetObjectQuadProperty(uint objectId, uint stype, out long value)
+    {
+        value = 0;
+        if (_inqInt64 == null)
+        {
+            if (!Probe() || _inqInt64 == null)
+                return false;
+        }
+        try
+        {
+            IntPtr weeniePtr = _getWeenieObject!(objectId);
+            if (weeniePtr == IntPtr.Zero)
+                return false;
+
+            if (!TryGetQualitiesPtr(weeniePtr, out IntPtr qualitiesPtr))
+                return false;
+
+            IntPtr baseQualitiesPtr = qualitiesPtr + CBaseQualitiesOffset;
+            if (!IsReadablePointer(baseQualitiesPtr))
+                return false;
+
+            long retval = 0;
+            int result = _inqInt64(baseQualitiesPtr, stype, &retval);
+            if (result == 0)
+                return false;
+
+            value = retval;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Calls CACQualities::InqAttribute2nd(stype, &result, raw=0) to read the base maximum vital.
+    /// Returns base training + gear bonuses + augmentations, but NOT spell enchantments.
+    /// stype: 1=MAX_HEALTH, 3=MAX_STAMINA, 5=MAX_MANA (STypeAttribute2nd enum).
+    /// Calls on CACQualities* directly — no CBaseQualitiesOffset applied.
+    /// </summary>
+    public static unsafe bool TryGetObjectAttribute2ndBaseLevel(uint objectId, uint stype, out uint value)
+    {
+        value = 0;
+        if (_inqAttribute2ndBaseLevel == null)
+        {
+            if (!Probe() || _inqAttribute2ndBaseLevel == null)
+                return false;
+        }
+        try
+        {
+            IntPtr weeniePtr = _getWeenieObject!(objectId);
+            if (weeniePtr == IntPtr.Zero)
+                return false;
+
+            if (!TryGetQualitiesPtr(weeniePtr, out IntPtr qualitiesPtr))
+                return false;
+
+            uint retval = 0;
+            int result = _inqAttribute2ndBaseLevel(qualitiesPtr, stype, &retval, 0);
+            if (result == 0)
+                return false;
+
+            value = retval;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Calls CBaseQualities::InqBool on the object's weenie to read a STypeBool property.
     /// Common stypes: ATTACKABLE=19, PLAYER_KILLER=7.
     /// </summary>
@@ -980,6 +1144,12 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectStringProperty(uint objectId, uint stype, out string value)
     {
         value = string.Empty;
+
+        // Appraisal cache covers inventory items where m_pQualities is null
+        // (CBaseQualities::InqString always returns 0 for such objects).
+        if (AppraisalHooks.TryGetCachedStringProperty(objectId, stype, out value))
+            return true;
+
         if (_inqString == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqString == null || _getWeenieObject == null)
@@ -1173,6 +1343,49 @@ internal static class ClientObjectHooks
         catch (Exception ex)
         {
             LogLookup($"Compat: object position read failed for 0x{objectId:X8} - {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads an object's facing heading (0–360°, clockwise, 0=North) from its CPhysicsObj quaternion.
+    /// Same qw/qz offsets as the player position struct.
+    /// </summary>
+    public static bool TryGetObjectHeading(uint objectId, out float headingDegrees)
+    {
+        headingDegrees = 0;
+
+        if (_weeniePhysicsObjOffset < 0)
+        {
+            ProbePhysObjOffset();
+            if (_weeniePhysicsObjOffset < 0)
+                return false;
+        }
+
+        if (!TryGetWeenieObjectPtr(objectId, out IntPtr weeniePtr))
+            return false;
+
+        try
+        {
+            IntPtr physicsObj = Marshal.ReadIntPtr(weeniePtr + _weeniePhysicsObjOffset);
+            if (physicsObj == IntPtr.Zero)
+                return false;
+
+            IntPtr vtable = Marshal.ReadIntPtr(physicsObj);
+            if (!SmartBoxLocator.IsPointerInModule(vtable))
+                return false;
+
+            IntPtr pos = physicsObj + PhysicsPositionOffset;
+            float qw = ReadFloat(pos + PositionQwOffset);
+            float qz = ReadFloat(pos + PositionQzOffset);
+
+            // Same formula as NavigationEngine / CorpseOpenController
+            double physYawDeg = 2.0 * Math.Atan2(qz, qw) * (180.0 / Math.PI);
+            headingDegrees = (float)(((-physYawDeg) % 360.0 + 720.0) % 360.0);
+            return true;
+        }
+        catch
+        {
             return false;
         }
     }

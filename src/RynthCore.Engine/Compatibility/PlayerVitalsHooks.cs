@@ -149,6 +149,40 @@ internal static class PlayerVitalsHooks
         return false;
     }
 
+    /// <summary>
+    /// Returns the unbuffed base maximum vitals (base training + gear + augmentations, no spell enchantments).
+    /// Uses _initLevel + _levelFromCp from InqAttribute2ndStruct on the current-vital stypes (2/4/6).
+    /// This formula is confirmed "unbuffed base max" by the TryReadSecondary fallback path.
+    /// Must be called after SendNoticePlayerDescReceived has fired (KnownPlayerQualitiesPtr set).
+    /// </summary>
+    public static unsafe bool TryGetPlayerBaseVitals(out uint baseMaxHp, out uint baseMaxStam, out uint baseMaxMana)
+    {
+        baseMaxHp = baseMaxStam = baseMaxMana = 0;
+        if (_inqAttribute2ndStruct == null)
+            return false;
+
+        IntPtr ptr = KnownPlayerQualitiesPtr;
+        if (ptr == IntPtr.Zero)
+            return false;
+
+        try
+        {
+            SecondaryAttributeNative v = default;
+            if (_inqAttribute2ndStruct(ptr, HealthType, &v) != 0)
+                baseMaxHp = v._initLevel + v._levelFromCp;
+            if (_inqAttribute2ndStruct(ptr, StaminaType, &v) != 0)
+                baseMaxStam = v._initLevel + v._levelFromCp;
+            if (_inqAttribute2ndStruct(ptr, ManaType, &v) != 0)
+                baseMaxMana = v._initLevel + v._levelFromCp;
+
+            return baseMaxHp > 0 || baseMaxStam > 0 || baseMaxMana > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static bool TryGetSnapshot(out PlayerVitalsSnapshot snapshot)
     {
         lock (CacheLock)

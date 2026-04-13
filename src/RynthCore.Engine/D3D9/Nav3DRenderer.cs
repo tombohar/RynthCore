@@ -8,8 +8,8 @@ namespace RynthCore.Engine.D3D9;
 
 internal static class Nav3DRenderer
 {
-    private const int MaxRings = 128;
-    private const int MaxLines = 128;
+    private const int MaxRings = 256;
+    private const int MaxLines = 512;
 
     // Ring: center(x,y,z) + radius + thickness + color
     private static readonly float[] _ringX = new float[MaxRings];

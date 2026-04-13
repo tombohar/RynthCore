@@ -23,9 +23,13 @@ internal static class BusyCountHooks
     private static string _statusMessage = "Not probed yet.";
     private static int _incrementDispatchCount;
     private static int _decrementDispatchCount;
+    private static int _netBusyCount;
 
     public static bool IsInstalled { get; private set; }
     public static string StatusMessage => _statusMessage;
+
+    /// <summary>Returns 0 if the character is idle, positive if a UI action is in progress.</summary>
+    public static int GetBusyState() => Math.Max(0, _netBusyCount);
 
     public static void Initialize()
     {
@@ -90,6 +94,7 @@ internal static class BusyCountHooks
         if (count <= 0)
             RynthLog.Compat($"Compat: busy count incremented #{count}");
 
+        Interlocked.Increment(ref _netBusyCount);
         PluginManager.QueueBusyCountIncremented();
     }
 
@@ -101,6 +106,7 @@ internal static class BusyCountHooks
         if (count <= 0)
             RynthLog.Compat($"Compat: busy count decremented #{count}");
 
+        Interlocked.Decrement(ref _netBusyCount);
         PluginManager.QueueBusyCountDecremented();
     }
 
