@@ -101,6 +101,12 @@ internal struct RynthCoreAPI
     /// <summary>Function pointer: uint GetGroundContainerId()</summary>
     public IntPtr GetGroundContainerIdFn;
 
+    /// <summary>Function pointer: int GetNumContainedItems(uint objectId)</summary>
+    public IntPtr GetNumContainedItemsFn;
+
+    /// <summary>Function pointer: int GetNumContainedContainers(uint objectId)</summary>
+    public IntPtr GetNumContainedContainersFn;
+
     /// <summary>Function pointer: int GetCurCoords(double* northSouth, double* eastWest)</summary>
     public IntPtr GetCurCoordsFn;
 
@@ -428,6 +434,22 @@ internal struct RynthCoreAPI
     /// Reads a primary attribute via InqAttribute. raw=0→buffed, raw=1→base.
     /// stype: 1=Strength, 2=Endurance, 3=Quickness, 4=Coordination, 5=Focus, 6=Self.</summary>
     public IntPtr GetObjectAttributeFn;
+
+    /// <summary>Function pointer: int GetObjectMotionOn(uint objectId, int* isOn)
+    /// Returns 1 if a DoMotion On/Off state is known for the object; isOn is 1 if On (open), 0 if Off (closed).
+    /// Returns 0 if no motion state has been observed for this object since injection.</summary>
+    public IntPtr GetObjectMotionOnFn;
+
+    /// <summary>Function pointer: int GetObjectState(uint objectId, uint* state)
+    /// Returns 1 if a PhysicsState has been received from the server for this object; state is the raw bitfield.
+    /// Returns 0 if no SetState message has been observed for this object since injection.</summary>
+    public IntPtr GetObjectStateFn;
+
+    /// <summary>Function pointer: uint GetObjectBitfield(uint objectId)
+    /// Returns the PublicWeenieDesc._bitfield (ObjectDescriptionFlags) for the given object.
+    /// BF_DOOR = 0x1000, BF_VENDOR = 0x200, BF_CORPSE = 0x2000, etc.
+    /// Returns 0 if the object is not found.</summary>
+    public IntPtr GetObjectBitfieldFn;
 }
 
 
@@ -435,7 +457,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 46;
+    public const uint Current = 49;
 }
 
 internal static class ClientActionHookFlags
@@ -511,6 +533,12 @@ internal delegate void PluginOnViewObjectContentsDelegate(uint objectId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void PluginOnStopViewingObjectContentsDelegate(uint objectId);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void PluginOnVendorOpenDelegate(uint vendorId);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void PluginOnVendorCloseDelegate(uint vendorId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void PluginOnUpdateHealthDelegate(uint targetId, float healthRatio, uint currentHealth, uint maxHealth);
@@ -801,3 +829,12 @@ internal unsafe delegate int GetObjectSkillLevelCallbackDelegate(uint objectId, 
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int GetObjectAttributeCallbackDelegate(uint objectId, uint stype, int raw, uint* value);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectMotionOnCallbackDelegate(uint objectId, int* isOn);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectStateCallbackDelegate(uint objectId, uint* state);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate uint GetObjectBitfieldCallbackDelegate(uint objectId);

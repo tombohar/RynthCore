@@ -31,6 +31,8 @@ public struct RynthCoreApiNative
     public IntPtr GetPreviousSelectedItemIdFn;
     public IntPtr GetPlayerIdFn;
     public IntPtr GetGroundContainerIdFn;
+    public IntPtr GetNumContainedItemsFn;
+    public IntPtr GetNumContainedContainersFn;
     public IntPtr GetCurCoordsFn;
     public IntPtr UseObjectFn;
     public IntPtr UseObjectOnFn;
@@ -93,4 +95,7 @@ public struct RynthCoreApiNative
     public IntPtr GetObjectSpellIdsFn;
     public IntPtr GetObjectSkillBuffedFn;
     public IntPtr GetObjectAttributeFn;
+    public IntPtr GetObjectMotionOnFn;
+    public IntPtr GetObjectStateFn;
+    public IntPtr GetObjectBitfieldFn;
 }

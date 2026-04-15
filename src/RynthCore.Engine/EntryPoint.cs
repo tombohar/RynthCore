@@ -272,6 +272,8 @@ public static class EntryPoint
             RunInitStep("combat-mode hooks", CombatModeHooks.Initialize);
             RunInitStep("teleport-state hooks", TeleportStateHooks.Initialize);
             RunInitStep("salvage hooks", SalvageHooks.Initialize);
+            RunInitStep("do-motion hooks", DoMotionHooks.Initialize);
+            RunInitStep("smartbox-setstate hooks", SmartBoxSetStateHooks.Initialize);
             RunInitStep("appraisal hooks", AppraisalHooks.Initialize);
             RunInitStep("account hooks", AccountHooks.Initialize);
             RunInitStep("client combat hooks", () => ClientCombatHooks.Probe());
@@ -286,8 +288,11 @@ public static class EntryPoint
             RunInitStep("vector-update hooks", VectorUpdateServerDispatchHooks.Initialize);
             RunInitStep("update-object-inventory hooks", UpdateObjectInventoryHooks.Initialize);
             RunInitStep("view-object-contents hooks", ViewObjectContentsHooks.Initialize);
+            RunInitStep("vendor hooks", VendorHooks.Initialize);
             RunInitStep("chat callback hooks", ChatCallbackHooks.Initialize);
             RunInitStep("raw packet hooks", RawPacketHooks.Initialize);
+            RunInitStep("property-update hooks", PropertyUpdateHooks.Initialize);
+            RunInitStep("auto-id service", AutoIdService.Start);
             PluginManager.LoadPlugins(engineDir);
 
             // Defer D3D9 hooking until after character login. By that point
@@ -340,6 +345,11 @@ public static class EntryPoint
                 RecentLogLines.Enqueue(line);
                 while (RecentLogLines.Count > MaxRecentLogLines)
                     RecentLogLines.Dequeue();
+
+                string logPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                    "RynthCore.log");
+                File.AppendAllText(logPath, line + "\n");
             }
         }
         catch

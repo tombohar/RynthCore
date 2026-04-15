@@ -79,6 +79,7 @@ internal static class CreateObjectHooks
             RynthLog.Compat($"Compat: create object #{count} id=0x{objectId:X8} ptr=0x{result.ToInt32():X8}");
 
         PluginManager.QueueCreateObject(objectId);
+        AutoIdService.Enqueue(objectId);
         return result;
     }
 }

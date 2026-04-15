@@ -40,6 +40,8 @@ public readonly unsafe struct RynthCoreHost
     public bool HasGetPreviousSelectedItemId => _api.GetPreviousSelectedItemIdFn != IntPtr.Zero;
     public bool HasGetPlayerId => _api.GetPlayerIdFn != IntPtr.Zero;
     public bool HasGetGroundContainerId => _api.GetGroundContainerIdFn != IntPtr.Zero;
+    public bool HasGetNumContainedItems => _api.GetNumContainedItemsFn != IntPtr.Zero;
+    public bool HasGetNumContainedContainers => _api.GetNumContainedContainersFn != IntPtr.Zero;
     public bool HasGetCurCoords => _api.GetCurCoordsFn != IntPtr.Zero;
     public bool HasUseObject => _api.UseObjectFn != IntPtr.Zero;
     public bool HasUseObjectOn => _api.UseObjectOnFn != IntPtr.Zero;
@@ -298,6 +300,20 @@ public readonly unsafe struct RynthCoreHost
             : 0;
     }
 
+    public int GetNumContainedItems(uint objectId)
+    {
+        return _api.GetNumContainedItemsFn != IntPtr.Zero
+            ? ((delegate* unmanaged[Cdecl]<uint, int>)_api.GetNumContainedItemsFn)(objectId)
+            : -1;
+    }
+
+    public int GetNumContainedContainers(uint objectId)
+    {
+        return _api.GetNumContainedContainersFn != IntPtr.Zero
+            ? ((delegate* unmanaged[Cdecl]<uint, int>)_api.GetNumContainedContainersFn)(objectId)
+            : -1;
+    }
+
     public bool TryGetCurCoords(out double northSouth, out double eastWest)
     {
         northSouth = 0;
@@ -461,6 +477,16 @@ public readonly unsafe struct RynthCoreHost
         if (_api.GetObjectWcidFn == IntPtr.Zero) return false;
         wcid = ((delegate* unmanaged[Cdecl]<uint, uint>)_api.GetObjectWcidFn)(objectId);
         return wcid != 0;
+    }
+
+    public bool HasGetObjectBitfield => _api.GetObjectBitfieldFn != IntPtr.Zero;
+
+    public bool TryGetObjectBitfield(uint objectId, out uint bitfield)
+    {
+        bitfield = 0;
+        if (_api.GetObjectBitfieldFn == IntPtr.Zero) return false;
+        bitfield = ((delegate* unmanaged[Cdecl]<uint, uint>)_api.GetObjectBitfieldFn)(objectId);
+        return true;
     }
 
     public bool HasAppraisalData(uint objectId)
@@ -665,6 +691,42 @@ public readonly unsafe struct RynthCoreHost
         if (_api.GetObjectAttributeFn == IntPtr.Zero) return false;
         fixed (uint* p = &value)
             return ((delegate* unmanaged[Cdecl]<uint, uint, int, uint*, int>)_api.GetObjectAttributeFn)(objectId, stype, raw, p) != 0;
+    }
+
+    public bool HasGetObjectMotionOn => _api.GetObjectMotionOnFn != IntPtr.Zero;
+
+    /// <summary>
+    /// Returns true if a DoMotion On/Off state is known for the object.
+    /// isOn is true if the last observed motion was On (e.g. door opened), false if Off (door closed).
+    /// Returns false if no motion state has been observed for this object since injection.
+    /// </summary>
+    public bool TryGetObjectMotionOn(uint objectId, out bool isOn)
+    {
+        isOn = false;
+        if (_api.GetObjectMotionOnFn == IntPtr.Zero) return false;
+        int v = 0;
+        if (((delegate* unmanaged[Cdecl]<uint, int*, int>)_api.GetObjectMotionOnFn)(objectId, &v) == 0)
+            return false;
+        isOn = v != 0;
+        return true;
+    }
+
+    public bool HasGetObjectState => _api.GetObjectStateFn != IntPtr.Zero;
+
+    /// <summary>
+    /// Returns true if a PhysicsState value has been received from the server for this object.
+    /// state is the raw PhysicsState bitfield (e.g. 0x100 = Open).
+    /// Returns false if no SetState has been observed for this object since injection.
+    /// </summary>
+    public bool TryGetObjectState(uint objectId, out uint state)
+    {
+        state = 0;
+        if (_api.GetObjectStateFn == IntPtr.Zero) return false;
+        uint s = 0;
+        if (((delegate* unmanaged[Cdecl]<uint, uint*, int>)_api.GetObjectStateFn)(objectId, &s) == 0)
+            return false;
+        state = s;
+        return true;
     }
 
     public bool IsSpellKnown(uint objectId, uint spellId, out bool known)

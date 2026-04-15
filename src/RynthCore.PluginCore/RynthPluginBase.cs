@@ -52,6 +52,8 @@ public abstract class RynthPluginBase
     public virtual void OnUpdateObjectInventory(uint objectId) { }
     public virtual void OnViewObjectContents(uint objectId) { }
     public virtual void OnStopViewingObjectContents(uint objectId) { }
+    public virtual void OnVendorOpen(uint vendorId) { }
+    public virtual void OnVendorClose(uint vendorId) { }
     public virtual void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth) { }
     public virtual void OnEnchantmentAdded(uint spellId, double durationSeconds) { }
     public virtual void OnEnchantmentRemoved(uint enchantmentId) { }

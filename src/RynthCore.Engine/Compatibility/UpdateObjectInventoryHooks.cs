@@ -168,8 +168,6 @@ internal static class UpdateObjectInventoryHooks
 
     private static int GetContainerContents(uint containerId, Span<uint> itemIds)
     {
-        RynthLog.Compat($"Compat: GetContainerContents ENTER id=0x{containerId:X8} maxCount={itemIds.Length}");
-
         if (containerId == 0 || itemIds.Length == 0)
             return 0;
 
@@ -198,7 +196,6 @@ internal static class UpdateObjectInventoryHooks
                 itemIds[written++] = id;
         }
 
-        RynthLog.Compat($"Compat: ScanByContainerId(0x{containerId:X8}) found {written} item(s) in 0x8000xxxx range.");
         return written;
     }
 
@@ -215,13 +212,11 @@ internal static class UpdateObjectInventoryHooks
             if (itemId != 0)
             {
                 dest[written++] = itemId;
-                RynthLog.Compat($"Compat:   {label}[{written - 1}] = 0x{itemId:X8}");
             }
 
             node = Marshal.ReadIntPtr(node + 0x08); // next node
         }
 
-        RynthLog.Compat($"Compat: GetContainerContents(0x{containerId:X8}) walked {walked} {label} node(s), wrote {written}.");
         return written;
     }
 

@@ -57,6 +57,8 @@ internal static class AppraisalHooks
     private static readonly HashSet<uint> _appraisedGuids = new();
     // Unix timestamp (seconds) of last appraisal receipt per guid
     private static readonly Dictionary<uint, long> _lastIdTime = new();
+    // Int property cache: guid → (stype → value)
+    private static readonly Dictionary<uint, Dictionary<uint, int>> _intCache = new();
     // Bool property cache: guid → (stype → value)
     private static readonly Dictionary<uint, Dictionary<uint, bool>> _boolCache = new();
     // String property cache: guid → (stype → value)
@@ -84,6 +86,21 @@ internal static class AppraisalHooks
     {
         lock (_cacheLock)
             return _lastIdTime.TryGetValue(guid, out long t) ? t : 0L;
+    }
+
+    /// <summary>
+    /// Returns an int property from the last server appraisal for this object.
+    /// Only populated after the player has identified the item (RequestId).
+    /// </summary>
+    public static bool TryGetCachedIntProperty(uint guid, uint stype, out int value)
+    {
+        value = 0;
+        lock (_cacheLock)
+        {
+            if (!_intCache.TryGetValue(guid, out Dictionary<uint, int>? props))
+                return false;
+            return props.TryGetValue(stype, out value);
+        }
     }
 
     /// <summary>
@@ -177,6 +194,15 @@ internal static class AppraisalHooks
 
         try
         {
+            CacheIntProps(guid, profilePtr);
+        }
+        catch (Exception ex)
+        {
+            try { RynthLog.Compat($"Compat: appraisal int cache error guid=0x{guid:X8} - {ex.GetType().Name}: {ex.Message}"); } catch { }
+        }
+
+        try
+        {
             CacheBoolProps(guid, profilePtr);
         }
         catch (Exception ex)
@@ -203,6 +229,48 @@ internal static class AppraisalHooks
         }
 
         return result;
+    }
+
+    private static void CacheIntProps(uint guid, IntPtr profilePtr)
+    {
+        if (profilePtr == IntPtr.Zero)
+            return;
+
+        // AppraisalProfile._intStatsTable* is at offset +0x18
+        IntPtr intTablePtr = Marshal.ReadIntPtr(profilePtr + 0x18);
+        if (intTablePtr == IntPtr.Zero)
+            return;
+
+        // PackableHashTable<uint,int>: bucket_array at +0x8, bucket_count at +0xC
+        IntPtr bucketArray = Marshal.ReadIntPtr(intTablePtr + 0x08);
+        int bucketCount = Marshal.ReadInt32(intTablePtr + 0x0C);
+
+        if (bucketArray == IntPtr.Zero || bucketCount <= 0 || bucketCount > 65536)
+            return;
+
+        var props = new Dictionary<uint, int>(8);
+
+        for (int i = 0; i < bucketCount; i++)
+        {
+            IntPtr node = Marshal.ReadIntPtr(bucketArray + i * 4);
+            while (node != IntPtr.Zero)
+            {
+                uint key = (uint)Marshal.ReadInt32(node);
+                int val = Marshal.ReadInt32(node + 4);
+                props[key] = val;
+                node = Marshal.ReadIntPtr(node + 8);
+            }
+        }
+
+        if (props.Count == 0)
+            return;
+
+        lock (_cacheLock)
+        {
+            _intCache[guid] = props;
+        }
+
+        RynthLog.Compat($"Compat: cached {props.Count} int prop(s) for guid=0x{guid:X8}");
     }
 
     private static void CacheBoolProps(uint guid, IntPtr profilePtr)

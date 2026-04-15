@@ -219,6 +219,14 @@ internal static class PluginLoader
         if (onStopViewingObjectContentsPtr != IntPtr.Zero)
             plugin.OnStopViewingObjectContents = Marshal.GetDelegateForFunctionPointer<PluginOnStopViewingObjectContentsDelegate>(onStopViewingObjectContentsPtr);
 
+        IntPtr onVendorOpenPtr = GetProcAddress(handle, "RynthPluginOnVendorOpen");
+        if (onVendorOpenPtr != IntPtr.Zero)
+            plugin.OnVendorOpen = Marshal.GetDelegateForFunctionPointer<PluginOnVendorOpenDelegate>(onVendorOpenPtr);
+
+        IntPtr onVendorClosePtr = GetProcAddress(handle, "RynthPluginOnVendorClose");
+        if (onVendorClosePtr != IntPtr.Zero)
+            plugin.OnVendorClose = Marshal.GetDelegateForFunctionPointer<PluginOnVendorCloseDelegate>(onVendorClosePtr);
+
         IntPtr onUpdateHealthPtr = GetProcAddress(handle, "RynthPluginOnUpdateHealth");
         if (onUpdateHealthPtr != IntPtr.Zero)
         {
@@ -356,6 +364,8 @@ internal static class PluginLoader
         if (p.OnUpdateObjectInventory != null) parts.Add("inventory");
         if (p.OnViewObjectContents != null) parts.Add("contents-open");
         if (p.OnStopViewingObjectContents != null) parts.Add("contents-close");
+        if (p.OnVendorOpen != null) parts.Add("vendor-open");
+        if (p.OnVendorClose != null) parts.Add("vendor-close");
         if (p.OnUpdateHealth != null || p.OnUpdateHealthPtr != IntPtr.Zero) parts.Add("health");
         if (p.OnChatWindowText != null) parts.Add("chat-in");
         if (p.OnChatBarEnter != null) parts.Add("chat-out");

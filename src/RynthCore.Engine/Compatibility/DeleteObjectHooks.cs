@@ -70,7 +70,10 @@ internal static class DeleteObjectHooks
     private static int DeleteObjectDetour(IntPtr thisPtr, uint objectId)
     {
         if (objectId != 0)
+        {
             PluginManager.QueueDeleteObject(objectId);
+            AutoIdService.Evict(objectId);
+        }
 
         return _originalDeleteObject!(thisPtr, objectId);
     }

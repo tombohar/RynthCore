@@ -37,6 +37,8 @@ internal sealed class LoadedPlugin
     public PluginOnUpdateObjectInventoryDelegate? OnUpdateObjectInventory { get; set; }
     public PluginOnViewObjectContentsDelegate? OnViewObjectContents { get; set; }
     public PluginOnStopViewingObjectContentsDelegate? OnStopViewingObjectContents { get; set; }
+    public PluginOnVendorOpenDelegate? OnVendorOpen { get; set; }
+    public PluginOnVendorCloseDelegate? OnVendorClose { get; set; }
     public IntPtr OnUpdateHealthPtr { get; set; }
     public PluginOnUpdateHealthDelegate? OnUpdateHealth { get; set; }
     public IntPtr OnChatWindowTextPtr { get; set; }

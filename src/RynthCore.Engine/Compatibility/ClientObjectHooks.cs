@@ -6,6 +6,14 @@ namespace RynthCore.Engine.Compatibility;
 internal static class ClientObjectHooks
 {
     private const int ReferenceGetWeenieObject = 0x005583F0;
+
+    // ACCWeenieObject::GetNumContainedItems() — ThisCall, no args, returns int
+    // Source: Chorizite Weenie.cs (0x0058CCE0)
+    private const int ReferenceGetNumContainedItems = 0x0058CCE0;
+
+    // ACCWeenieObject::GetNumContainedContainers() — ThisCall, no args, returns int
+    // Source: Chorizite Weenie.cs (0x0058CCF0)
+    private const int ReferenceGetNumContainedContainers = 0x0058CCF0;
     private const int ReferenceGetObjectNameStatic = 0x0058F840;
     private const int ReferenceGetObjectNameInstance = 0x0058F510;
 
@@ -242,7 +250,7 @@ internal static class ClientObjectHooks
     /// Checks if a pointer's memory page is committed and readable via VirtualQuery.
     /// Critical for NativeAOT where try/catch does NOT catch access violations.
     /// </summary>
-    private static bool IsReadablePointer(IntPtr ptr)
+    internal static bool IsReadablePointer(IntPtr ptr)
     {
         if (ptr == IntPtr.Zero)
             return false;
@@ -746,6 +754,39 @@ internal static class ClientObjectHooks
         }
     }
 
+    /// <summary>
+    /// Reads PublicWeenieDesc._bitfield from the weenie struct.
+    /// Returns the ObjectDescriptionFlags bitfield (e.g. BF_DOOR = 0x1000).
+    /// Layout: PublicWeenieDesc+104 = _bitfield (26 × 4-byte fields from start).
+    /// </summary>
+    public static bool TryGetObjectBitfield(uint objectId, out uint bitfield)
+    {
+        bitfield = 0;
+        if (_getWeenieObject == null)
+        {
+            if (!Probe() || _getWeenieObject == null)
+                return false;
+        }
+        if (_weeniePhysicsObjOffset < 0)
+            return false;
+        try
+        {
+            IntPtr weeniePtr = _getWeenieObject(objectId);
+            if (weeniePtr == IntPtr.Zero)
+                return false;
+            int pwdBase = _weeniePhysicsObjOffset + 4;
+            IntPtr fieldAddr = weeniePtr + pwdBase + 104;
+            if (!IsReadablePointer(fieldAddr))
+                return false;
+            bitfield = (uint)Marshal.ReadInt32(fieldAddr);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool TryGetObjectQualitiesPtr(uint objectId, out IntPtr qualitiesPtr)
     {
         qualitiesPtr = IntPtr.Zero;
@@ -863,6 +904,11 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectIntProperty(uint objectId, uint stype, out int value)
     {
         value = 0;
+
+        // Appraisal cache covers objects where m_pQualities is null (doors, inventory items, etc.)
+        if (AppraisalHooks.TryGetCachedIntProperty(objectId, stype, out value))
+            return true;
+
         if (_getWeenieObject == null)
         {
             if (!Probe() || _getWeenieObject == null)
@@ -937,6 +983,12 @@ internal static class ClientObjectHooks
                 value = retval;
                 return true;
             }
+
+            // Fallback: network property cache (covers static world objects like doors
+            // where m_pQualities is null and InqInt returns 0).
+            if (PropertyUpdateHooks.TryGetCachedIntProperty(objectId, stype, out value))
+                return true;
+
             return false;
         }
         catch
@@ -1126,7 +1178,13 @@ internal static class ClientObjectHooks
             int result = _inqBool(baseQualitiesPtr, stype, &retval);
 
             if (result == 0)
+            {
+                // Fallback: network property cache (covers static world objects like doors
+                // where m_pQualities is null and InqBool returns 0).
+                if (PropertyUpdateHooks.TryGetCachedBoolProperty(objectId, stype, out value))
+                    return true;
                 return false;
+            }
 
             value = retval != 0;
             return true;
@@ -1347,6 +1405,46 @@ internal static class ClientObjectHooks
         }
     }
 
+    // CPhysicsObj::m_state offset — confirmed from Ghidra set_state disasm: MOV [ESI+0xa8], EAX
+    private const int PhysicsStateOffset = 0xA8;
+
+    /// <summary>
+    /// Reads CPhysicsObj::m_state directly from memory.
+    /// Notable bits: ETHEREAL_PS=0x4 (door open/passable), STATIC_PS=0x1, NODRAW_PS=0x20.
+    /// </summary>
+    public static bool TryGetObjectPhysicsState(uint objectId, out uint state)
+    {
+        state = 0;
+
+        if (_weeniePhysicsObjOffset < 0)
+        {
+            ProbePhysObjOffset();
+            if (_weeniePhysicsObjOffset < 0)
+                return false;
+        }
+
+        if (!TryGetWeenieObjectPtr(objectId, out IntPtr weeniePtr))
+            return false;
+
+        try
+        {
+            IntPtr physicsObj = Marshal.ReadIntPtr(weeniePtr + _weeniePhysicsObjOffset);
+            if (physicsObj == IntPtr.Zero)
+                return false;
+
+            IntPtr vtable = Marshal.ReadIntPtr(physicsObj);
+            if (!SmartBoxLocator.IsPointerInModule(vtable))
+                return false;
+
+            state = unchecked((uint)Marshal.ReadInt32(physicsObj + PhysicsStateOffset));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>
     /// Reads an object's facing heading (0–360°, clockwise, 0=North) from its CPhysicsObj quaternion.
     /// Same qw/qz offsets as the player position struct.
@@ -1448,6 +1546,48 @@ internal static class ClientObjectHooks
         {
             _weeniePhysicsObjOffset = FallbackWeeniePhysicsObjOffset;
             RynthLog.Compat($"Compat: physOffsetProbe no match found, using fallback +0x{FallbackWeeniePhysicsObjOffset:X2} (player=0x{playerId:X8})");
+        }
+    }
+
+    /// <summary>
+    /// Calls ACCWeenieObject::GetNumContainedItems() — the AC client's own count of
+    /// items in the container. Returns -1 if the weenie is unavailable.
+    /// </summary>
+    public static int GetNumContainedItems(uint objectId)
+    {
+        if (_getWeenieObject == null && !Probe())
+            return -1;
+        if (_getWeenieObject == null)
+            return -1;
+
+        IntPtr weeniePtr = _getWeenieObject(objectId);
+        if (weeniePtr == IntPtr.Zero)
+            return -1;
+
+        unsafe
+        {
+            return ((delegate* unmanaged[Thiscall]<IntPtr, int>)new IntPtr(ReferenceGetNumContainedItems))(weeniePtr);
+        }
+    }
+
+    /// <summary>
+    /// Calls ACCWeenieObject::GetNumContainedContainers() — the AC client's own count of
+    /// how many packs/foci occupy container slots. Returns -1 if the weenie is unavailable.
+    /// </summary>
+    public static int GetNumContainedContainers(uint objectId)
+    {
+        if (_getWeenieObject == null && !Probe())
+            return -1;
+        if (_getWeenieObject == null)
+            return -1;
+
+        IntPtr weeniePtr = _getWeenieObject(objectId);
+        if (weeniePtr == IntPtr.Zero)
+            return -1;
+
+        unsafe
+        {
+            return ((delegate* unmanaged[Thiscall]<IntPtr, int>)new IntPtr(ReferenceGetNumContainedContainers))(weeniePtr);
         }
     }
 

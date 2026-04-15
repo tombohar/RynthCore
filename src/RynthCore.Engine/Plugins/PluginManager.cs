@@ -27,6 +27,8 @@ internal static class PluginManager
     private readonly record struct PendingUpdateObjectInventory(uint ObjectId);
     private readonly record struct PendingViewObjectContents(uint ObjectId);
     private readonly record struct PendingStopViewingObjectContents(uint ObjectId);
+    private readonly record struct PendingVendorOpen(uint VendorId);
+    private readonly record struct PendingVendorClose(uint VendorId);
     private readonly record struct PendingUpdateHealth(uint TargetId, float HealthRatio, uint CurrentHealth, uint MaxHealth);
     private readonly record struct PendingEnchantmentAdded(uint SpellId, double DurationSeconds);
     private readonly record struct PendingEnchantmentRemoved(uint EnchantmentId);
@@ -44,6 +46,8 @@ internal static class PluginManager
     private const int MaxPendingUpdateObjectInventory = 128;
     private const int MaxPendingViewObjectContents = 128;
     private const int MaxPendingStopViewingObjectContents = 128;
+    private const int MaxPendingVendorOpen = 32;
+    private const int MaxPendingVendorClose = 32;
     private const int MaxPendingUpdateHealth = 512;
     private const int MaxPendingEnchantmentEvents = 256;
     private const int MaxPrePluginCreateObjects = 4096;
@@ -63,6 +67,8 @@ internal static class PluginManager
     private static readonly Queue<PendingUpdateObjectInventory> _pendingUpdateObjectInventory = new();
     private static readonly Queue<PendingViewObjectContents> _pendingViewObjectContents = new();
     private static readonly Queue<PendingStopViewingObjectContents> _pendingStopViewingObjectContents = new();
+    private static readonly Queue<PendingVendorOpen> _pendingVendorOpen = new();
+    private static readonly Queue<PendingVendorClose> _pendingVendorClose = new();
     private static readonly Queue<PendingUpdateHealth> _pendingUpdateHealth = new();
     private static readonly Queue<PendingEnchantmentAdded> _pendingEnchantmentAdded = new();
     private static readonly Queue<PendingEnchantmentRemoved> _pendingEnchantmentRemoved = new();
@@ -78,6 +84,8 @@ internal static class PluginManager
     private static readonly object PendingUpdateObjectInventoryLock = new();
     private static readonly object PendingViewObjectContentsLock = new();
     private static readonly object PendingStopViewingObjectContentsLock = new();
+    private static readonly object PendingVendorOpenLock = new();
+    private static readonly object PendingVendorCloseLock = new();
     private static readonly object PendingUpdateHealthLock = new();
     private static readonly object PendingEnchantmentAddedLock = new();
     private static readonly object PendingEnchantmentRemovedLock = new();
@@ -116,6 +124,8 @@ internal static class PluginManager
     private static GetItemIdCallbackDelegate? _getPreviousSelectedItemIdCallback;
     private static GetItemIdCallbackDelegate? _getPlayerIdCallback;
     private static GetItemIdCallbackDelegate? _getGroundContainerIdCallback;
+    private static QueryHealthCallbackDelegate? _getNumContainedItemsCallback;
+    private static QueryHealthCallbackDelegate? _getNumContainedContainersCallback;
     private static GetCurCoordsCallbackDelegate? _getCurCoordsCallback;
     private static UseObjectCallbackDelegate? _useObjectCallback;
     private static UseObjectOnCallbackDelegate? _useObjectOnCallback;
@@ -174,6 +184,9 @@ internal static class PluginManager
     private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
     private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
     private static GetObjectAttributeCallbackDelegate? _getObjectAttributeCallback;
+    private static GetObjectMotionOnCallbackDelegate? _getObjectMotionOnCallback;
+    private static GetObjectStateCallbackDelegate? _getObjectStateCallback;
+    private static GetObjectBitfieldCallbackDelegate? _getObjectBitfieldCallback;
     private static IntPtr _accountNameScratchPtr;
     private static IntPtr _worldNameScratchPtr;
     [ThreadStatic] private static IntPtr _objectNameScratchPtr;
@@ -276,6 +289,8 @@ internal static class PluginManager
         DispatchQueuedSmartBoxEvent();
         DispatchQueuedStopViewingObjectContents();
         DispatchQueuedViewObjectContents();
+        DispatchQueuedVendorOpen();
+        DispatchQueuedVendorClose();
         DispatchQueuedUpdateObjectInventory();
         DispatchQueuedCreateObject();
         DispatchQueuedUpdateObject();
@@ -522,6 +537,34 @@ internal static class PluginManager
                 _pendingStopViewingObjectContents.Dequeue();
 
             _pendingStopViewingObjectContents.Enqueue(new PendingStopViewingObjectContents(objectId));
+        }
+    }
+
+    public static void QueueVendorOpen(uint vendorId)
+    {
+        if (_plugins.Count == 0)
+            return;
+
+        lock (PendingVendorOpenLock)
+        {
+            if (_pendingVendorOpen.Count >= MaxPendingVendorOpen)
+                _pendingVendorOpen.Dequeue();
+
+            _pendingVendorOpen.Enqueue(new PendingVendorOpen(vendorId));
+        }
+    }
+
+    public static void QueueVendorClose(uint vendorId)
+    {
+        if (_plugins.Count == 0)
+            return;
+
+        lock (PendingVendorCloseLock)
+        {
+            if (_pendingVendorClose.Count >= MaxPendingVendorClose)
+                _pendingVendorClose.Dequeue();
+
+            _pendingVendorClose.Enqueue(new PendingVendorClose(vendorId));
         }
     }
 
@@ -1257,6 +1300,78 @@ internal static class PluginManager
         }
     }
 
+    private static void DispatchQueuedVendorOpen()
+    {
+        if (!_initialized || _plugins.Count == 0)
+            return;
+
+        PendingVendorOpen[] pending;
+        lock (PendingVendorOpenLock)
+        {
+            if (_pendingVendorOpen.Count == 0)
+                return;
+
+            pending = _pendingVendorOpen.ToArray();
+            _pendingVendorOpen.Clear();
+        }
+
+        foreach (PendingVendorOpen evt in pending)
+        {
+            for (int i = 0; i < _plugins.Count; i++)
+            {
+                var plugin = _plugins[i];
+                if (!plugin.Initialized || plugin.Failed || plugin.OnVendorOpen == null)
+                    continue;
+
+                try
+                {
+                    plugin.OnVendorOpen(evt.VendorId);
+                }
+                catch (Exception ex)
+                {
+                    plugin.Failed = true;
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnVendorOpen threw {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    private static void DispatchQueuedVendorClose()
+    {
+        if (!_initialized || _plugins.Count == 0)
+            return;
+
+        PendingVendorClose[] pending;
+        lock (PendingVendorCloseLock)
+        {
+            if (_pendingVendorClose.Count == 0)
+                return;
+
+            pending = _pendingVendorClose.ToArray();
+            _pendingVendorClose.Clear();
+        }
+
+        foreach (PendingVendorClose evt in pending)
+        {
+            for (int i = 0; i < _plugins.Count; i++)
+            {
+                var plugin = _plugins[i];
+                if (!plugin.Initialized || plugin.Failed || plugin.OnVendorClose == null)
+                    continue;
+
+                try
+                {
+                    plugin.OnVendorClose(evt.VendorId);
+                }
+                catch (Exception ex)
+                {
+                    plugin.Failed = true;
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnVendorClose threw {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+    }
+
     private static void DispatchQueuedUpdateHealth()
     {
         if (!_initialized || _plugins.Count == 0)
@@ -1546,6 +1661,8 @@ internal static class PluginManager
         _getPreviousSelectedItemIdCallback ??= GetPreviousSelectedItemId;
         _getPlayerIdCallback ??= GetPlayerId;
         _getGroundContainerIdCallback ??= GetGroundContainerId;
+        _getNumContainedItemsCallback ??= GetNumContainedItemsAction;
+        _getNumContainedContainersCallback ??= GetNumContainedContainersAction;
         _getCurCoordsCallback ??= GetCurCoords;
         _useObjectCallback ??= UseObject;
         _useObjectOnCallback ??= UseObjectOn;
@@ -1604,6 +1721,9 @@ internal static class PluginManager
         _getObjectSpellIdsCallback ??= GetObjectSpellIdsAction;
         _getObjectSkillBuffedCallback ??= GetObjectSkillLevelAction;
         _getObjectAttributeCallback ??= GetObjectAttributeAction;
+        _getObjectMotionOnCallback ??= GetObjectMotionOnAction;
+        _getObjectStateCallback ??= GetObjectStateAction;
+        _getObjectBitfieldCallback ??= GetObjectBitfieldAction;
 
         _api.Version = PluginContractVersion.Current;
         _api.LogFn = Marshal.GetFunctionPointerForDelegate(_logCallback);
@@ -1631,6 +1751,8 @@ internal static class PluginManager
         _api.GetPreviousSelectedItemIdFn = Marshal.GetFunctionPointerForDelegate(_getPreviousSelectedItemIdCallback);
         _api.GetPlayerIdFn = Marshal.GetFunctionPointerForDelegate(_getPlayerIdCallback);
         _api.GetGroundContainerIdFn = Marshal.GetFunctionPointerForDelegate(_getGroundContainerIdCallback);
+        _api.GetNumContainedItemsFn = Marshal.GetFunctionPointerForDelegate(_getNumContainedItemsCallback);
+        _api.GetNumContainedContainersFn = Marshal.GetFunctionPointerForDelegate(_getNumContainedContainersCallback);
         _api.GetCurCoordsFn = Marshal.GetFunctionPointerForDelegate(_getCurCoordsCallback);
         _api.UseObjectFn = Marshal.GetFunctionPointerForDelegate(_useObjectCallback);
         _api.UseObjectOnFn = Marshal.GetFunctionPointerForDelegate(_useObjectOnCallback);
@@ -1689,6 +1811,9 @@ internal static class PluginManager
         _api.GetObjectSpellIdsFn = Marshal.GetFunctionPointerForDelegate(_getObjectSpellIdsCallback);
         _api.GetObjectSkillBuffedFn = Marshal.GetFunctionPointerForDelegate(_getObjectSkillBuffedCallback);
         _api.GetObjectAttributeFn = Marshal.GetFunctionPointerForDelegate(_getObjectAttributeCallback);
+        _api.GetObjectMotionOnFn = Marshal.GetFunctionPointerForDelegate(_getObjectMotionOnCallback);
+        _api.GetObjectStateFn = Marshal.GetFunctionPointerForDelegate(_getObjectStateCallback);
+        _api.GetObjectBitfieldFn = Marshal.GetFunctionPointerForDelegate(_getObjectBitfieldCallback);
     }
 
     private static void ProbeClientHooks()
@@ -1938,6 +2063,22 @@ internal static class PluginManager
         return 1;
     }
 
+    private static unsafe int GetObjectMotionOnAction(uint objectId, int* isOn)
+    {
+        if (!DoMotionHooks.TryGetObjectMotionOn(objectId, out bool v))
+            return 0;
+        *isOn = v ? 1 : 0;
+        return 1;
+    }
+
+    private static unsafe int GetObjectStateAction(uint objectId, uint* state)
+    {
+        if (!ClientObjectHooks.TryGetObjectPhysicsState(objectId, out uint s))
+            return 0;
+        *state = s;
+        return 1;
+    }
+
     private static unsafe int ReadPlayerEnchantmentsAction(uint* spellIds, double* expiryTimes, int maxCount)
     {
         return EnchantmentHooks.ReadPlayerEnchantments(spellIds, expiryTimes, maxCount);
@@ -2079,6 +2220,16 @@ internal static class PluginManager
         return ClientHelperHooks.GetGroundContainerId();
     }
 
+    private static int GetNumContainedItemsAction(uint objectId)
+    {
+        return ClientObjectHooks.GetNumContainedItems(objectId);
+    }
+
+    private static int GetNumContainedContainersAction(uint objectId)
+    {
+        return ClientObjectHooks.GetNumContainedContainers(objectId);
+    }
+
     private static unsafe int GetCurCoords(double* northSouth, double* eastWest)
     {
         if (northSouth == null || eastWest == null)
@@ -2182,6 +2333,11 @@ internal static class PluginManager
     private static uint GetObjectWcidAction(uint objectId)
     {
         return ClientObjectHooks.TryGetObjectWcid(objectId, out uint wcid) ? wcid : 0u;
+    }
+
+    private static uint GetObjectBitfieldAction(uint objectId)
+    {
+        return ClientObjectHooks.TryGetObjectBitfield(objectId, out uint bitfield) ? bitfield : 0u;
     }
 
     private static int HasAppraisalDataAction(uint objectId)

@@ -168,6 +168,18 @@ public unsafe sealed class RynthPluginRuntime<TPlugin>
             _plugin!.OnStopViewingObjectContents(objectId);
     }
 
+    public void OnVendorOpen(uint vendorId)
+    {
+        if (IsInitialized)
+            _plugin!.OnVendorOpen(vendorId);
+    }
+
+    public void OnVendorClose(uint vendorId)
+    {
+        if (IsInitialized)
+            _plugin!.OnVendorClose(vendorId);
+    }
+
     public void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
     {
         if (IsInitialized)
