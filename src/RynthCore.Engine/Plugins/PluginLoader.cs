@@ -106,6 +106,12 @@ internal static class PluginLoader
         }
     }
 
+    public static LoadedPlugin? LoadSingle(string sourcePath, string shadowRootDir, int generation)
+    {
+        string sessionShadowDir = PrepareShadowDirectory(shadowRootDir, generation);
+        return TryLoad(sourcePath, sessionShadowDir);
+    }
+
     private static LoadedPlugin? TryLoad(string sourcePath, string sessionShadowDir)
     {
         string fileName = Path.GetFileName(sourcePath);

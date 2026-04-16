@@ -47,6 +47,7 @@ internal static class RynthCoreShell
     private static long _nextLogRefreshTick;
     private static int _selectedPlugin = 0;
     private static bool _showPluginTips = true;
+    private static string _newPluginPathInput = "";
     private static readonly bool[] PluginBarButtonsVisible = [true, false, false, false];
     private static Vector2 _barPosition = new(12f, 12f);
     private static bool _barPositionInitialized;
@@ -389,22 +390,38 @@ internal static class RynthCoreShell
         }
 
         RenderShellToolbar();
-        DrawHero();
-        ImGui.Spacing();
 
-        if (ImGui.BeginTable("ShellMain", 2, ImGuiTableFlags.SizingStretchProp))
+        if (ImGui.BeginTabBar("##ShellTabs"))
         {
-            ImGui.TableSetupColumn("Left", ImGuiTableColumnFlags.WidthStretch, 0.60f);
-            ImGui.TableSetupColumn("Right", ImGuiTableColumnFlags.WidthStretch, 0.40f);
-            ImGui.TableNextRow();
+            if (ImGui.BeginTabItem("Dashboard"))
+            {
+                DrawHero();
+                ImGui.Spacing();
 
-            ImGui.TableNextColumn();
-            RenderControlDeck();
+                if (ImGui.BeginTable("ShellMain", 2, ImGuiTableFlags.SizingStretchProp))
+                {
+                    ImGui.TableSetupColumn("Left", ImGuiTableColumnFlags.WidthStretch, 0.60f);
+                    ImGui.TableSetupColumn("Right", ImGuiTableColumnFlags.WidthStretch, 0.40f);
+                    ImGui.TableNextRow();
 
-            ImGui.TableNextColumn();
-            RenderPluginDeck();
+                    ImGui.TableNextColumn();
+                    RenderControlDeck();
 
-            ImGui.EndTable();
+                    ImGui.TableNextColumn();
+                    RenderPluginDeck();
+
+                    ImGui.EndTable();
+                }
+                ImGui.EndTabItem();
+            }
+
+            if (ImGui.BeginTabItem("Plugins"))
+            {
+                RenderPluginsTab();
+                ImGui.EndTabItem();
+            }
+
+            ImGui.EndTabBar();
         }
 
         ImGui.End();
@@ -654,6 +671,109 @@ internal static class RynthCoreShell
 
         ImGui.EndChild();
         ImGui.EndChild();
+    }
+
+    private static void RenderPluginsTab()
+    {
+        ImGui.Spacing();
+
+        // ── Loaded plugins ──────────────────────────────────────────────────
+        var loadedPlugins = PluginManager.Plugins;
+        ImGui.TextColored(Accent, $"Loaded Plugins ({loadedPlugins.Count})");
+        ImGui.Separator();
+
+        if (loadedPlugins.Count == 0)
+        {
+            ImGui.TextColored(TextMute, "No plugins loaded.");
+        }
+        else
+        {
+            for (int i = 0; i < loadedPlugins.Count; i++)
+            {
+                var p = loadedPlugins[i];
+                bool waitingForLogin = p.Initialized && !p.Failed && p.OnLoginComplete != null && !p.LoginCompleteDispatched;
+                Vector4 statusColor = p.Failed ? Warn : waitingForLogin ? Gold : p.Initialized ? Good : TextMute;
+                string statusText = p.Failed ? "FAILED" : waitingForLogin ? "WAIT LOGIN" : p.Initialized ? "ACTIVE" : "PENDING";
+
+                string ver = string.IsNullOrEmpty(p.VersionString) ? "" : $" v{p.VersionString}";
+                ImGui.BulletText("");
+                ImGui.SameLine();
+                ImGui.TextColored(Accent, p.DisplayName);
+                ImGui.SameLine();
+                ImGui.TextColored(TextMute, ver);
+                ImGui.SameLine(280f);
+                ImGui.TextColored(statusColor, statusText);
+                ImGui.TextColored(TextMute, $"  {p.SourceFilePath}");
+            }
+        }
+
+        ImGui.Spacing();
+        ImGui.Spacing();
+
+        // ── Plugin sources ──────────────────────────────────────────────────
+        ImGui.TextColored(Accent, "Plugin Sources");
+        ImGui.Separator();
+
+        string builtInDir = PluginManager.PluginDirectory;
+        if (!string.IsNullOrEmpty(builtInDir))
+        {
+            ImGui.TextColored(TextMute, "Built-in directory:");
+            ImGui.SameLine();
+            ImGui.TextColored(TextDim, builtInDir);
+        }
+
+        ImGui.Spacing();
+        ImGui.TextColored(TextMute, "Additional plugin DLLs:");
+
+        var extraPaths = PluginManager.ExtraPluginPaths;
+        int removeIdx = -1;
+        if (extraPaths.Count == 0)
+        {
+            ImGui.TextColored(TextMute, "  (none)");
+        }
+        else
+        {
+            for (int i = 0; i < extraPaths.Count; i++)
+            {
+                ImGui.PushID($"pluginpath_{i}");
+                bool exists = File.Exists(extraPaths[i]);
+                ImGui.TextColored(exists ? Good : Warn, exists ? "  OK" : "  ??");
+                ImGui.SameLine();
+                ImGui.TextColored(TextDim, extraPaths[i]);
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Remove"))
+                    removeIdx = i;
+                ImGui.PopID();
+            }
+        }
+        if (removeIdx >= 0)
+        {
+            EngineSettings.RemovePluginPath(removeIdx);
+            PluginManager.RequestRescan();
+        }
+
+        ImGui.Spacing();
+        ImGui.TextColored(TextMute, "Add plugin DLL path:");
+        ImGui.SetNextItemWidth(-80f);
+        ImGui.InputText("##newpath", ref _newPluginPathInput, 512);
+        ImGui.SameLine();
+        bool canAdd = !string.IsNullOrWhiteSpace(_newPluginPathInput);
+        if (!canAdd) ImGui.BeginDisabled();
+        if (ImGui.SmallButton("Add"))
+        {
+            EngineSettings.AddPluginPath(_newPluginPathInput.Trim());
+            _newPluginPathInput = "";
+            PluginManager.RequestRescan();
+        }
+        if (!canAdd) ImGui.EndDisabled();
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        if (ImGui.Button("Rescan Plugins"))
+            PluginManager.RequestRescan();
+        ShowTooltip("Unload all plugins, re-scan built-in directory and all extra paths, reload.");
     }
 
     private static void RenderCompatibilityDeck()

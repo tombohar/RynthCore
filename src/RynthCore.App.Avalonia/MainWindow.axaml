@@ -226,23 +226,31 @@
           </ScrollViewer>
         </TabItem>
 
-        <TabItem Header="Runtime">
+        <TabItem Header="Plugins">
           <ScrollViewer>
             <StackPanel Spacing="12" Margin="6">
               <Border Background="#132028" CornerRadius="16" Padding="18">
                 <StackPanel Spacing="8">
-                  <TextBlock Text="Runtime Surface" FontSize="19" FontWeight="Bold" Foreground="#EAF0F4" />
-                  <TextBlock Text="Runtime controls are also safe to migrate because they live in the desktop host, not the game overlay. This is the start of that second wave so we can make the launcher genuinely usable."
+                  <TextBlock Text="Plugins" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                  <TextBlock Text="Manage the runtime modules loaded into RynthCore. Add plugins by browsing for their DLL file."
                              TextWrapping="Wrap"
                              Foreground="#9AA8B3" />
+                  <StackPanel x:Name="PluginLoadoutPanel" Spacing="10" />
+                  <Button x:Name="AddPluginDllButton" Content="Add Plugin" HorizontalAlignment="Left" />
                 </StackPanel>
               </Border>
+            </StackPanel>
+          </ScrollViewer>
+        </TabItem>
 
+        <TabItem Header="Runtime">
+          <ScrollViewer>
+            <StackPanel Spacing="12" Margin="6">
               <Grid ColumnDefinitions="*,Auto,*">
                 <Border Grid.Column="0" Background="#132028" CornerRadius="16" Padding="18" MinWidth="280">
                   <StackPanel Spacing="8">
                     <TextBlock Text="Paths" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
-                    <TextBlock Text="These values are backed by the shared app settings store, so they persist across the WinForms and Avalonia hosts."
+                    <TextBlock Text="These values are backed by the shared app settings store and persist across sessions."
                                TextWrapping="Wrap"
                                Foreground="#9AA8B3" />
                     <TextBlock Text="AC Client Path" Foreground="#EAF0F4" />
@@ -269,7 +277,7 @@
                 <Border Grid.Column="2" Background="#132028" CornerRadius="16" Padding="18" MinWidth="280">
                   <StackPanel Spacing="8">
                     <TextBlock Text="Launch Behavior" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
-                    <TextBlock Text="These are the same host-side toggles the current launcher uses. They are safe to migrate independently of the injected engine."
+                    <TextBlock Text="Host-side toggles for launch and injection behavior."
                                TextWrapping="Wrap"
                                Foreground="#9AA8B3" />
                     <CheckBox x:Name="AllowMultipleClientsCheckBox" Content="Allow multiple clients" />
@@ -284,38 +292,21 @@
                 </Border>
               </Grid>
 
-              <Grid ColumnDefinitions="*,Auto,*">
-                <Border Grid.Column="0" Background="#132028" CornerRadius="16" Padding="18" MinWidth="280">
-                  <StackPanel Spacing="8">
-                    <TextBlock Text="Runtime Loadout" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
-                    <TextBlock Text="This is the first pass of plugin selection in Avalonia. RynthCore Engine remains the required injectable runtime; future loadout items can layer in beside it."
-                               TextWrapping="Wrap"
-                               Foreground="#9AA8B3" />
-                    <StackPanel x:Name="PluginLoadoutPanel" Spacing="10" />
-                  </StackPanel>
-                </Border>
-
-                <GridSplitter Grid.Column="1"
-                              Width="12"
-                              ResizeDirection="Columns"
-                              Background="Transparent" />
-
-                <Border Grid.Column="2" Background="#132028" CornerRadius="16" Padding="18" MinWidth="280">
-                  <StackPanel Spacing="8">
-                    <TextBlock Text="Recovery Actions" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
-                    <TextBlock Text="Use these when AC is already running and you need to attach RynthCore manually or refresh the live session readout."
-                               TextWrapping="Wrap"
-                               Foreground="#9AA8B3" />
-                    <WrapPanel Orientation="Horizontal" ItemWidth="176" ItemHeight="40">
-                      <Button x:Name="InjectRunningAcButton" Content="Inject Into Running AC" Margin="0,0,8,8" />
-                      <Button x:Name="RefreshSessionsButton" Content="Refresh Sessions" Margin="0,0,8,8" />
-                    </WrapPanel>
-                    <TextBlock Text="Manual inject targets the first detected acclient.exe session."
-                               TextWrapping="Wrap"
-                               Foreground="#9AA8B3" />
-                  </StackPanel>
-                </Border>
-              </Grid>
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Recovery Actions" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                  <TextBlock Text="Use these when AC is already running and you need to attach RynthCore manually or refresh the live session readout."
+                             TextWrapping="Wrap"
+                             Foreground="#9AA8B3" />
+                  <WrapPanel Orientation="Horizontal" ItemWidth="176" ItemHeight="40">
+                    <Button x:Name="InjectRunningAcButton" Content="Inject Into Running AC" Margin="0,0,8,8" />
+                    <Button x:Name="RefreshSessionsButton" Content="Refresh Sessions" Margin="0,0,8,8" />
+                  </WrapPanel>
+                  <TextBlock Text="Manual inject targets the first detected acclient.exe session."
+                             TextWrapping="Wrap"
+                             Foreground="#9AA8B3" />
+                </StackPanel>
+              </Border>
             </StackPanel>
           </ScrollViewer>
         </TabItem>
@@ -346,17 +337,9 @@
               <Border Background="#132028" CornerRadius="16" Padding="18">
                 <StackPanel Spacing="8">
                   <TextBlock Text="Important Constraint" FontSize="19" FontWeight="Bold" Foreground="#EAF0F4" />
-                  <TextBlock Text="Switching the desktop host to Avalonia does not replace the in-game ImGui overlay. If ImGui is causing client crashes, we should keep treating that as a separate engine-side stabilization track."
+                  <TextBlock Text="The Avalonia desktop host does not replace the in-game ImGui overlay. If ImGui is causing client crashes, that is a separate engine-side stabilization track."
                              TextWrapping="Wrap"
                              Foreground="#9AA8B3" />
-                </StackPanel>
-              </Border>
-
-              <Border Background="#132028" CornerRadius="16" Padding="18">
-                <StackPanel Spacing="8">
-                  <TextBlock Text="Phase 1 Exit Criteria" FontSize="16" FontWeight="SemiBold" Foreground="#E2B348" />
-                  <TextBlock Text="• Avalonia app builds in the solution&#x0A;• Shared launcher styling direction is established&#x0A;• One real launcher workflow is ported end to end&#x0A;• Current WinForms host stays available until parity is good enough to cut over"
-                             Foreground="#EAF0F4" />
                 </StackPanel>
               </Border>
             </StackPanel>

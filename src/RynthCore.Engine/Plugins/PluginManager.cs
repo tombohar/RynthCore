@@ -196,6 +196,7 @@ internal static class PluginManager
     public static IReadOnlyList<LoadedPlugin> Plugins => _plugins;
     public static bool IsRescanQueued => _rescanRequested;
     public static string PluginDirectory => _pluginsDir;
+    public static IReadOnlyList<string> ExtraPluginPaths => EngineSettings.PluginPaths;
     public static bool HasObservedUIInitialized => _uiInitializedObserved;
     public static bool HasObservedLoginComplete => _loginCompleteObserved;
 
@@ -1493,8 +1494,26 @@ internal static class PluginManager
     private static void LoadPluginsFromDisk()
     {
         _loadGeneration++;
+
+        // Default directory
         var loaded = PluginLoader.LoadAll(_pluginsDir, _shadowRootDir, _loadGeneration);
         _plugins.AddRange(loaded);
+
+        // Extra DLL paths from engine settings
+        var extraPaths = EngineSettings.PluginPaths;
+        for (int i = 0; i < extraPaths.Count; i++)
+        {
+            string dllPath = extraPaths[i];
+            if (!File.Exists(dllPath))
+            {
+                RynthLog.Plugin($"PluginManager: Extra plugin not found: {dllPath}");
+                continue;
+            }
+            RynthLog.Plugin($"PluginManager: Loading extra plugin: {dllPath}");
+            var plugin = PluginLoader.LoadSingle(dllPath, _shadowRootDir, _loadGeneration);
+            if (plugin != null)
+                _plugins.Add(plugin);
+        }
     }
 
     private static void InitializeLoadedPlugins()

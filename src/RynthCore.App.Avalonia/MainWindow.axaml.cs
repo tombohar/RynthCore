@@ -4,11 +4,13 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using RynthCore.Injector;
 
@@ -25,6 +27,7 @@ internal partial class MainWindow : Window
     private readonly ServerStatusProbeService _serverStatusProbe = new();
     private readonly ObservableCollection<string> _activityItems = [];
     private readonly ObservableCollection<string> _sessionItems = [];
+    private readonly ObservableCollection<string> _pluginDllPaths = [];
     private readonly HashSet<int> _launchedSessionPids = [];
     private readonly Dictionary<string, TextBlock> _launchTargetStatusTexts = [];
     private readonly Dictionary<string, CheckBox> _launchTargetChecks = [];
@@ -41,14 +44,6 @@ internal partial class MainWindow : Window
             Summary = "Injects the in-process runtime and overlay host into acclient.exe.",
             StatusText = "Implemented now",
             RuntimeImplemented = true
-        },
-        new PluginDefinition
-        {
-            Id = "nexai",
-            Name = "RynthAi",
-            Summary = "Selection is persisted now so the desktop host becomes the future loadout surface for adopted runtime modules.",
-            StatusText = "Planned adoption",
-            RuntimeImplemented = false
         }
     ];
     private readonly Dictionary<string, CheckBox> _pluginChecks = [];
@@ -68,6 +63,7 @@ internal partial class MainWindow : Window
         SessionList.ItemsSource = _sessionItems;
         LoadSettings();
         LoadRuntimeControls();
+        LoadPluginDllPaths();
         BuildPluginLoadout();
         WireEvents();
         RefreshLists();
@@ -103,6 +99,7 @@ internal partial class MainWindow : Window
         SaveBehaviorButton.Click += (_, _) => SaveLaunchBehavior();
         InjectRunningAcButton.Click += async (_, _) => await InjectRunningAcAsync();
         RefreshSessionsButton.Click += (_, _) => RefreshSessionState();
+        AddPluginDllButton.Click += async (_, _) => await AddPluginDllAsync();
 
         ServerProfilesList.SelectionChanged += (_, _) => OnPrimarySelectionChanged();
         AccountProfilesList.SelectionChanged += (_, _) => OnPrimarySelectionChanged();
@@ -164,41 +161,87 @@ internal partial class MainWindow : Window
 
         foreach (PluginDefinition plugin in _plugins)
         {
-            var host = new Border
-            {
-                Background = Brush.Parse("#0F161D"),
-                BorderBrush = Brush.Parse("#243742"),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(12)
-            };
-
-            var stack = new StackPanel { Spacing = 6 };
             var checkBox = new CheckBox
             {
                 Content = plugin.Name,
                 IsChecked = _settings.EnabledPluginIds.Contains(plugin.Id, StringComparer.OrdinalIgnoreCase)
             };
             checkBox.IsCheckedChanged += (_, _) => OnPluginSelectionChanged(plugin, checkBox);
-
-            stack.Children.Add(checkBox);
-            stack.Children.Add(new TextBlock
-            {
-                Text = plugin.StatusText.ToUpperInvariant(),
-                Foreground = Brush.Parse(plugin.RuntimeImplemented ? "#66D687" : "#E2B348"),
-                FontWeight = FontWeight.Bold
-            });
-            stack.Children.Add(new TextBlock
-            {
-                Text = plugin.Summary,
-                TextWrapping = TextWrapping.Wrap,
-                Foreground = Brush.Parse("#9AA8B3")
-            });
-
-            host.Child = stack;
-            PluginLoadoutPanel.Children.Add(host);
             _pluginChecks[plugin.Id] = checkBox;
+
+            PluginLoadoutPanel.Children.Add(BuildPluginCard(checkBox, plugin.Summary, null));
         }
+
+        foreach (string dllPath in _pluginDllPaths)
+        {
+            string capturedPath = dllPath;
+            string pluginName = Path.GetFileNameWithoutExtension(dllPath);
+
+            var checkBox = new CheckBox { Content = pluginName, IsChecked = true };
+
+            PluginLoadoutPanel.Children.Add(BuildPluginCard(checkBox, capturedPath, () =>
+            {
+                for (int j = _pluginDllPaths.Count - 1; j >= 0; j--)
+                {
+                    if (string.Equals(_pluginDllPaths[j], capturedPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _pluginDllPaths.RemoveAt(j);
+                        break;
+                    }
+                }
+                SavePluginDllPaths();
+                BuildPluginLoadout();
+                AppendActivity($"Removed plugin: {Path.GetFileName(capturedPath)}");
+            }));
+        }
+    }
+
+    private static Border BuildPluginCard(CheckBox checkBox, string description, Action? onRemove)
+    {
+        var host = new Border
+        {
+            Background = Brush.Parse("#0F161D"),
+            BorderBrush = Brush.Parse("#243742"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(12)
+        };
+
+        var stack = new StackPanel { Spacing = 6 };
+        stack.Children.Add(checkBox);
+        stack.Children.Add(new TextBlock
+        {
+            Text = description,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brush.Parse("#9AA8B3")
+        });
+
+        if (onRemove == null)
+        {
+            host.Child = stack;
+            return host;
+        }
+
+        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*, Auto") };
+        var removeButton = new Button
+        {
+            Content = "\u2715",
+            FontSize = 14,
+            Padding = new Thickness(6, 2),
+            VerticalAlignment = VerticalAlignment.Top,
+            Background = Brushes.Transparent,
+            Foreground = Brush.Parse("#9AA8B3"),
+            BorderThickness = new Thickness(0)
+        };
+        removeButton.Click += (_, _) => onRemove();
+
+        Grid.SetColumn(stack, 0);
+        Grid.SetColumn(removeButton, 1);
+        row.Children.Add(stack);
+        row.Children.Add(removeButton);
+
+        host.Child = row;
+        return host;
     }
 
     private void RefreshLists()
@@ -997,6 +1040,87 @@ internal partial class MainWindow : Window
         AppendActivity($"Runtime loadout updated: {plugin.Name} {(checkBox.IsChecked == true ? "enabled" : "disabled")}.");
     }
 
+    private void LoadPluginDllPaths()
+    {
+        _pluginDllPaths.Clear();
+        if (_settings.PluginDllPaths != null)
+        {
+            foreach (string path in _settings.PluginDllPaths)
+                _pluginDllPaths.Add(path);
+        }
+    }
+
+    private async Task AddPluginDllAsync()
+    {
+        var topLevel = GetTopLevel(this);
+        if (topLevel == null)
+            return;
+
+        var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Select a plugin DLL",
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType("Plugin DLL") { Patterns = ["*.dll"] },
+                new FilePickerFileType("All Files") { Patterns = ["*"] }
+            ]
+        });
+
+        if (files.Count == 0)
+            return;
+
+        string fullPath = Path.GetFullPath(files[0].Path.LocalPath);
+
+        if (_pluginDllPaths.Any(p => string.Equals(p, fullPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            AppendActivity($"Plugin path already added: {fullPath}");
+            return;
+        }
+
+        _pluginDllPaths.Add(fullPath);
+        SavePluginDllPaths();
+        BuildPluginLoadout();
+        AppendActivity($"Added plugin: {Path.GetFileName(fullPath)}");
+    }
+
+    private void SavePluginDllPaths()
+    {
+        _settings.PluginDllPaths = _pluginDllPaths.ToList();
+        SaveSettings();
+        SyncPluginPathsToEngineSettings();
+    }
+
+    private void SyncPluginPathsToEngineSettings()
+    {
+        string engineSettingsPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "RynthCore",
+            "engine.json");
+
+        try
+        {
+            string? dir = Path.GetDirectoryName(engineSettingsPath);
+            if (dir != null) Directory.CreateDirectory(dir);
+
+            using var ms = new MemoryStream();
+            using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
+            {
+                w.WriteStartObject();
+                w.WriteStartArray("PluginPaths");
+                foreach (string p in _pluginDllPaths)
+                    w.WriteStringValue(p);
+                w.WriteEndArray();
+                w.WriteEndObject();
+            }
+            File.WriteAllBytes(engineSettingsPath, ms.ToArray());
+        }
+        catch (Exception ex)
+        {
+            AppendActivity($"Failed to sync plugin paths to engine.json: {ex.Message}");
+        }
+    }
+
     private async Task InjectRunningAcAsync()
     {
         if (_operationBusy)
@@ -1034,9 +1158,6 @@ internal partial class MainWindow : Window
             SetOperationState(true);
             Process target = targets.OrderBy(process => process.Id).First();
             AppendActivity($"Applying selected loadout to running AC (PID {target.Id}).");
-
-            if (GetSelectedPluginIds().Contains("nexai", StringComparer.OrdinalIgnoreCase))
-                AppendActivity("RynthAi is selected and saved in the loadout. Runtime adoption is still a future step.");
 
             InjectionResult result = await Task.Run(() => _injector.InjectIntoProcess(target, enginePath, AppendActivity));
             if (result.Success)

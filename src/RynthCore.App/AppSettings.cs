@@ -18,6 +18,7 @@ internal sealed class AppSettings
     public bool AutoInjectAfterLaunch { get; set; } = true;
     public bool WatchForAcStart { get; set; } = true;
     public List<string> EnabledPluginIds { get; set; } = [];
+    public List<string> PluginDllPaths { get; set; } = [];
     public List<LaunchServerProfile> ServerProfiles { get; set; } = [];
     public List<LaunchAccountProfile> AccountProfiles { get; set; } = [];
 
