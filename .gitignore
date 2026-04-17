@@ -38,3 +38,7 @@ appsettings.*.local.json
 
 # Scratch space
 scratch/
+
+# Installer build artifacts
+installer/staging/
+installer/Output/
