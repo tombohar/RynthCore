@@ -98,7 +98,7 @@ internal static class VendorHooks
 
             IsInstalled    = true;
             _statusMessage = $"Hooked vendor @ open=0x{_openAddress.ToInt32():X8} close=0x{_closeAddress.ToInt32():X8}.";
-            RynthLog.Compat($"Compat: vendor hooks ready - {_statusMessage}");
+            RynthLog.Verbose($"Compat: vendor hooks ready - {_statusMessage}");
         }
         catch (Exception ex)
         {

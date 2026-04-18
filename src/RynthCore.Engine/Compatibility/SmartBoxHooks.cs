@@ -74,7 +74,7 @@ internal static class SmartBoxHooks
                         {
                             delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint> pSbDetour = &DispatchSmartBoxEventDetour;
                             MinHook.Hook(sbAddr, (IntPtr)pSbDetour, out _originalDispatchSmartBoxEventPtr);
-                            RynthLog.Compat($"Compat: smartbox hook ready @ 0x{sbAddr.ToInt32():X8}");
+                            RynthLog.Verbose($"Compat: smartbox hook ready @ 0x{sbAddr.ToInt32():X8}");
                         }
                     }
                     else RynthLog.Compat("Compat: smartbox pattern not found.");
@@ -88,7 +88,7 @@ internal static class SmartBoxHooks
                         {
                             delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint> pGeDetour = &DispatchGameEventDetour;
                             MinHook.Hook(geAddr, (IntPtr)pGeDetour, out _originalDispatchGameEventPtr);
-                            RynthLog.Compat($"Compat: game-event hook ready @ 0x{geAddr.ToInt32():X8}");
+                            RynthLog.Verbose($"Compat: game-event hook ready @ 0x{geAddr.ToInt32():X8}");
                         }
                         else RynthLog.Compat("Compat: game-event pattern matched already-hooked address.");
                     }
@@ -267,7 +267,7 @@ internal static class SmartBoxHooks
 
                 int count = Interlocked.Increment(ref _identifyLogCount);
                 if (count <= 12)
-                    RynthLog.Compat($"Compat: identify 0xC9 obj=0x{objectId:X8} maxHealth={maxHealth}");
+                    RynthLog.Verbose($"Compat: identify 0xC9 obj=0x{objectId:X8} maxHealth={maxHealth}");
             }
         }
         catch

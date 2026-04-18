@@ -86,22 +86,22 @@ internal static class ClientCombatHooks
             // Verify the combat system singleton is accessible
             IntPtr cs = _getCombatSystem();
             IntPtr globalPtr = Marshal.ReadIntPtr(new IntPtr(CombatSystemPtrVa));
-            RynthLog.Compat($"Compat: ClientCombat GetCombatSystem()=0x{cs:X8}, global=0x{globalPtr:X8}");
+            RynthLog.Verbose($"Compat: ClientCombat GetCombatSystem()=0x{cs:X8}, global=0x{globalPtr:X8}");
             if (cs == IntPtr.Zero && globalPtr == IntPtr.Zero)
             {
                 _statusMessage = "GetCombatSystem returned null — client not ready.";
-                RynthLog.Compat($"Compat: ClientCombat probe - {_statusMessage}");
+                RynthLog.Verbose($"Compat: ClientCombat probe - {_statusMessage}");
                 // Don't fail — the pointer may be valid after login
             }
             else
             {
                 IntPtr used = cs != IntPtr.Zero ? cs : globalPtr;
-                RynthLog.Compat($"Compat: ClientCombatSystem at 0x{used:X8}");
+                RynthLog.Verbose($"Compat: ClientCombatSystem at 0x{used:X8}");
             }
 
             _initialized = true;
             _statusMessage = "Ready.";
-            RynthLog.Compat("Compat: ClientCombat hooks ready — native attack pipeline available.");
+            RynthLog.Verbose("Compat: ClientCombat hooks ready — native attack pipeline available.");
             return true;
         }
         catch (Exception ex)

@@ -68,7 +68,7 @@ internal static class SessionStateRegistry
                 CharacterCacheStore.UpsertCharacter(accountName, serverName, characterName);
 
             _loginRecorded = true;
-            RynthLog.Compat($"SessionState: recorded login session for PID {Environment.ProcessId} account='{accountName}' character='{characterName}'.");
+            RynthLog.Verbose($"SessionState: recorded login session for PID {Environment.ProcessId} account='{accountName}' character='{characterName}'.");
         }
         catch (Exception ex)
         {

@@ -14,10 +14,16 @@ internal static class CommandInterpreterHooks
     private const int ReferenceCommandInterpreterSetAutoRun = 0x006B5790;
     private const int ReferenceCommandInterpreterStopCompletely = 0x006B4A90;
     private const int ReferenceCommandInterpreterTurnToHeading = 0x006B54B0;
+    private const int ReferenceCommandInterpreterPlayerTeleported = 0x006B41F0;
+    private const int ReferenceCommandInterpreterTakeControlFromServer = 0x006B4210;
+    private const int ReferenceCommandInterpreterClearAllCommands = 0x006B40E0;
     private const int SetMotionOffsetFromCommenceJump = ReferenceAccCmdInterpSetMotion - ReferenceAccCmdInterpCommenceJump;
     private const int SetMotionOffsetFromDoJump = ReferenceAccCmdInterpSetMotion - ReferenceAccCmdInterpDoJump;
     private const int StopCompletelyOffsetFromSetAutoRun = ReferenceCommandInterpreterStopCompletely - ReferenceCommandInterpreterSetAutoRun;
     private const int TurnToHeadingOffsetFromSetAutoRun = ReferenceCommandInterpreterTurnToHeading - ReferenceCommandInterpreterSetAutoRun;
+    private const int PlayerTeleportedOffsetFromSetAutoRun = ReferenceCommandInterpreterPlayerTeleported - ReferenceCommandInterpreterSetAutoRun;
+    private const int TakeControlOffsetFromSetAutoRun = ReferenceCommandInterpreterTakeControlFromServer - ReferenceCommandInterpreterSetAutoRun;
+    private const int ClearAllCommandsOffsetFromSetAutoRun = ReferenceCommandInterpreterClearAllCommands - ReferenceCommandInterpreterSetAutoRun;
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void CommenceJumpDelegate(IntPtr thisPtr);
@@ -37,6 +43,15 @@ internal static class CommandInterpreterHooks
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void TurnToHeadingDelegate(IntPtr thisPtr, float headingDegrees);
 
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate void PlayerTeleportedDelegate(IntPtr thisPtr);
+
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate void TakeControlFromServerDelegate(IntPtr thisPtr);
+
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate void ClearAllCommandsDelegate(IntPtr thisPtr);
+
     private static IntPtr _smartboxStaticAddr;
     private static IntPtr _boundCmdInterp;
     private static CommenceJumpDelegate? _commenceJump;
@@ -45,6 +60,9 @@ internal static class CommandInterpreterHooks
     private static SetMotionDelegate? _setMotion;
     private static StopCompletelyDelegate? _stopCompletely;
     private static TurnToHeadingDelegate? _turnToHeading;
+    private static PlayerTeleportedDelegate? _playerTeleported;
+    private static TakeControlFromServerDelegate? _takeControlFromServer;
+    private static ClearAllCommandsDelegate? _clearAllCommands;
     private static string _statusMessage = "Not probed yet.";
 
     public static bool IsInitialized { get; private set; }
@@ -53,6 +71,8 @@ internal static class CommandInterpreterHooks
     public static bool HasSetMotion => _setMotion != null;
     public static bool HasStopCompletely => _stopCompletely != null;
     public static bool HasTurnToHeading => _turnToHeading != null;
+    public static bool HasTakeControlFromServer => _takeControlFromServer != null;
+    public static bool HasClearAllCommands => _clearAllCommands != null;
     public static string StatusMessage => _statusMessage;
 
     public static bool Probe()
@@ -73,20 +93,15 @@ internal static class CommandInterpreterHooks
                 return false;
             }
 
-            RynthLog.Compat($"Compat: command interpreter found {SmartBoxLocator.CandidateCount} SmartBox candidate(s).");
-
             if (!TryBindDelegates())
             {
                 if (string.IsNullOrEmpty(_statusMessage))
                     _statusMessage = "cmdinterp unavailable.";
-
-                RynthLog.Compat($"Compat: command interpreter probe pending - {_statusMessage}");
                 return false;
             }
 
             IsInitialized = true;
             _statusMessage = "Ready.";
-            RynthLog.Compat($"Compat: command interpreter hooks ready - smartbox=0x{_smartboxStaticAddr.ToInt32():X8}, cmdinterp=0x{_boundCmdInterp.ToInt32():X8}");
             return true;
         }
         catch (Exception ex)
@@ -162,6 +177,54 @@ internal static class CommandInterpreterHooks
         }
     }
 
+    public static bool PlayerTeleported()
+    {
+        if (!TryBindDelegates() || _playerTeleported == null)
+            return false;
+
+        try
+        {
+            _playerTeleported(_boundCmdInterp);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool TakeControlFromServer()
+    {
+        if (!TryBindDelegates() || _takeControlFromServer == null)
+            return false;
+
+        try
+        {
+            _takeControlFromServer(_boundCmdInterp);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool ClearAllCommands()
+    {
+        if (!TryBindDelegates() || _clearAllCommands == null)
+            return false;
+
+        try
+        {
+            _clearAllCommands(_boundCmdInterp);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static bool TapJump()
     {
         if (!TryBindDelegates())
@@ -191,7 +254,6 @@ internal static class CommandInterpreterHooks
         if (!SmartBoxLocator.TryGetSmartBox(out smartBox, out selectedStaticAddr, out string smartBoxFailure))
         {
             _statusMessage = smartBoxFailure;
-            RynthLog.Compat($"Compat: command interpreter bind pending - {_statusMessage}");
             return false;
         }
 
@@ -200,12 +262,7 @@ internal static class CommandInterpreterHooks
             cmdInterp = Marshal.ReadIntPtr(smartBox + SmartBoxLocator.SmartBoxCmdInterpOffset);
             if (cmdInterp == IntPtr.Zero)
             {
-                uint playerId = unchecked((uint)Marshal.ReadInt32(smartBox + SmartBoxLocator.SmartBoxPlayerIdOffset));
-                IntPtr player = Marshal.ReadIntPtr(smartBox + SmartBoxLocator.SmartBoxPlayerOffset);
-                _statusMessage = playerId != 0 || player != IntPtr.Zero
-                    ? $"CommandInterpreter not ready (playerId=0x{playerId:X8}, player=0x{player.ToInt32():X8})."
-                    : "SmartBox active but player not ready.";
-                RynthLog.Compat($"Compat: command interpreter bind pending - {_statusMessage}");
+                _statusMessage = "SmartBox active but CommandInterpreter not ready.";
                 return false;
             }
 
@@ -213,14 +270,12 @@ internal static class CommandInterpreterHooks
             if (!SmartBoxLocator.IsPointerInModule(vtable))
             {
                 _statusMessage = $"CommandInterpreter vtable looks invalid (0x{vtable.ToInt32():X8}).";
-                RynthLog.Compat($"Compat: command interpreter bind failed - {_statusMessage}");
                 return false;
             }
         }
         catch (Exception ex)
         {
             _statusMessage = ex.Message;
-            RynthLog.Compat($"Compat: command interpreter bind pending - {_statusMessage}");
             return false;
         }
 
@@ -230,7 +285,10 @@ internal static class CommandInterpreterHooks
             _setAutoRun != null &&
             _setMotion != null &&
             _stopCompletely != null &&
-            _turnToHeading != null)
+            _turnToHeading != null &&
+            _playerTeleported != null &&
+            _takeControlFromServer != null &&
+            _clearAllCommands != null)
         {
             _smartboxStaticAddr = selectedStaticAddr;
             IsInitialized = true;
@@ -244,17 +302,21 @@ internal static class CommandInterpreterHooks
         IntPtr setMotionPtr = ResolveSetMotionPointer(commenceJumpPtr, doJumpPtr);
         IntPtr stopCompletelyPtr = AddOffset(setAutoRunPtr, StopCompletelyOffsetFromSetAutoRun);
         IntPtr turnToHeadingPtr = AddOffset(setAutoRunPtr, TurnToHeadingOffsetFromSetAutoRun);
+        IntPtr playerTeleportedPtr = AddOffset(setAutoRunPtr, PlayerTeleportedOffsetFromSetAutoRun);
+        IntPtr takeControlPtr = AddOffset(setAutoRunPtr, TakeControlOffsetFromSetAutoRun);
+        IntPtr clearAllCommandsPtr = AddOffset(setAutoRunPtr, ClearAllCommandsOffsetFromSetAutoRun);
 
         if (!SmartBoxLocator.IsPointerInModule(commenceJumpPtr) ||
             !SmartBoxLocator.IsPointerInModule(doJumpPtr) ||
             !SmartBoxLocator.IsPointerInModule(setAutoRunPtr) ||
             !SmartBoxLocator.IsPointerInModule(setMotionPtr) ||
             !SmartBoxLocator.IsPointerInModule(stopCompletelyPtr) ||
-            !SmartBoxLocator.IsPointerInModule(turnToHeadingPtr))
+            !SmartBoxLocator.IsPointerInModule(turnToHeadingPtr) ||
+            !SmartBoxLocator.IsPointerInModule(playerTeleportedPtr) ||
+            !SmartBoxLocator.IsPointerInModule(takeControlPtr) ||
+            !SmartBoxLocator.IsPointerInModule(clearAllCommandsPtr))
         {
-            _statusMessage =
-                $"CommandInterpreter pointers look invalid (commence=0x{commenceJumpPtr.ToInt32():X8}, doJump=0x{doJumpPtr.ToInt32():X8}, autorun=0x{setAutoRunPtr.ToInt32():X8}, setMotion=0x{setMotionPtr.ToInt32():X8}, stop=0x{stopCompletelyPtr.ToInt32():X8}, turn=0x{turnToHeadingPtr.ToInt32():X8}).";
-            RynthLog.Compat($"Compat: command interpreter bind failed - {_statusMessage}");
+            _statusMessage = "CommandInterpreter pointers look invalid.";
             return false;
         }
 
@@ -264,13 +326,15 @@ internal static class CommandInterpreterHooks
         _setMotion = Marshal.GetDelegateForFunctionPointer<SetMotionDelegate>(setMotionPtr);
         _stopCompletely = Marshal.GetDelegateForFunctionPointer<StopCompletelyDelegate>(stopCompletelyPtr);
         _turnToHeading = Marshal.GetDelegateForFunctionPointer<TurnToHeadingDelegate>(turnToHeadingPtr);
+        _playerTeleported = Marshal.GetDelegateForFunctionPointer<PlayerTeleportedDelegate>(playerTeleportedPtr);
+        _takeControlFromServer = Marshal.GetDelegateForFunctionPointer<TakeControlFromServerDelegate>(takeControlPtr);
+        _clearAllCommands = Marshal.GetDelegateForFunctionPointer<ClearAllCommandsDelegate>(clearAllCommandsPtr);
 
         _smartboxStaticAddr = selectedStaticAddr;
         _boundCmdInterp = cmdInterp;
         IsInitialized = true;
         _statusMessage = "Ready.";
-        RynthLog.Compat(
-            $"Compat: command interpreter bound - smartboxStatic=0x{selectedStaticAddr.ToInt32():X8}, smartbox=0x{smartBox.ToInt32():X8}, cmdinterp=0x{cmdInterp.ToInt32():X8}, setMotion=0x{setMotionPtr.ToInt32():X8}, stop=0x{stopCompletelyPtr.ToInt32():X8}, turn=0x{turnToHeadingPtr.ToInt32():X8}, autorun=0x{setAutoRunPtr.ToInt32():X8}");
+        RynthLog.Verbose("Compat: command interpreter bound");
         return true;
     }
 
@@ -296,6 +360,9 @@ internal static class CommandInterpreterHooks
         _setMotion = null;
         _stopCompletely = null;
         _turnToHeading = null;
+        _playerTeleported = null;
+        _takeControlFromServer = null;
+        _clearAllCommands = null;
         IsInitialized = false;
         _statusMessage = "Not probed yet.";
     }

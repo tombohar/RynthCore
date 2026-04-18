@@ -63,7 +63,7 @@ internal static class EnchantmentHooks
         if (_initialized) return true;
 
         _initialized = true;
-        RynthLog.Compat("Compat: enchantment reader ready (hookless, CACQualities+0x70)");
+        RynthLog.Verbose("Compat: enchantment reader ready (hookless, CACQualities+0x70)");
         return true;
     }
 
@@ -85,7 +85,7 @@ internal static class EnchantmentHooks
         if (!_loggedFirstRead && count > 0)
         {
             _loggedFirstRead = true;
-            RynthLog.Compat($"[EnchRead] first player read: {count} enchantments");
+            RynthLog.Verbose($"[EnchRead] first player read: {count} enchantments");
         }
 
         return count;

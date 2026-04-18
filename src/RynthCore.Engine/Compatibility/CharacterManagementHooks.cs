@@ -162,7 +162,7 @@ internal static class CharacterManagementHooks
                 _characterSetGetGid = Marshal.GetDelegateForFunctionPointer<CharacterSetGetGidDelegate>(new IntPtr(CharacterSetGetGidVa));
                 _bound = true;
                 _statusMessage = "Bound.";
-                RynthLog.Compat("CharacterManagement: Bound UIFlow and direct LogOnCharacter entry points.");
+                RynthLog.Verbose("CharacterManagement: Bound UIFlow and direct LogOnCharacter entry points.");
             }
             catch (Exception ex)
             {

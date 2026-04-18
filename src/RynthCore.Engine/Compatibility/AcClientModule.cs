@@ -59,7 +59,7 @@ internal static class AcClientModule
             if (!_loggedBaseOnce)
             {
                 _loggedBaseOnce = true;
-                RynthLog.Compat($"Compat: acclient.exe base=0x{moduleBase.ToInt32():X8}, size=0x{imageSize:X}");
+                RynthLog.Verbose($"Compat: acclient.exe base=0x{moduleBase.ToInt32():X8}, size=0x{imageSize:X}");
             }
 
             int rawTextSize = imageSize - DefaultTextRva;

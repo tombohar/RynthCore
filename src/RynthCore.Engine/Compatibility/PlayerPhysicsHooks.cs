@@ -41,7 +41,7 @@ internal static class PlayerPhysicsHooks
         if (ready)
         {
             BindPhysicsDelegates();
-            RynthLog.Compat($"Compat: player physics ready - smartbox candidates={SmartBoxLocator.CandidateCount}");
+            RynthLog.Verbose($"Compat: player physics ready - smartbox candidates={SmartBoxLocator.CandidateCount}");
         }
 
         return ready;
@@ -276,7 +276,7 @@ internal static class PlayerPhysicsHooks
 
         _getHeading = Marshal.GetDelegateForFunctionPointer<PhysicsGetHeadingDelegate>(getHeadingPtr);
         _setHeading = Marshal.GetDelegateForFunctionPointer<PhysicsSetHeadingDelegate>(setHeadingPtr);
-        RynthLog.Compat(
+        RynthLog.Verbose(
             $"Compat: player heading hooks ready - get=0x{getHeadingPtr.ToInt32():X8}, set=0x{setHeadingPtr.ToInt32():X8}");
         return true;
     }

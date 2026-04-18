@@ -11,8 +11,17 @@ internal static class BusyCountHooks
     private const int IncrementBusyCountVa = 0x00565610;
     private const int DecrementBusyCountVa = 0x00565630;
 
+    // ClientUISystem::UpdateCursorState — per-frame cursor evaluation
+    private const int UpdateCursorStateVa = 0x005653D0;
+
+    // ClientUISystem struct field offset for m_cBusy (confirmed via runtime dump)
+    private const int OffsetMCBusy = 0x14;
+
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void BusyCountDelegate(IntPtr thisPtr);
+
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate void UpdateCursorStateDelegate(IntPtr thisPtr);
 
     private static BusyCountDelegate? _originalIncrementBusyCount;
     private static BusyCountDelegate? _incrementBusyCountDetour;
@@ -24,12 +33,56 @@ internal static class BusyCountHooks
     private static int _incrementDispatchCount;
     private static int _decrementDispatchCount;
     private static int _netBusyCount;
+    private static IntPtr _lastThisPtr;
 
     public static bool IsInstalled { get; private set; }
     public static string StatusMessage => _statusMessage;
 
     /// <summary>Returns 0 if the character is idle, positive if a UI action is in progress.</summary>
     public static int GetBusyState() => Math.Max(0, _netBusyCount);
+
+    /// <summary>Force-reset the client's busy count to zero and re-evaluate the cursor.
+    /// Directly writes m_cBusy=0 then calls UpdateCursorState so the game
+    /// switches from hourglass back to the default arrow.</summary>
+    public static void ForceResetBusyCount()
+    {
+        if (!IsInstalled || _lastThisPtr == IntPtr.Zero)
+            return;
+
+        int was = _netBusyCount;
+
+        // Call the original decrement a few times to let the client run
+        // its own cleanup path (cursor reset, etc) for any non-zero count.
+        if (_originalDecrementBusyCount != null)
+        {
+            int calls = Math.Max(was, 3);
+            for (int i = 0; i < calls && i < 20; i++)
+                _originalDecrementBusyCount(_lastThisPtr);
+        }
+
+        Interlocked.Exchange(ref _netBusyCount, 0);
+
+        // Directly zero m_cBusy — DecrementBusyCount guards with if(m_cBusy>0)
+        // so it's a no-op when our tracked count drifts from the real value.
+        try { Marshal.WriteInt32(_lastThisPtr + OffsetMCBusy, 0); }
+        catch { /* non-fatal */ }
+
+        // Clear pending commands and restore client control
+        CommandInterpreterHooks.ClearAllCommands();
+        CommandInterpreterHooks.TakeControlFromServer();
+        CommandInterpreterHooks.PlayerTeleported();
+
+        // Force the game's own cursor evaluation with the cleared state
+        try
+        {
+            var updateCursor = Marshal.GetDelegateForFunctionPointer<UpdateCursorStateDelegate>(
+                new IntPtr(UpdateCursorStateVa));
+            updateCursor(_lastThisPtr);
+        }
+        catch { /* non-fatal */ }
+
+        RynthLog.Verbose($"Compat: force-reset busy count (was {was})");
+    }
 
     public static void Initialize()
     {
@@ -76,8 +129,7 @@ internal static class BusyCountHooks
 
             IsInstalled = true;
             _statusMessage = $"Hooked busy-count seams @ 0x{_incrementTargetAddress.ToInt32():X8}/0x{_decrementTargetAddress.ToInt32():X8}.";
-            RynthLog.Compat(
-                $"Compat: busy-count hooks ready - increment=0x{_incrementTargetAddress.ToInt32():X8} (0x{incrementByte:X2}), decrement=0x{_decrementTargetAddress.ToInt32():X8} (0x{decrementByte:X2})");
+            RynthLog.Verbose($"Compat: busy-count hooks installed");
         }
         catch (Exception ex)
         {
@@ -88,24 +140,19 @@ internal static class BusyCountHooks
 
     private static void IncrementBusyCountDetour(IntPtr thisPtr)
     {
+        _lastThisPtr = thisPtr;
         _originalIncrementBusyCount!(thisPtr);
-
-        int count = Interlocked.Increment(ref _incrementDispatchCount);
-        if (count <= 0)
-            RynthLog.Compat($"Compat: busy count incremented #{count}");
-
+        Interlocked.Increment(ref _incrementDispatchCount);
         Interlocked.Increment(ref _netBusyCount);
         PluginManager.QueueBusyCountIncremented();
     }
 
     private static void DecrementBusyCountDetour(IntPtr thisPtr)
     {
+        if (_lastThisPtr == IntPtr.Zero)
+            _lastThisPtr = thisPtr;
         _originalDecrementBusyCount!(thisPtr);
-
-        int count = Interlocked.Increment(ref _decrementDispatchCount);
-        if (count <= 0)
-            RynthLog.Compat($"Compat: busy count decremented #{count}");
-
+        Interlocked.Increment(ref _decrementDispatchCount);
         Interlocked.Decrement(ref _netBusyCount);
         PluginManager.QueueBusyCountDecremented();
     }

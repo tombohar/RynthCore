@@ -172,7 +172,7 @@ internal static class AppraisalHooks
 
             _hookInstalled = true;
             _statusMessage = $"Hooked CM_Examine::SendNotice_SetAppraiseInfo @ 0x{targetAddress.ToInt32():X8}.";
-            RynthLog.Compat($"Compat: appraisal hook ready @ 0x{targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
+            RynthLog.Verbose($"Compat: appraisal hook ready @ 0x{targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
         }
         catch (Exception ex)
         {
@@ -270,7 +270,7 @@ internal static class AppraisalHooks
             _intCache[guid] = props;
         }
 
-        RynthLog.Compat($"Compat: cached {props.Count} int prop(s) for guid=0x{guid:X8}");
+        RynthLog.Verbose($"Compat: cached {props.Count} int prop(s) for guid=0x{guid:X8}");
     }
 
     private static void CacheBoolProps(uint guid, IntPtr profilePtr)
@@ -312,7 +312,7 @@ internal static class AppraisalHooks
             _boolCache[guid] = props;
         }
 
-        RynthLog.Compat($"Compat: cached {props.Count} bool prop(s) for guid=0x{guid:X8}");
+        RynthLog.Verbose($"Compat: cached {props.Count} bool prop(s) for guid=0x{guid:X8}");
     }
 
     private static void CacheStringProps(uint guid, IntPtr profilePtr)
@@ -367,7 +367,7 @@ internal static class AppraisalHooks
             _stringCache[guid] = props;
         }
 
-        RynthLog.Compat($"Compat: cached {props.Count} string prop(s) for guid=0x{guid:X8}");
+        RynthLog.Verbose($"Compat: cached {props.Count} string prop(s) for guid=0x{guid:X8}");
     }
 
     private static void CacheSpellIds(uint guid, IntPtr profilePtr)
@@ -386,7 +386,7 @@ internal static class AppraisalHooks
 
         if (mNum == 0)
         {
-            RynthLog.Compat($"Compat: guid=0x{guid:X8} spell book present but empty (mNum=0)");
+            RynthLog.Verbose($"Compat: guid=0x{guid:X8} spell book present but empty (mNum=0)");
             return;
         }
         if (mData == IntPtr.Zero || mNum < 0 || mNum > 512)
@@ -402,7 +402,7 @@ internal static class AppraisalHooks
         lock (_cacheLock)
             _spellIdCache[guid] = ids;
 
-        RynthLog.Compat($"Compat: cached {mNum} spell ID(s) for guid=0x{guid:X8}");
+        RynthLog.Verbose($"Compat: cached {mNum} spell ID(s) for guid=0x{guid:X8}");
     }
 
     /// <summary>

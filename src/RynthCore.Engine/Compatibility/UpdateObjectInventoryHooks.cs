@@ -69,7 +69,7 @@ internal static class UpdateObjectInventoryHooks
             _statusMessage =
                 $"Hooked ACCObjectMaint::UpdateObjectInventory @ 0x{_targetAddress.ToInt32():X8}" +
                 $"{(updateUsedScan ? " (pattern)" : string.Empty)}.";
-            RynthLog.Compat($"Compat: update-object-inventory hook ready - {_statusMessage}");
+            RynthLog.Verbose($"Compat: update-object-inventory hook ready - {_statusMessage}");
         }
         catch (Exception ex)
         {
@@ -124,7 +124,7 @@ internal static class UpdateObjectInventoryHooks
         if (_hasLoggedVtableScan) return;
         _hasLoggedVtableScan = true;
 
-        RynthLog.Compat($"Compat: === Vtable scan of weenie 0x{containerId:X8} at 0x{weeniePtr.ToInt32():X8} ===");
+        RynthLog.Verbose($"Compat: === Vtable scan of weenie 0x{containerId:X8} at 0x{weeniePtr.ToInt32():X8} ===");
         for (int off = 0; off < 0x80; off += 4)
         {
             try
@@ -132,7 +132,7 @@ internal static class UpdateObjectInventoryHooks
                 IntPtr addr = weeniePtr + off;
                 if (!IsReadablePointer(addr))
                 {
-                    RynthLog.Compat($"Compat:   +0x{off:X2} UNREADABLE");
+                    RynthLog.Verbose($"Compat:   +0x{off:X2} UNREADABLE");
                     continue;
                 }
 
@@ -141,15 +141,15 @@ internal static class UpdateObjectInventoryHooks
                 bool readable = val != IntPtr.Zero && IsReadablePointer(val);
 
                 if (inModule)
-                    RynthLog.Compat($"Compat:   +0x{off:X2} = 0x{val.ToInt32():X8} [VTABLE - in module]");
+                    RynthLog.Verbose($"Compat:   +0x{off:X2} = 0x{val.ToInt32():X8} [VTABLE - in module]");
                 else if (readable && val.ToInt32() > 0x10000)
-                    RynthLog.Compat($"Compat:   +0x{off:X2} = 0x{val.ToInt32():X8} [heap ptr]");
+                    RynthLog.Verbose($"Compat:   +0x{off:X2} = 0x{val.ToInt32():X8} [heap ptr]");
                 else
-                    RynthLog.Compat($"Compat:   +0x{off:X2} = 0x{val.ToInt32():X8}");
+                    RynthLog.Verbose($"Compat:   +0x{off:X2} = 0x{val.ToInt32():X8}");
             }
             catch
             {
-                RynthLog.Compat($"Compat:   +0x{off:X2} ACCESS VIOLATION");
+                RynthLog.Verbose($"Compat:   +0x{off:X2} ACCESS VIOLATION");
                 break;
             }
         }
@@ -158,7 +158,7 @@ internal static class UpdateObjectInventoryHooks
         try
         {
             IntPtr invPtr = Marshal.ReadIntPtr(weeniePtr + WeenieObjectInventoryOffset);
-            RynthLog.Compat($"Compat: Current WeenieObjectInventoryOffset=0x{WeenieObjectInventoryOffset:X2} -> 0x{invPtr.ToInt32():X8} readable={IsReadablePointer(invPtr)}");
+            RynthLog.Verbose($"Compat: Current WeenieObjectInventoryOffset=0x{WeenieObjectInventoryOffset:X2} -> 0x{invPtr.ToInt32():X8} readable={IsReadablePointer(invPtr)}");
         }
         catch (Exception ex)
         {

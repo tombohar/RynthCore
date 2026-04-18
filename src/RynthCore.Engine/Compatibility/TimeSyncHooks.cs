@@ -71,7 +71,7 @@ internal static class TimeSyncHooks
             }
 
             _initialized = true;
-            RynthLog.Compat($"Compat: time-sync hook ready - HandleTimeSynch=0x{HandleTimeSynchVa:X8}");
+            RynthLog.Verbose($"Compat: time-sync hook ready - HandleTimeSynch=0x{HandleTimeSynchVa:X8}");
         }
         catch (Exception ex)
         {

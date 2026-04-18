@@ -450,6 +450,11 @@ internal struct RynthCoreAPI
     /// BF_DOOR = 0x1000, BF_VENDOR = 0x200, BF_CORPSE = 0x2000, etc.
     /// Returns 0 if the object is not found.</summary>
     public IntPtr GetObjectBitfieldFn;
+
+    /// <summary>Function pointer: void ForceResetBusyCount()
+    /// Force-resets the client's ClientUISystem busy count to zero.
+    /// Use after portal teleports that interrupt actions and leave the hourglass cursor stuck.</summary>
+    public IntPtr ForceResetBusyCountFn;
 }
 
 
@@ -838,3 +843,6 @@ internal unsafe delegate int GetObjectStateCallbackDelegate(uint objectId, uint*
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate uint GetObjectBitfieldCallbackDelegate(uint objectId);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void ForceResetBusyCountCallbackDelegate();

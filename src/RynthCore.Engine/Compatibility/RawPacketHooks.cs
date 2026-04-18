@@ -49,7 +49,7 @@ internal static class RawPacketHooks
                 delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int, int, IntPtr, IntPtr, int> pDetour = &RecvFromDetour;
                 MinHook.Hook(recvFromAddr, (IntPtr)pDetour, out _originalRecvFromPtr);
                 IsInstalled = true;
-                RynthLog.Compat($"RawPacket: RecvFrom hook installed @ 0x{recvFromAddr.ToInt32():X8}");
+                RynthLog.Verbose($"RawPacket: RecvFrom hook installed @ 0x{recvFromAddr.ToInt32():X8}");
             }
             catch (Exception ex)
             {

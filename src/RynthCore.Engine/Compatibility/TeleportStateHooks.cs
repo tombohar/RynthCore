@@ -41,6 +41,6 @@ internal static class TeleportStateHooks
     // Called from EntryPoint.Initialize chain — nothing to install for a direct read.
     public static void Initialize()
     {
-        RynthLog.Compat($"Compat: teleport-state ready — direct read CPlayerSystem+0x238 @ PlayerSystemPtr=0x{PlayerSystemPtrVa:X8}");
+        RynthLog.Verbose($"Compat: teleport-state ready — direct read CPlayerSystem+0x238 @ PlayerSystemPtr=0x{PlayerSystemPtrVa:X8}");
     }
 }

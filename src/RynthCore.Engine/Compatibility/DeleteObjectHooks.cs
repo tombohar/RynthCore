@@ -58,7 +58,7 @@ internal static class DeleteObjectHooks
 
             IsInstalled = true;
             _statusMessage = $"Hooked ACCObjectMaint::DeleteObject @ 0x{_targetAddress.ToInt32():X8}.";
-            RynthLog.Compat($"Compat: delete-object hook ready - DeleteObject=0x{_targetAddress.ToInt32():X8}");
+            RynthLog.Verbose($"Compat: delete-object hook ready - DeleteObject=0x{_targetAddress.ToInt32():X8}");
         }
         catch (Exception ex)
         {

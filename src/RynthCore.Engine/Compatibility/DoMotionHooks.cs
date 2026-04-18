@@ -89,7 +89,7 @@ internal static class DoMotionHooks
 
             _hookInstalled = true;
             _statusMessage = $"Hooked CPhysicsObj::DoMotion @ 0x{targetAddress.ToInt32():X8}.";
-            RynthLog.Compat($"Compat: do-motion hook ready @ 0x{targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
+            RynthLog.Verbose($"Compat: do-motion hook ready @ 0x{targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
         }
         catch (Exception ex)
         {

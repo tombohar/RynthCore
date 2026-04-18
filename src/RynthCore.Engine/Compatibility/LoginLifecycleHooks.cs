@@ -49,7 +49,7 @@ internal static class LoginLifecycleHooks
         {
             int imageSize = textSection.ImageSize;
             if (imageSize != ExpectedImageSize)
-                RynthLog.Compat($"Compat: login lifecycle hook using unverified acclient image size 0x{imageSize:X} (expected 0x{ExpectedImageSize:X}).");
+                RynthLog.Verbose($"Compat: login lifecycle hook using unverified acclient image size 0x{imageSize:X} (expected 0x{ExpectedImageSize:X}).");
 
             int callSiteOff = PatternScanner.FindPattern(textSection.Bytes, SendLoginCompletePattern);
             if (callSiteOff < 0)
@@ -82,7 +82,7 @@ internal static class LoginLifecycleHooks
             IsInstalled = true;
             _statusMessage = $"Hooked SendLoginCompleteNotification @ 0x{_targetAddress.ToInt32():X8}.";
             _nextStatusLogTick = Environment.TickCount64 + 3000;
-            RynthLog.Compat(
+            RynthLog.Verbose(
                 $"Compat: login lifecycle hook ready - SendLoginCompleteNotification=0x{_targetAddress.ToInt32():X8}, callSite=0x{textSection.TextBaseVa + callSiteOff:X8}");
         }
         catch (Exception ex)
@@ -105,7 +105,7 @@ internal static class LoginLifecycleHooks
         if (!_waitingLogged)
         {
             _waitingLogged = true;
-            RynthLog.Compat("Compat: login lifecycle awaiting SendLoginCompleteNotification.");
+            RynthLog.Verbose("Compat: login lifecycle awaiting SendLoginCompleteNotification.");
         }
     }
 
@@ -122,7 +122,7 @@ internal static class LoginLifecycleHooks
 
         HasObservedLoginComplete = true;
         _statusMessage = $"Login complete observed via {source}.";
-        RynthLog.Compat($"Compat: login complete observed via {source}.");
+        RynthLog.Verbose($"Compat: login complete observed via {source}.");
         LoginComplete?.Invoke();
     }
 }

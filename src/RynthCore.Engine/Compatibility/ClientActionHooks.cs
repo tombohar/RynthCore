@@ -33,7 +33,7 @@ internal static class ClientActionHooks
 
     public static void Probe()
     {
-        RynthLog.Compat("Compat: probing RynthAi action hooks...");
+        RynthLog.Verbose("Compat: probing RynthAi action hooks...");
 
         bool combatReady = CombatActionHooks.Probe();
         bool movementReady = MovementActionHooks.Probe();
@@ -41,7 +41,7 @@ internal static class ClientActionHooks
         bool playerPhysicsReady = PlayerPhysicsHooks.Probe();
         bool objectReady = ClientObjectHooks.Probe();
 
-        RynthLog.Compat($"Compat: probe complete. combat={(combatReady ? "ready" : "off")}, movement={(movementReady ? "ready" : "off")}, local={(cmdInterpReady ? "ready" : "off")}, player={(playerPhysicsReady ? "ready" : "off")}, objects={(objectReady ? "ready" : "off")}");
+        RynthLog.Verbose($"Compat: probe complete. combat={(combatReady ? "ready" : "off")}, movement={(movementReady ? "ready" : "off")}, local={(cmdInterpReady ? "ready" : "off")}, player={(playerPhysicsReady ? "ready" : "off")}, objects={(objectReady ? "ready" : "off")}");
     }
 
     public static ClientActionHookStatus GetStatus()

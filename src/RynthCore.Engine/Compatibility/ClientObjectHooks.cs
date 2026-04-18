@@ -296,7 +296,7 @@ internal static class ClientObjectHooks
         {
             IsInitialized = true;
             _statusMessage = "Ready.";
-            RynthLog.Compat($"Compat: client objects ready - smartbox candidates={SmartBoxLocator.CandidateCount}");
+            RynthLog.Verbose($"Compat: client objects ready - smartbox candidates={SmartBoxLocator.CandidateCount}");
 
         }
         else
@@ -364,7 +364,7 @@ internal static class ClientObjectHooks
         _inqAttribute = Marshal.GetDelegateForFunctionPointer<InqAttributeDelegate>(new IntPtr(ReferenceInqAttribute));
         _isSpellKnown = Marshal.GetDelegateForFunctionPointer<IsSpellKnownDelegate>(new IntPtr(ReferenceIsSpellKnown));
         _getVitaeValue = Marshal.GetDelegateForFunctionPointer<GetVitaeValueDelegate>(new IntPtr(ReferenceGetVitaeValue));
-        RynthLog.Compat(
+        RynthLog.Verbose(
             $"Compat: client object hooks ready - getWeenie=0x{getWeeniePtr.ToInt32():X8}, getNameStatic=0x{getNameStaticPtr.ToInt32():X8}, getNameInstance=0x{getNameInstancePtr.ToInt32():X8}");
         return true;
     }
@@ -447,7 +447,7 @@ internal static class ClientObjectHooks
         if (knownPtr == IntPtr.Zero || _getWeenieObject == null)
         {
             _weenieQualitiesOffset = FallbackWeenieQualitiesOffset;
-            RynthLog.Compat($"Compat: qualitiesOffsetProbe no known ptr, using fallback +0x{FallbackWeenieQualitiesOffset:X3}");
+            RynthLog.Verbose($"Compat: qualitiesOffsetProbe no known ptr, using fallback +0x{FallbackWeenieQualitiesOffset:X3}");
             return;
         }
 
@@ -455,7 +455,7 @@ internal static class ClientObjectHooks
         if (playerId == 0)
         {
             _weenieQualitiesOffset = FallbackWeenieQualitiesOffset;
-            RynthLog.Compat($"Compat: qualitiesOffsetProbe playerId==0, using fallback +0x{FallbackWeenieQualitiesOffset:X3}");
+            RynthLog.Verbose($"Compat: qualitiesOffsetProbe playerId==0, using fallback +0x{FallbackWeenieQualitiesOffset:X3}");
             return;
         }
 
@@ -465,7 +465,7 @@ internal static class ClientObjectHooks
             if (weeniePtr == IntPtr.Zero)
             {
                 _weenieQualitiesOffset = FallbackWeenieQualitiesOffset;
-                RynthLog.Compat($"Compat: qualitiesOffsetProbe weenie null, using fallback +0x{FallbackWeenieQualitiesOffset:X3}");
+                RynthLog.Verbose($"Compat: qualitiesOffsetProbe weenie null, using fallback +0x{FallbackWeenieQualitiesOffset:X3}");
                 return;
             }
 
@@ -478,7 +478,7 @@ internal static class ClientObjectHooks
                     if (val == target)
                     {
                         _weenieQualitiesOffset = scan;
-                        RynthLog.Compat($"Compat: qualitiesOffsetProbe found m_pQualities at +0x{scan:X3} (player=0x{playerId:X8})");
+                        RynthLog.Verbose($"Compat: qualitiesOffsetProbe found m_pQualities at +0x{scan:X3} (player=0x{playerId:X8})");
                         return;
                     }
                 }
@@ -486,7 +486,7 @@ internal static class ClientObjectHooks
             }
 
             _weenieQualitiesOffset = FallbackWeenieQualitiesOffset;
-            RynthLog.Compat($"Compat: qualitiesOffsetProbe no match, using fallback +0x{FallbackWeenieQualitiesOffset:X3} (player=0x{playerId:X8})");
+            RynthLog.Verbose($"Compat: qualitiesOffsetProbe no match, using fallback +0x{FallbackWeenieQualitiesOffset:X3} (player=0x{playerId:X8})");
         }
         catch
         {
@@ -510,7 +510,7 @@ internal static class ClientObjectHooks
             else
             {
                 _weenieQualitiesOffset = FallbackWeenieQualitiesOffset;
-                RynthLog.Compat($"Compat: TryGetQualitiesPtr - no probe ptr, using fallback +0x{FallbackWeenieQualitiesOffset:X3}");
+                RynthLog.Verbose($"Compat: TryGetQualitiesPtr - no probe ptr, using fallback +0x{FallbackWeenieQualitiesOffset:X3}");
             }
         }
 
@@ -553,7 +553,7 @@ internal static class ClientObjectHooks
         {
             if (!TryGetObjectQualitiesPtr(objectId, out IntPtr qualitiesPtr))
             {
-                RynthLog.Compat($"TryGetObjectSkill: m_pQualities null for 0x{objectId:X8}");
+                RynthLog.Verbose($"TryGetObjectSkill: m_pQualities null for 0x{objectId:X8}");
                 return false;
             }
 
@@ -566,7 +566,7 @@ internal static class ClientObjectHooks
             if (_skillProbeLogCount < 6)
             {
                 _skillProbeLogCount++;
-                RynthLog.Compat(
+                RynthLog.Verbose(
                     $"Compat: skillTableProbe obj=0x{objectId:X8} skill={skillStype} qualities=0x{qualitiesPtr.ToInt32():X8} " +
                     $"table=0x{skillTablePtr.ToInt32():X8} buckets={tableSize} training={training} base={buffed}");
             }
@@ -801,7 +801,7 @@ internal static class ClientObjectHooks
         IntPtr weeniePtr = _getWeenieObject!(objectId);
         if (weeniePtr == IntPtr.Zero)
         {
-            RynthLog.Compat($"TryGetObjectSkill: GetWeenieObject(0x{objectId:X8}) returned null");
+            RynthLog.Verbose($"TryGetObjectSkill: GetWeenieObject(0x{objectId:X8}) returned null");
             return false;
         }
 
@@ -1516,7 +1516,7 @@ internal static class ClientObjectHooks
 
         if (playerWeenie == IntPtr.Zero)
         {
-            RynthLog.Compat($"Compat: physOffsetProbe - GetWeenieObject returned null for player 0x{playerId:X8}");
+            RynthLog.Verbose($"Compat: physOffsetProbe - GetWeenieObject returned null for player 0x{playerId:X8}");
             return;
         }
 
@@ -1540,12 +1540,12 @@ internal static class ClientObjectHooks
         if (foundOffset >= 0)
         {
             _weeniePhysicsObjOffset = foundOffset;
-            RynthLog.Compat($"Compat: physOffsetProbe discovered _phys_obj at +0x{foundOffset:X2} (player=0x{playerId:X8})");
+            RynthLog.Verbose($"Compat: physOffsetProbe discovered _phys_obj at +0x{foundOffset:X2} (player=0x{playerId:X8})");
         }
         else
         {
             _weeniePhysicsObjOffset = FallbackWeeniePhysicsObjOffset;
-            RynthLog.Compat($"Compat: physOffsetProbe no match found, using fallback +0x{FallbackWeeniePhysicsObjOffset:X2} (player=0x{playerId:X8})");
+            RynthLog.Verbose($"Compat: physOffsetProbe no match found, using fallback +0x{FallbackWeeniePhysicsObjOffset:X2} (player=0x{playerId:X8})");
         }
     }
 
@@ -1597,6 +1597,6 @@ internal static class ClientObjectHooks
             return;
 
         _lookupLogCount++;
-        RynthLog.Compat(message);
+        RynthLog.Verbose(message);
     }
 }

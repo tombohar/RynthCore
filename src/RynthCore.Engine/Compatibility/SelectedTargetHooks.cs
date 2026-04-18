@@ -59,7 +59,7 @@ internal static class SelectedTargetHooks
 
             IsInstalled = true;
             _statusMessage = $"Hooked ACCWeenieObject::SetSelectedObject @ 0x{_targetAddress.ToInt32():X8}.";
-            RynthLog.Compat(
+            RynthLog.Verbose(
                 $"Compat: selected-target hook ready - SetSelectedObject=0x{_targetAddress.ToInt32():X8}, selectedId=0x{SelectedIdVa:X8}");
         }
         catch (Exception ex)

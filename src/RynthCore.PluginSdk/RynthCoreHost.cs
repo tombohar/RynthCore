@@ -61,6 +61,7 @@ public readonly unsafe struct RynthCoreHost
     public bool HasGetLastIdTime       => _api.GetLastIdTimeFn       != IntPtr.Zero;
     public bool HasGetObjectHeading    => _api.GetObjectHeadingFn    != IntPtr.Zero;
     public bool HasGetBusyState        => _api.GetBusyStateFn        != IntPtr.Zero;
+    public bool HasForceResetBusyCount => _api.ForceResetBusyCountFn != IntPtr.Zero;
     public bool HasGetObjectSpellIds   => _api.GetObjectSpellIdsFn   != IntPtr.Zero;
     public bool HasSetMotion => _api.SetMotionFn != IntPtr.Zero;
     public bool HasStopCompletely => _api.StopCompletelyFn != IntPtr.Zero;
@@ -513,6 +514,12 @@ public readonly unsafe struct RynthCoreHost
     {
         if (_api.GetBusyStateFn == IntPtr.Zero) return 0;
         return ((delegate* unmanaged[Cdecl]<int>)_api.GetBusyStateFn)();
+    }
+
+    public void ForceResetBusyCount()
+    {
+        if (_api.ForceResetBusyCountFn != IntPtr.Zero)
+            ((delegate* unmanaged[Cdecl]<void>)_api.ForceResetBusyCountFn)();
     }
 
     public bool TryGetObjectName(uint objectId, out string name)

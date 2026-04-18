@@ -60,7 +60,7 @@ internal static class UpdateObjectServerDispatchHooks
 
             IsInstalled = true;
             _statusMessage = $"Hooked CM_Physics::DispatchSB_UpdateObject @ 0x{_targetAddress.ToInt32():X8}.";
-            RynthLog.Compat($"Compat: update-object hook ready - DispatchSB_UpdateObject=0x{_targetAddress.ToInt32():X8}");
+            RynthLog.Verbose($"Compat: update-object hook ready - DispatchSB_UpdateObject=0x{_targetAddress.ToInt32():X8}");
         }
         catch (Exception ex)
         {
@@ -81,7 +81,7 @@ internal static class UpdateObjectServerDispatchHooks
 
         int count = Interlocked.Increment(ref _dispatchCount);
         if (count <= 8)
-            RynthLog.Compat($"Compat: update object #{count} id=0x{objectId:X8} status={status}");
+            RynthLog.Verbose($"Compat: update object #{count} id=0x{objectId:X8} status={status}");
 
         PluginManager.QueueUpdateObject(objectId);
         return status;

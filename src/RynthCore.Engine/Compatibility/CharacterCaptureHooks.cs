@@ -79,7 +79,7 @@ internal static class CharacterCaptureHooks
             uint opcode = unchecked((uint)Marshal.ReadInt32(payloadPtr));
             if (opcode == PostConnectReadyOpcode)
             {
-                RynthLog.Compat($"CharacterCapture: [{(isGameEvent ? "GameEvent" : "SmartBox")}] Observed post-connect packet (0xF7EA).");
+                RynthLog.Verbose($"CharacterCapture: [{(isGameEvent ? "GameEvent" : "SmartBox")}] Observed post-connect packet (0xF7EA).");
                 LogoBypassHooks.NotifyPostConnectObserved();
                 return;
             }
@@ -87,7 +87,7 @@ internal static class CharacterCaptureHooks
             if (opcode != CharacterListOpcode)
                 return;
 
-            RynthLog.Compat($"CharacterCapture: [{(isGameEvent ? "GameEvent" : "SmartBox")}] Found CharacterList (0xF658)!");
+            RynthLog.Verbose($"CharacterCapture: [{(isGameEvent ? "GameEvent" : "SmartBox")}] Found CharacterList (0xF658)!");
             LogoBypassHooks.NotifyCharacterListObserved();
             (List<string> characters, int slotCount) = ParseAndSaveCharacterList(payloadPtr, blobSize);
             ScheduleAutoLoginIfRequested(characters, slotCount);
@@ -112,7 +112,7 @@ internal static class CharacterCaptureHooks
             uint opcode = unchecked((uint)Marshal.ReadInt32(buffer));
             if (opcode == PostConnectReadyOpcode)
             {
-                RynthLog.Compat("CharacterCapture: [InnerDispatcher] Observed post-connect packet (0xF7EA).");
+                RynthLog.Verbose("CharacterCapture: [InnerDispatcher] Observed post-connect packet (0xF7EA).");
                 LogoBypassHooks.NotifyPostConnectObserved();
                 return;
             }
@@ -120,7 +120,7 @@ internal static class CharacterCaptureHooks
             if (opcode != CharacterListOpcode)
                 return;
 
-            RynthLog.Compat("CharacterCapture: [InnerDispatcher] Processing 0xF658 raw buffer.");
+            RynthLog.Verbose("CharacterCapture: [InnerDispatcher] Processing 0xF658 raw buffer.");
             LogoBypassHooks.NotifyCharacterListObserved();
             (List<string> characters, int slotCount) = size >= 12
                 ? ParseAndSaveCharacterList(buffer, size)
@@ -177,7 +177,7 @@ internal static class CharacterCaptureHooks
                 ? Marshal.ReadInt32(IntPtr.Add(payloadPtr, offset))
                 : characters.Count;
 
-            RynthLog.Compat($"CharacterCapture: Parsed {characters.Count} chars ({slotCount} slots): {string.Join(", ", characters)}");
+            RynthLog.Verbose($"CharacterCapture: Parsed {characters.Count} chars ({slotCount} slots): {string.Join(", ", characters)}");
 
             if (characters.Count > 0)
             {
@@ -247,7 +247,7 @@ internal static class CharacterCaptureHooks
             if (!string.IsNullOrWhiteSpace(accountName))
             {
                 CharacterCacheStore.Write(accountName, serverName, characters);
-                RynthLog.Compat(
+                RynthLog.Verbose(
                     !string.IsNullOrWhiteSpace(serverName)
                         ? $"CharacterCapture: Saved {characters.Count} chars for '{accountName}' on '{serverName}'."
                         : $"CharacterCapture: Saved {characters.Count} chars for '{accountName}' (no server name in context).");
@@ -298,7 +298,7 @@ internal static class CharacterCaptureHooks
         };
         thread.Start();
 
-        RynthLog.Compat(
+        RynthLog.Verbose(
             fallbackIndex >= 0
                 ? $"CharacterCapture: Auto-login scheduled for '{targetCharacter}' in {scheduledDelayMs}ms (native direct login first, fallback slot index {fallbackIndex}, logoDelay={logoDelayMs}ms)."
                 : $"CharacterCapture: Auto-login scheduled for '{targetCharacter}' in {scheduledDelayMs}ms (native direct login only so far, logoDelay={logoDelayMs}ms).");
@@ -311,13 +311,13 @@ internal static class CharacterCaptureHooks
         {
             if (LoginLifecycleHooks.HasObservedLoginComplete)
             {
-                RynthLog.Compat($"CharacterCapture: Auto-login for '{targetCharacter}' skipped because login is already complete.");
+                RynthLog.Verbose($"CharacterCapture: Auto-login for '{targetCharacter}' skipped because login is already complete.");
                 return;
             }
 
             if (CharacterManagementHooks.TryLogOnCharacter(targetCharacter, out string matchedCharacter, out uint avatarId, out string directStatus))
             {
-                RynthLog.Compat(
+                RynthLog.Verbose(
                     $"CharacterCapture: Direct auto-login succeeded for '{matchedCharacter}' (target '{targetCharacter}', avatar 0x{avatarId:X8}) on attempt {attempt}/{DirectAutoLoginAttempts}.");
                 return;
             }
@@ -350,7 +350,7 @@ internal static class CharacterCaptureHooks
 
         for (int attempt = 1; attempt <= AutoLoginAttempts; attempt++)
         {
-            RynthLog.Compat($"CharacterCapture: Auto-login attempt {attempt}/{AutoLoginAttempts} for '{targetCharacter}' at ({XCharList}, {yOffset}).");
+            RynthLog.Verbose($"CharacterCapture: Auto-login attempt {attempt}/{AutoLoginAttempts} for '{targetCharacter}' at ({XCharList}, {yOffset}).");
 
             PostMouseClick(hwnd, XCharList, yOffset);
             Thread.Sleep(AutoLoginDoubleClickGapMs);
@@ -360,7 +360,7 @@ internal static class CharacterCaptureHooks
                 Thread.Sleep(AutoLoginAttemptDelayMs);
         }
 
-        RynthLog.Compat($"CharacterCapture: Auto-login double-click sequence complete for '{targetCharacter}'.");
+        RynthLog.Verbose($"CharacterCapture: Auto-login double-click sequence complete for '{targetCharacter}'.");
     }
 
     private static IntPtr WaitForGameWindow()

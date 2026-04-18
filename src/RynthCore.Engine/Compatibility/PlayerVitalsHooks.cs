@@ -120,7 +120,7 @@ internal static class PlayerVitalsHooks
 
             IsInstalled = true;
             _statusMessage = "Hooks installed.";
-            RynthLog.Compat($"Compat: player vitals hooks ready - update=0x{UpdateAttribute2ndVa:X8}, level=0x{UpdateAttribute2ndLevelVa:X8}, private=0x{PrivateUpdateAttribute2ndVa:X8}, privateLevel=0x{PrivateUpdateAttribute2ndLevelVa:X8}, stat=0x{OnStatUpdatedIntVa:X8}, playerDesc=0x{SendNoticePlayerDescReceivedVa:X8}");
+            RynthLog.Verbose($"Compat: player vitals hooks ready - update=0x{UpdateAttribute2ndVa:X8}, level=0x{UpdateAttribute2ndLevelVa:X8}, private=0x{PrivateUpdateAttribute2ndVa:X8}, privateLevel=0x{PrivateUpdateAttribute2ndLevelVa:X8}, stat=0x{OnStatUpdatedIntVa:X8}, playerDesc=0x{SendNoticePlayerDescReceivedVa:X8}");
         }
         catch (Exception ex)
         {
@@ -211,7 +211,7 @@ internal static class PlayerVitalsHooks
                 MaxStamina = maxStamina > 0 ? maxStamina : _snapshot.MaxStamina,
                 MaxMana = maxMana > 0 ? maxMana : _snapshot.MaxMana
             };
-            RynthLog.Compat($"Compat: player max vitals from identify hp={maxHealth} st={maxStamina} mn={maxMana}");
+            RynthLog.Verbose($"Compat: player max vitals from identify hp={maxHealth} st={maxStamina} mn={maxMana}");
         }
     }
 
@@ -234,7 +234,7 @@ internal static class PlayerVitalsHooks
             if (derivedMax > _snapshot.MaxHealth)
             {
                 _snapshot = _snapshot with { MaxHealth = derivedMax };
-                RynthLog.Compat($"Compat: player MaxHealth derived from ratio={healthRatio:0.000} hp={_snapshot.Health} → max={derivedMax}");
+                RynthLog.Verbose($"Compat: player MaxHealth derived from ratio={healthRatio:0.000} hp={_snapshot.Health} → max={derivedMax}");
             }
         }
     }
@@ -369,7 +369,7 @@ internal static class PlayerVitalsHooks
         {
             _updateLogCount++;
             string scope = isPrivate ? "private" : $"sender=0x{sender:X8}";
-            RynthLog.Compat($"Compat: player vital update #{_updateLogCount} {scope} stype={stype} value={value}");
+            RynthLog.Verbose($"Compat: player vital update #{_updateLogCount} {scope} stype={stype} value={value}");
         }
     }
 
@@ -422,7 +422,7 @@ internal static class PlayerVitalsHooks
         if (changed && _seedLogCount < 1)
         {
             _seedLogCount++;
-            RynthLog.Compat($"Compat: player vitals seeded from player desc #{_seedLogCount} hp={health}/{maxHealth} st={stamina}/{maxStamina} mn={mana}/{maxMana}");
+            RynthLog.Verbose($"Compat: player vitals seeded from player desc #{_seedLogCount} hp={health}/{maxHealth} st={stamina}/{maxStamina} mn={mana}/{maxMana}");
         }
     }
 

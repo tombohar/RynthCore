@@ -153,7 +153,7 @@ internal static class ChatCallbackHooks
             }
 
             _statusMessage = $"Ready. incoming={incomingStatus}, outgoing={outgoingStatus}.";
-            RynthLog.Compat($"Compat: chat callback hooks ready - incoming={incomingStatus}, outgoing={outgoingStatus}");
+            RynthLog.Verbose($"Compat: chat callback hooks ready - incoming={incomingStatus}, outgoing={outgoingStatus}");
         }
         catch (Exception ex)
         {
@@ -169,7 +169,7 @@ internal static class ChatCallbackHooks
 
         if (CurrentIncomingMode is not IncomingChatMode.WrapperQueuedText and not IncomingChatMode.WrapperQueuedTextHostEat)
         {
-            RynthLog.Compat("Compat: preferred incoming chat seam unavailable - falling back to wrapper path.");
+            RynthLog.Verbose("Compat: preferred incoming chat seam unavailable - falling back to wrapper path.");
             return TryInstallIncomingWrapperHook(textSection, out incomingStatus);
         }
 
@@ -310,7 +310,7 @@ internal static class ChatCallbackHooks
 
             int count = Interlocked.Increment(ref _incomingCallCount);
             if (count <= 0)
-                RynthLog.Compat($"Compat: incoming chat #{count} type={chatType} len={length}");
+                RynthLog.Verbose($"Compat: incoming chat #{count} type={chatType} len={length}");
 
             return line;
         }
@@ -491,7 +491,7 @@ internal static class ChatCallbackHooks
                     if (IsLikelyExternalHookOpcode(entryByte))
                     {
                         resolution = $"skipped (prepatched-0x{entryByte:X2})";
-                        RynthLog.Compat($"Compat: outgoing chat entry at 0x{OutgoingChatVa:X8} appears prepatched (opcode 0x{entryByte:X2}) - skipping RynthCore outgoing hook to avoid conflicting with another injector.");
+                        RynthLog.Verbose($"Compat: outgoing chat entry at 0x{OutgoingChatVa:X8} appears prepatched (opcode 0x{entryByte:X2}) - skipping RynthCore outgoing hook to avoid conflicting with another injector.");
                         return false;
                     }
                 }

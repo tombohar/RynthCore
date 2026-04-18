@@ -112,14 +112,14 @@ internal static class MovementActionHooks
             {
                 int jumpVa = textSection.TextBaseVa + jumpFuncOff;
                 _jumpNonAutonomous = Marshal.GetDelegateForFunctionPointer<JumpNonAutonomousDelegate>(new IntPtr(jumpVa));
-                RynthLog.Compat($"Compat: movement jump hook ready - jump=0x{jumpVa:X8}");
+                RynthLog.Verbose($"Compat: movement jump hook ready - jump=0x{jumpVa:X8}");
             }
 
             if (autonomyFuncOff >= 0)
             {
                 int autonomyVa = textSection.TextBaseVa + autonomyFuncOff;
                 _autonomyLevel = Marshal.GetDelegateForFunctionPointer<AutonomyLevelDelegate>(new IntPtr(autonomyVa));
-                RynthLog.Compat($"Compat: movement autonomy hook ready - autonomy=0x{autonomyVa:X8}");
+                RynthLog.Verbose($"Compat: movement autonomy hook ready - autonomy=0x{autonomyVa:X8}");
             }
 
             IsInitialized = true;
@@ -127,7 +127,7 @@ internal static class MovementActionHooks
                 ? "Ready."
                 : $"Partial. jump={jumpFuncOff >= 0}, autonomy={autonomyFuncOff >= 0}.";
 
-            RynthLog.Compat($"Compat: movement hooks ready - stop=0x{stopVa:X8}, move=0x{doVa:X8}");
+            RynthLog.Verbose($"Compat: movement hooks ready - stop=0x{stopVa:X8}, move=0x{doVa:X8}");
             return true;
         }
         catch (Exception ex)

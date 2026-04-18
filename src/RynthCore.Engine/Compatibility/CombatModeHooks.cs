@@ -87,7 +87,7 @@ internal static class CombatModeHooks
 
             IsInstalled = true;
             _statusMessage = $"Hooked ClientCombatSystem::SetCombatMode @ 0x{_targetAddress.ToInt32():X8}.";
-            RynthLog.Compat($"Compat: combat-mode hook ready - SetCombatMode=0x{_targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
+            RynthLog.Verbose($"Compat: combat-mode hook ready - SetCombatMode=0x{_targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
         }
         catch (Exception ex)
         {

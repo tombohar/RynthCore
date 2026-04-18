@@ -32,6 +32,13 @@ internal static class CombatActionHooks
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate bool CastSpellDelegate(uint targetId, int spellId);
 
+    // Chorizite-style: ClientMagicSystem::CastSpell(uint spellId, byte targetIsSelected)
+    // VA 0x00568DE0 — static Cdecl. The client uses the currently selected target.
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void CastSpellClientDelegate(uint spellId, byte targetIsSelected);
+
+    private const int ClientMagicSystemCastSpellVa = 0x00568DE0;
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate uint QueryHealthResponseDelegate(IntPtr uiQueueManager, IntPtr buffer, uint size);
 
@@ -53,6 +60,7 @@ internal static class CombatActionHooks
     private static QueryHealthDelegate? _queryHealth;
     private static RequestIdDelegate? _requestId;
     private static CastSpellDelegate? _castSpell;
+    private static CastSpellClientDelegate? _castSpellClient;
     private static QueryHealthResponseDelegate? _queryHealthResponseDetour;
     private static QueryHealthResponseDelegate? _originalQueryHealthResponse;
     private static QueryHealthResponseDelegate? _identifyObjectDetour;
@@ -157,7 +165,7 @@ internal static class CombatActionHooks
                     {
                         castSpellOff = off;
                         castSpellFuncOff = funcOff;
-                        RynthLog.Compat($"Compat: CastSpell candidate opcode=0x{candidate[2]:X2} matched at text+0x{off:X}");
+                        RynthLog.Verbose($"Compat: CastSpell candidate opcode=0x{candidate[2]:X2} matched at text+0x{off:X}");
                         break;
                     }
                 }
@@ -198,7 +206,7 @@ internal static class CombatActionHooks
             {
                 int requestIdVa = textSection.TextBaseVa + requestIdFuncOff;
                 _requestId = Marshal.GetDelegateForFunctionPointer<RequestIdDelegate>(new IntPtr(requestIdVa));
-                RynthLog.Compat($"Compat: RequestId (IdentifyObject 0xC8) found at 0x{requestIdVa:X8}");
+                RynthLog.Verbose($"Compat: RequestId (IdentifyObject 0xC8) found at 0x{requestIdVa:X8}");
             }
             else
             {
@@ -209,11 +217,25 @@ internal static class CombatActionHooks
             {
                 int castSpellVa = textSection.TextBaseVa + castSpellFuncOff;
                 _castSpell = Marshal.GetDelegateForFunctionPointer<CastSpellDelegate>(new IntPtr(castSpellVa));
-                RynthLog.Compat($"Compat: CastSpell (0x4A) found at 0x{castSpellVa:X8}");
+                RynthLog.Verbose($"Compat: CastSpell (0x4A) found at 0x{castSpellVa:X8}");
             }
             else
             {
                 RynthLog.Compat("Compat: CastSpell (0x4A) not found — magic combat unavailable.");
+            }
+
+            // ClientMagicSystem::CastSpell — direct VA from Chorizite.
+            // Static Cdecl: void CastSpell(uint spellId, byte targetIsSelected)
+            // Uses the currently selected target (from SelectItem).
+            if (SmartBoxLocator.IsPointerInModule(new IntPtr(ClientMagicSystemCastSpellVa)))
+            {
+                _castSpellClient = Marshal.GetDelegateForFunctionPointer<CastSpellClientDelegate>(
+                    new IntPtr(ClientMagicSystemCastSpellVa));
+                RynthLog.Verbose($"Compat: ClientMagicSystem::CastSpell bound at 0x{ClientMagicSystemCastSpellVa:X8}");
+            }
+            else
+            {
+                RynthLog.Compat("Compat: ClientMagicSystem::CastSpell VA outside module — unavailable.");
             }
 
             InstallQueryHealthResponseHook();
@@ -222,7 +244,7 @@ internal static class CombatActionHooks
             IsInitialized = true;
             _statusMessage = "Ready.";
 
-            RynthLog.Compat($"Compat: combat hooks ready - cancel=0x{cancelVa:X8}, mode=0x{changeModeVa:X8}, health=0x{queryHealthVa:X8}, melee=0x{meleeVa:X8}, missile=0x{missileVa:X8}");
+            RynthLog.Verbose($"Compat: combat hooks ready - cancel=0x{cancelVa:X8}, mode=0x{changeModeVa:X8}, health=0x{queryHealthVa:X8}, melee=0x{meleeVa:X8}, missile=0x{missileVa:X8}");
             return true;
         }
         catch (Exception ex)
@@ -326,7 +348,27 @@ internal static class CombatActionHooks
 
     public static bool CastSpell(uint targetId, int spellId)
     {
-        if (_castSpell == null || targetId == 0 || spellId <= 0)
+        if (spellId <= 0) return false;
+
+        // Prefer ClientMagicSystem::CastSpell — initiates the full client-side
+        // cast sequence (animation, state, network). The target must already be
+        // selected via SelectItem before calling this.
+        if (_castSpellClient != null)
+        {
+            try
+            {
+                byte targetIsSelected = targetId != 0 ? (byte)1 : (byte)0;
+                _castSpellClient((uint)spellId, targetIsSelected);
+                return true;
+            }
+            catch
+            {
+                // Fall through to game action method
+            }
+        }
+
+        // Fallback: direct game action 0x4A (network message only)
+        if (_castSpell == null || targetId == 0)
             return false;
 
         try
@@ -358,6 +400,7 @@ internal static class CombatActionHooks
         _queryHealth = null;
         _requestId = null;
         _castSpell = null;
+        _castSpellClient = null;
         _queryHealthResponseDetour = null;
         _originalQueryHealthResponse = null;
         _identifyObjectDetour = null;
@@ -418,7 +461,7 @@ internal static class CombatActionHooks
         }
 
         int funcEntryVa = textBase + subEspOff;
-        RynthLog.Compat($"Compat: inner dispatcher entry @ 0x{funcEntryVa:X8}");
+        RynthLog.Verbose($"Compat: inner dispatcher entry @ 0x{funcEntryVa:X8}");
 
         try
         {
@@ -426,7 +469,7 @@ internal static class CombatActionHooks
             {
                 delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint, uint> pDetour = &InnerDispatcherDetour;
                 MinHook.Hook(new IntPtr(funcEntryVa), (IntPtr)pDetour, out _originalInnerDispatcherPtr);
-                RynthLog.Compat($"Compat: inner dispatcher hook installed @ 0x{funcEntryVa:X8}");
+                RynthLog.Verbose($"Compat: inner dispatcher hook installed @ 0x{funcEntryVa:X8}");
             }
         }
         catch (Exception ex)
@@ -616,7 +659,7 @@ internal static class CombatActionHooks
         _originalQueryHealthResponse = Marshal.GetDelegateForFunctionPointer<QueryHealthResponseDelegate>(originalPtr);
         Thread.MemoryBarrier();
         MinHook.Enable(responsePtr);
-        RynthLog.Compat($"Compat: query-health-response hook ready - Handle_Combat__QueryHealthResponse=0x{QueryHealthResponseVa:X8}");
+        RynthLog.Verbose($"Compat: query-health-response hook ready - Handle_Combat__QueryHealthResponse=0x{QueryHealthResponseVa:X8}");
     }
 
     private static uint QueryHealthResponseDetour(IntPtr uiQueueManager, IntPtr buffer, uint size)

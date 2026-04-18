@@ -181,6 +181,7 @@ internal static class PluginManager
     private static GetLastIdTimeCallbackDelegate? _getLastIdTimeCallback;
     private static GetObjectHeadingCallbackDelegate? _getObjectHeadingCallback;
     private static GetBusyStateCallbackDelegate? _getBusyStateCallback;
+    private static ForceResetBusyCountCallbackDelegate? _forceResetBusyCountCallback;
     private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
     private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
     private static GetObjectAttributeCallbackDelegate? _getObjectAttributeCallback;
@@ -1737,6 +1738,7 @@ internal static class PluginManager
         _getLastIdTimeCallback ??= GetLastIdTimeAction;
         _getObjectHeadingCallback ??= GetObjectHeadingAction;
         _getBusyStateCallback ??= GetBusyStateAction;
+        _forceResetBusyCountCallback ??= ForceResetBusyCountAction;
         _getObjectSpellIdsCallback ??= GetObjectSpellIdsAction;
         _getObjectSkillBuffedCallback ??= GetObjectSkillLevelAction;
         _getObjectAttributeCallback ??= GetObjectAttributeAction;
@@ -1833,6 +1835,7 @@ internal static class PluginManager
         _api.GetObjectMotionOnFn = Marshal.GetFunctionPointerForDelegate(_getObjectMotionOnCallback);
         _api.GetObjectStateFn = Marshal.GetFunctionPointerForDelegate(_getObjectStateCallback);
         _api.GetObjectBitfieldFn = Marshal.GetFunctionPointerForDelegate(_getObjectBitfieldCallback);
+        _api.ForceResetBusyCountFn = Marshal.GetFunctionPointerForDelegate(_forceResetBusyCountCallback);
     }
 
     private static void ProbeClientHooks()
@@ -2049,7 +2052,7 @@ internal static class PluginManager
 
     private static unsafe int GetContainerContentsAction(uint containerId, uint* itemIds, int maxCount)
     {
-        RynthLog.Compat($"Compat: GetContainerContentsAction ENTRY id=0x{containerId:X8} itemIds=0x{(int)itemIds:X8} maxCount={maxCount}");
+        RynthLog.Verbose($"Compat: GetContainerContentsAction ENTRY id=0x{containerId:X8} itemIds=0x{(int)itemIds:X8} maxCount={maxCount}");
         if (itemIds == null || maxCount <= 0)
             return 0;
 
@@ -2378,6 +2381,8 @@ internal static class PluginManager
     }
 
     private static int GetBusyStateAction() => BusyCountHooks.GetBusyState();
+
+    private static void ForceResetBusyCountAction() => BusyCountHooks.ForceResetBusyCount();
 
     private static unsafe int GetObjectSpellIdsAction(uint guid, uint* spellIds, int maxCount)
     {

@@ -88,7 +88,7 @@ internal static class ViewObjectContentsHooks
 
             IsInstalled = true;
             _statusMessage = $"Hooked contents view seams @ 0x{_viewTargetAddress.ToInt32():X8}/0x{_stopTargetAddress.ToInt32():X8}.";
-            RynthLog.Compat(
+            RynthLog.Verbose(
                 $"Compat: view-object-contents hooks ready - view=0x{_viewTargetAddress.ToInt32():X8}, stop=0x{_stopTargetAddress.ToInt32():X8}");
         }
         catch (Exception ex)
@@ -108,7 +108,7 @@ internal static class ViewObjectContentsHooks
 
         int count = Interlocked.Increment(ref _viewDispatchCount);
         if (count <= 0)
-            RynthLog.Compat($"Compat: view contents #{count} id=0x{objectId:X8} contents=0x{newContents.ToInt32():X8}");
+            RynthLog.Verbose($"Compat: view contents #{count} id=0x{objectId:X8} contents=0x{newContents.ToInt32():X8}");
 
         PluginManager.QueueViewObjectContents(objectId);
     }
@@ -123,7 +123,7 @@ internal static class ViewObjectContentsHooks
 
         int count = Interlocked.Increment(ref _stopDispatchCount);
         if (count <= 5)
-            RynthLog.Compat($"Compat: stop view contents #{count} id=0x{objectId:X8}");
+            RynthLog.Verbose($"Compat: stop view contents #{count} id=0x{objectId:X8}");
 
         PluginManager.QueueStopViewingObjectContents(objectId);
     }

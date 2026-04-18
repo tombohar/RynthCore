@@ -148,7 +148,7 @@ internal static class PropertyUpdateHooks
         _statusMessage = _hookInstalled
             ? $"{_hookCount}/5 hooks installed."
             : "All hooks failed.";
-        RynthLog.Compat($"Compat: property-update hooks — {_statusMessage}");
+        RynthLog.Verbose($"Compat: property-update hooks — {_statusMessage}");
     }
 
     // --- Hook installation helpers ---
@@ -181,7 +181,7 @@ internal static class PropertyUpdateHooks
             MinHook.Enable(target);
 
             _hookCount++;
-            RynthLog.Compat($"Compat: {name} hooked @ 0x{target.ToInt32():X8}");
+            RynthLog.Verbose($"Compat: {name} hooked @ 0x{target.ToInt32():X8}");
         }
         catch (Exception ex)
         {
@@ -216,7 +216,7 @@ internal static class PropertyUpdateHooks
             MinHook.Enable(target);
 
             _hookCount++;
-            RynthLog.Compat($"Compat: BeingDeleted hooked @ 0x{target.ToInt32():X8}");
+            RynthLog.Verbose($"Compat: BeingDeleted hooked @ 0x{target.ToInt32():X8}");
         }
         catch (Exception ex)
         {

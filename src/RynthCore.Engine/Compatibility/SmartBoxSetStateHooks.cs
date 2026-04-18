@@ -53,7 +53,7 @@ internal static class SmartBoxSetStateHooks
         // Physics state is now read directly from CPhysicsObj+0xA8 via TryGetObjectPhysicsState.
         // Hook not installed; TryGetObjectState remains available for future use.
         _statusMessage = "Disabled — using direct CPhysicsObj state read instead.";
-        RynthLog.Compat("Compat: smartbox-setstate hook skipped — direct read via CPhysicsObj+0xA8 in use.");
+        RynthLog.Verbose("Compat: smartbox-setstate hook skipped — direct read via CPhysicsObj+0xA8 in use.");
     }
 
     /// <summary>
@@ -74,7 +74,7 @@ internal static class SmartBoxSetStateHooks
 
             int n = Interlocked.Increment(ref _debugLogCount);
             if (n <= 60)
-                RynthLog.Compat($"SetState#{n} obj=0x{objectId:X8} state=0x{newState:X8}");
+                RynthLog.Verbose($"SetState#{n} obj=0x{objectId:X8} state=0x{newState:X8}");
         }
         catch { }
 

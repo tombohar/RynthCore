@@ -57,7 +57,7 @@ internal static class VectorUpdateServerDispatchHooks
 
             IsInstalled = true;
             _statusMessage = $"Hooked CM_Physics::DispatchSB_VectorUpdate @ 0x{_targetAddress.ToInt32():X8}.";
-            RynthLog.Compat($"Compat: vector-update hook ready - DispatchSB_VectorUpdate=0x{_targetAddress.ToInt32():X8}");
+            RynthLog.Verbose($"Compat: vector-update hook ready - DispatchSB_VectorUpdate=0x{_targetAddress.ToInt32():X8}");
         }
         catch (Exception ex)
         {

@@ -78,7 +78,7 @@ internal static class AccountHooks
             _getAccountName = Marshal.GetDelegateForFunctionPointer<ClientGetAccountNameDelegate>(
                 new IntPtr(ReferenceClientGetAccountName));
             IsInitialized = true;
-            RynthLog.Compat("Compat: account hooks ready.");
+            RynthLog.Verbose("Compat: account hooks ready.");
         }
         catch (Exception ex)
         {
@@ -121,7 +121,7 @@ internal static class AccountHooks
             MinHook.Enable(targetAddress);
 
             WorldHookInstalled = true;
-            RynthLog.Compat($"Compat: world-name hook ready - ECM_Login::SendNotice_WorldName @ 0x{targetAddress.ToInt32():X8}.");
+            RynthLog.Verbose($"Compat: world-name hook ready - ECM_Login::SendNotice_WorldName @ 0x{targetAddress.ToInt32():X8}.");
         }
         catch (Exception ex)
         {
@@ -149,7 +149,7 @@ internal static class AccountHooks
                         if (!string.IsNullOrEmpty(name))
                         {
                             _cachedWorldName = name;
-                            RynthLog.Compat($"Compat: world name captured - \"{name}\".");
+                            RynthLog.Verbose($"Compat: world name captured - \"{name}\".");
                         }
                     }
                 }

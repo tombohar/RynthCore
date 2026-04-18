@@ -59,7 +59,7 @@ internal static class CreateObjectHooks
 
             IsInstalled = true;
             _statusMessage = $"Hooked ACCObjectMaint::CreateObject @ 0x{_targetAddress.ToInt32():X8}.";
-            RynthLog.Compat($"Compat: create-object hook ready - CreateObject=0x{_targetAddress.ToInt32():X8}");
+            RynthLog.Verbose($"Compat: create-object hook ready - CreateObject=0x{_targetAddress.ToInt32():X8}");
         }
         catch (Exception ex)
         {
@@ -76,7 +76,7 @@ internal static class CreateObjectHooks
 
         int count = Interlocked.Increment(ref _dispatchCount);
         if (count <= 0)
-            RynthLog.Compat($"Compat: create object #{count} id=0x{objectId:X8} ptr=0x{result.ToInt32():X8}");
+            RynthLog.Verbose($"Compat: create object #{count} id=0x{objectId:X8} ptr=0x{result.ToInt32():X8}");
 
         PluginManager.QueueCreateObject(objectId);
         AutoIdService.Enqueue(objectId);

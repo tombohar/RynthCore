@@ -68,7 +68,7 @@ internal static class LogoBypassHooks
 
         if (LoginLifecycleHooks.HasObservedLoginComplete)
         {
-            RynthLog.Compat("LogoBypass: Login already complete at start - skipping.");
+            RynthLog.Verbose("LogoBypass: Login already complete at start - skipping.");
             return;
         }
 
@@ -87,7 +87,7 @@ internal static class LogoBypassHooks
         };
         thread.Start();
 
-        RynthLog.Compat("LogoBypass: Started - waiting for post-connect or character-list signal before dismiss clicks.");
+        RynthLog.Verbose("LogoBypass: Started - waiting for post-connect or character-list signal before dismiss clicks.");
     }
 
     public static void NotifyCharacterListObserved()
@@ -121,7 +121,7 @@ internal static class LogoBypassHooks
             return;
         }
 
-        RynthLog.Compat($"LogoBypass: Found game HWND 0x{hwnd:X8} - awaiting post-connect or character-list signal.");
+        RynthLog.Verbose($"LogoBypass: Found game HWND 0x{hwnd:X8} - awaiting post-connect or character-list signal.");
         BypassLoop(hwnd);
     }
 
@@ -147,7 +147,7 @@ internal static class LogoBypassHooks
 
         if (scheduled)
         {
-            RynthLog.Compat(
+            RynthLog.Verbose(
                 $"LogoBypass: {triggerName} observed - scheduling {ScheduledDismissClicks} dismiss click(s) at ({DismissClickX}, {DismissClickY}) with {startDelayMs}ms start delay.");
         }
     }
@@ -198,7 +198,7 @@ internal static class LogoBypassHooks
         finally
         {
             string reason = LoginLifecycleHooks.HasObservedLoginComplete ? "login complete" : "timeout";
-            RynthLog.Compat($"LogoBypass: Stopped ({reason}).");
+            RynthLog.Verbose($"LogoBypass: Stopped ({reason}).");
         }
     }
 
@@ -225,7 +225,7 @@ internal static class LogoBypassHooks
         PostMessage(hwnd, WM_MOUSEMOVE, IntPtr.Zero, lParam);
         PostMessage(hwnd, WM_LBUTTONDOWN, (IntPtr)0x0001, lParam);
         PostMessage(hwnd, WM_LBUTTONUP, IntPtr.Zero, lParam);
-        RynthLog.Compat($"LogoBypass: Sent dismiss click at ({DismissClickX}, {DismissClickY}).");
+        RynthLog.Verbose($"LogoBypass: Sent dismiss click at ({DismissClickX}, {DismissClickY}).");
     }
 
     private static IntPtr MakeLParam(int x, int y) =>

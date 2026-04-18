@@ -63,7 +63,7 @@ internal static class MultiClientHooks
 
         if (!allowMultipleClients)
         {
-            RynthLog.Compat($"Compat: multi-client bypass skipped - {_statusMessage}");
+            RynthLog.Verbose($"Compat: multi-client bypass skipped - {_statusMessage}");
             return;
         }
 
@@ -77,7 +77,7 @@ internal static class MultiClientHooks
         try
         {
             if (textSection.ImageSize != ExpectedImageSize)
-                RynthLog.Compat($"Compat: multi-client hook using unverified acclient image size 0x{textSection.ImageSize:X} (expected 0x{ExpectedImageSize:X}).");
+                RynthLog.Verbose($"Compat: multi-client hook using unverified acclient image size 0x{textSection.ImageSize:X} (expected 0x{ExpectedImageSize:X}).");
 
             int funcOff = IsAlreadyRunningVa - textSection.TextBaseVa;
             if (funcOff < 0 || funcOff + IsAlreadyRunningSignature.Length > textSection.Bytes.Length)
@@ -147,7 +147,7 @@ internal static class MultiClientHooks
         MinHook.Enable(_targetAddress);
 
         IsAlreadyRunningInstalled = true;
-        RynthLog.Compat($"Compat: multi-client hook ready - IsAlreadyRunning=0x{IsAlreadyRunningVa:X8}");
+        RynthLog.Verbose($"Compat: multi-client hook ready - IsAlreadyRunning=0x{IsAlreadyRunningVa:X8}");
     }
 
     private static void TryInstallOpenDataFileHook(AcClientTextSection textSection)
@@ -177,7 +177,7 @@ internal static class MultiClientHooks
         MinHook.Enable(_openDataFileAddress);
 
         OpenDataFileInstalled = true;
-        RynthLog.Compat($"Compat: multi-client data-file hook ready - CLBlockAllocator::OpenDataFile=0x{OpenDataFileVa:X8}");
+        RynthLog.Verbose($"Compat: multi-client data-file hook ready - CLBlockAllocator::OpenDataFile=0x{OpenDataFileVa:X8}");
     }
 
     private static byte IsAlreadyRunningDetour(IntPtr thisPtr)

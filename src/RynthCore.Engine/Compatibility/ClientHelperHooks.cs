@@ -167,7 +167,7 @@ internal static class ClientHelperHooks
             _gmSalvageUISalvage = Marshal.GetDelegateForFunctionPointer<GmSalvageUISalvageDelegate>(new IntPtr(GmSalvageUISalvageVa));
             _initialized = true;
             _statusMessage = "Ready.";
-            RynthLog.Compat("Compat: helper hooks ready - validated select/state/chat helpers plus mapped interaction and inventory helpers.");
+            RynthLog.Verbose("Compat: helper hooks ready - validated select/state/chat helpers plus mapped interaction and inventory helpers.");
             return true;
         }
         catch (Exception ex)
@@ -385,7 +385,7 @@ internal static class ClientHelperHooks
             int room = maxStack - targetCount;
             if (room <= 0)
             {
-                RynthLog.Compat($"Compat: Event_StackableMerge skipped - target 0x{targetObjectId:X8}({targetCount}) is full (max={maxStack})");
+                RynthLog.Verbose($"Compat: Event_StackableMerge skipped - target 0x{targetObjectId:X8}({targetCount}) is full (max={maxStack})");
                 return false;
             }
             amount = Math.Min(sourceCount, room);
@@ -401,7 +401,7 @@ internal static class ClientHelperHooks
         try
         {
             byte rv = _eventStackableMerge(sourceObjectId, targetObjectId, amount);
-            RynthLog.Compat($"Compat: Event_StackableMerge from=0x{sourceObjectId:X8}({sourceCount}) to=0x{targetObjectId:X8}({targetCount}) amount={amount}/{maxStack} rv={rv}");
+            RynthLog.Verbose($"Compat: Event_StackableMerge from=0x{sourceObjectId:X8}({sourceCount}) to=0x{targetObjectId:X8}({targetCount}) amount={amount}/{maxStack} rv={rv}");
             return rv != 0;
         }
         catch (Exception ex)
@@ -622,7 +622,7 @@ internal static class ClientHelperHooks
             if (line.Length == 0)
                 return false;
 
-            RynthLog.Compat($"Compat: InvokeParser text='{line}'");
+            RynthLog.Verbose($"Compat: InvokeParser text='{line}'");
             return ChatCommandDispatcher.Dispatch(line);
         }
         catch (Exception ex)
@@ -673,7 +673,7 @@ internal static class ClientHelperHooks
             return;
 
         _interactionLogCount++;
-        RynthLog.Compat($"Compat: {message}");
+        RynthLog.Verbose($"Compat: {message}");
     }
 
     private static uint ReadUInt32(int address)

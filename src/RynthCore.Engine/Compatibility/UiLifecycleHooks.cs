@@ -68,14 +68,14 @@ internal static class UiLifecycleHooks
             _statusMessage = $"Hooked SetUIReady @ 0x{_targetAddress.ToInt32():X8}.";
             _nextStatusLogTick = Environment.TickCount64 + 3000;
 
-            RynthLog.Compat(
+            RynthLog.Verbose(
                 $"Compat: UI lifecycle hook ready - SetUIReady=0x{_targetAddress.ToInt32():X8}, uiReadyFlag=0x{_uiReadyFlagAddress.ToInt32():X8}");
 
             if (_uiReadyFlagAddress != IntPtr.Zero && Marshal.ReadInt32(_uiReadyFlagAddress) != 0)
             {
                 HasObservedUiInitialized = true;
                 _statusMessage = "UI ready already active (late attach).";
-                RynthLog.Compat("Compat: UI lifecycle already active at inject time.");
+                RynthLog.Verbose("Compat: UI lifecycle already active at inject time.");
             }
         }
         catch (Exception ex)
@@ -98,7 +98,7 @@ internal static class UiLifecycleHooks
         if (!_waitingLogged)
         {
             _waitingLogged = true;
-            RynthLog.Compat("Compat: UI lifecycle awaiting SetUIReady(1).");
+            RynthLog.Verbose("Compat: UI lifecycle awaiting SetUIReady(1).");
         }
     }
 
@@ -116,7 +116,7 @@ internal static class UiLifecycleHooks
 
         HasObservedUiInitialized = true;
         _statusMessage = $"UI initialized observed via {source}.";
-        RynthLog.Compat($"Compat: UI initialized observed via {source}.");
+        RynthLog.Verbose($"Compat: UI initialized observed via {source}.");
         UiInitialized?.Invoke();
     }
 }

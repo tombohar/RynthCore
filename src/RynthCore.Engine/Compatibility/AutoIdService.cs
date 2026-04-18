@@ -38,7 +38,7 @@ internal static class AutoIdService
             return;
         _started = true;
         _drainTimer = new Timer(DrainTick, null, DrainIntervalMs, DrainIntervalMs);
-        RynthLog.Compat("Compat: AutoIdService started.");
+        RynthLog.Verbose("Compat: AutoIdService started.");
     }
 
     /// <summary>

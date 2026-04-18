@@ -79,7 +79,7 @@ internal static class SalvageHooks
 
             _hookInstalled = true;
             _statusMessage = $"Hooked gmSalvageUI::OpenSalvagePanel @ 0x{targetAddress.ToInt32():X8}.";
-            RynthLog.Compat($"Compat: salvage hook ready @ 0x{targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
+            RynthLog.Verbose($"Compat: salvage hook ready @ 0x{targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
         }
         catch (Exception ex)
         {
