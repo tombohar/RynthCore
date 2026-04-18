@@ -97,11 +97,9 @@ begin
   if IsAcClientRunning() then
   begin
     if MsgBox(
-      'Asheron''s Call (acclient.exe) is currently running.' + #13#10 +
-      #13#10 +
+      'Asheron''s Call (acclient.exe) is currently running.' + #13#10 + #13#10 +
       'Please close Asheron''s Call before continuing — the installer ' +
-      'needs to write files that are loaded by acclient.exe.' + #13#10 +
-      #13#10 +
+      'needs to write files that are loaded by acclient.exe.' + #13#10 + #13#10 +
       'Click OK once you have closed it, or Cancel to abort.',
       mbConfirmation, MB_OKCANCEL) = IDCANCEL then
     begin
@@ -118,21 +116,17 @@ begin
   if CurPageID <> wpFinish then Exit;
 
   Msg :=
-    'RynthCore is installed.' + #13#10 +
-    #13#10 +
+    'RynthCore is installed.' + #13#10 + #13#10 +
     'Getting started:' + #13#10 +
     '  1. Start Asheron''s Call and log in to your character.' + #13#10 +
     '  2. Open RynthCore (Start Menu or Desktop shortcut).' + #13#10 +
     '  3. In the Launcher, set your acclient.exe path under Runtime Paths.' + #13#10 +
     '  4. Click "Inject Running AC" to activate the overlay.' + #13#10 +
-    '     The RynthAi panel should appear inside the AC window.' + #13#10 +
-    #13#10 +
+    '     The RynthAi panel should appear inside the AC window.' + #13#10 + #13#10 +
     'Alternatively, use "Launch + Inject" to have the launcher start' + #13#10 +
-    'AC and inject automatically once it finishes loading.' + #13#10 +
-    #13#10 +
+    'AC and inject automatically once it finishes loading.' + #13#10 + #13#10 +
     'Loot, nav, and meta profiles go in:' + #13#10 +
-    '  C:\Games\RynthSuite\RynthAi\' + #13#10 +
-    #13#10 +
+    '  C:\Games\RynthSuite\RynthAi\' + #13#10 + #13#10 +
     'Log file: %USERPROFILE%\Desktop\RynthCore.log';
 
   WizardForm.FinishedLabel.Caption := Msg;
