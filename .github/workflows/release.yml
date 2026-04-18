@@ -1,0 +1,105 @@
+name: Build & Release
+
+# Trigger manually (Actions tab → Run workflow) or automatically on version tags.
+# For a manual release: go to Actions → Build & Release → Run workflow, enter version.
+# For an automated release: push a tag: git tag v0.3 && git push origin v0.3
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g. 0.3) — creates tag v<version>'
+        required: true
+        default: '0.3'
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    permissions:
+      contents: write   # needed to create releases
+
+    steps:
+    # ── Checkout both repos ────────────────────────────────────────────────────
+    - name: Checkout RynthCore
+      uses: actions/checkout@v4
+
+    - name: Checkout RynthSuite
+      uses: actions/checkout@v4
+      with:
+        repository: tombohar/RynthSuite
+        path: RynthSuite
+        # If RynthSuite is a private repo, create a Personal Access Token with
+        # repo scope and add it as a repository secret named GH_PAT.
+        # Then uncomment the next line:
+        # token: ${{ secrets.GH_PAT }}
+
+    # ── Toolchain ─────────────────────────────────────────────────────────────
+    - name: Setup .NET 9
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '9.0.x'
+
+    - name: Install Inno Setup 6
+      run: choco install innosetup --yes --no-progress
+      shell: pwsh
+
+    # ── Determine version ──────────────────────────────────────────────────────
+    - name: Resolve version
+      id: ver
+      shell: pwsh
+      run: |
+        if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+          $v = "${{ github.event.inputs.version }}"
+        } else {
+          $v = "${{ github.ref_name }}".TrimStart('v')
+        }
+        echo "version=$v" >> $env:GITHUB_OUTPUT
+        echo "tag=v$v"    >> $env:GITHUB_OUTPUT
+        Write-Host "Building version: $v"
+
+    # ── Build installer ────────────────────────────────────────────────────────
+    - name: Build installer
+      shell: pwsh
+      run: |
+        & "$env:GITHUB_WORKSPACE\installer\Build-Installer.ps1" `
+            -RynthSuiteRoot "$env:GITHUB_WORKSPACE\RynthSuite" `
+            -Version "${{ steps.ver.outputs.version }}"
+
+    # ── Tag (manual dispatch only — tag-push already has a tag) ───────────────
+    - name: Create tag (manual dispatch)
+      if: github.event_name == 'workflow_dispatch'
+      shell: pwsh
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag "${{ steps.ver.outputs.tag }}" -m "Release ${{ steps.ver.outputs.tag }}"
+        git push origin "${{ steps.ver.outputs.tag }}"
+
+    # ── GitHub Release ─────────────────────────────────────────────────────────
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.ver.outputs.tag }}
+        name: RynthCore ${{ steps.ver.outputs.tag }}
+        files: installer/Output/RynthCore-Setup.exe
+        body: |
+          ## Installation
+
+          1. Download **RynthCore-Setup.exe** below and run it
+          2. Start Asheron's Call and log in to your character
+          3. Open **RynthCore** from the Start Menu or Desktop shortcut
+          4. Click **Inject Running AC** in the launcher
+          5. The RynthAi panel will appear inside the AC window
+
+          ---
+
+          **First-time setup** — in the RynthCore launcher:
+          - Set your `acclient.exe` path under **Runtime Paths** if prompted
+          - The plugin auto-loads from `C:\Games\RynthCore\Runtime\Plugins\`
+
+          Loot, nav, and meta profiles go in `C:\Games\RynthSuite\RynthAi\`
+
+          Log file: `%USERPROFILE%\Desktop\RynthCore.log`

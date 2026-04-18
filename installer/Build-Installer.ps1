@@ -23,6 +23,12 @@
 param(
     [string]$Configuration = "Release",
     [string]$IsccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    # Explicit path to the RynthSuite repo root. When omitted, defaults to the
+    # sibling directory of RynthCore (i.e. ..\RynthSuite relative to this repo).
+    [string]$RynthSuiteRoot = "",
+    # Version string injected into the installer (e.g. "0.3"). When omitted,
+    # the version defined in RynthCore.iss is used as-is.
+    [string]$Version = "",
     [switch]$SkipBuild
 )
 
@@ -30,16 +36,21 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Off
 
 $ScriptDir    = $PSScriptRoot
-$RepoRoot     = Split-Path $ScriptDir -Parent          # C:\Projects\RynthCore
-$ProjectsRoot = Split-Path $RepoRoot -Parent           # C:\Projects
+$RepoRoot     = Split-Path $ScriptDir -Parent          # e.g. C:\Projects\RynthCore
+$ProjectsRoot = Split-Path $RepoRoot -Parent           # e.g. C:\Projects
+
+# RynthSuite root: explicit param takes priority, otherwise sibling convention.
+if (-not $RynthSuiteRoot) {
+    $RynthSuiteRoot = "$ProjectsRoot\RynthSuite"
+}
 
 $LauncherProject = "$RepoRoot\src\RynthCore.App.Avalonia\RynthCore.App.Avalonia.csproj"
 $EngineProject   = "$RepoRoot\src\RynthCore.Engine\RynthCore.Engine.csproj"
-$PluginProject   = "$ProjectsRoot\RynthSuite\Plugins\RynthCore.Plugin.RynthAi\RynthCore.Plugin.RynthAi.csproj"
+$PluginProject   = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\RynthCore.Plugin.RynthAi.csproj"
 
 $LauncherPublish = "$RepoRoot\src\RynthCore.App.Avalonia\bin\$Configuration\net9.0-windows7.0\win-x86\publish"
 $EnginePublish   = "$RepoRoot\src\RynthCore.Engine\bin\$Configuration\net9.0-windows\win-x86\publish"
-$PluginPublish   = "$ProjectsRoot\RynthSuite\Plugins\RynthCore.Plugin.RynthAi\bin\$Configuration\net9.0-windows\win-x86\publish"
+$PluginPublish   = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\bin\$Configuration\net9.0-windows\win-x86\publish"
 
 $StagingDir  = "$ScriptDir\staging\app"
 
@@ -131,7 +142,13 @@ if (-not (Test-Path $IsccPath)) {
 Write-Host ""
 Write-Host "Building installer..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Path "$ScriptDir\Output" -Force | Out-Null
-& $IsccPath "$ScriptDir\RynthCore.iss"
+
+$isccArgs = @("$ScriptDir\RynthCore.iss")
+if ($Version) {
+    $isccArgs += "/DAppVersion=$Version"
+    Write-Host "  Version override: $Version"
+}
+& $IsccPath @isccArgs
 if ($LASTEXITCODE -ne 0) { throw "ISCC build failed (exit $LASTEXITCODE)" }
 
 Write-Host ""
