@@ -147,7 +147,9 @@ New-Item -ItemType Directory -Path "$ScriptDir\Output" -Force | Out-Null
 # /D flags to ISPP (the preprocessor chokes on them in some Inno Setup 6
 # builds when the .iss file has specific content patterns).
 $issSource = "$ScriptDir\RynthCore.iss"
-$issTmp    = "$ScriptDir\Output\RynthCore.tmp.iss"
+# Write temp file alongside the original so all relative paths (SetupIconFile,
+# Source, staging\) still resolve from the installer\ directory.
+$issTmp    = "$ScriptDir\RynthCore.tmp.iss"
 $issContent = Get-Content $issSource -Raw
 if ($Version) {
     $issContent = $issContent -replace 'AppVersion=0\.0\.0', "AppVersion=$Version"
@@ -155,8 +157,12 @@ if ($Version) {
 }
 Set-Content -Path $issTmp -Value $issContent -Encoding UTF8
 
-& $IsccPath $issTmp
-if ($LASTEXITCODE -ne 0) { throw "ISCC build failed (exit $LASTEXITCODE)" }
+try {
+    & $IsccPath $issTmp
+    if ($LASTEXITCODE -ne 0) { throw "ISCC build failed (exit $LASTEXITCODE)" }
+} finally {
+    Remove-Item $issTmp -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host ""
 Write-Host "SUCCESS" -ForegroundColor Green
