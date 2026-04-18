@@ -130,6 +130,42 @@ After deploying a plugin with AC running, click **RL** on the RynthCore overlay 
 
 To confirm NativeAOT actually ran, check that `.lib` and `.exp` files exist alongside the DLL in the `native\` directory.
 
+## Installer
+
+The `installer/` directory contains an Inno Setup script and a PowerShell build script that publishes all three projects, stages the output, and produces a single `RynthCore-Setup.exe`.
+
+### Prerequisites
+
+- [Inno Setup 6](https://jrsoftware.org/isdl.php) installed to the default location (`C:\Program Files (x86)\Inno Setup 6\`)
+- All build prerequisites listed above (.NET 9 SDK, VS Build Tools)
+
+### Build the installer
+
+```powershell
+cd C:\Projects\RynthCore\installer
+.\Build-Installer.ps1
+```
+
+This runs three `dotnet publish` steps (Launcher, Engine, Plugin), stages everything under `installer\staging\app\`, then invokes `ISCC.exe` to produce the installer.
+
+Output: `installer\Output\RynthCore-Setup.exe`
+
+### Options
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-Configuration` | `Release` | Build configuration |
+| `-IsccPath` | `C:\Program Files (x86)\Inno Setup 6\ISCC.exe` | Path to the Inno Setup compiler |
+| `-SkipBuild` | off | Skip `dotnet publish` steps and re-package using the existing staging directory |
+
+### What the installer does
+
+- Installs the launcher, engine, and native dependencies to `C:\Games\RynthCore` (user-selectable)
+- Creates data directories under `C:\Games\RynthSuite\RynthAi\` (NavProfiles, LootProfiles, MetaFiles, etc.) — these are preserved on uninstall
+- Adds Start Menu and optional Desktop shortcuts
+- Warns if `acclient.exe` is running (the engine DLL would be locked)
+- Shows getting-started instructions on the finish page
+
 ## Gotchas
 
 - **`dotnet publish`, not `dotnet build` for Engine and Plugins.** NativeAOT only runs during `dotnet publish`. A `dotnet build` produces a valid managed DLL that compiles fine but has no unmanaged exports and will be silently ignored by the engine. The Avalonia launcher is the exception — `dotnet build` is fine since it's a normal .NET app.
