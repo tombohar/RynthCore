@@ -23,18 +23,24 @@ jobs:
 
     steps:
     # ── Checkout both repos ────────────────────────────────────────────────────
+    # RynthCore is checked out to $GITHUB_WORKSPACE (e.g. D:\a\RynthCore\RynthCore).
+    # RynthSuite must be a *sibling* of RynthCore so that the csproj project
+    # references (..\..\..\RynthCore\src\...) resolve correctly — they assume
+    # both repos live under a common parent directory, matching the local
+    # C:\Projects\RynthCore + C:\Projects\RynthSuite convention.
     - name: Checkout RynthCore
       uses: actions/checkout@v4
 
-    - name: Checkout RynthSuite
-      uses: actions/checkout@v4
-      with:
-        repository: tombohar/RynthSuite
-        path: RynthSuite
-        # If RynthSuite is a private repo, create a Personal Access Token with
-        # repo scope and add it as a repository secret named GH_PAT.
-        # Then uncomment the next line:
-        # token: ${{ secrets.GH_PAT }}
+    - name: Checkout RynthSuite (sibling of RynthCore)
+      shell: pwsh
+      run: |
+        $parent = Split-Path "$env:GITHUB_WORKSPACE" -Parent
+        $dest   = "$parent\RynthSuite"
+        Write-Host "Cloning RynthSuite to: $dest"
+        # If RynthSuite is private, set a GH_PAT secret and use the token URL:
+        # git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/tombohar/RynthSuite.git $dest
+        git clone https://github.com/tombohar/RynthSuite.git $dest
+        if ($LASTEXITCODE -ne 0) { throw "git clone RynthSuite failed" }
 
     # ── Toolchain ─────────────────────────────────────────────────────────────
     - name: Setup .NET 9
@@ -64,8 +70,9 @@ jobs:
     - name: Build installer
       shell: pwsh
       run: |
+        $parent = Split-Path "$env:GITHUB_WORKSPACE" -Parent
         & "$env:GITHUB_WORKSPACE\installer\Build-Installer.ps1" `
-            -RynthSuiteRoot "$env:GITHUB_WORKSPACE\RynthSuite" `
+            -RynthSuiteRoot "$parent\RynthSuite" `
             -Version "${{ steps.ver.outputs.version }}"
 
     # ── Tag (manual dispatch only — tag-push already has a tag) ───────────────
