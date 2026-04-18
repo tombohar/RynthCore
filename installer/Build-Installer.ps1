@@ -143,12 +143,19 @@ Write-Host ""
 Write-Host "Building installer..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Path "$ScriptDir\Output" -Force | Out-Null
 
-$isccArgs = @("$ScriptDir\RynthCore.iss")
+# Substitute version into a temp copy of the .iss file so we never pass
+# /D flags to ISPP (the preprocessor chokes on them in some Inno Setup 6
+# builds when the .iss file has specific content patterns).
+$issSource = "$ScriptDir\RynthCore.iss"
+$issTmp    = "$ScriptDir\Output\RynthCore.tmp.iss"
+$issContent = Get-Content $issSource -Raw
 if ($Version) {
-    $isccArgs += "/DAppVersion=$Version"
+    $issContent = $issContent -replace 'AppVersion=0\.0\.0', "AppVersion=$Version"
     Write-Host "  Version override: $Version"
 }
-& $IsccPath @isccArgs
+Set-Content -Path $issTmp -Value $issContent -Encoding UTF8
+
+& $IsccPath $issTmp
 if ($LASTEXITCODE -ne 0) { throw "ISCC build failed (exit $LASTEXITCODE)" }
 
 Write-Host ""
