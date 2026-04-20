@@ -27,12 +27,6 @@ internal static class EndSceneHook
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-
-    [DllImport("kernel32.dll")]
-    private static extern uint GetCurrentProcessId();
-
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int EndSceneDelegate(IntPtr pDevice);
 
@@ -278,9 +272,8 @@ internal static class EndSceneHook
         if (FpsLimitEnabled)
         {
             IntPtr fgWnd = GetForegroundWindow();
-            GetWindowThreadProcessId(fgWnd, out uint fgPid);
-            uint thisPid = GetCurrentProcessId();
-            bool isFocused = fgPid == thisPid;
+            // Only "focused" when the AC game window itself is foreground — not viewport popups.
+            bool isFocused = fgWnd != IntPtr.Zero && fgWnd == Win32Backend.GameHwnd;
             int targetFps = isFocused ? FpsTargetFocused : FpsTargetBackground;
             double minFrameMs = 1000.0 / Math.Max(targetFps, 1);
 
@@ -291,7 +284,7 @@ internal static class EndSceneHook
             if (!_fpsLimiterLoggedOnce)
             {
                 _fpsLimiterLoggedOnce = true;
-                RynthLog.D3D9($"EndSceneHook: FPS governor active — max={FpsTargetFocused} focused, max={FpsTargetBackground} background, pid={thisPid}");
+                RynthLog.D3D9($"EndSceneHook: FPS governor active — max={FpsTargetFocused} focused, max={FpsTargetBackground} background, gameHwnd=0x{Win32Backend.GameHwnd.ToInt64():X}");
             }
 
             // Periodic FPS measurement — log every 60 seconds

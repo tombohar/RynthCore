@@ -149,17 +149,27 @@ internal static class RynthCoreShell
             _barPositionInitialized = true;
         }
 
+        // With ViewportsEnable, ImGui expects absolute screen coords. We store
+        // the bar position as client-relative, so offset by the main viewport's
+        // origin (which ImGuiController sets to ClientToScreen(0,0) each frame).
+        Vector2 viewportOrigin = ImGui.GetMainViewport().Pos;
+        Vector2 screenPos = _barPosition + viewportOrigin;
+
         if (_barResetRequested)
         {
-            ImGui.SetNextWindowPos(_barPosition, ImGuiCond.Always);
+            ImGui.SetNextWindowPos(screenPos, ImGuiCond.Always);
             _barResetRequested = false;
         }
         else
         {
-            ImGui.SetNextWindowPos(_barPosition, ImGuiCond.FirstUseEver);
+            ImGui.SetNextWindowPos(screenPos, ImGuiCond.FirstUseEver);
         }
 
         ImGui.SetNextWindowBgAlpha(1.0f);
+        // Pin the bar to the main viewport so it stays anchored inside the game
+        // client even with ViewportsEnable on. Plugin windows can still pop out
+        // into their own OS windows — this pin only applies to the bar.
+        ImGui.SetNextWindowViewport(ImGui.GetMainViewport().ID);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(6f, 4f));
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(4f, 3f));
         ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(5f, 2f));
@@ -276,7 +286,8 @@ internal static class RynthCoreShell
             return;
 
         _barPosition = clamped;
-        ImGui.SetWindowPos(_barPosition);
+        // _barPosition is client-relative; translate to screen coords for ImGui.
+        ImGui.SetWindowPos(_barPosition + ImGui.GetMainViewport().Pos);
     }
 
     private static Vector2 ClampToDisplay(Vector2 position, Vector2 windowSize, Vector2 displaySize)
@@ -342,7 +353,9 @@ internal static class RynthCoreShell
 
     private static void UpdateBarPositionFromWindow()
     {
-        _barPosition = ImGui.GetWindowPos();
+        // GetWindowPos returns screen coords with ViewportsEnable — convert back
+        // to client-relative so the stored position is viewport-independent.
+        _barPosition = ImGui.GetWindowPos() - ImGui.GetMainViewport().Pos;
         EnsureBarVisible();
         SaveBarPositionThrottled();
     }

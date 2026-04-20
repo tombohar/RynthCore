@@ -28,6 +28,7 @@ internal static class DeviceVTableIndex
     public const int SetTransform           = 44;
     public const int GetTransform           = 45;
     public const int GetRenderTarget        = 38;
+    public const int SetRenderTarget        = 37;
     public const int SetViewport            = 47;
     public const int GetViewport            = 48;
     public const int GetTexture             = 64;
@@ -75,6 +76,25 @@ internal static class TextureVTableIndex
     public const int Release    = 2;
     public const int LockRect   = 19;
     public const int UnlockRect = 20;
+}
+
+/// <summary>
+/// IDirect3DSwapChain9 vtable indices.
+/// </summary>
+internal static class SwapChain9VTableIndex
+{
+    public const int Release        = 2;
+    public const int Present        = 3;
+    // IDirect3DSwapChain9 vtable: 3=Present, 4=GetFrontBufferData, 5=GetBackBuffer.
+    public const int GetBackBuffer  = 5;
+}
+
+/// <summary>
+/// IDirect3DSurface9 vtable indices.
+/// </summary>
+internal static class Surface9VTableIndex
+{
+    public const int Release = 2;
 }
 
 /// <summary>

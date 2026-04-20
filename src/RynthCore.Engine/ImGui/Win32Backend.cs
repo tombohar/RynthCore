@@ -19,7 +19,10 @@ internal static unsafe class Win32Backend
     private const uint WM_MOUSEMOVE = 0x0200;
     private const uint WM_SETFOCUS = 0x0007;
     private const uint WM_KILLFOCUS = 0x0008;
+    private const uint WM_ACTIVATE    = 0x0006;
     private const uint WM_ACTIVATEAPP = 0x001C;
+    private const int  WA_INACTIVE    = 0;
+    private const int  WA_ACTIVE      = 1;
     private const uint WM_LBUTTONDOWN = 0x0201;
     private const uint WM_LBUTTONUP = 0x0202;
     private const uint WM_RBUTTONDOWN = 0x0204;
@@ -60,6 +63,12 @@ internal static unsafe class Win32Backend
     private static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentProcessId();
+
+    [DllImport("user32.dll")]
     private static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
 
     [DllImport("user32.dll")]
@@ -67,6 +76,9 @@ internal static unsafe class Win32Backend
 
     [DllImport("user32.dll")]
     private static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
 
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out POINT lpPoint);
@@ -282,9 +294,12 @@ internal static unsafe class Win32Backend
 
         FlushQueuedInput(io);
 
-        // Always refresh the cursor position relative to the device window.
+        // Refresh the cursor position. With ViewportsEnable, ImGui expects
+        // absolute screen coords so it can route clicks to the correct viewport.
+        // Without it, client-relative coords are the simpler contract.
         GetCursorPos(out POINT cursorPos);
-        ScreenToClient(_gameHwnd, ref cursorPos);
+        if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) == 0)
+            ScreenToClient(_gameHwnd, ref cursorPos);
         io.AddMousePosEvent(cursorPos.X, cursorPos.Y);
         SyncFocusState(io);
 
@@ -363,6 +378,21 @@ internal static unsafe class Win32Backend
             // ── Background FPS unlock: lie to AC so it never idle-throttles ──
             if (msg == WM_ACTIVATEAPP && EndSceneHook.FpsLimitEnabled)
                 return CallWindowProcA(_originalWndProc, hWnd, msg, (IntPtr)1, lParam);
+
+            // WM_ACTIVATE WA_INACTIVE fires when focus moves to another window in the SAME
+            // process (e.g. an ImGui viewport popup). WM_ACTIVATEAPP doesn't fire in that case,
+            // so AC would see its window go inactive and may idle-throttle its render loop.
+            // Intercept and lie: tell AC its window is still active.
+            if (msg == WM_ACTIVATE && EndSceneHook.FpsLimitEnabled)
+            {
+                int activationCode = (int)((long)wParam & 0xFFFF);
+                if (activationCode == WA_INACTIVE && lParam != IntPtr.Zero)
+                {
+                    GetWindowThreadProcessId(lParam, out uint newActivePid);
+                    if (newActivePid == GetCurrentProcessId())
+                        return CallWindowProcA(_originalWndProc, hWnd, msg, (IntPtr)WA_ACTIVE, lParam);
+                }
+            }
 
             // Pass through to original WndProc
             return CallWindowProcA(_originalWndProc, hWnd, msg, wParam, lParam);
@@ -692,7 +722,16 @@ internal static unsafe class Win32Backend
     {
         short x = (short)((long)lParam & 0xFFFF);
         short y = (short)(((long)lParam >> 16) & 0xFFFF);
-        io.AddMousePosEvent(x, y);
+        if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
+        {
+            POINT p = new POINT { X = x, Y = y };
+            ClientToScreen(_gameHwnd, ref p);
+            io.AddMousePosEvent(p.X, p.Y);
+        }
+        else
+        {
+            io.AddMousePosEvent(x, y);
+        }
     }
 
     private static void UpdateMouseButton(ImGuiIOPtr io, int buttonIndex, int virtualKey)

@@ -99,6 +99,7 @@ public readonly unsafe struct RynthCoreHost
     public bool HasGetObjectOwnershipInfo => _api.GetObjectOwnershipInfoFn != IntPtr.Zero;
     public bool HasGetCurrentCombatMode => _api.GetCurrentCombatModeFn != IntPtr.Zero;
     public bool HasSalvagePanel => _api.SalvagePanelOpenFn != IntPtr.Zero && _api.SalvagePanelAddItemFn != IntPtr.Zero && _api.SalvagePanelExecuteFn != IntPtr.Zero;
+    public bool HasGetObjectPalettes => _api.Version >= 50 && _api.GetObjectPalettesFn != IntPtr.Zero;
 
     // ─── Methods ────────────────────────────────────────────────────────────
 
@@ -1085,6 +1086,40 @@ public readonly unsafe struct RynthCoreHost
         {
             return ((delegate* unmanaged[Cdecl]<uint, uint*, uint*, uint*, int>)_api.GetObjectOwnershipInfoFn)(
                 objectId, cPtr, wPtr, lPtr) != 0;
+        }
+    }
+
+    /// <summary>
+    /// Returns palette subpalette data (sorted by offset) for an object captured at CreateObject time.
+    /// subIds[i] = palette DID; offsets[i] = range-start offset (slot index).
+    /// Returns total count (may exceed maxCount), or -1 if no data captured.
+    /// </summary>
+    public int GetObjectPalettes(uint objectId, uint[] subIds, uint[] offsets, int maxCount)
+    {
+        if (_api.GetObjectPalettesFn == IntPtr.Zero || subIds == null || offsets == null || maxCount <= 0)
+            return -1;
+
+        IntPtr subIdsBuf = Marshal.AllocHGlobal(maxCount * sizeof(uint));
+        IntPtr offsetsBuf = Marshal.AllocHGlobal(maxCount * sizeof(uint));
+        try
+        {
+            int result = ((delegate* unmanaged[Cdecl]<uint, uint*, uint*, int, int>)_api.GetObjectPalettesFn)(
+                objectId, (uint*)subIdsBuf, (uint*)offsetsBuf, maxCount);
+
+            int count = result > 0 ? Math.Min(result, maxCount) : 0;
+            uint* sp = (uint*)subIdsBuf;
+            uint* op = (uint*)offsetsBuf;
+            for (int i = 0; i < count; i++)
+            {
+                subIds[i] = sp[i];
+                offsets[i] = op[i];
+            }
+            return result;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(subIdsBuf);
+            Marshal.FreeHGlobal(offsetsBuf);
         }
     }
 }

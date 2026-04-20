@@ -99,4 +99,5 @@ public struct RynthCoreApiNative
     public IntPtr GetObjectStateFn;
     public IntPtr GetObjectBitfieldFn;
     public IntPtr ForceResetBusyCountFn;
+    public IntPtr GetObjectPalettesFn;
 }

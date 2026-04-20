@@ -455,6 +455,12 @@ internal struct RynthCoreAPI
     /// Force-resets the client's ClientUISystem busy count to zero.
     /// Use after portal teleports that interrupt actions and leave the hourglass cursor stuck.</summary>
     public IntPtr ForceResetBusyCountFn;
+
+    /// <summary>Function pointer: int GetObjectPalettes(uint objectId, uint* subIds, uint* offsets, int maxCount)
+    /// Fills subIds and offsets with the item's ObjDesc subpalette data (sorted by offset).
+    /// Returns total subpalette count, or -1 if no data was captured for this object.
+    /// subIds[i] is the palette DID; offsets[i] is the range-start offset (used as slot index).</summary>
+    public IntPtr GetObjectPalettesFn;
 }
 
 
@@ -462,7 +468,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 49;
+    public const uint Current = 50;
 }
 
 internal static class ClientActionHookFlags
@@ -846,3 +852,6 @@ internal delegate uint GetObjectBitfieldCallbackDelegate(uint objectId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void ForceResetBusyCountCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectPalettesCallbackDelegate(uint objectId, uint* subIds, uint* offsets, int maxCount);

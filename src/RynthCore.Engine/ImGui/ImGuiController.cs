@@ -29,6 +29,17 @@ internal static class ImGuiController
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindowVisible(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hWnd, out ClientRect lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr hWnd, ref ClientPoint lpPoint);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ClientRect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ClientPoint { public int X, Y; }
+
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     private static bool _initialized;
@@ -73,13 +84,36 @@ internal static class ImGuiController
             ImGuiIOPtr io = ImGuiNET.ImGui.GetIO();
 
             io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
+            io.ConfigFlags |= ImGuiConfigFlags.ViewportsEnable;
+            // Popped-out plugin windows use WS_EX_TOOLWINDOW so they don't show
+            // up as extra "Asheron's Call" entries in the taskbar — critical for
+            // users running many clients side by side.
+            io.ConfigViewportsNoTaskBarIcon = true;
             ImGuiNET.ImGui.StyleColorsDark();
+
+            // One-shot offset probe for diagnostics — safe to keep installed.
+            ViewportProbe.Run();
 
             if (!Win32Backend.Init(_gameHwnd))
                 return false;
 
             if (!DX9Backend.Init(pDevice))
                 return false;
+
+            // Viewport backends only run when ViewportsEnable is on. Installing
+            // their callbacks on PlatformIO without the flag has no upside and
+            // just expands the crash surface.
+            if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
+            {
+                bool platformOk = ViewportPlatformBackend.Init(_gameHwnd);
+                bool rendererOk = platformOk && ViewportRendererBackend.Init(pDevice);
+                if (!platformOk || !rendererOk)
+                {
+                    RynthLog.Render($"ImGuiController: viewport init failed (platform={platformOk}, renderer={rendererOk}) — disabling ViewportsEnable.");
+                    io.ConfigFlags &= ~ImGuiConfigFlags.ViewportsEnable;
+                }
+                ViewportPlatformBackend.ImGuiContext = _context;
+            }
 
             _lastFrameTicks = Stopwatch.GetTimestamp();
             _initialized = true;
@@ -114,6 +148,8 @@ internal static class ImGuiController
 
             PluginManager.ShutdownAll();
             OverlayTextureRenderer.Shutdown();
+            ViewportRendererBackend.Shutdown();
+            ViewportPlatformBackend.Shutdown();
             DX9Backend.Shutdown();
             Win32Backend.Shutdown();
             ImGuiNET.ImGui.DestroyContext(contextToDestroy);
@@ -192,6 +228,26 @@ internal static class ImGuiController
             // Plugin tick (per-frame logic, before ImGui drawing)
             PluginManager.TickAll();
 
+            // With ViewportsEnable on, ImGui routes mouse and window positions in
+            // absolute screen coords. The main viewport's Pos must equal the game
+            // client's screen origin so clicks over the main viewport map to the
+            // correct windows, and popped-out viewports share a coord system with
+            // the main one.
+            if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
+            {
+                int screenX = 0, screenY = 0;
+                if (_gameHwnd != IntPtr.Zero)
+                {
+                    ClientPoint p = new ClientPoint { X = 0, Y = 0 };
+                    if (ClientToScreen(_gameHwnd, ref p)) { screenX = p.X; screenY = p.Y; }
+                }
+                ImGuiViewportPtr mainVp = ImGuiNET.ImGui.GetMainViewport();
+                mainVp.Pos = new System.Numerics.Vector2(screenX, screenY);
+                mainVp.Size = io.DisplaySize;
+                mainVp.WorkPos = new System.Numerics.Vector2(screenX, screenY);
+                mainVp.WorkSize = io.DisplaySize;
+            }
+
             ImGuiNET.ImGui.NewFrame();
             frameStarted = true;
             RynthCoreShell.Render(_frameCount);
@@ -210,16 +266,11 @@ internal static class ImGuiController
             Win32Backend.UpdateCaptureFlags(captureMouse, captureKeyboard);
 
             ImDrawDataPtr drawData = ImGuiNET.ImGui.GetDrawData();
-            // Frame diagnostics suppressed — ImGui is stable.
 
-            // Nav markers were rendered by Nav3DRenderInjector at the 3D→UI
-            // transition. Fallback to EndScene if transition wasn't detected.
             if (!nav3DAlreadyRendered)
                 DX9Backend.RenderNav3D(pDevice);
 
             DX9Backend.RenderDrawData(drawData, pDevice);
-
-            // Composite the Avalonia overlay frame on top of ImGui
             OverlayTextureRenderer.Render(pDevice);
 
             if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
@@ -240,7 +291,7 @@ internal static class ImGuiController
             {
             }
 
-            RynthLog.Render($"ImGuiController: frame {_frameCount} error: {ex.GetType().Name}: {ex.Message}");
+            RynthLog.Info($"ImGuiController: frame {_frameCount} error: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {

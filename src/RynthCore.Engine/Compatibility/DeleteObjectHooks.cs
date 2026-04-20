@@ -71,6 +71,7 @@ internal static class DeleteObjectHooks
     {
         if (objectId != 0)
         {
+            PaletteCache.Remove(objectId);
             PluginManager.QueueDeleteObject(objectId);
             AutoIdService.Evict(objectId);
         }

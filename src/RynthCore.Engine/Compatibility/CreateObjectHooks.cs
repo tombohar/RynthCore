@@ -70,6 +70,9 @@ internal static class CreateObjectHooks
 
     private static IntPtr CreateObjectDetour(IntPtr thisPtr, uint objectId, IntPtr visualDesc, IntPtr physicsDesc, IntPtr weenieDesc)
     {
+        if (objectId != 0 && visualDesc != IntPtr.Zero)
+            PaletteCache.ReadFromObjDesc(objectId, visualDesc);
+
         IntPtr result = _originalCreateObject!(thisPtr, objectId, visualDesc, physicsDesc, weenieDesc);
         if (result == IntPtr.Zero || objectId == 0)
             return result;

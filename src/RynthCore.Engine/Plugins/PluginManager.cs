@@ -188,6 +188,7 @@ internal static class PluginManager
     private static GetObjectMotionOnCallbackDelegate? _getObjectMotionOnCallback;
     private static GetObjectStateCallbackDelegate? _getObjectStateCallback;
     private static GetObjectBitfieldCallbackDelegate? _getObjectBitfieldCallback;
+    private static GetObjectPalettesCallbackDelegate? _getObjectPalettesCallback;
     private static IntPtr _accountNameScratchPtr;
     private static IntPtr _worldNameScratchPtr;
     [ThreadStatic] private static IntPtr _objectNameScratchPtr;
@@ -1836,6 +1837,8 @@ internal static class PluginManager
         _api.GetObjectStateFn = Marshal.GetFunctionPointerForDelegate(_getObjectStateCallback);
         _api.GetObjectBitfieldFn = Marshal.GetFunctionPointerForDelegate(_getObjectBitfieldCallback);
         _api.ForceResetBusyCountFn = Marshal.GetFunctionPointerForDelegate(_forceResetBusyCountCallback);
+        _getObjectPalettesCallback ??= GetObjectPalettesAction;
+        _api.GetObjectPalettesFn = Marshal.GetFunctionPointerForDelegate(_getObjectPalettesCallback);
     }
 
     private static void ProbeClientHooks()
@@ -2360,6 +2363,12 @@ internal static class PluginManager
     private static uint GetObjectBitfieldAction(uint objectId)
     {
         return ClientObjectHooks.TryGetObjectBitfield(objectId, out uint bitfield) ? bitfield : 0u;
+    }
+
+    private static unsafe int GetObjectPalettesAction(uint objectId, uint* subIds, uint* offsets, int maxCount)
+    {
+        if (subIds == null || offsets == null || maxCount <= 0) return -1;
+        return PaletteCache.Fill(objectId, subIds, offsets, maxCount);
     }
 
     private static int HasAppraisalDataAction(uint objectId)

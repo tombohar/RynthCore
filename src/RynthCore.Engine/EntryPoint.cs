@@ -44,6 +44,7 @@ public static class EntryPoint
         try
         {
             RynthLog.Info($"RynthCoreInit called (build {BuildStamp}) - spawning init thread...");
+            CrashLogger.Install();
             RunInitStep("early multi-client hooks", MultiClientHooks.Initialize);
 
             var thread = new Thread(InitWorker)
