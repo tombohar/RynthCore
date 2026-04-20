@@ -48,9 +48,9 @@ $LauncherProject = "$RepoRoot\src\RynthCore.App.Avalonia\RynthCore.App.Avalonia.
 $EngineProject   = "$RepoRoot\src\RynthCore.Engine\RynthCore.Engine.csproj"
 $PluginProject   = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\RynthCore.Plugin.RynthAi.csproj"
 
-$LauncherPublish = "$RepoRoot\src\RynthCore.App.Avalonia\bin\$Configuration\net9.0-windows7.0\win-x86\publish"
-$EnginePublish   = "$RepoRoot\src\RynthCore.Engine\bin\$Configuration\net9.0-windows\win-x86\publish"
-$PluginPublish   = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\bin\$Configuration\net9.0-windows\win-x86\publish"
+$LauncherPublish = "$RepoRoot\src\RynthCore.App.Avalonia\bin\$Configuration\net10.0-windows7.0\win-x86\publish"
+$EnginePublish   = "$RepoRoot\src\RynthCore.Engine\bin\$Configuration\net10.0-windows\win-x86\publish"
+$PluginPublish   = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\bin\$Configuration\net10.0-windows\win-x86\publish"
 
 $StagingDir  = "$ScriptDir\staging\app"
 
