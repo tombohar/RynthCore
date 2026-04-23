@@ -470,14 +470,15 @@ internal static unsafe class ViewportPlatformBackend
     {
         uint flags = unchecked((uint)vp->Flags);
         bool noDecoration = (flags & (uint)ImGuiViewportFlags.NoDecoration) != 0;
-        bool noTaskbarIcon = (flags & (uint)ImGuiViewportFlags.NoTaskBarIcon) != 0;
         bool topMost = (flags & (uint)ImGuiViewportFlags.TopMost) != 0;
 
         uint dwStyle = noDecoration
             ? WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
             : WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
 
-        uint dwExStyle = noTaskbarIcon ? WS_EX_TOOLWINDOW : WS_EX_APPWINDOW;
+        // Always use WS_EX_TOOLWINDOW so tear-off viewports don't clutter the taskbar / Alt-Tab
+        // list when users run many clients. Owned by _mainHwnd so it still closes with the game.
+        uint dwExStyle = WS_EX_TOOLWINDOW;
         if (topMost) dwExStyle |= WS_EX_TOPMOST;
         dwExStyle |= WS_EX_NOACTIVATE;
 
@@ -746,7 +747,16 @@ internal static unsafe class ViewportPlatformBackend
                     break;
 
                 case WM_MOUSEACTIVATE:
-                    return new IntPtr(MA_NOACTIVATE);
+                {
+                    // If AC is the foreground app, don't steal its focus — just process the click.
+                    // If the user is tabbed out (some other app is foreground), allow Windows to
+                    // activate this viewport so the click actually brings it to the front.
+                    IntPtr fg = GetForegroundWindow();
+                    IntPtr game = Win32Backend.GameHwnd;
+                    if (game != IntPtr.Zero && fg == game)
+                        return new IntPtr(MA_NOACTIVATE);
+                    break;
+                }
 
                 case WM_NCHITTEST:
                 {

@@ -136,6 +136,21 @@ internal static class ClientActionHooks
         return CommandInterpreterHooks.TapJump();
     }
 
+    public static bool CommenceJump()
+    {
+        return CommandInterpreterHooks.CommenceJump();
+    }
+
+    public static bool DoJump(bool autonomous)
+    {
+        return CommandInterpreterHooks.DoJump(autonomous);
+    }
+
+    public static bool LaunchJumpWithMotion(bool shift, bool holdW, bool holdX, bool holdZ, bool holdC)
+    {
+        return PlayerPhysicsHooks.LaunchJumpWithMotion(shift, holdW, holdX, holdZ, holdC);
+    }
+
     public static bool SetMotion(uint motion, bool enabled)
     {
         return CommandInterpreterHooks.SetMotion(motion, enabled);

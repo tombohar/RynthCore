@@ -461,6 +461,30 @@ internal struct RynthCoreAPI
     /// Returns total subpalette count, or -1 if no data was captured for this object.
     /// subIds[i] is the palette DID; offsets[i] is the range-start offset (used as slot index).</summary>
     public IntPtr GetObjectPalettesFn;
+
+    /// <summary>Function pointer: int CommenceJump()
+    /// Calls ClientCombatSystem::CommenceJump (spacebar key-down). Starts the
+    /// power-bar charge cycle. Pair with DoJump(autonomous) to release.</summary>
+    public IntPtr CommenceJumpFn;
+
+    /// <summary>Function pointer: int DoJump(int autonomous)
+    /// Calls ClientCombatSystem::DoJump (spacebar key-up). Releases a jump
+    /// at the current power-bar level. Pass autonomous=1 for the normal
+    /// player-driven jump (matches keyboard behavior).</summary>
+    public IntPtr DoJumpFn;
+
+    /// <summary>Function pointer: int LaunchJumpWithMotion(int shift, int w, int x, int z, int c)
+    /// Writes motion vector directly into CMotionInterp, calls DoJump(1), then
+    /// clears the motion. This is the only way to jump with forward/back/strafe
+    /// momentum — SetMotion does not bake velocity into the physics sim in time
+    /// for DoJump. Mirrors UB's UBHelper.Jumper algorithm.</summary>
+    public IntPtr LaunchJumpWithMotionFn;
+
+    /// <summary>Function pointer: int GetRadarRect(int* x0, int* y0, int* x1, int* y1)
+    /// Returns the retail gmRadarUI element's current screen rect in pixels
+    /// (x0,y0 top-left, x1,y1 bottom-right exclusive). Returns 1 on success, 0
+    /// if the radar has not rendered yet this session. Requires API v53+.</summary>
+    public IntPtr GetRadarRectFn;
 }
 
 
@@ -468,7 +492,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 50;
+    public const uint Current = 53;
 }
 
 internal static class ClientActionHookFlags
@@ -624,6 +648,15 @@ internal delegate int SetAutoRunCallbackDelegate(int enabled);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int TapJumpCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int CommenceJumpCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int DoJumpCallbackDelegate(int autonomous);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int LaunchJumpWithMotionCallbackDelegate(int shift, int w, int x, int z, int c);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int SetMotionCallbackDelegate(uint motion, int enabled);
@@ -855,3 +888,6 @@ internal delegate void ForceResetBusyCountCallbackDelegate();
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int GetObjectPalettesCallbackDelegate(uint objectId, uint* subIds, uint* offsets, int maxCount);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetRadarRectCallbackDelegate(int* x0, int* y0, int* x1, int* y1);

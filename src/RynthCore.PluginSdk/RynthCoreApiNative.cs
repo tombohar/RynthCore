@@ -100,4 +100,8 @@ public struct RynthCoreApiNative
     public IntPtr GetObjectBitfieldFn;
     public IntPtr ForceResetBusyCountFn;
     public IntPtr GetObjectPalettesFn;
+    public IntPtr CommenceJumpFn;
+    public IntPtr DoJumpFn;
+    public IntPtr LaunchJumpWithMotionFn;
+    public IntPtr GetRadarRectFn;
 }

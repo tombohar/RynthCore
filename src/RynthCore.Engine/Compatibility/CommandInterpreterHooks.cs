@@ -244,6 +244,38 @@ internal static class CommandInterpreterHooks
         }
     }
 
+    public static bool CommenceJump()
+    {
+        if (!TryBindDelegates())
+            return false;
+
+        try
+        {
+            _commenceJump!(_boundCmdInterp);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool DoJump(bool autonomous)
+    {
+        if (!TryBindDelegates())
+            return false;
+
+        try
+        {
+            _doJump!(_boundCmdInterp, autonomous ? 1 : 0);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool TryBindDelegates()
     {
         IntPtr selectedStaticAddr = IntPtr.Zero;

@@ -4,6 +4,11 @@ namespace RynthCore.App;
 
 internal sealed class LaunchAccountProfile
 {
+    /// Sentinel stored in CharacterName when the user has explicitly opted out of auto-login.
+    /// At launch time, ResolveTargetCharacterForLaunch translates this to an empty string so
+    /// the engine's CharacterCapture sees a blank TargetCharacter and skips auto-login entirely.
+    public const string NoneOption = "(None — no auto-login)";
+
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string AccountName { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
@@ -15,7 +20,7 @@ internal sealed class LaunchAccountProfile
     {
         get
         {
-            string launchLabel = !string.IsNullOrWhiteSpace(CharacterName)
+            string launchLabel = !string.IsNullOrWhiteSpace(CharacterName) && CharacterName != NoneOption
                 ? CharacterName
                 : Alias;
 

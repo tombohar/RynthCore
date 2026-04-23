@@ -55,16 +55,23 @@ internal partial class AccountProfileDialog : Window
     private void PopulateCharacterDropdown(string accountName, string serverName, string selectedCharacter)
     {
         List<string> chars = LoadDetectedCharacters(accountName, serverName);
-        if (string.IsNullOrWhiteSpace(selectedCharacter) && chars.Count == 1)
-            selectedCharacter = chars[0];
 
         // Ensure the existing saved name appears even if the scan file is empty
-        if (!string.IsNullOrEmpty(selectedCharacter) && !chars.Contains(selectedCharacter))
+        if (!string.IsNullOrEmpty(selectedCharacter)
+            && selectedCharacter != LaunchAccountProfile.NoneOption
+            && !chars.Contains(selectedCharacter))
+        {
             chars.Insert(0, selectedCharacter);
+        }
+
+        // "(None)" sentinel at the top so users can opt out of auto-login per account
+        chars.Insert(0, LaunchAccountProfile.NoneOption);
 
         CharacterBox.ItemsSource = chars;
 
-        if (!string.IsNullOrEmpty(selectedCharacter) && chars.Contains(selectedCharacter))
+        if (string.IsNullOrEmpty(selectedCharacter) || selectedCharacter == LaunchAccountProfile.NoneOption)
+            CharacterBox.SelectedItem = LaunchAccountProfile.NoneOption;
+        else if (chars.Contains(selectedCharacter))
             CharacterBox.SelectedItem = selectedCharacter;
     }
 

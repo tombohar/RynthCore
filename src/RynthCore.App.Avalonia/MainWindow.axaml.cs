@@ -607,11 +607,20 @@ internal partial class MainWindow : Window
             }
 
             // Preserve any already-saved character name even if scan hasn't seen it yet
-            if (!string.IsNullOrEmpty(account.CharacterName) && !dropdownItems.Contains(account.CharacterName))
+            if (!string.IsNullOrEmpty(account.CharacterName)
+                && account.CharacterName != LaunchAccountProfile.NoneOption
+                && !dropdownItems.Contains(account.CharacterName))
+            {
                 dropdownItems.Insert(0, account.CharacterName);
+            }
+
+            // "(None)" at the top — selecting it opts out of auto-login for this account
+            dropdownItems.Insert(0, LaunchAccountProfile.NoneOption);
 
             charDropdown.ItemsSource = dropdownItems;
-            if (!string.IsNullOrEmpty(account.CharacterName) && dropdownItems.Contains(account.CharacterName))
+            if (account.CharacterName == LaunchAccountProfile.NoneOption)
+                charDropdown.SelectedItem = LaunchAccountProfile.NoneOption;
+            else if (!string.IsNullOrEmpty(account.CharacterName) && dropdownItems.Contains(account.CharacterName))
                 charDropdown.SelectedItem = account.CharacterName;
 
             charDropdown.SelectionChanged += (_, _) =>
@@ -1595,16 +1604,26 @@ internal partial class MainWindow : Window
             if (!_launchTargetCharacterDropdowns.TryGetValue(account.Id, out ComboBox? dropdown))
                 continue;
 
-            if (!string.IsNullOrWhiteSpace(account.CharacterName) && !detectedCharacters.Contains(account.CharacterName))
+            if (!string.IsNullOrWhiteSpace(account.CharacterName)
+                && account.CharacterName != LaunchAccountProfile.NoneOption
+                && !detectedCharacters.Contains(account.CharacterName))
+            {
                 detectedCharacters.Insert(0, account.CharacterName);
+            }
+
+            // "(None)" at the top — selecting it opts out of auto-login for this account
+            detectedCharacters.Insert(0, LaunchAccountProfile.NoneOption);
 
             _suppressLaunchTargetCharacterSelectionChanged = true;
             try
             {
                 dropdown.ItemsSource = detectedCharacters;
-                dropdown.SelectedItem = !string.IsNullOrWhiteSpace(account.CharacterName) && detectedCharacters.Contains(account.CharacterName)
-                    ? account.CharacterName
-                    : null;
+                if (account.CharacterName == LaunchAccountProfile.NoneOption)
+                    dropdown.SelectedItem = LaunchAccountProfile.NoneOption;
+                else
+                    dropdown.SelectedItem = !string.IsNullOrWhiteSpace(account.CharacterName) && detectedCharacters.Contains(account.CharacterName)
+                        ? account.CharacterName
+                        : null;
             }
             finally
             {
@@ -1621,6 +1640,10 @@ internal partial class MainWindow : Window
 
     private string ResolveTargetCharacterForLaunch(LaunchAccountProfile account, LaunchServerProfile? server)
     {
+        // User explicitly opted out of auto-login → blank target so engine skips it.
+        if (account.CharacterName == LaunchAccountProfile.NoneOption)
+            return string.Empty;
+
         List<string> detectedCharacters = GetDetectedCharacters(account.AccountName, server?.Name ?? string.Empty);
         string bestKnownCharacter = GetPreferredCharacterName(account, server, null, null, detectedCharacters);
         if (!string.IsNullOrWhiteSpace(bestKnownCharacter) &&

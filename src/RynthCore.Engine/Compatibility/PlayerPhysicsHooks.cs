@@ -17,15 +17,43 @@ internal static class PlayerPhysicsHooks
     private const int ReferencePhysicsGetHeading = 0x00512010;
     private const int ReferencePhysicsSetHeading = 0x00514C60;
 
+    // CPhysicsObj::m_pMovementManager lives at +0xC4 (same offset UB's Jumper uses).
+    // The CMotionInterp pointer is the first field of MovementManager.
+    private const int MovementManagerOffset = 0xC4;
+
+    // CMotionInterp::get_max_speed — Chorizite RVA 0x001278C0, our client is +0x1000
+    // from Chorizite (confirmed via set_heading/get_heading/CommenceJump addresses).
+    private const int ReferenceGetMaxSpeed = 0x005288C0;
+
+    // Fields in CMotionInterp holding the "current motion command" for each
+    // channel. Writing these right before DoJump tells the physics simulation
+    // to launch the jump with that velocity baked in.
+    private const int CMotionForwardIdOffset = 76;   // 0x4C
+    private const int CMotionForwardSpeedOffset = 80; // 0x50
+    private const int CMotionStrafeIdOffset = 84;    // 0x54
+    private const int CMotionStrafeSpeedOffset = 88; // 0x58
+    private const int CMotionTurnOffset = 92;        // 0x5C
+
+    // Raw motion-command IDs the physics simulation reads from CMotionInterp.
+    // Sourced from UB's UBHelper.Jumper — these are *not* the SetMotion IDs.
+    private const int MotionIdForward = 0x44000007;
+    private const int MotionIdBackward = 0x45000005;
+    private const int MotionIdIdle = 0x41000003;
+    private const int MotionIdSidestep = 0x6500000F;
+
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate float PhysicsGetHeadingDelegate(IntPtr physicsObjPtr);
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void PhysicsSetHeadingDelegate(IntPtr physicsObjPtr, float headingDegrees, int sendEvent);
 
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate double GetMaxSpeedDelegate(IntPtr cmotionInterpPtr);
+
     private static string _statusMessage = "Not probed yet.";
     private static PhysicsGetHeadingDelegate? _getHeading;
     private static PhysicsSetHeadingDelegate? _setHeading;
+    private static GetMaxSpeedDelegate? _getMaxSpeed;
 
     public static bool IsInitialized { get; private set; }
     public static bool HasGetHeading => _getHeading != null;
@@ -181,6 +209,137 @@ internal static class PlayerPhysicsHooks
         catch (Exception ex)
         {
             _statusMessage = ex.Message;
+            return false;
+        }
+    }
+
+    public static bool HasLaunchJumpWithMotion => SmartBoxLocator.IsPointerInModule(new(ReferenceGetMaxSpeed));
+
+    /// <summary>
+    /// Writes motion-vector fields directly into CMotionInterp, calls DoJump(1),
+    /// then clears them back out. Mirrors UB's UBHelper.Jumper algorithm, minus
+    /// the power-bar hook (the plugin drives timing with a ms delay).
+    ///
+    /// This is the only reliable way to jump *with forward/back/strafe momentum*
+    /// in AC — SetMotion routes through the command interpreter, which doesn't
+    /// bake velocity into the physics simulation in time for DoJump.
+    /// </summary>
+    public static bool LaunchJumpWithMotion(bool shift, bool holdW, bool holdX, bool holdZ, bool holdC)
+    {
+        if (!TryGetCMotionInterp(out IntPtr cmi))
+        {
+            RynthLog.Compat("LaunchJumpWithMotion: CMotionInterp unavailable");
+            return false;
+        }
+
+        if (!TryGetMaxSpeed(cmi, out double maxSpeed))
+        {
+            RynthLog.Compat("LaunchJumpWithMotion: get_max_speed failed");
+            return false;
+        }
+
+        double num = maxSpeed / 4.0;
+
+        IntPtr pForwardId = cmi + CMotionForwardIdOffset;
+        IntPtr pForwardSpeed = cmi + CMotionForwardSpeedOffset;
+        IntPtr pStrafeId = cmi + CMotionStrafeIdOffset;
+        IntPtr pStrafeSpeed = cmi + CMotionStrafeSpeedOffset;
+        IntPtr pTurn = cmi + CMotionTurnOffset;
+
+        try
+        {
+            // Forward/back channel
+            if (holdW || holdX)
+            {
+                if (holdW)
+                {
+                    Marshal.WriteInt32(pForwardId, MotionIdForward);
+                    WriteFloat(pForwardSpeed, shift ? 1f : (float)num);
+                }
+                else
+                {
+                    Marshal.WriteInt32(pForwardId, MotionIdBackward);
+                    WriteFloat(pForwardSpeed, shift ? -1f : (float)(-0.65 * num));
+                }
+            }
+            else
+            {
+                Marshal.WriteInt32(pForwardId, MotionIdIdle);
+            }
+
+            // Strafe channel
+            if (holdZ || holdC)
+            {
+                Marshal.WriteInt32(pStrafeId, MotionIdSidestep);
+                double s = num * 1.248;
+                if (shift) s *= 0.5;
+                if (s > 3.0) s = 3.0;
+                WriteFloat(pStrafeSpeed, holdC ? (float)s : (float)(-s));
+            }
+            else
+            {
+                Marshal.WriteInt32(pStrafeId, 0);
+            }
+
+            Marshal.WriteInt32(pTurn, 0);
+
+            bool jumped = CommandInterpreterHooks.DoJump(true);
+
+            // Clear immediately so the character doesn't keep walking on landing.
+            if (holdZ || holdC) Marshal.WriteInt32(pStrafeId, 0);
+            if (holdW || holdX) Marshal.WriteInt32(pForwardId, MotionIdIdle);
+
+            return jumped;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"LaunchJumpWithMotion: write failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool TryGetCMotionInterp(out IntPtr cmotionInterp)
+    {
+        cmotionInterp = IntPtr.Zero;
+
+        if (!SmartBoxLocator.TryGetPlayer(out IntPtr player, out _, out string failure))
+        {
+            _statusMessage = failure;
+            return false;
+        }
+
+        try
+        {
+            IntPtr movementManager = Marshal.ReadIntPtr(player + MovementManagerOffset);
+            if (movementManager == IntPtr.Zero) return false;
+            cmotionInterp = Marshal.ReadIntPtr(movementManager);
+            return cmotionInterp != IntPtr.Zero;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetMaxSpeed(IntPtr cmotionInterp, out double maxSpeed)
+    {
+        maxSpeed = 0;
+
+        if (_getMaxSpeed == null)
+        {
+            IntPtr ptr = new(ReferenceGetMaxSpeed);
+            if (!SmartBoxLocator.IsPointerInModule(ptr))
+                return false;
+            _getMaxSpeed = Marshal.GetDelegateForFunctionPointer<GetMaxSpeedDelegate>(ptr);
+        }
+
+        try
+        {
+            maxSpeed = _getMaxSpeed(cmotionInterp);
+            return true;
+        }
+        catch
+        {
             return false;
         }
     }

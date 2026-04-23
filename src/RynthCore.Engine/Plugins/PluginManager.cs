@@ -113,6 +113,10 @@ internal static class PluginManager
     private static SetAutonomyLevelCallbackDelegate? _setAutonomyLevelCallback;
     private static SetAutoRunCallbackDelegate? _setAutoRunCallback;
     private static TapJumpCallbackDelegate? _tapJumpCallback;
+    private static CommenceJumpCallbackDelegate? _commenceJumpCallback;
+    private static DoJumpCallbackDelegate? _doJumpCallback;
+    private static LaunchJumpWithMotionCallbackDelegate? _launchJumpWithMotionCallback;
+    private static GetRadarRectCallbackDelegate? _getRadarRectCallback;
     private static SetMotionCallbackDelegate? _setMotionCallback;
     private static StopCompletelyCallbackDelegate? _stopCompletelyCallback;
     private static TurnToHeadingCallbackDelegate? _turnToHeadingCallback;
@@ -1671,6 +1675,10 @@ internal static class PluginManager
         _setAutonomyLevelCallback ??= SetAutonomyLevel;
         _setAutoRunCallback ??= SetAutoRun;
         _tapJumpCallback ??= TapJump;
+        _commenceJumpCallback ??= CommenceJump;
+        _doJumpCallback ??= DoJump;
+        _launchJumpWithMotionCallback ??= LaunchJumpWithMotion;
+        _getRadarRectCallback ??= GetRadarRect;
         _setMotionCallback ??= SetMotion;
         _stopCompletelyCallback ??= StopCompletely;
         _turnToHeadingCallback ??= TurnToHeading;
@@ -1839,6 +1847,10 @@ internal static class PluginManager
         _api.ForceResetBusyCountFn = Marshal.GetFunctionPointerForDelegate(_forceResetBusyCountCallback);
         _getObjectPalettesCallback ??= GetObjectPalettesAction;
         _api.GetObjectPalettesFn = Marshal.GetFunctionPointerForDelegate(_getObjectPalettesCallback);
+        _api.CommenceJumpFn = Marshal.GetFunctionPointerForDelegate(_commenceJumpCallback);
+        _api.DoJumpFn = Marshal.GetFunctionPointerForDelegate(_doJumpCallback);
+        _api.LaunchJumpWithMotionFn = Marshal.GetFunctionPointerForDelegate(_launchJumpWithMotionCallback);
+        _api.GetRadarRectFn = Marshal.GetFunctionPointerForDelegate(_getRadarRectCallback);
     }
 
     private static void ProbeClientHooks()
@@ -2181,6 +2193,33 @@ internal static class PluginManager
     private static int TapJump()
     {
         return ToAbiBool(ClientActionHooks.TapJump());
+    }
+
+    private static int CommenceJump()
+    {
+        return ToAbiBool(ClientActionHooks.CommenceJump());
+    }
+
+    private static int DoJump(int autonomous)
+    {
+        return ToAbiBool(ClientActionHooks.DoJump(autonomous != 0));
+    }
+
+    private static int LaunchJumpWithMotion(int shift, int w, int x, int z, int c)
+    {
+        return ToAbiBool(ClientActionHooks.LaunchJumpWithMotion(shift != 0, w != 0, x != 0, z != 0, c != 0));
+    }
+
+    private static unsafe int GetRadarRect(int* x0, int* y0, int* x1, int* y1)
+    {
+        if (x0 == null || y0 == null || x1 == null || y1 == null)
+            return 0;
+
+        if (!RadarHooks.TryGetRadarRect(out int rx0, out int ry0, out int rx1, out int ry1))
+            return 0;
+
+        *x0 = rx0; *y0 = ry0; *x1 = rx1; *y1 = ry1;
+        return 1;
     }
 
     private static int SetMotion(uint motion, int enabled)

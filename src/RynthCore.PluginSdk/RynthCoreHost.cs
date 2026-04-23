@@ -100,6 +100,10 @@ public readonly unsafe struct RynthCoreHost
     public bool HasGetCurrentCombatMode => _api.GetCurrentCombatModeFn != IntPtr.Zero;
     public bool HasSalvagePanel => _api.SalvagePanelOpenFn != IntPtr.Zero && _api.SalvagePanelAddItemFn != IntPtr.Zero && _api.SalvagePanelExecuteFn != IntPtr.Zero;
     public bool HasGetObjectPalettes => _api.Version >= 50 && _api.GetObjectPalettesFn != IntPtr.Zero;
+    public bool HasCommenceJump => _api.Version >= 51 && _api.CommenceJumpFn != IntPtr.Zero;
+    public bool HasDoJump => _api.Version >= 51 && _api.DoJumpFn != IntPtr.Zero;
+    public bool HasLaunchJumpWithMotion => _api.Version >= 52 && _api.LaunchJumpWithMotionFn != IntPtr.Zero;
+    public bool HasGetRadarRect => _api.Version >= 53 && _api.GetRadarRectFn != IntPtr.Zero;
 
     // ─── Methods ────────────────────────────────────────────────────────────
 
@@ -221,6 +225,61 @@ public readonly unsafe struct RynthCoreHost
     {
         return _api.TapJumpFn != IntPtr.Zero &&
                ((delegate* unmanaged[Cdecl]<int>)_api.TapJumpFn)() != 0;
+    }
+
+    /// <summary>
+    /// Starts a charged jump (mirrors the keyboard spacebar-down path).
+    /// Follow with <see cref="DoJump"/> once the desired charge time has elapsed.
+    /// </summary>
+    public bool CommenceJump()
+    {
+        return _api.CommenceJumpFn != IntPtr.Zero &&
+               ((delegate* unmanaged[Cdecl]<int>)_api.CommenceJumpFn)() != 0;
+    }
+
+    /// <summary>
+    /// Releases a jump begun with <see cref="CommenceJump"/> (mirrors the keyboard spacebar-up path).
+    /// Pass autonomous=true to match UB's Jumper (player-authoritative extent).
+    /// </summary>
+    public bool DoJump(bool autonomous)
+    {
+        return _api.DoJumpFn != IntPtr.Zero &&
+               ((delegate* unmanaged[Cdecl]<int, int>)_api.DoJumpFn)(autonomous ? 1 : 0) != 0;
+    }
+
+    /// <summary>
+    /// Writes forward/back/strafe motion directly into CMotionInterp, calls
+    /// DoJump(autonomous=1), then clears the motion — mirrors UB's UBHelper.Jumper
+    /// algorithm. This is the only reliable way to jump *with momentum*; SetMotion
+    /// does not bake velocity into the physics simulation in time for DoJump.
+    /// Call this *in place of* <see cref="DoJump"/> when you want a directional jump.
+    /// </summary>
+    public bool LaunchJumpWithMotion(bool shift, bool holdW, bool holdX, bool holdZ, bool holdC)
+    {
+        return _api.LaunchJumpWithMotionFn != IntPtr.Zero &&
+               ((delegate* unmanaged[Cdecl]<int, int, int, int, int, int>)_api.LaunchJumpWithMotionFn)(
+                   shift ? 1 : 0, holdW ? 1 : 0, holdX ? 1 : 0, holdZ ? 1 : 0, holdC ? 1 : 0) != 0;
+    }
+
+    /// <summary>
+    /// Returns the retail gmRadarUI element's current screen rect in pixels
+    /// (x0,y0 top-left, x1,y1 bottom-right exclusive). Returns false until the
+    /// radar has rendered at least once this session.
+    /// </summary>
+    public bool TryGetRadarRect(out int x0, out int y0, out int x1, out int y1)
+    {
+        x0 = y0 = x1 = y1 = 0;
+        if (_api.GetRadarRectFn == IntPtr.Zero)
+            return false;
+
+        fixed (int* x0Ptr = &x0)
+        fixed (int* y0Ptr = &y0)
+        fixed (int* x1Ptr = &x1)
+        fixed (int* y1Ptr = &y1)
+        {
+            return ((delegate* unmanaged[Cdecl]<int*, int*, int*, int*, int>)_api.GetRadarRectFn)(
+                x0Ptr, y0Ptr, x1Ptr, y1Ptr) != 0;
+        }
     }
 
     public bool SetMotion(uint motion, bool enabled)
