@@ -104,4 +104,6 @@ public struct RynthCoreApiNative
     public IntPtr DoJumpFn;
     public IntPtr LaunchJumpWithMotionFn;
     public IntPtr GetRadarRectFn;
+    public IntPtr SetRadarSuppressedFn;
+    public IntPtr SetChatSuppressedFn;
 }

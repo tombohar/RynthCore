@@ -117,6 +117,8 @@ internal static class PluginManager
     private static DoJumpCallbackDelegate? _doJumpCallback;
     private static LaunchJumpWithMotionCallbackDelegate? _launchJumpWithMotionCallback;
     private static GetRadarRectCallbackDelegate? _getRadarRectCallback;
+    private static SetRadarSuppressedCallbackDelegate? _setRadarSuppressedCallback;
+    private static SetChatSuppressedCallbackDelegate? _setChatSuppressedCallback;
     private static SetMotionCallbackDelegate? _setMotionCallback;
     private static StopCompletelyCallbackDelegate? _stopCompletelyCallback;
     private static TurnToHeadingCallbackDelegate? _turnToHeadingCallback;
@@ -1679,6 +1681,8 @@ internal static class PluginManager
         _doJumpCallback ??= DoJump;
         _launchJumpWithMotionCallback ??= LaunchJumpWithMotion;
         _getRadarRectCallback ??= GetRadarRect;
+        _setRadarSuppressedCallback ??= SetRadarSuppressed;
+        _setChatSuppressedCallback ??= SetChatSuppressed;
         _setMotionCallback ??= SetMotion;
         _stopCompletelyCallback ??= StopCompletely;
         _turnToHeadingCallback ??= TurnToHeading;
@@ -1851,6 +1855,8 @@ internal static class PluginManager
         _api.DoJumpFn = Marshal.GetFunctionPointerForDelegate(_doJumpCallback);
         _api.LaunchJumpWithMotionFn = Marshal.GetFunctionPointerForDelegate(_launchJumpWithMotionCallback);
         _api.GetRadarRectFn = Marshal.GetFunctionPointerForDelegate(_getRadarRectCallback);
+        _api.SetRadarSuppressedFn = Marshal.GetFunctionPointerForDelegate(_setRadarSuppressedCallback);
+        _api.SetChatSuppressedFn = Marshal.GetFunctionPointerForDelegate(_setChatSuppressedCallback);
     }
 
     private static void ProbeClientHooks()
@@ -2220,6 +2226,16 @@ internal static class PluginManager
 
         *x0 = rx0; *y0 = ry0; *x1 = rx1; *y1 = ry1;
         return 1;
+    }
+
+    private static void SetRadarSuppressed(int enabled)
+    {
+        RadarHooks.SuppressOriginalDraw = enabled != 0;
+    }
+
+    private static void SetChatSuppressed(int enabled)
+    {
+        ChatHooks.SuppressOriginalChat = enabled != 0;
     }
 
     private static int SetMotion(uint motion, int enabled)

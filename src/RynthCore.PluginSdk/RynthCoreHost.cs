@@ -104,6 +104,8 @@ public readonly unsafe struct RynthCoreHost
     public bool HasDoJump => _api.Version >= 51 && _api.DoJumpFn != IntPtr.Zero;
     public bool HasLaunchJumpWithMotion => _api.Version >= 52 && _api.LaunchJumpWithMotionFn != IntPtr.Zero;
     public bool HasGetRadarRect => _api.Version >= 53 && _api.GetRadarRectFn != IntPtr.Zero;
+    public bool HasSetRadarSuppressed => _api.Version >= 54 && _api.SetRadarSuppressedFn != IntPtr.Zero;
+    public bool HasSetChatSuppressed  => _api.Version >= 55 && _api.SetChatSuppressedFn  != IntPtr.Zero;
 
     // ─── Methods ────────────────────────────────────────────────────────────
 
@@ -280,6 +282,31 @@ public readonly unsafe struct RynthCoreHost
             return ((delegate* unmanaged[Cdecl]<int*, int*, int*, int*, int>)_api.GetRadarRectFn)(
                 x0Ptr, y0Ptr, x1Ptr, y1Ptr) != 0;
         }
+    }
+
+    /// <summary>
+    /// When enabled, the engine suppresses the vanilla gmRadarUI::DrawObjects
+    /// call so the radar rect is blank and a plugin can own it entirely.
+    /// </summary>
+    public void SetRadarSuppressed(bool enabled)
+    {
+        if (_api.SetRadarSuppressedFn == IntPtr.Zero)
+            return;
+
+        ((delegate* unmanaged[Cdecl]<int, void>)_api.SetRadarSuppressedFn)(enabled ? 1 : 0);
+    }
+
+    /// <summary>
+    /// When enabled, the engine hides the retail gmMainChatUI each frame via
+    /// UIElement::SetVisible(false). Re-asserted every frame so the game can't
+    /// sneak it back on.
+    /// </summary>
+    public void SetChatSuppressed(bool enabled)
+    {
+        if (_api.SetChatSuppressedFn == IntPtr.Zero)
+            return;
+
+        ((delegate* unmanaged[Cdecl]<int, void>)_api.SetChatSuppressedFn)(enabled ? 1 : 0);
     }
 
     public bool SetMotion(uint motion, bool enabled)

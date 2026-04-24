@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
+using RynthCore.Engine.Compatibility;
 using RynthCore.Engine.Hooking;
 using RynthCore.Engine.ImGuiBackend;
 
@@ -204,6 +205,9 @@ internal static class EndSceneHook
 
             _renderCount++;
             _frameCount++;
+
+            // Per-frame chatbox visibility assertion (no-op unless plugin enables suppression).
+            try { ChatHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
 
             if (_renderCount == 1 && _offscreenFilterDisabled && _skipCount > 0)
             {

@@ -485,6 +485,18 @@ internal struct RynthCoreAPI
     /// (x0,y0 top-left, x1,y1 bottom-right exclusive). Returns 1 on success, 0
     /// if the radar has not rendered yet this session. Requires API v53+.</summary>
     public IntPtr GetRadarRectFn;
+
+    /// <summary>Function pointer: void SetRadarSuppressed(int enabled)
+    /// When enabled=1, the engine skips the original gmRadarUI::DrawObjects call
+    /// so the vanilla radar stops rendering and a plugin can own that rect.
+    /// Requires API v54+.</summary>
+    public IntPtr SetRadarSuppressedFn;
+
+    /// <summary>Function pointer: void SetChatSuppressed(int enabled)
+    /// When enabled=1, the engine calls UIElement::SetVisible(false) on the
+    /// gmMainChatUI each frame, hiding the retail chatbox entirely.
+    /// Requires API v55+.</summary>
+    public IntPtr SetChatSuppressedFn;
 }
 
 
@@ -492,7 +504,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 53;
+    public const uint Current = 55;
 }
 
 internal static class ClientActionHookFlags
@@ -891,3 +903,9 @@ internal unsafe delegate int GetObjectPalettesCallbackDelegate(uint objectId, ui
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int GetRadarRectCallbackDelegate(int* x0, int* y0, int* x1, int* y1);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void SetRadarSuppressedCallbackDelegate(int enabled);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void SetChatSuppressedCallbackDelegate(int enabled);

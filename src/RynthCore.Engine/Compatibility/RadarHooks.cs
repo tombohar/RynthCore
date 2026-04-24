@@ -1,14 +1,18 @@
 // ============================================================================
 //  RynthCore.Engine - Compatibility/RadarHooks.cs
 //
-//  Hooks gmRadarUI::DrawObjects to capture the singleton 'this' pointer.
+//  Hooks gmRadarUI::DrawObjects (blips) and gmRadarUI::DrawChildren (bezel,
+//  compass tokens, coord readouts) to capture the singleton 'this' pointer
+//  and, when SuppressOriginalDraw is set, blank the vanilla radar entirely
+//  so a plugin can own that rect.
+//
 //  Exposes TryGetRadarRect, which asks UIElement::GetSurfaceBox for the
-//  radar element's current screen rect (used to overlay dungeon walls on
-//  the retail radar).
+//  radar element's current screen rect.
 //
 //  VA derivation (map offset + 0x00401000 = live VA):
-//    000D8FE0 gmRadarUI::DrawObjects(UISurface*)         → 0x004D9FE0
-//    00061220 UIElement::GetSurfaceBox(Box2D*)           → 0x00462220
+//    000D8FE0 gmRadarUI::DrawObjects(UISurface*)                       → 0x004D9FE0
+//    000D9380 gmRadarUI::DrawChildren(Box2D&,Box2D&,SmartArray&,UISurface*) → 0x004DA380
+//    00061220 UIElement::GetSurfaceBox(Box2D*)                         → 0x00462220
 // ============================================================================
 
 using System;
@@ -20,20 +24,34 @@ namespace RynthCore.Engine.Compatibility;
 
 internal static class RadarHooks
 {
-    private const int GmRadarUIDrawObjectsVa = 0x004D9FE0;
+    private const int GmRadarUIDrawObjectsVa   = 0x004D9FE0;
+    private const int GmRadarUIDrawChildrenVa  = 0x004DA380;
     private const int UIElementGetSurfaceBoxVa = 0x00462220;
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void GmRadarUIDrawObjectsDelegate(IntPtr thisPtr, IntPtr uiSurface);
 
-    private static GmRadarUIDrawObjectsDelegate? _originalDrawObjects;
-    private static GmRadarUIDrawObjectsDelegate? _drawObjectsDetour; // held alive to prevent GC
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate void GmRadarUIDrawChildrenDelegate(IntPtr thisPtr, IntPtr clipRect, IntPtr clipInside, IntPtr boxArray, IntPtr uiSurface);
+
+    private static GmRadarUIDrawObjectsDelegate?  _originalDrawObjects;
+    private static GmRadarUIDrawObjectsDelegate?  _drawObjectsDetour;   // held alive to prevent GC
+    private static GmRadarUIDrawChildrenDelegate? _originalDrawChildren;
+    private static GmRadarUIDrawChildrenDelegate? _drawChildrenDetour;
+
     private static IntPtr _gmRadarUIInstance;
     private static bool _hookInstalled;
     private static string _statusMessage = "Not initialized.";
 
     public static bool IsInstalled => _hookInstalled;
     public static string StatusMessage => _statusMessage;
+
+    /// <summary>
+    /// When true, the detours skip the original gmRadarUI draw calls, blanking
+    /// the vanilla radar so a custom renderer can own that rect. The UIElement
+    /// is still captured on entry, so GetSurfaceBox keeps working.
+    /// </summary>
+    public static bool SuppressOriginalDraw;
 
     /// <summary>
     /// The captured gmRadarUI singleton. Zero until the radar has rendered at
@@ -52,20 +70,36 @@ internal static class RadarHooks
             return;
         }
 
+        bool drawObjectsOk = TryInstallDrawObjectsHook(textSection);
+        bool drawChildrenOk = TryInstallDrawChildrenHook(textSection);
+
+        if (drawObjectsOk && drawChildrenOk)
+        {
+            _hookInstalled = true;
+            _statusMessage = "Hooked gmRadarUI::DrawObjects + DrawChildren.";
+            RynthLog.Verbose("Compat: radar hooks ready (DrawObjects + DrawChildren).");
+        }
+        else
+        {
+            _statusMessage = $"Partial install — DrawObjects={drawObjectsOk}, DrawChildren={drawChildrenOk}.";
+            RynthLog.Compat($"Compat: radar hook {_statusMessage}");
+        }
+    }
+
+    private static bool TryInstallDrawObjectsHook(AcClientTextSection textSection)
+    {
         int funcOff = GmRadarUIDrawObjectsVa - textSection.TextBaseVa;
         if (funcOff < 0 || funcOff >= textSection.Bytes.Length)
         {
-            _statusMessage = $"gmRadarUI::DrawObjects VA out of range @ 0x{GmRadarUIDrawObjectsVa:X8}.";
-            RynthLog.Compat($"Compat: radar hook failed - {_statusMessage}");
-            return;
+            RynthLog.Compat($"Compat: DrawObjects VA out of range @ 0x{GmRadarUIDrawObjectsVa:X8}.");
+            return false;
         }
 
         byte firstByte = textSection.Bytes[funcOff];
         if (firstByte is 0x00 or 0xCC or 0xC3)
         {
-            _statusMessage = $"gmRadarUI::DrawObjects looks invalid @ 0x{GmRadarUIDrawObjectsVa:X8} (opcode 0x{firstByte:X2}).";
-            RynthLog.Compat($"Compat: radar hook failed - {_statusMessage}");
-            return;
+            RynthLog.Compat($"Compat: DrawObjects looks invalid @ 0x{GmRadarUIDrawObjectsVa:X8} (opcode 0x{firstByte:X2}).");
+            return false;
         }
 
         try
@@ -77,15 +111,46 @@ internal static class RadarHooks
                 MinHook.HookCreate(targetAddress, detourPtr));
             Thread.MemoryBarrier();
             MinHook.Enable(targetAddress);
-
-            _hookInstalled = true;
-            _statusMessage = $"Hooked gmRadarUI::DrawObjects @ 0x{targetAddress.ToInt32():X8}.";
-            RynthLog.Verbose($"Compat: radar hook ready @ 0x{targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
+            return true;
         }
         catch (Exception ex)
         {
-            _statusMessage = ex.Message;
-            RynthLog.Compat($"Compat: radar hook failed - {ex.Message}");
+            RynthLog.Compat($"Compat: DrawObjects hook failed - {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool TryInstallDrawChildrenHook(AcClientTextSection textSection)
+    {
+        int funcOff = GmRadarUIDrawChildrenVa - textSection.TextBaseVa;
+        if (funcOff < 0 || funcOff >= textSection.Bytes.Length)
+        {
+            RynthLog.Compat($"Compat: DrawChildren VA out of range @ 0x{GmRadarUIDrawChildrenVa:X8}.");
+            return false;
+        }
+
+        byte firstByte = textSection.Bytes[funcOff];
+        if (firstByte is 0x00 or 0xCC or 0xC3)
+        {
+            RynthLog.Compat($"Compat: DrawChildren looks invalid @ 0x{GmRadarUIDrawChildrenVa:X8} (opcode 0x{firstByte:X2}).");
+            return false;
+        }
+
+        try
+        {
+            IntPtr targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
+            _drawChildrenDetour = DrawChildrenDetour;
+            IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_drawChildrenDetour);
+            _originalDrawChildren = Marshal.GetDelegateForFunctionPointer<GmRadarUIDrawChildrenDelegate>(
+                MinHook.HookCreate(targetAddress, detourPtr));
+            Thread.MemoryBarrier();
+            MinHook.Enable(targetAddress);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"Compat: DrawChildren hook failed - {ex.Message}");
+            return false;
         }
     }
 
@@ -94,7 +159,21 @@ internal static class RadarHooks
         if (thisPtr != IntPtr.Zero)
             _gmRadarUIInstance = thisPtr;
 
+        if (SuppressOriginalDraw)
+            return;
+
         _originalDrawObjects!(thisPtr, uiSurface);
+    }
+
+    private static void DrawChildrenDetour(IntPtr thisPtr, IntPtr clipRect, IntPtr clipInside, IntPtr boxArray, IntPtr uiSurface)
+    {
+        if (thisPtr != IntPtr.Zero)
+            _gmRadarUIInstance = thisPtr;
+
+        if (SuppressOriginalDraw)
+            return;
+
+        _originalDrawChildren!(thisPtr, clipRect, clipInside, boxArray, uiSurface);
     }
 
     /// <summary>
