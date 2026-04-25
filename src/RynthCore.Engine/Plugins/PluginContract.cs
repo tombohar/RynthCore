@@ -497,6 +497,12 @@ internal struct RynthCoreAPI
     /// gmMainChatUI each frame, hiding the retail chatbox entirely.
     /// Requires API v55+.</summary>
     public IntPtr SetChatSuppressedFn;
+
+    /// <summary>Function pointer: void SetPowerbarSuppressed(int enabled)
+    /// When enabled=1, the engine no-ops gmPowerbarUI's RecvNotice_(Begin/
+    /// Level/Finish), so the retail attack/magic power bar never renders.
+    /// Requires API v56+.</summary>
+    public IntPtr SetPowerbarSuppressedFn;
 }
 
 
@@ -504,7 +510,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 55;
+    public const uint Current = 56;
 }
 
 internal static class ClientActionHookFlags
@@ -906,6 +912,9 @@ internal unsafe delegate int GetRadarRectCallbackDelegate(int* x0, int* y0, int*
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void SetRadarSuppressedCallbackDelegate(int enabled);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void SetPowerbarSuppressedCallbackDelegate(int enabled);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void SetChatSuppressedCallbackDelegate(int enabled);

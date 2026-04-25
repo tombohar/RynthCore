@@ -275,6 +275,7 @@ public static class EntryPoint
             RunInitStep("salvage hooks", SalvageHooks.Initialize);
             RunInitStep("radar hooks", RadarHooks.Initialize);
             RunInitStep("chat hooks", ChatHooks.Initialize);
+            RunInitStep("powerbar hooks", PowerbarHooks.Initialize);
             RunInitStep("do-motion hooks", DoMotionHooks.Initialize);
             RunInitStep("smartbox-setstate hooks", SmartBoxSetStateHooks.Initialize);
             RunInitStep("appraisal hooks", AppraisalHooks.Initialize);

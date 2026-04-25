@@ -106,4 +106,5 @@ public struct RynthCoreApiNative
     public IntPtr GetRadarRectFn;
     public IntPtr SetRadarSuppressedFn;
     public IntPtr SetChatSuppressedFn;
+    public IntPtr SetPowerbarSuppressedFn;
 }

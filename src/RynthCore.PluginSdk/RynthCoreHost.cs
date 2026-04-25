@@ -104,8 +104,9 @@ public readonly unsafe struct RynthCoreHost
     public bool HasDoJump => _api.Version >= 51 && _api.DoJumpFn != IntPtr.Zero;
     public bool HasLaunchJumpWithMotion => _api.Version >= 52 && _api.LaunchJumpWithMotionFn != IntPtr.Zero;
     public bool HasGetRadarRect => _api.Version >= 53 && _api.GetRadarRectFn != IntPtr.Zero;
-    public bool HasSetRadarSuppressed => _api.Version >= 54 && _api.SetRadarSuppressedFn != IntPtr.Zero;
-    public bool HasSetChatSuppressed  => _api.Version >= 55 && _api.SetChatSuppressedFn  != IntPtr.Zero;
+    public bool HasSetRadarSuppressed    => _api.Version >= 54 && _api.SetRadarSuppressedFn    != IntPtr.Zero;
+    public bool HasSetChatSuppressed     => _api.Version >= 55 && _api.SetChatSuppressedFn     != IntPtr.Zero;
+    public bool HasSetPowerbarSuppressed => _api.Version >= 56 && _api.SetPowerbarSuppressedFn != IntPtr.Zero;
 
     // ─── Methods ────────────────────────────────────────────────────────────
 
@@ -301,6 +302,14 @@ public readonly unsafe struct RynthCoreHost
     /// UIElement::SetVisible(false). Re-asserted every frame so the game can't
     /// sneak it back on.
     /// </summary>
+    public void SetPowerbarSuppressed(bool enabled)
+    {
+        if (_api.SetPowerbarSuppressedFn == IntPtr.Zero)
+            return;
+
+        ((delegate* unmanaged[Cdecl]<int, void>)_api.SetPowerbarSuppressedFn)(enabled ? 1 : 0);
+    }
+
     public void SetChatSuppressed(bool enabled)
     {
         if (_api.SetChatSuppressedFn == IntPtr.Zero)

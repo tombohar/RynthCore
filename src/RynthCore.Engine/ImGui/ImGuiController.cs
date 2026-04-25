@@ -83,6 +83,23 @@ internal static class ImGuiController
             ImGuiNET.ImGui.SetCurrentContext(_context);
             ImGuiIOPtr io = ImGuiNET.ImGui.GetIO();
 
+            // Pin imgui.ini to a stable absolute path so window positions/sizes
+            // persist across plugin reloads (RL) and AC restarts. The default
+            // ImGui behavior writes to the working directory which can differ
+            // between launches. Allocated once, kept alive for the process lifetime.
+            try
+            {
+                const string iniPath = @"C:\Games\RynthSuite\RynthAi\imgui.ini";
+                System.IO.Directory.CreateDirectory(@"C:\Games\RynthSuite\RynthAi");
+                IntPtr iniPtr = System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(iniPath);
+                unsafe { io.NativePtr->IniFilename = (byte*)iniPtr; }
+                RynthLog.Render($"ImGuiController: imgui.ini pinned to {iniPath}");
+            }
+            catch (Exception ex)
+            {
+                RynthLog.Render($"ImGuiController: failed to pin imgui.ini path - {ex.Message}");
+            }
+
             io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
             io.ConfigFlags |= ImGuiConfigFlags.ViewportsEnable;
             // Popped-out plugin windows use WS_EX_TOOLWINDOW so they don't show

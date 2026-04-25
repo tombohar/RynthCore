@@ -119,6 +119,7 @@ internal static class PluginManager
     private static GetRadarRectCallbackDelegate? _getRadarRectCallback;
     private static SetRadarSuppressedCallbackDelegate? _setRadarSuppressedCallback;
     private static SetChatSuppressedCallbackDelegate? _setChatSuppressedCallback;
+    private static SetPowerbarSuppressedCallbackDelegate? _setPowerbarSuppressedCallback;
     private static SetMotionCallbackDelegate? _setMotionCallback;
     private static StopCompletelyCallbackDelegate? _stopCompletelyCallback;
     private static TurnToHeadingCallbackDelegate? _turnToHeadingCallback;
@@ -1683,6 +1684,7 @@ internal static class PluginManager
         _getRadarRectCallback ??= GetRadarRect;
         _setRadarSuppressedCallback ??= SetRadarSuppressed;
         _setChatSuppressedCallback ??= SetChatSuppressed;
+        _setPowerbarSuppressedCallback ??= SetPowerbarSuppressed;
         _setMotionCallback ??= SetMotion;
         _stopCompletelyCallback ??= StopCompletely;
         _turnToHeadingCallback ??= TurnToHeading;
@@ -1857,6 +1859,7 @@ internal static class PluginManager
         _api.GetRadarRectFn = Marshal.GetFunctionPointerForDelegate(_getRadarRectCallback);
         _api.SetRadarSuppressedFn = Marshal.GetFunctionPointerForDelegate(_setRadarSuppressedCallback);
         _api.SetChatSuppressedFn = Marshal.GetFunctionPointerForDelegate(_setChatSuppressedCallback);
+        _api.SetPowerbarSuppressedFn = Marshal.GetFunctionPointerForDelegate(_setPowerbarSuppressedCallback);
     }
 
     private static void ProbeClientHooks()
@@ -2236,6 +2239,15 @@ internal static class PluginManager
     private static void SetChatSuppressed(int enabled)
     {
         ChatHooks.SuppressOriginalChat = enabled != 0;
+    }
+
+    private static void SetPowerbarSuppressed(int enabled)
+    {
+        bool was = PowerbarHooks.SuppressOriginalDraw;
+        bool now = enabled != 0;
+        PowerbarHooks.SuppressOriginalDraw = now;
+        if (was != now)
+            RynthLog.Compat($"Compat: powerbar suppress -> {now}");
     }
 
     private static int SetMotion(uint motion, int enabled)
