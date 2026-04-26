@@ -96,6 +96,7 @@ internal static class PluginManager
     private static bool _uiDispatchPending;
     private static bool _loginCompleteObserved;
     private static bool _loginDispatchPending;
+    private static bool _logoutDispatchPending;
     private static long _nextUpdateObjectDispatchTick;
     private static int _loadGeneration;
     private static RynthCoreAPI _api;
@@ -225,6 +226,9 @@ internal static class PluginManager
         _loginCompleteObserved = LoginLifecycleHooks.HasObservedLoginComplete;
         _loginDispatchPending = _loginCompleteObserved;
 
+        LogoutLifecycleHooks.LogoutComplete -= OnLogoutObserved;
+        LogoutLifecycleHooks.LogoutComplete += OnLogoutObserved;
+
         string normalizedEngineDir = Path.GetFullPath(engineDir);
         bool engineDirIsRuntime = string.Equals(
             Path.GetFileName(normalizedEngineDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
@@ -293,6 +297,11 @@ internal static class PluginManager
         UiLifecycleHooks.Poll();
         LoginLifecycleHooks.Poll();
         SessionStateRegistry.Poll();
+
+        // Drain logout BEFORE any per-frame plugin activity so plugin teardown
+        // happens this frame and Tick/Render skip stale state.
+        if (_logoutDispatchPending && _initialized)
+            DispatchPendingLogout();
         DispatchQueuedBusyCountDecremented();
         DispatchQueuedBusyCountIncremented();
         DispatchQueuedCombatModeChange();
@@ -694,6 +703,13 @@ internal static class PluginManager
 
     public static void RenderAll()
     {
+        // Suppress plugin rendering while we are not in-world. The window between
+        // RecvNotice_Logoff and the next SendLoginCompleteNotification is the
+        // crash zone: plugin draw paths reach into world data the AC client is
+        // simultaneously tearing down.
+        if (!_loginCompleteObserved)
+            return;
+
         for (int i = 0; i < _plugins.Count; i++)
         {
             var plugin = _plugins[i];
@@ -717,6 +733,7 @@ internal static class PluginManager
         RynthLog.Plugin($"PluginManager: Shutting down {_plugins.Count} plugin(s)...");
         UiLifecycleHooks.UiInitialized -= OnUIInitializedObserved;
         LoginLifecycleHooks.LoginComplete -= OnLoginCompleteObserved;
+        LogoutLifecycleHooks.LogoutComplete -= OnLogoutObserved;
         UnloadAllPlugins();
         PluginLoader.CleanupShadowCopies(_shadowRootDir);
         _initialized = false;
@@ -726,6 +743,7 @@ internal static class PluginManager
         _uiInitializedObserved = false;
         _loginDispatchPending = false;
         _loginCompleteObserved = false;
+        _logoutDispatchPending = false;
         _pluginsDir = "";
         _shadowRootDir = "";
 
@@ -789,6 +807,75 @@ internal static class PluginManager
         _loginCompleteObserved = true;
         _loginDispatchPending = true;
         RynthLog.Plugin("PluginManager: OnLoginComplete observed - queued login lifecycle callbacks.");
+    }
+
+    /// <summary>
+    /// Hooked to <see cref="LogoutLifecycleHooks.LogoutComplete"/>. Runs on AC's UI
+    /// thread INSIDE <c>gmGamePlayUI::RecvNotice_Logoff</c>, so it must do as little
+    /// work as possible — anything heavier than flipping a flag will stall AC during
+    /// a critical state transition. The actual plugin teardown happens on the next
+    /// EndScene tick via <see cref="ProcessPendingActions"/>.
+    /// </summary>
+    private static void OnLogoutObserved()
+    {
+        if (_logoutDispatchPending)
+            return;
+
+        _logoutDispatchPending = true;
+        RynthLog.Plugin("PluginManager: OnLogout observed - queued for next EndScene frame.");
+    }
+
+    /// <summary>
+    /// Drained from <see cref="ProcessPendingActions"/> on the EndScene thread.
+    /// </summary>
+    private static void DispatchPendingLogout()
+    {
+        if (!_logoutDispatchPending)
+            return;
+
+        _logoutDispatchPending = false;
+
+        RynthLog.Plugin("PluginManager: dispatching OnLogout to plugins.");
+        DispatchLogoutToLoadedPlugins();
+
+        // Drop pointers to AC objects that the engine has cached and that AC
+        // frees during the world-to-charselect transition. ChatHooks caches
+        // gmMainChatUI for per-frame visibility assertion; using that pointer
+        // after AC has freed the widget AVs inside UIElement::IsVisible. The
+        // instance gets re-captured on the next ListenToElementMessage call
+        // after the next login completes.
+        Compatibility.ChatHooks.ResetCachedInstance();
+
+        // Reset login observation so the next SendLoginCompleteNotification kicks
+        // off a fresh login-complete cycle.
+        for (int i = 0; i < _plugins.Count; i++)
+            _plugins[i].LoginCompleteDispatched = false;
+
+        _loginCompleteObserved = false;
+        _loginDispatchPending = false;
+        LoginLifecycleHooks.ResetObservation();
+        LogoutLifecycleHooks.ResetObservation();
+    }
+
+    private static void DispatchLogoutToLoadedPlugins()
+    {
+        for (int i = 0; i < _plugins.Count; i++)
+        {
+            var plugin = _plugins[i];
+            if (!plugin.Initialized || plugin.Failed || plugin.OnLogout == null)
+                continue;
+
+            try
+            {
+                plugin.OnLogout();
+                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} received OnLogout.");
+            }
+            catch (Exception ex)
+            {
+                plugin.Failed = true;
+                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnLogout threw {ex.GetType().Name}: {ex.Message}");
+            }
+        }
     }
 
     private static void RescanPlugins(IntPtr imguiContext, IntPtr d3dDevice, IntPtr gameHwnd)

@@ -92,6 +92,18 @@ internal static class LoginLifecycleHooks
         }
     }
 
+    /// <summary>
+    /// Clears the one-shot observation flag so the next <c>SendLoginCompleteNotification</c>
+    /// raises <see cref="LoginComplete"/> again. Called by the logout pipeline so the
+    /// following login (e.g. swapping characters) re-runs login-gated startup.
+    /// </summary>
+    public static void ResetObservation()
+    {
+        HasObservedLoginComplete = false;
+        _statusMessage = "Awaiting next SendLoginCompleteNotification.";
+        _waitingLogged = false;
+    }
+
     public static void Poll()
     {
         if (HasObservedLoginComplete || !IsInstalled)

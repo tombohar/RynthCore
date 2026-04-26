@@ -117,6 +117,17 @@ internal static class ChatHooks
     /// </summary>
     public static unsafe void TickHide()
     {
+        // CRITICAL: do not call SetVisible while AC is between in-world sessions.
+        // _gmMainChatInstance points at AC's gmMainChatUI singleton, which AC
+        // frees during the logout-to-charselect transition. Calling SetVisible
+        // on the freed pointer dereferences a stale vtable (filled with reused
+        // float/zero data) and AVs inside UIElement::IsVisible. We resume the
+        // assertion only after the next SendLoginCompleteNotification, by which
+        // time AC has rebuilt gmMainChatUI and ListenDetour has re-captured the
+        // fresh pointer.
+        if (!LoginLifecycleHooks.HasObservedLoginComplete)
+            return;
+
         IntPtr inst = _gmMainChatInstance;
         if (inst == IntPtr.Zero) return;
 
@@ -141,5 +152,17 @@ internal static class ChatHooks
             catch { /* best-effort */ }
             _isHiddenAsserted = false;
         }
+    }
+
+    /// <summary>
+    /// Drops the cached <c>gmMainChatUI</c> singleton pointer. Called from the
+    /// logout pipeline so we don't reuse a freed pointer after the next login —
+    /// <see cref="ListenDetour"/> re-captures the fresh instance on the next
+    /// chat-UI message dispatch.
+    /// </summary>
+    public static void ResetCachedInstance()
+    {
+        _gmMainChatInstance = IntPtr.Zero;
+        _isHiddenAsserted = false;
     }
 }

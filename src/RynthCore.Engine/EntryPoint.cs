@@ -266,6 +266,7 @@ public static class EntryPoint
             RunInitStep("RynthAi action hooks", ClientActionHooks.Initialize);
             RunInitStep("client helper hooks", () => ClientHelperHooks.Probe());
             RunInitStep("login lifecycle hooks", LoginLifecycleHooks.Initialize);
+            RunInitStep("logout lifecycle hooks", LogoutLifecycleHooks.Initialize);
             RunInitStep("session state registry", SessionStateRegistry.Initialize);
             RunInitStep("UI lifecycle hooks", UiLifecycleHooks.Initialize);
             RunInitStep("logo bypass", LogoBypassHooks.Start);

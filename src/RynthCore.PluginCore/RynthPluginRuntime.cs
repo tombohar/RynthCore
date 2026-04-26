@@ -68,6 +68,12 @@ public unsafe sealed class RynthPluginRuntime<TPlugin>
             _plugin!.OnLoginComplete();
     }
 
+    public void OnLogout()
+    {
+        if (IsInitialized)
+            _plugin!.OnLogout();
+    }
+
     public void OnBarAction()
     {
         if (IsInitialized)

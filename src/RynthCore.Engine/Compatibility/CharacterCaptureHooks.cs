@@ -61,6 +61,14 @@ internal static class CharacterCaptureHooks
 
     private static int _autoLoginScheduled;
 
+    // Latches once auto-login has fired in this process. The character-list packet
+    // (0xF658) arrives every time the client sees char-select — including the
+    // logout-to-char-select transition — and without this latch we'd re-trigger
+    // auto-login the moment the user manually logs out. One-shot per process: if
+    // the user wants to swap characters, they can pick from char-select manually,
+    // or relaunch.
+    private static int _autoLoginEverFired;
+
     public static void ProcessPotentialCharacterMessage(IntPtr blob, bool isGameEvent = false)
     {
         if (blob == IntPtr.Zero)
@@ -268,6 +276,15 @@ internal static class CharacterCaptureHooks
         (_, _, string targetCharacter) = ReadLaunchContext();
         if (string.IsNullOrWhiteSpace(targetCharacter))
             return;
+
+        // One-shot per process: if auto-login already fired (and the user has
+        // since logged back out), don't re-trigger. This keeps a manual logout
+        // from instantly re-logging the same character.
+        if (Interlocked.CompareExchange(ref _autoLoginEverFired, 1, 0) != 0)
+        {
+            RynthLog.Verbose($"CharacterCapture: Auto-login already fired this session — skipping for '{targetCharacter}'.");
+            return;
+        }
 
         if (Interlocked.Exchange(ref _autoLoginScheduled, 1) != 0)
             return;

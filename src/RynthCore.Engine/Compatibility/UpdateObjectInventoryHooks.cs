@@ -178,9 +178,12 @@ internal static class UpdateObjectInventoryHooks
     }
 
     /// <summary>
-    /// Scan a range of object IDs, calling GetWeenieObject for each, and return
-    /// those whose containerID matches the target. This discovers items that were
-    /// created before the plugin loaded (e.g. pack contents at login).
+    /// Scan a range of object IDs and return those owned by the target container —
+    /// either as a contained child (containerID match) OR as a wielded child
+    /// (wielderID match). PublicWeenieDesc stores those as separate fields, so
+    /// matching only on containerID misses wielded items (weapons, armor, ammo).
+    /// Returning both keeps the plugin's container walk a single authoritative
+    /// list of "everything the player owns right now."
     /// </summary>
     private static int ScanByContainerId(uint containerId, Span<uint> itemIds)
     {
@@ -190,9 +193,9 @@ internal static class UpdateObjectInventoryHooks
         for (uint id = 0x80000001; id <= 0x8000FFFF && written < itemIds.Length; id++)
         {
             if (id == containerId) continue;
-            if (!ClientObjectHooks.TryGetObjectOwnershipInfo(id, out uint cid, out _, out _))
+            if (!ClientObjectHooks.TryGetObjectOwnershipInfo(id, out uint cid, out uint wid, out _))
                 continue;
-            if (cid == containerId)
+            if (cid == containerId || wid == containerId)
                 itemIds[written++] = id;
         }
 

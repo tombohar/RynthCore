@@ -510,7 +510,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 56;
+    public const uint Current = 57;
 }
 
 internal static class ClientActionHookFlags
@@ -550,6 +550,9 @@ internal delegate IntPtr PluginVersionDelegate();
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void PluginOnLoginCompleteDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void PluginOnLogoutDelegate();
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void PluginOnUIInitializedDelegate();

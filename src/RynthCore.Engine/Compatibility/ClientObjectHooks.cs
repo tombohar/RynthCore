@@ -561,14 +561,29 @@ internal static class ClientObjectHooks
                 return false;
 
             training = unchecked((int)skill.AdvancementClass);
-            buffed = unchecked((int)(skill.InitialLevel + skill.LevelFromPracticePoints));
+
+            // Use CACQualities::InqSkill(stype, retval, raw=0) for the FULL buffed
+            // skill — that includes attribute contribution, augmentations, and
+            // spell-buff enchantments. The raw struct fields (InitialLevel +
+            // LevelFromPracticePoints) only give the base trained level and miss
+            // everything else, which is why this used to return ~208 for a
+            // character whose true buffed Creature Enchantment was 360+.
+            int rawBase = unchecked((int)(skill.InitialLevel + skill.LevelFromPracticePoints));
+            int trulyBuffed = rawBase;
+            if (_inqSkillLevel != null)
+            {
+                int retval = 0;
+                if (_inqSkillLevel(qualitiesPtr, skillStype, &retval, 0) != 0)
+                    trulyBuffed = retval;
+            }
+            buffed = trulyBuffed;
 
             if (_skillProbeLogCount < 6)
             {
                 _skillProbeLogCount++;
                 RynthLog.Verbose(
                     $"Compat: skillTableProbe obj=0x{objectId:X8} skill={skillStype} qualities=0x{qualitiesPtr.ToInt32():X8} " +
-                    $"table=0x{skillTablePtr.ToInt32():X8} buckets={tableSize} training={training} base={buffed}");
+                    $"table=0x{skillTablePtr.ToInt32():X8} buckets={tableSize} training={training} base={rawBase} buffed={buffed}");
             }
 
             return true;

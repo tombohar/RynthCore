@@ -76,6 +76,16 @@ internal static class RynthCoreShell
     public static void Render(int frameCount)
     {
         ApplyTheme();
+
+        // Hide the entire shell while we are NOT in-world. Between RecvNotice_Logoff
+        // and the next SendLoginCompleteNotification the AC client tears down its
+        // world / UI state; rendering the bar (and the plugin shortcuts it hosts)
+        // during that window has been observed to crash D3D9 because plugin
+        // controls reach into half-released game data.
+        bool inWorld = LoginLifecycleHooks.HasObservedLoginComplete;
+        if (!inWorld)
+            return;
+
         RenderControlBar(frameCount);
 
         if (_showDemoWindow)

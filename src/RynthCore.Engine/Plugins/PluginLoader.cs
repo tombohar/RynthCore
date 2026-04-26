@@ -171,6 +171,10 @@ internal static class PluginLoader
         if (onLoginCompletePtr != IntPtr.Zero)
             plugin.OnLoginComplete = Marshal.GetDelegateForFunctionPointer<PluginOnLoginCompleteDelegate>(onLoginCompletePtr);
 
+        IntPtr onLogoutPtr = GetProcAddress(handle, "RynthPluginOnLogout");
+        if (onLogoutPtr != IntPtr.Zero)
+            plugin.OnLogout = Marshal.GetDelegateForFunctionPointer<PluginOnLogoutDelegate>(onLogoutPtr);
+
         IntPtr onUiInitializedPtr = GetProcAddress(handle, "RynthPluginOnUIInitialized");
         if (onUiInitializedPtr != IntPtr.Zero)
             plugin.OnUIInitialized = Marshal.GetDelegateForFunctionPointer<PluginOnUIInitializedDelegate>(onUiInitializedPtr);
@@ -358,6 +362,7 @@ internal static class PluginLoader
     {
         var parts = new List<string>(4) { "init", "shutdown" };
         if (p.OnLoginComplete != null) parts.Add("login");
+        if (p.OnLogout != null) parts.Add("logout");
         if (p.OnUIInitialized != null) parts.Add("ui");
         if (p.OnBusyCountIncremented != null) parts.Add("busy+");
         if (p.OnBusyCountDecremented != null) parts.Add("busy-");

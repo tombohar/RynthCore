@@ -37,6 +37,7 @@ public abstract class RynthPluginBase
     public virtual void OnTick() { }
     public virtual void OnUIInitialized() { }
     public virtual void OnLoginComplete() { }
+    public virtual void OnLogout() { }
     public virtual void OnBarAction() { }
     public virtual void OnRender() { }
     public virtual void OnChatWindowText(string? text, int chatType, ref int eat) { }
