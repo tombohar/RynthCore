@@ -133,10 +133,17 @@ internal static class EndSceneHook
         if (!_installed)
             return;
 
-        ImGuiController.Shutdown();
-
+        // Order is critical: disable the detour FIRST so AC's render thread
+        // stops entering our code, then drain in-flight calls, THEN tear down
+        // ImGui. If we destroyed the context first, an in-flight EndScene call
+        // would assert on `GImGui != NULL`.
         int status = MinHook.MH_DisableHook(_endSceneAddr);
         RynthLog.D3D9($"EndSceneHook: Disable = {MinHook.StatusString(status)}");
+
+        // Let the render thread return through the trampoline.
+        Thread.Sleep(80);
+
+        ImGuiController.Shutdown();
 
         status = MinHook.MH_RemoveHook(_endSceneAddr);
         RynthLog.D3D9($"EndSceneHook: Remove = {MinHook.StatusString(status)}");

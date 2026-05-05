@@ -299,7 +299,14 @@ internal static class PluginLoader
 
     private static string PrepareShadowDirectory(string shadowRootDir, int generation)
     {
-        string sessionDir = Path.Combine(shadowRootDir, $"session-{generation:D4}-pid{Environment.ProcessId}");
+        // Include EntryPoint.InitCount so each engine instance gets its own
+        // shadow root. After an engine hot-reload the previous engine's
+        // plugin DLL stays pinned (FreeLibrary doesn't actually unmap), so
+        // overwriting its shadow path would fail with a sharing violation.
+        int engineInit = EntryPoint.InitCount;
+        string sessionDir = Path.Combine(
+            shadowRootDir,
+            $"session-{generation:D4}-pid{Environment.ProcessId}-eng{engineInit:D2}");
         Directory.CreateDirectory(sessionDir);
         return sessionDir;
     }

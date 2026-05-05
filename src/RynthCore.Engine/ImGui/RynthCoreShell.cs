@@ -73,6 +73,12 @@ internal static class RynthCoreShell
         }
     }
 
+    /// <summary>Set by the ERl click handler so the shell skips rendering for a
+    /// few frames before the engine actually tears down. Otherwise the last
+    /// drawn frame (with the ERl tooltip) gets stranded in the bar's viewport
+    /// HWND backbuffer and stays visible after reload.</summary>
+    internal static volatile bool SuppressDraw;
+
     public static void Render(int frameCount)
     {
         ApplyTheme();
@@ -84,6 +90,9 @@ internal static class RynthCoreShell
         // controls reach into half-released game data.
         bool inWorld = LoginLifecycleHooks.HasObservedLoginComplete;
         if (!inWorld)
+            return;
+
+        if (SuppressDraw)
             return;
 
         RenderControlBar(frameCount);
@@ -283,6 +292,40 @@ internal static class RynthCoreShell
         if (ImGui.SmallButton("Rs"))
             ResetBarPosition();
         ShowTooltip("Reset the bar to the top-left corner.");
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Sd"))
+        {
+            // Spawn a background thread so the EndScene detour returns before
+            // EngineLifecycle.Shutdown disables the EndScene hook itself.
+            new System.Threading.Thread(() =>
+            {
+                try { EngineLifecycle.Shutdown(); }
+                catch (Exception ex) { RynthLog.Info($"Shutdown trigger failed: {ex}"); }
+            })
+            { IsBackground = true, Name = "RynthCore.Shutdown" }.Start();
+        }
+        ShowTooltip("Engine shutdown (debug): tear down hooks/overlay/plugins. Engine stays loaded but goes silent.");
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("ERl"))
+        {
+            RynthLog.Info("ERl button clicked — suppressing shell draw, then signaling reload.");
+            // Suppress the shell from rendering for the next few frames so
+            // the bar's separate viewport HWND presents a blank backbuffer
+            // before we destroy it — otherwise the still-drawn ERl tooltip
+            // pixels get stranded in that swap chain and stay visible after
+            // the engine reloads.
+            SuppressDraw = true;
+            new System.Threading.Thread(() =>
+            {
+                System.Threading.Thread.Sleep(120);
+                bool ok = EngineLifecycle.SignalReload();
+                RynthLog.Info($"ERl: SignalReload returned {ok}.");
+            })
+            { IsBackground = true, Name = "RynthCore.ERl" }.Start();
+        }
+        ShowTooltip("Engine reload: shut down, FreeLibrary, reload from disk, re-init. Picks up new engine builds without restarting AC.");
 
         ImGui.End();
         ImGui.PopStyleVar(3);

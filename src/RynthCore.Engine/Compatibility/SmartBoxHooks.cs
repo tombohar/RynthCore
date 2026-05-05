@@ -110,33 +110,37 @@ internal static class SmartBoxHooks
     private static unsafe uint DispatchSmartBoxEventDetour(IntPtr thisPtr, IntPtr blob)
     {
         var pOriginal = (delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint>)_originalDispatchSmartBoxEventPtr;
-        
+
         if (!LoginLifecycleHooks.HasObservedLoginComplete)
         {
-            CharacterCaptureHooks.ProcessPotentialCharacterMessage(blob, isGameEvent: false);
+            try { CharacterCaptureHooks.ProcessPotentialCharacterMessage(blob, isGameEvent: false); } catch { }
             return pOriginal(thisPtr, blob);
         }
 
         SmartBoxEventInfo info = ReadSmartBoxEventInfo(blob);
         uint status = pOriginal(thisPtr, blob);
 
-        TryQueueHealthUpdate(blob, info);
-
-        // Game events arrive as 0xF7B0 wrapper: [F7B0][playerId][seq][innerEventType][...]
-        // Check for IdentifyObject response (inner event 0xC9) after the original processes it.
-        if (info.Opcode == GameEventOpcode)
-            TryHandleGameEvent(blob, info);
-        else if (info.Opcode == 0xC9 && info.RawObjectId != 0)
-            TryCacheVitalsFromIdentify(info.RawObjectId);
-
-        if (info.RawObjectId != 0 &&
-            (info.Opcode == PositionUpdateOpcode ||
-             info.Opcode == PlayerPositionUpdateOpcode ||
-             info.Opcode == VectorUpdateOpcode ||
-             info.Opcode == UpdateObjectOpcode))
+        try
         {
-            PluginManager.QueueUpdateObject(info.RawObjectId);
+            TryQueueHealthUpdate(blob, info);
+
+            // Game events arrive as 0xF7B0 wrapper: [F7B0][playerId][seq][innerEventType][...]
+            // Check for IdentifyObject response (inner event 0xC9) after the original processes it.
+            if (info.Opcode == GameEventOpcode)
+                TryHandleGameEvent(blob, info);
+            else if (info.Opcode == 0xC9 && info.RawObjectId != 0)
+                TryCacheVitalsFromIdentify(info.RawObjectId);
+
+            if (info.RawObjectId != 0 &&
+                (info.Opcode == PositionUpdateOpcode ||
+                 info.Opcode == PlayerPositionUpdateOpcode ||
+                 info.Opcode == VectorUpdateOpcode ||
+                 info.Opcode == UpdateObjectOpcode))
+            {
+                PluginManager.QueueUpdateObject(info.RawObjectId);
+            }
         }
+        catch { }
 
         return status;
     }
@@ -146,19 +150,25 @@ internal static class SmartBoxHooks
     {
         var pOriginal = (delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint>)_originalDispatchGameEventPtr;
 
-        // Log game event opcodes for discovery
-        SmartBoxEventInfo info = ReadSmartBoxEventInfo(blob);
-        TryQueueHealthUpdate(blob, info);
-
-        // Always attempt capture from game events (pre-login)
-        CharacterCaptureHooks.ProcessPotentialCharacterMessage(blob, isGameEvent: true);
+        SmartBoxEventInfo info = default;
+        try
+        {
+            info = ReadSmartBoxEventInfo(blob);
+            TryQueueHealthUpdate(blob, info);
+            CharacterCaptureHooks.ProcessPotentialCharacterMessage(blob, isGameEvent: true);
+        }
+        catch { }
 
         uint result = pOriginal(thisPtr, blob);
 
         // After the original handler processes 0xC9 (IdentifyObject response),
         // the weenie's qualities are populated — read maxHealth and cache it.
-        if (info.Opcode == 0xC9 && info.RawObjectId != 0)
-            TryCacheVitalsFromIdentify(info.RawObjectId);
+        try
+        {
+            if (info.Opcode == 0xC9 && info.RawObjectId != 0)
+                TryCacheVitalsFromIdentify(info.RawObjectId);
+        }
+        catch { }
 
         return result;
     }

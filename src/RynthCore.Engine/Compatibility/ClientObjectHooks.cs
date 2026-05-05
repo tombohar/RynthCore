@@ -899,13 +899,46 @@ internal static class ClientObjectHooks
             if (weeniePtr == IntPtr.Zero)
                 return false;
 
-            typeFlags = _inqType(weeniePtr);
-            return true;
+            // _inqType reads m_pQualities->m_type. Null qualities causes an AV
+            // (a Corrupted State Exception in NativeAOT, which managed catch
+            // can NOT recover from — it FailFasts the entire AC client process).
+            // Skip the call when qualities is null and fall through to the
+            // PWD-direct fallback below.
+            if (TryGetQualitiesPtr(weeniePtr, out _))
+            {
+                typeFlags = _inqType(weeniePtr);
+                return true;
+            }
+
+            // PWD.type is set up by network packets independently of qualities.
+            // PublicWeenieDesc + 56 = _type (ITEM_TYPE uint). Layout per Chorizite
+            // Weenie.cs: WeenieDesc(4) + _name(4) + _plural_name(4) + _wcid(4) +
+            // _iconID(4) + _iconOverlayID(4) + _iconUnderlayID(4) + _containerID(4) +
+            // _wielderID(4) + _priority(4) + _valid_locations(4) + _location(4) +
+            // _itemsCapacity(4) + _containersCapacity(4) = 56 → _type.
+            if (_weeniePhysicsObjOffset >= 0)
+            {
+                int pwdBase = _weeniePhysicsObjOffset + 4;
+                IntPtr typeAddr = weeniePtr + pwdBase + 56;
+                if (IsReadablePointer(typeAddr))
+                {
+                    typeFlags = (uint)Marshal.ReadInt32(typeAddr);
+                    return true;
+                }
+            }
         }
         catch
         {
             return false;
         }
+
+        // Last resort: appraisal cache from IdentifyObject responses.
+        if (AppraisalHooks.TryGetCachedIntProperty(objectId, 1 /* STypeInt.ItemType */, out int cachedType))
+        {
+            typeFlags = unchecked((uint)cachedType);
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -1337,10 +1370,30 @@ internal static class ClientObjectHooks
                 return false;
             }
 
-            if (TryMarshalName(_getObjectNameInstance(pWeenie, NameTypeSingular, 0), out name))
+            // _getObjectNameInstance reads m_pQualities. Null qualities causes
+            // an AV (Corrupted State Exception → AC FailFast in NativeAOT).
+            // Gate ONLY this call on qualities being non-null.
+            if (TryGetQualitiesPtr(pWeenie, out _) &&
+                TryMarshalName(_getObjectNameInstance(pWeenie, NameTypeSingular, 0), out name))
                 return true;
 
-            if (TryMarshalName(_getObjectNameStatic(pWeenie, objectId, NameTypeSingular, 0), out name))
+            // The cdecl static ACCWeenieObject::GetObjectName also touches qualities
+            // for some name-modification paths (corpse-of-X, +N enchant suffix), so
+            // gate it on qualities too.
+            if (TryGetQualitiesPtr(pWeenie, out _) &&
+                TryMarshalName(_getObjectNameStatic(pWeenie, objectId, NameTypeSingular, 0), out name))
+                return true;
+
+            // PWD-direct fallback: PublicWeenieDesc + 4 = _name (PStringBase<char>).
+            // PStringBase<char> = pointer to PSRefBuffer<char>:
+            //   +0  Turbine_RefCount (vfptr 4 + m_cRef 4 = 8)
+            //   +8  m_len (int — includes null terminator)
+            //   +12 m_size, +16 m_hash
+            //   +20 m_data — actual ANSI chars start here.
+            // PWD is set up by network packets independently of m_pQualities,
+            // so this resolves names for doors, fresh-spawn objects, and pack
+            // items where qualities is null.
+            if (_weeniePhysicsObjOffset >= 0 && TryReadPwdString(pWeenie, _weeniePhysicsObjOffset + 4 + 4, out name))
                 return true;
 
             LogLookup($"Compat: object name lookup miss - both name calls returned null/empty for 0x{objectId:X8} weenie=0x{pWeenie.ToInt32():X8}");
@@ -1350,6 +1403,46 @@ internal static class ClientObjectHooks
         {
             _statusMessage = ex.Message;
             LogLookup($"Compat: object name lookup failed for 0x{objectId:X8} - {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads an AC1Legacy::PStringBase&lt;char&gt; field at <paramref name="absoluteOffset"/>
+    /// inside an ACCWeenieObject. PStringBase = pointer to PSRefBuffer; PSRefBuffer layout
+    /// is { vfptr(4), refCount(4), m_len(4), m_size(4), m_hash(4), m_data[] }. m_len
+    /// includes the null terminator. ANSI text. Safe against torn pointers and
+    /// uncommitted memory via IsReadablePointer.
+    /// </summary>
+    private static bool TryReadPwdString(IntPtr weeniePtr, int absoluteOffset, out string value)
+    {
+        value = string.Empty;
+        try
+        {
+            IntPtr fieldAddr = weeniePtr + absoluteOffset;
+            if (!IsReadablePointer(fieldAddr)) return false;
+
+            IntPtr bufferPtr = Marshal.ReadIntPtr(fieldAddr);
+            if (bufferPtr == IntPtr.Zero || !IsReadablePointer(bufferPtr)) return false;
+
+            // m_len at PSRefBuffer+8 (includes null terminator).
+            IntPtr lenAddr = bufferPtr + 8;
+            if (!IsReadablePointer(lenAddr)) return false;
+            int rawLen = Marshal.ReadInt32(lenAddr);
+            if (rawLen <= 1 || rawLen > 4096) return false; // 1 = empty (just terminator)
+            int byteLen = rawLen - 1;
+
+            // m_data at PSRefBuffer+20.
+            IntPtr dataAddr = bufferPtr + 20;
+            if (!IsReadablePointer(dataAddr)) return false;
+
+            string? str = Marshal.PtrToStringAnsi(dataAddr, byteLen);
+            if (string.IsNullOrEmpty(str)) return false;
+            value = str;
+            return true;
+        }
+        catch
+        {
             return false;
         }
     }

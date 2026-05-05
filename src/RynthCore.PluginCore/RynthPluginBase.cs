@@ -27,6 +27,14 @@ public abstract class RynthPluginBase
         Host.Log(message);
     }
 
+    internal void LogInternal(string message)
+    {
+        if (!IsAttached)
+            return;
+
+        Host.Log(message);
+    }
+
     protected static string? ReadWideString(IntPtr textUtf16)
     {
         return textUtf16 != IntPtr.Zero ? Marshal.PtrToStringUni(textUtf16) : null;

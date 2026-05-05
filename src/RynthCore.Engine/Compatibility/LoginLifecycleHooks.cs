@@ -137,4 +137,17 @@ internal static class LoginLifecycleHooks
         RynthLog.Verbose($"Compat: login complete observed via {source}.");
         LoginComplete?.Invoke();
     }
+
+    /// <summary>
+    /// Mark login as already complete and fire the <see cref="LoginComplete"/>
+    /// event without waiting for the AC client's
+    /// <c>SendLoginCompleteNotification</c>. Used by the hot-reload path: the
+    /// new engine instance starts after the game is already in-world, so the
+    /// notification will never fire again — we synthesize it so subscribers
+    /// (PluginManager, D3D9 bootstrapper) reach their post-login state.
+    /// </summary>
+    public static void MarkAlreadyComplete(string source)
+    {
+        SignalLoginComplete(source);
+    }
 }

@@ -53,6 +53,12 @@ internal static class PluginManager
     private const int MaxPrePluginCreateObjects = 4096;
     private static readonly Queue<uint> _prePluginCreateObjects = new();
     private static readonly object PrePluginCreateObjectsLock = new();
+    private static readonly HashSet<uint> _prePluginDeleteObjects = new();
+    private static readonly object PrePluginDeleteObjectsLock = new();
+    // Always-current set of live object IDs: create adds, delete removes.
+    // Used by ReplayPrePluginCreateObjects so hot-reloads never replay stale/deleted objects.
+    private static readonly HashSet<uint> _liveObjects = new();
+    private static readonly object LiveObjectsLock = new();
     private static readonly List<LoadedPlugin> _plugins = new();
     private static readonly Queue<PendingIncomingChat> _pendingIncomingChats = new();
     private static readonly Queue<PendingBusyCountIncremented> _pendingBusyCountIncremented = new();
@@ -264,24 +270,28 @@ internal static class PluginManager
 
     private static void ReplayPrePluginCreateObjects()
     {
-        uint[] prePending;
-        lock (PrePluginCreateObjectsLock)
+        // Replay the live-object set rather than the raw create queue.
+        // _liveObjects is always current (create adds, delete removes), so it is correct
+        // for both the first plugin load and every hot-reload — no stale pointer risk.
+        uint[] live;
+        lock (LiveObjectsLock)
         {
-            if (_prePluginCreateObjects.Count == 0) return;
-            prePending = _prePluginCreateObjects.ToArray();
-            // Do NOT clear — keep accumulating so hot-reloads can replay the full snapshot.
+            if (_liveObjects.Count == 0) return;
+            live = new uint[_liveObjects.Count];
+            _liveObjects.CopyTo(live);
         }
 
-        RynthLog.Plugin($"PluginManager: Replaying {prePending.Length} pre-plugin CreateObject event(s).");
         lock (PendingCreateObjectsLock)
         {
-            foreach (uint objectId in prePending)
+            foreach (uint objectId in live)
             {
                 if (_pendingCreateObjects.Count >= MaxPendingCreateObjects)
                     _pendingCreateObjects.Dequeue();
                 _pendingCreateObjects.Enqueue(new PendingCreateObject(objectId));
             }
         }
+
+        RynthLog.Plugin($"PluginManager: Replaying {live.Length} live object(s) to new plugin.");
     }
 
     public static void RequestRescan()
@@ -463,6 +473,15 @@ internal static class PluginManager
 
     public static void QueueDeleteObject(uint objectId)
     {
+        lock (LiveObjectsLock) _liveObjects.Remove(objectId);
+
+        // Track deletes that arrive before plugin init so we can filter stale creates from the replay.
+        if (!_initialized)
+        {
+            lock (PrePluginDeleteObjectsLock)
+                _prePluginDeleteObjects.Add(objectId);
+        }
+
         if (_plugins.Count == 0)
             return;
 
@@ -497,7 +516,9 @@ internal static class PluginManager
 
     public static void QueueCreateObject(uint objectId)
     {
-        // Always buffer for replay — covers the race between hook install and plugin load
+        lock (LiveObjectsLock) _liveObjects.Add(objectId);
+
+        // Also buffer for replay — covers the race between hook install and plugin load
         lock (PrePluginCreateObjectsLock)
         {
             if (_prePluginCreateObjects.Count >= MaxPrePluginCreateObjects)
@@ -747,6 +768,12 @@ internal static class PluginManager
         _pluginsDir = "";
         _shadowRootDir = "";
 
+        lock (LiveObjectsLock)
+            _liveObjects.Clear();
+        lock (PrePluginCreateObjectsLock)
+            _prePluginCreateObjects.Clear();
+        lock (PrePluginDeleteObjectsLock)
+            _prePluginDeleteObjects.Clear();
         lock (PendingIncomingChatsLock)
             _pendingIncomingChats.Clear();
         lock (PendingBusyCountIncrementedLock)
@@ -845,6 +872,11 @@ internal static class PluginManager
         // instance gets re-captured on the next ListenToElementMessage call
         // after the next login completes.
         Compatibility.ChatHooks.ResetCachedInstance();
+
+        // Drop the cached PlayerDesc/CACQualities pointer so the next call into the
+        // buffed-max inq function can't AV on a freed allocation. Re-seeded on the next
+        // SendNoticePlayerDescReceived after the next login completes.
+        Compatibility.PlayerVitalsHooks.ResetSession();
 
         // Reset login observation so the next SendLoginCompleteNotification kicks
         // off a fresh login-complete cycle.
@@ -1217,6 +1249,10 @@ internal static class PluginManager
         }
     }
 
+    // Second delete drain — called after ProcessPendingActions to close the race window
+    // between DispatchQueuedDeleteObject and TickAll where a delete could arrive untracked.
+    public static void FlushPendingDeletes() => DispatchQueuedDeleteObject();
+
     private static void DispatchQueuedDeleteObject()
     {
         if (!_initialized || _plugins.Count == 0)
@@ -1270,6 +1306,12 @@ internal static class PluginManager
 
         foreach (PendingCreateObject evt in pending)
         {
+            // Skip objects that were deleted before we could dispatch them — avoids
+            // queuing stale IDs into the plugin's pending classification.
+            bool isLive;
+            lock (LiveObjectsLock) isLive = _liveObjects.Contains(evt.ObjectId);
+            if (!isLive) continue;
+
             for (int i = 0; i < _plugins.Count; i++)
             {
                 var plugin = _plugins[i];
@@ -1605,6 +1647,26 @@ internal static class PluginManager
                 RynthLog.Plugin($"PluginManager: Extra plugin not found: {dllPath}");
                 continue;
             }
+
+            // Skip if a plugin with the same filename was already loaded from the default directory.
+            // Both paths share the same session shadow dir — loading the same filename twice would
+            // try to overwrite a locked shadow copy and crash.
+            string extraFileName = Path.GetFileName(dllPath);
+            bool alreadyLoaded = false;
+            for (int j = 0; j < _plugins.Count; j++)
+            {
+                if (string.Equals(Path.GetFileName(_plugins[j].SourceFilePath), extraFileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    alreadyLoaded = true;
+                    break;
+                }
+            }
+            if (alreadyLoaded)
+            {
+                RynthLog.Plugin($"PluginManager: Extra plugin {extraFileName} already loaded from default directory — skipping.");
+                continue;
+            }
+
             RynthLog.Plugin($"PluginManager: Loading extra plugin: {dllPath}");
             var plugin = PluginLoader.LoadSingle(dllPath, _shadowRootDir, _loadGeneration);
             if (plugin != null)

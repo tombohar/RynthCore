@@ -163,6 +163,10 @@ internal static class ImGuiController
         {
             ImGuiNET.ImGui.SetCurrentContext(contextToDestroy);
 
+            // Zero the WndProc context guard BEFORE DestroyContext so any
+            // deferred OS messages that arrive at viewport HWNDs during or
+            // after teardown don't try to call into freed ImGui memory.
+            ViewportPlatformBackend.ImGuiContext = IntPtr.Zero;
             PluginManager.ShutdownAll();
             OverlayTextureRenderer.Shutdown();
             ViewportRendererBackend.Shutdown();
@@ -241,7 +245,7 @@ internal static class ImGuiController
             // Drain queued host/plugin callbacks before opening the Dear ImGui frame.
             // This keeps heavy world-update bursts from stretching an already-active frame.
             PluginManager.ProcessPendingActions(_context, pDevice, _gameHwnd);
-
+            PluginManager.FlushPendingDeletes(); // second drain closes the create→delete race window
             // Plugin tick (per-frame logic, before ImGui drawing)
             PluginManager.TickAll();
 

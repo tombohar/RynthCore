@@ -44,6 +44,10 @@ internal static unsafe class Win32Backend
     private const uint GA_ROOT = 2;
     private const int HTCLIENT = 1;
 
+    /// <summary>Posted by AvaloniaSubclassWndProc when Avalonia acquires focus.
+    /// Handled here (game thread) so SetFocus is always same-thread — no cross-thread wait.</summary>
+    public const uint WM_RYNTH_RESTORE_FOCUS = 0x8001;
+
     private const int VK_CONTROL = 0x11;
     private const int VK_SHIFT = 0x10;
     private const int VK_MENU = 0x12;  // Alt
@@ -92,6 +96,9 @@ internal static unsafe class Win32Backend
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetFocus(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     private static extern IntPtr SetCapture(IntPtr hWnd);
@@ -185,6 +192,12 @@ internal static unsafe class Win32Backend
     private static bool _avIsResizing;
     private static bool _avIsButtonCapture;
     private static bool _avHasNativeCapture;
+    // Set when a left-button press lands on an opened Avalonia panel (not the
+    // bar). While set, every mouse event is forwarded to Avalonia regardless
+    // of whether the cursor is still over the panel rect — without this,
+    // a fast drag where the cursor outpaces the panel-position update lands
+    // outside IsOverPanel and the drag drops.
+    private static bool _avPanelMouseDown;
     private static int  _avPrevPhysX;
     private static int  _avPrevPhysY;
     private static double _avDragResidualX;
@@ -250,6 +263,7 @@ internal static unsafe class Win32Backend
         _avIsDragging = false;
         _avIsResizing = false;
         _avIsButtonCapture = false;
+        _avPanelMouseDown = false;
         ReleaseAvaloniaNativeCapture();
         _avDragResidualX = 0;
         _avDragResidualY = 0;
@@ -268,6 +282,9 @@ internal static unsafe class Win32Backend
 
     public static void NewFrame()
     {
+        // Deferred focus restore: AvaloniaSubclassWndProc sets this flag when
+        // WM_SETFOCUS lands on the off-screen Avalonia HWND. We reclaim focus
+        // here (game thread owns _gameHwnd) so there's no cross-thread wait.
         ImGuiIOPtr io = ImGuiNET.ImGui.GetIO();
 
         // Update display size
@@ -344,6 +361,13 @@ internal static unsafe class Win32Backend
         {
             _wndProcLogCount++;
 
+            // ── Restore focus to game when Avalonia acquires it ───────────
+            if (msg == WM_RYNTH_RESTORE_FOCUS)
+            {
+                SetFocus(_gameHwnd);
+                return IntPtr.Zero;
+            }
+
             // ── Avalonia panel hit-test & input forwarding ────────────────
             if (IsMouseMessage(msg))
             {
@@ -354,6 +378,14 @@ internal static unsafe class Win32Backend
             else if (IsKeyMessage(msg) && _avaloniaHasMouse)
             {
                 // Keyboard goes to Avalonia only while the cursor is over the panel.
+                // CRITICAL: forward only WM_KEYDOWN/WM_KEYUP (and SYS variants). Do NOT
+                // forward WM_CHAR — Avalonia's own message pump calls TranslateMessage on
+                // the WM_KEYDOWN we just posted and synthesises its own WM_CHAR. If we
+                // also post WM_CHAR directly, Avalonia receives the character twice and
+                // every keypress shows up doubled in TextBoxes.
+                if (msg == WM_CHAR)
+                    return IntPtr.Zero;
+
                 IntPtr avHwnd = AvaloniaOverlay.AvaloniaHwnd;
                 if (avHwnd != IntPtr.Zero)
                 {
@@ -364,6 +396,8 @@ internal static unsafe class Win32Backend
             }
             // ─────────────────────────────────────────────────────────────
 
+            // Only enqueue if we did NOT already forward to Avalonia above.
+            // (When _avaloniaHasMouse is true and a key fires, we returned early.)
             if (IsMouseMessage(msg) || IsKeyMessage(msg) || IsFocusMessage(msg))
                 EnqueueInput(msg, wParam, lParam);
 
@@ -519,6 +553,28 @@ internal static unsafe class Win32Backend
                 _avaloniaHasMouse = over;
             }
 
+            // While the left button is held down on a panel, keep forwarding
+            // even if the cursor wanders off the panel rect — Avalonia's drag
+            // handler needs uninterrupted PointerMoved + PointerReleased to
+            // commit/release the drag. The latch clears on WM_LBUTTONUP.
+            if (_avPanelMouseDown)
+            {
+                _lastPanelClientX = overlayPoint.X;
+                _lastPanelClientY = overlayPoint.Y;
+                AvaloniaMessagePoint heldPoint = ClientToAvaloniaMessagePoint(overlayPoint.X, overlayPoint.Y);
+                _lastAvaloniaMessageX = heldPoint.X;
+                _lastAvaloniaMessageY = heldPoint.Y;
+                PostOverlayMouseMessage(avHwnd, msg, wParam, heldPoint.X, heldPoint.Y);
+                if (msg == WM_LBUTTONUP)
+                {
+                    _avPanelMouseDown = false;
+                    AvaloniaOverlay.SetDockedPanelPointerCaptureActive(false);
+                }
+                if (msg != WM_MOUSEMOVE || AvaloniaOverlay.ShouldUseCustomSkiaProducer)
+                    AvaloniaOverlay.RequestCapture();
+                return true;
+            }
+
             if (!over)
             {
                 if (msg == WM_LBUTTONUP)
@@ -627,8 +683,17 @@ internal static unsafe class Win32Backend
             _lastAvaloniaMessageX = messagePoint.X;
             _lastAvaloniaMessageY = messagePoint.Y;
             if (msg == WM_LBUTTONDOWN)
+            {
                 LogAvaloniaPointerDebug("forward-down", cx, cy, overlayPoint.X, overlayPoint.Y, messagePoint.X, messagePoint.Y);
+                _avPanelMouseDown = true;
+                AvaloniaOverlay.SetDockedPanelPointerCaptureActive(true);
+            }
             PostOverlayMouseMessage(avHwnd, msg, wParam, messagePoint.X, messagePoint.Y);
+            if (msg == WM_LBUTTONUP)
+            {
+                _avPanelMouseDown = false;
+                AvaloniaOverlay.SetDockedPanelPointerCaptureActive(false);
+            }
             if (msg != WM_MOUSEMOVE || AvaloniaOverlay.ShouldUseCustomSkiaProducer)
                 AvaloniaOverlay.RequestCapture();
             return true;

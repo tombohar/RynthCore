@@ -30,10 +30,19 @@ internal static unsafe class OverlayTextureRenderer
     private const uint D3DRS_SRCBLEND         = 19;
     private const uint D3DRS_DESTBLEND        = 20;
     private const uint D3DRS_ZENABLE          = 7;
+    private const uint D3DRS_ALPHATESTENABLE  = 15;
     private const uint D3DRS_CULLMODE         = 22;
     private const uint D3DRS_LIGHTING         = 137;
+    private const uint D3DRS_FOGENABLE        = 28;
+    private const uint D3DRS_STENCILENABLE    = 52;
     private const uint D3DRS_COLORWRITEENABLE = 168;
+    private const uint D3DRS_BLENDOP          = 171;
+    private const uint D3DRS_SCISSORTESTENABLE = 174;
+    private const uint D3DRS_SRGBWRITEENABLE  = 194;
+    private const uint D3DRS_SEPARATEALPHABLENDENABLE = 206;
+    private const uint D3DBLENDOP_ADD         = 1;
 
+    private const uint D3DBLEND_ONE         = 2;
     private const uint D3DBLEND_SRCALPHA    = 5;
     private const uint D3DBLEND_INVSRCALPHA = 6;
     private const uint D3DCULL_NONE         = 1;
@@ -45,6 +54,7 @@ internal static unsafe class OverlayTextureRenderer
     private const uint D3DTSS_ALPHAARG1 = 5;
     private const uint D3DTSS_ALPHAARG2 = 6;
 
+    private const uint D3DTOP_SELECTARG1 = 2;
     private const uint D3DTOP_MODULATE  = 4;
     private const uint D3DTA_TEXTURE    = 2;
     private const uint D3DTA_DIFFUSE    = 0;
@@ -88,9 +98,17 @@ internal static unsafe class OverlayTextureRenderer
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetTextureStageStateD(IntPtr dev, uint stage, uint type, uint value);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetTextureStageStateD(IntPtr dev, uint stage, uint type, out uint pValue);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetSamplerStateD(IntPtr dev, uint sampler, uint type, uint value);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetSamplerStateD(IntPtr dev, uint sampler, uint type, out uint pValue);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetTextureD(IntPtr dev, uint stage, out IntPtr ppTex);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetFVFD(IntPtr dev, uint fvf);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetFVFD(IntPtr dev, out uint pFvf);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetRenderStateD(IntPtr dev, uint state, uint value);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -120,8 +138,12 @@ internal static unsafe class OverlayTextureRenderer
     private static CreateTextureD?      _createTexture;
     private static SetTextureD?         _setTexture;
     private static SetTextureStageStateD? _setTexStageState;
+    private static GetTextureStageStateD? _getTexStageState;
     private static SetSamplerStateD?    _setSamplerState;
+    private static GetSamplerStateD?    _getSamplerState;
+    private static GetTextureD?         _getTexture;
     private static SetFVFD?             _setFVF;
+    private static GetFVFD?             _getFVF;
     private static SetRenderStateD?     _setRenderState;
     private static GetRenderStateD?     _getRenderState;
     private static SetVertexShaderD?    _setVertexShader;
@@ -367,21 +389,51 @@ internal static unsafe class OverlayTextureRenderer
         _getRenderState!(pDevice, D3DRS_SRCBLEND,         out uint savedSrcBlend);
         _getRenderState!(pDevice, D3DRS_DESTBLEND,        out uint savedDstBlend);
         _getRenderState!(pDevice, D3DRS_ZENABLE,          out uint savedZ);
+        _getRenderState!(pDevice, D3DRS_ALPHATESTENABLE,  out uint savedAlphaTest);
         _getRenderState!(pDevice, D3DRS_CULLMODE,         out uint savedCull);
         _getRenderState!(pDevice, D3DRS_LIGHTING,         out uint savedLighting);
+        _getRenderState!(pDevice, D3DRS_FOGENABLE,        out uint savedFog);
+        _getRenderState!(pDevice, D3DRS_STENCILENABLE,    out uint savedStencil);
         _getRenderState!(pDevice, D3DRS_COLORWRITEENABLE, out uint savedColorWrite);
+        _getRenderState!(pDevice, D3DRS_BLENDOP,          out uint savedBlendOp);
+        _getRenderState!(pDevice, D3DRS_SCISSORTESTENABLE, out uint savedScissor);
+        _getRenderState!(pDevice, D3DRS_SRGBWRITEENABLE,  out uint savedSrgb);
+        _getRenderState!(pDevice, D3DRS_SEPARATEALPHABLENDENABLE, out uint savedSeparateAlpha);
         _getVertexShader!(pDevice, out IntPtr savedVS);
         _getPixelShader!(pDevice, out IntPtr savedPS);
+        _getFVF!(pDevice, out uint savedFVF);
+        _getTexture!(pDevice, 0, out IntPtr savedTex0);
+        _getTexStageState!(pDevice, 0, D3DTSS_COLOROP,   out uint savedTSS_ColorOp);
+        _getTexStageState!(pDevice, 0, D3DTSS_COLORARG1, out uint savedTSS_ColorArg1);
+        _getTexStageState!(pDevice, 0, D3DTSS_COLORARG2, out uint savedTSS_ColorArg2);
+        _getTexStageState!(pDevice, 0, D3DTSS_ALPHAOP,   out uint savedTSS_AlphaOp);
+        _getTexStageState!(pDevice, 0, D3DTSS_ALPHAARG1, out uint savedTSS_AlphaArg1);
+        _getTexStageState!(pDevice, 0, D3DTSS_ALPHAARG2, out uint savedTSS_AlphaArg2);
+        _getSamplerState!(pDevice, 0, D3DSAMP_MINFILTER, out uint savedSamp_Min);
+        _getSamplerState!(pDevice, 0, D3DSAMP_MAGFILTER, out uint savedSamp_Mag);
 
         try
         {
-            // Set up fixed-function alpha-blended state
+            // Avalonia produces premultiplied BGRA, so the right blend is
+            // ONE / INVSRCALPHA. SRCALPHA would square the alpha and dim the
+            // overlay; ONE matches the premul invariant exactly.
             _setRenderState!(pDevice, D3DRS_ALPHABLENDENABLE, 1);
-            _setRenderState!(pDevice, D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+            _setRenderState!(pDevice, D3DRS_SRCBLEND,         D3DBLEND_ONE);
             _setRenderState!(pDevice, D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+            _setRenderState!(pDevice, D3DRS_BLENDOP,          D3DBLENDOP_ADD);
             _setRenderState!(pDevice, D3DRS_ZENABLE,          0);
+            _setRenderState!(pDevice, D3DRS_ALPHATESTENABLE,  0);
             _setRenderState!(pDevice, D3DRS_CULLMODE,         D3DCULL_NONE);
             _setRenderState!(pDevice, D3DRS_LIGHTING,         0);
+            // AC enables fog (often white) for portal-space and dungeon
+            // particle effects; without disabling it our quad gets
+            // fog-blended toward white. Same for scissor (AC clips), stencil
+            // (UI passes), and separate-alpha-blend (would override our blend).
+            _setRenderState!(pDevice, D3DRS_FOGENABLE,        0);
+            _setRenderState!(pDevice, D3DRS_STENCILENABLE,    0);
+            _setRenderState!(pDevice, D3DRS_SCISSORTESTENABLE, 0);
+            _setRenderState!(pDevice, D3DRS_SRGBWRITEENABLE,  0);
+            _setRenderState!(pDevice, D3DRS_SEPARATEALPHABLENDENABLE, 0);
             _setRenderState!(pDevice, D3DRS_COLORWRITEENABLE, 0xF);
 
             _setVertexShader!(pDevice, IntPtr.Zero);
@@ -390,40 +442,68 @@ internal static unsafe class OverlayTextureRenderer
             _setFVF!(pDevice, FVF);
             _setTexture!(pDevice, 0, _texture);
 
-            _setTexStageState!(pDevice, 0, D3DTSS_COLOROP,   D3DTOP_MODULATE);
+            // Use SELECTARG1 (texture only) instead of MODULATE so a stale
+            // per-vertex DIFFUSE left over from ImGui's previous DrawPrimitiveUP
+            // call can't tint the overlay — our FVF doesn't include DIFFUSE,
+            // making its value undefined under MODULATE.
+            _setTexStageState!(pDevice, 0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
             _setTexStageState!(pDevice, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
-            _setTexStageState!(pDevice, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
-            _setTexStageState!(pDevice, 0, D3DTSS_ALPHAOP,   D3DTOP_MODULATE);
+            _setTexStageState!(pDevice, 0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
             _setTexStageState!(pDevice, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
-            _setTexStageState!(pDevice, 0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
-            _setSamplerState!(pDevice, 0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
-            _setSamplerState!(pDevice, 0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+            // POINT filter is crisper than LINEAR when the texture and the
+            // target backbuffer have the same dimensions — each output pixel
+            // maps to exactly one texel, so we don't want any blending.
+            _setSamplerState!(pDevice, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+            _setSamplerState!(pDevice, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
 
+            // D3D9 half-texel offset: pixel centers are at integer + 0.5, but
+            // texel coords are at integer indexes. Without -0.5 vertex offset,
+            // each output pixel samples *between* two texels, blending them
+            // (visible blur even with POINT filter due to rasterization rules).
             QuadVertex* verts = stackalloc QuadVertex[4];
-            verts[0] = new QuadVertex { X = 0, Y = 0, Z = 0, RHW = 1, U = 0, V = 0 };
-            verts[1] = new QuadVertex { X = W, Y = 0, Z = 0, RHW = 1, U = 1, V = 0 };
-            verts[2] = new QuadVertex { X = 0, Y = H, Z = 0, RHW = 1, U = 0, V = 1 };
-            verts[3] = new QuadVertex { X = W, Y = H, Z = 0, RHW = 1, U = 1, V = 1 };
+            verts[0] = new QuadVertex { X = -0.5f,    Y = -0.5f,    Z = 0, RHW = 1, U = 0, V = 0 };
+            verts[1] = new QuadVertex { X = W - 0.5f, Y = -0.5f,    Z = 0, RHW = 1, U = 1, V = 0 };
+            verts[2] = new QuadVertex { X = -0.5f,    Y = H - 0.5f, Z = 0, RHW = 1, U = 0, V = 1 };
+            verts[3] = new QuadVertex { X = W - 0.5f, Y = H - 0.5f, Z = 0, RHW = 1, U = 1, V = 1 };
 
             _drawPrimitiveUP!(pDevice, D3DPT_TRIANGLESTRIP, 2,
                 new IntPtr(verts), (uint)sizeof(QuadVertex));
         }
         finally
         {
-            // Restore changed state
+            // Restore changed state. Anything we touched must be put back —
+            // AC re-enters EndScene mid-frame for additional passes (post-fx,
+            // particles, fog) and inherits whatever device state we left.
             _setRenderState!(pDevice, D3DRS_ALPHABLENDENABLE, savedAlpha);
             _setRenderState!(pDevice, D3DRS_SRCBLEND,         savedSrcBlend);
             _setRenderState!(pDevice, D3DRS_DESTBLEND,        savedDstBlend);
+            _setRenderState!(pDevice, D3DRS_BLENDOP,          savedBlendOp);
             _setRenderState!(pDevice, D3DRS_ZENABLE,          savedZ);
+            _setRenderState!(pDevice, D3DRS_ALPHATESTENABLE,  savedAlphaTest);
             _setRenderState!(pDevice, D3DRS_CULLMODE,         savedCull);
             _setRenderState!(pDevice, D3DRS_LIGHTING,         savedLighting);
+            _setRenderState!(pDevice, D3DRS_FOGENABLE,        savedFog);
+            _setRenderState!(pDevice, D3DRS_STENCILENABLE,    savedStencil);
+            _setRenderState!(pDevice, D3DRS_SCISSORTESTENABLE, savedScissor);
+            _setRenderState!(pDevice, D3DRS_SRGBWRITEENABLE,  savedSrgb);
+            _setRenderState!(pDevice, D3DRS_SEPARATEALPHABLENDENABLE, savedSeparateAlpha);
             _setRenderState!(pDevice, D3DRS_COLORWRITEENABLE, savedColorWrite);
             _setVertexShader!(pDevice, savedVS);
             _setPixelShader!(pDevice, savedPS);
-            _setTexture!(pDevice, 0, IntPtr.Zero);
+            _setFVF!(pDevice, savedFVF);
+            _setTexStageState!(pDevice, 0, D3DTSS_COLOROP,   savedTSS_ColorOp);
+            _setTexStageState!(pDevice, 0, D3DTSS_COLORARG1, savedTSS_ColorArg1);
+            _setTexStageState!(pDevice, 0, D3DTSS_COLORARG2, savedTSS_ColorArg2);
+            _setTexStageState!(pDevice, 0, D3DTSS_ALPHAOP,   savedTSS_AlphaOp);
+            _setTexStageState!(pDevice, 0, D3DTSS_ALPHAARG1, savedTSS_AlphaArg1);
+            _setTexStageState!(pDevice, 0, D3DTSS_ALPHAARG2, savedTSS_AlphaArg2);
+            _setSamplerState!(pDevice, 0, D3DSAMP_MINFILTER, savedSamp_Min);
+            _setSamplerState!(pDevice, 0, D3DSAMP_MAGFILTER, savedSamp_Mag);
+            _setTexture!(pDevice, 0, savedTex0);
 
             if (savedVS != IntPtr.Zero) ReleaseComObject(savedVS);
             if (savedPS != IntPtr.Zero) ReleaseComObject(savedPS);
+            if (savedTex0 != IntPtr.Zero) ReleaseComObject(savedTex0);
         }
     }
 
@@ -456,9 +536,13 @@ internal static unsafe class OverlayTextureRenderer
         IntPtr vtable = Marshal.ReadIntPtr(pDevice);
         _createTexture   = Get<CreateTextureD>(vtable,      DeviceVTableIndex.CreateTexture);
         _setTexture      = Get<SetTextureD>(vtable,         DeviceVTableIndex.SetTexture);
+        _getTexture      = Get<GetTextureD>(vtable,         DeviceVTableIndex.GetTexture);
         _setTexStageState = Get<SetTextureStageStateD>(vtable, DeviceVTableIndex.SetTextureStageState);
+        _getTexStageState = Get<GetTextureStageStateD>(vtable, DeviceVTableIndex.GetTextureStageState);
         _setSamplerState = Get<SetSamplerStateD>(vtable,    DeviceVTableIndex.SetSamplerState);
+        _getSamplerState = Get<GetSamplerStateD>(vtable,    DeviceVTableIndex.GetSamplerState);
         _setFVF          = Get<SetFVFD>(vtable,             DeviceVTableIndex.SetFVF);
+        _getFVF          = Get<GetFVFD>(vtable,             DeviceVTableIndex.GetFVF);
         _setRenderState  = Get<SetRenderStateD>(vtable,     DeviceVTableIndex.SetRenderState);
         _getRenderState  = Get<GetRenderStateD>(vtable,     DeviceVTableIndex.GetRenderState);
         _setVertexShader = Get<SetVertexShaderD>(vtable,    DeviceVTableIndex.SetVertexShader);
