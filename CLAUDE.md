@@ -4,13 +4,6 @@ A modern .NET 9 NativeAOT framework for Asheron's Call client modding. Replaces 
 
 ---
 
-## ⚠ Active Focus: RynthAi ImGui Plugin
-
-**Do NOT work on `src/RynthCore.Engine/UI/Panels/RynthAiPanel.cs` (the Avalonia version of RynthAi).**
-The Avalonia RynthAi panel is disabled (`EntryPoint.cs` registration is commented out) and parked until the ImGui plugin is feature-complete. All RynthAi work goes in `Plugins/RynthCore.Plugin.RynthAi/` which uses ImGui via `RynthCore.PluginCore`.
-
----
-
 ## Project Layout
 
 ```
@@ -57,7 +50,15 @@ C:\Games\RynthCore\
 └── cimgui.dll              ← ImGui C bindings (x86, docking branch)
 ```
 
-Log file: `%USERPROFILE%\Desktop\RynthCore.log`
+### Logging
+
+Unified log file: `C:\Games\RynthCore\Logs\RynthCore.log`
+
+All RynthCore components (Engine, Loader, Injector, plugins, CrashLogger) append to this single file. Each line is tagged with its origin — `[engine]`, `[loader]`, `[injector]` — so the source is unambiguous when the engine and loader DLLs are writing concurrently from inside acclient.exe. The active log is rotated to `RynthCore.log.old` on engine startup if it exceeds 5 MB. The path is centralised in `src/RynthCore.Engine/LogPaths.cs`; the Loader and Injector projects mirror the constants because they don't reference the Engine assembly.
+
+Crash logging:
+- `CrashLogger.cs` installs a Win32 Vectored Exception Handler that catches AVs and other SEH faults NativeAOT can't surface. Writes a `==== CRASH ====` banner with exception code, faulting module + RVA, register dump, EBP frame walk, and ESP stack sweep.
+- `EntryPoint.InstallManagedExceptionHandlers` hooks `AppDomain.UnhandledException` and `TaskScheduler.UnobservedTaskException` so managed exceptions escaping a worker thread (or unobserved task continuations) get logged with full stack before the process terminates.
 
 ---
 

@@ -79,7 +79,7 @@ internal static class VectorUpdateServerDispatchHooks
         if (info.Opcode != VectorUpdateOpcode || info.RawObjectId == 0)
             return status;
 
-        PluginManager.QueueUpdateObject(info.RawObjectId);
+        try { PluginManager.QueueUpdateObject(info.RawObjectId); } catch { }
         return status;
     }
 

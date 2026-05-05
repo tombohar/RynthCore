@@ -79,11 +79,15 @@ internal static class UpdateObjectServerDispatchHooks
         if (!LoginLifecycleHooks.HasObservedLoginComplete || objectId == 0)
             return status;
 
-        int count = Interlocked.Increment(ref _dispatchCount);
-        if (count <= 8)
-            RynthLog.Verbose($"Compat: update object #{count} id=0x{objectId:X8} status={status}");
+        try
+        {
+            int count = Interlocked.Increment(ref _dispatchCount);
+            if (count <= 8)
+                RynthLog.Verbose($"Compat: update object #{count} id=0x{objectId:X8} status={status}");
 
-        PluginManager.QueueUpdateObject(objectId);
+            PluginManager.QueueUpdateObject(objectId);
+        }
+        catch { }
         return status;
     }
 

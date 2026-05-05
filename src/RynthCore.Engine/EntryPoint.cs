@@ -1,7 +1,8 @@
 // ============================================================================
 //  RynthCore.Engine - EntryPoint.cs
-//  NativeAOT exported function. Called by the injector after LoadLibrary.
+//  NativeAOT exported function. Called by RynthCore.Loader after LoadLibrary.
 //  Spawns init on a background thread to avoid loader-lock issues.
+//  Export name is RynthCoreEngineInit; the loader DLL owns RynthCoreInit.
 // ============================================================================
 
 using System;
@@ -24,6 +25,13 @@ public static class EntryPoint
     internal const string BuildStamp = "2026-03-30-v54-patternscan";
     private const int MaxRecentLogLines = 256;
     private static int _initialized;
+    /// <summary>Init counter the loader passes in lpParam. 1 = cold start,
+    /// 2+ = hot reload (game is already past login, skip the LoginComplete gate).
+    /// Read by PluginLoader to give each engine instance its own shadow-copy
+    /// directory so a previous (zombie-loaded) engine's plugin DLL doesn't
+    /// keep the same shadow path locked.</summary>
+    internal static int InitCount => _initCount;
+    private static int _initCount;
     private static bool _imGuiResolverConfigured;
     private static IntPtr _imGuiNativeHandle;
     private static readonly object LogLock = new();
@@ -35,15 +43,61 @@ public static class EntryPoint
     /// <summary>Set by ImGuiController once the game window is confirmed. Read by AvaloniaOverlay.</summary>
     internal static volatile IntPtr GameHwnd;
 
+    // Legacy export: kept so an old launcher / injector that still targets
+    // RynthCore.Engine.dll directly (instead of going through RynthCore.Loader)
+    // continues to work during the migration. Forwards to InitializeCore.
     [UnmanagedCallersOnly(EntryPoint = "RynthCoreInit")]
-    public static uint Initialize(IntPtr lpParam)
+    public static uint InitializeLegacy(IntPtr lpParam) => InitializeCore(lpParam);
+
+    [UnmanagedCallersOnly(EntryPoint = "RynthCoreEngineInit")]
+    public static uint Initialize(IntPtr lpParam) => InitializeCore(lpParam);
+
+    /// <summary>
+    /// Tear down everything Initialize set up, in reverse order. Called by
+    /// RynthCore.Loader before FreeLibrary'ing the engine. Must NOT be invoked
+    /// from inside an EndScene detour — the caller should run on a background
+    /// thread so the render thread's call into our hook can return cleanly.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "RynthCoreShutdown")]
+    public static uint Shutdown(IntPtr lpParam)
+    {
+        try
+        {
+            EngineLifecycle.Shutdown();
+            // Reset the init guard so a fresh RynthCoreEngineInit call (after
+            // the loader reloads us) can run again.
+            Interlocked.Exchange(ref _initialized, 0);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Info($"FATAL in RynthCoreShutdown: {ex}");
+            return 1;
+        }
+    }
+
+    private static uint InitializeCore(IntPtr lpParam)
     {
         if (Interlocked.CompareExchange(ref _initialized, 1, 0) != 0)
             return 1;
 
         try
         {
-            RynthLog.Info($"RynthCoreInit called (build {BuildStamp}) - spawning init thread...");
+            _initCount = lpParam.ToInt32();
+
+            // Set up the unified log sink BEFORE anything else so all
+            // subsequent failures are captured in C:\Games\RynthCore\Logs.
+            LogPaths.EnsureLogDirectory();
+            if (_initCount <= 1)
+                LogPaths.RotateAtStartup();
+
+            InstallManagedExceptionHandlers();
+
+            RynthLog.Info("================================================================");
+            RynthLog.Info($"RynthCore.Engine init  build={BuildStamp}  initCount={_initCount}  pid={Environment.ProcessId}");
+            RynthLog.Info($"  os={Environment.OSVersion}  clr={Environment.Version}  cwd={Environment.CurrentDirectory}");
+            RynthLog.Info("================================================================");
+
             CrashLogger.Install();
             RunInitStep("early multi-client hooks", MultiClientHooks.Initialize);
 
@@ -58,7 +112,7 @@ public static class EntryPoint
         }
         catch (Exception ex)
         {
-            RynthLog.Info($"FATAL in RynthCoreInit: {ex}");
+            RynthLog.Info($"FATAL in RynthCoreEngineInit: {ex}");
             return 2;
         }
     }
@@ -72,9 +126,45 @@ public static class EntryPoint
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr LoadLibraryW(string lpLibFileName);
 
-    private static string? GetEngineDirectory()
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetModuleHandleExW(uint dwFlags, IntPtr lpModuleName, out IntPtr phModule);
+
+    private const uint GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS = 0x00000004;
+    private const uint GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT = 0x00000002;
+
+    private static unsafe string? GetEngineDirectory()
     {
-        IntPtr hEngine = GetModuleHandleA("RynthCore.Engine.dll");
+        // Resolve our module by passing the address of a static method
+        // compiled into our DLL. `&StaticMethod` yields a direct pointer to
+        // the AOT-emitted code in our image — unlike
+        // Marshal.GetFunctionPointerForDelegate which hands back a runtime
+        // thunk allocated outside our module.
+        // GetModuleHandleA("RynthCore.Engine.dll") fails when the loader has
+        // staged us under a unique filename (RynthCore.Engine.gen2.dll etc.)
+        // for hot-reload, so this is the path that always works.
+        IntPtr hEngine = IntPtr.Zero;
+        try
+        {
+            delegate*<void> anchor = &EngineDirAnchor;
+            if (!GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    (IntPtr)anchor,
+                    out hEngine))
+            {
+                hEngine = IntPtr.Zero;
+            }
+        }
+        catch
+        {
+            hEngine = IntPtr.Zero;
+        }
+
+        // Fallback for the legacy load path (loader bypassed, engine loaded
+        // directly under its canonical filename).
+        if (hEngine == IntPtr.Zero)
+            hEngine = GetModuleHandleA("RynthCore.Engine.dll");
+
         if (hEngine == IntPtr.Zero)
             return null;
 
@@ -85,6 +175,13 @@ public static class EntryPoint
 
         return Path.GetDirectoryName(new string(buffer, 0, (int)length));
     }
+
+    /// <summary>
+    /// No-op anchor whose address is taken via `&EngineDirAnchor` to give us a
+    /// stable pointer inside the engine's own module image — used by
+    /// GetEngineDirectory's GetModuleHandleExW(FROM_ADDRESS) lookup.
+    /// </summary>
+    private static void EngineDirAnchor() { }
 
     private static bool PreloadNativeDll(string engineDir, string dllName)
     {
@@ -209,6 +306,21 @@ public static class EntryPoint
             AddCandidate(directories, runtimeDir);
             AddCandidate(directories, Path.Combine(normalizedEngineDir, "Native"));
             AddCandidate(directories, Path.Combine(runtimeDir, "Native"));
+
+            // When loaded from a reload-staging subdir (e.g.
+            // Runtime/.engine_loads/RynthCore.Engine.gen2.dll), the canonical
+            // Runtime dir holding minhook/cimgui/skia is the parent. Walk up
+            // a couple of levels so PreloadNativeDll can still resolve them.
+            string? parent = Directory.GetParent(normalizedEngineDir)?.FullName;
+            if (!string.IsNullOrWhiteSpace(parent))
+            {
+                AddCandidate(directories, parent);
+                AddCandidate(directories, Path.Combine(parent, "Native"));
+
+                string? grand = Directory.GetParent(parent)?.FullName;
+                if (!string.IsNullOrWhiteSpace(grand))
+                    AddCandidate(directories, grand);
+            }
         }
 
         return directories;
@@ -240,7 +352,7 @@ public static class EntryPoint
     {
         try
         {
-            RynthLog.Verbose("Init thread started.");
+            RynthLog.Info($"InitWorker: thread started, _initCount={_initCount}, LogoutHooks.IsInstalled={LogoutLifecycleHooks.IsInstalled}, SmartBoxHooks.IsInstalled={SmartBoxHooks.IsInstalled}");
 
             string? engineDir = GetEngineDirectory();
             if (engineDir == null)
@@ -249,7 +361,7 @@ public static class EntryPoint
                 return;
             }
 
-            RynthLog.Verbose($"Engine directory: {engineDir}");
+            RynthLog.Info($"InitWorker: Engine directory: {engineDir}");
 
             if (!PreloadNativeDll(engineDir, "minhook.x86.dll"))
             {
@@ -263,6 +375,7 @@ public static class EntryPoint
                 RynthLog.Info("  Ship RynthCore.cimgui.dll (or cimgui.dll) alongside RynthCore.Engine.dll");
             }
 
+            RynthLog.Info("InitWorker: starting hook init steps");
             RunInitStep("RynthAi action hooks", ClientActionHooks.Initialize);
             RunInitStep("client helper hooks", () => ClientHelperHooks.Probe());
             RunInitStep("login lifecycle hooks", LoginLifecycleHooks.Initialize);
@@ -306,19 +419,53 @@ public static class EntryPoint
             // on Win11's d3d9-on-d3d12 wrapper.
             LoginLifecycleHooks.LoginComplete += () =>
             {
-                RynthLog.D3D9("D3D9: Login complete — starting D3D9 bootstrapper.");
+                RynthLog.Info("D3D9: Login complete — starting D3D9 bootstrapper.");
                 D3D9Bootstrapper.Start();
             };
 
-            // Avalonia overlay and its native dependencies (Skia, HarfBuzz, ANGLE)
-            // are disabled. The ImGui shell handles all UI. Re-enable when needed.
-            // PreloadNativeDll(engineDir, "libSkiaSharp.dll");
-            // PreloadNativeDll(engineDir, "libHarfBuzzSharp.dll");
-            // PreloadNativeDll(engineDir, "av_libglesv2.dll");
-            // OverlayHost.RegisterPanel("Status",    StatusPanel.Create);
-            // OverlayHost.RegisterPanel("Log",       LogPanel.Create);
-            // OverlayHost.RegisterPanel("Hello Box", HelloBoxPanel.Create);
-            // AvaloniaOverlay.Start();
+            RynthLog.Info($"InitWorker: post-init checkpoint, _initCount={_initCount}");
+
+            // On a hot reload (initCount >= 2) the game's already past the
+            // login gate, so SendLoginCompleteNotification won't fire again.
+            // Start the bootstrapper directly — the device race the deferral
+            // protects against can't happen post-login.
+            if (_initCount >= 2)
+            {
+                RynthLog.Info($"D3D9: Hot reload detected (initCount={_initCount}) — starting D3D9 bootstrapper directly.");
+                D3D9Bootstrapper.Start();
+
+                // Synthesize the LoginComplete signal so subscribers
+                // (PluginManager and others) finish wiring up their post-login
+                // state — the AC client won't fire the notification again until
+                // the player logs out and back in.
+                RynthLog.Info("LoginLifecycle: hot reload — marking login already complete.");
+                LoginLifecycleHooks.MarkAlreadyComplete("hot-reload synthesis");
+
+                // SendNoticePlayerDescReceived also won't re-fire, so the
+                // PlayerVitalsHooks qualities ptr stays at zero and the buffed
+                // max never refreshes — vitals fall back to "highest seen"
+                // tracked across UpdateAttribute2nd events. Pull the qualities
+                // ptr from the live player object so the buffed-max read works
+                // immediately after the reload.
+                if (PlayerVitalsHooks.TryReseedFromCurrentPlayer())
+                    RynthLog.Info("PlayerVitals: hot reload — qualities ptr re-seeded from live player.");
+                else
+                    RynthLog.Info("PlayerVitals: hot reload — could not derive qualities ptr (will fall back to event-driven path).");
+            }
+
+            PreloadNativeDll(engineDir, "libSkiaSharp.dll");
+            PreloadNativeDll(engineDir, "libHarfBuzzSharp.dll");
+            PreloadNativeDll(engineDir, "av_libglesv2.dll");
+            OverlayHost.RegisterPanel("Status",  StatusPanel.Create);
+            OverlayHost.RegisterPanel("Log",     LogPanel.Create);
+            OverlayHost.RegisterPanel("RynthAi", RynthAiPanel.Create);
+            OverlayHost.RegisterPanel("Monsters", MonstersPanel.Create);
+            OverlayHost.RegisterPanel("Items",    ItemsPanel.Create);
+            OverlayHost.RegisterPanel("Settings", SettingsPanel.Create);
+            OverlayHost.RegisterPanel("Nav",      NavPanel.Create);
+            OverlayHost.RegisterPanel("Meta",     MetaPanel.Create);
+            OverlayHost.RegisterPanel("Radar", RadarPanel.Create);
+            AvaloniaOverlay.Start();
             RynthLog.Info("RynthCore bootstrap initialized.");
         }
         catch (Exception ex)
@@ -339,11 +486,91 @@ public static class EntryPoint
         }
     }
 
-    internal static void Log(string message)
+    private static int _managedHandlersInstalled;
+
+    /// <summary>
+    /// Install AppDomain.UnhandledException + TaskScheduler.UnobservedTaskException.
+    /// Note: in NativeAOT, AccessViolationException is a Corrupted State Exception
+    /// and bypasses managed handlers — those land in CrashLogger's VEH. These
+    /// handlers cover normal managed exceptions that escape worker threads and
+    /// background-task fault paths.
+    /// </summary>
+    private static void InstallManagedExceptionHandlers()
+    {
+        if (Interlocked.CompareExchange(ref _managedHandlersInstalled, 1, 0) != 0)
+            return;
+
+        try
+        {
+            AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Info($"InstallManagedExceptionHandlers: AppDomain hook failed - {ex.GetType().Name}: {ex.Message}");
+        }
+
+        try
+        {
+            System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Info($"InstallManagedExceptionHandlers: TaskScheduler hook failed - {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)
     {
         try
         {
-            string line = $"[{DateTime.Now:HH:mm:ss.fff}] [pid:{Environment.ProcessId}] {message}";
+            var ex = e.ExceptionObject as Exception;
+            RynthLog.Info("==== UNHANDLED MANAGED EXCEPTION ====");
+            RynthLog.Info($"  terminating={e.IsTerminating}  type={ex?.GetType().FullName ?? "<non-Exception>"}");
+            if (ex != null)
+            {
+                RynthLog.Info($"  message: {ex.Message}");
+                RynthLog.Info($"  stack:\r\n{ex}");
+            }
+            else
+            {
+                RynthLog.Info($"  raw: {e.ExceptionObject}");
+            }
+            RynthLog.Info("=====================================");
+        }
+        catch
+        {
+            // Logging path must not throw from inside an unhandled handler.
+        }
+    }
+
+    private static void OnUnobservedTaskException(object? sender, System.Threading.Tasks.UnobservedTaskExceptionEventArgs e)
+    {
+        try
+        {
+            RynthLog.Info("==== UNOBSERVED TASK EXCEPTION ====");
+            RynthLog.Info($"  {e.Exception}");
+            RynthLog.Info("===================================");
+            e.SetObserved();
+        }
+        catch
+        {
+        }
+    }
+
+    internal static void Log(string message) => LogTagged("engine", message);
+
+    /// <summary>
+    /// Write a tagged line to the unified log. Called by the loader, injector,
+    /// plugin SDK, and CrashLogger so every line in the file identifies its
+    /// origin. The lock here serializes writes from the engine module only;
+    /// other processes (injector) and module instances (loader, hot-reloaded
+    /// engines) use FileShare.ReadWrite + a brief retry to coexist.
+    /// </summary>
+    internal static void LogTagged(string tag, string message)
+    {
+        try
+        {
+            string line = $"[{DateTime.Now:HH:mm:ss.fff}] [pid:{Environment.ProcessId}] [{tag}] {message}";
 
             lock (LogLock)
             {
@@ -351,14 +578,45 @@ public static class EntryPoint
                 while (RecentLogLines.Count > MaxRecentLogLines)
                     RecentLogLines.Dequeue();
 
-                string logPath = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
-                    "RynthCore.log");
-                File.AppendAllText(logPath, line + "\n");
+                AppendWithRetry(line + "\r\n");
             }
         }
         catch
         {
+        }
+    }
+
+    private static void AppendWithRetry(string line)
+    {
+        // Retry briefly to tolerate concurrent writers (loader DLL, injector
+        // process). FileShare.ReadWrite on each open lets multiple writers
+        // append; the small delays smooth over rare lock collisions.
+        const int MaxAttempts = 4;
+        for (int attempt = 0; attempt < MaxAttempts; attempt++)
+        {
+            try
+            {
+                using var fs = new FileStream(
+                    LogPaths.LogFilePath,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite);
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(line);
+                fs.Write(bytes, 0, bytes.Length);
+                return;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                LogPaths.EnsureLogDirectory();
+            }
+            catch (IOException)
+            {
+                Thread.Sleep(5);
+            }
+            catch
+            {
+                return;
+            }
         }
     }
 

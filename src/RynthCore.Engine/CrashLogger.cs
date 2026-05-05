@@ -150,9 +150,21 @@ internal static class CrashLogger
                 ? er.ExceptionAddress.ToInt64() - moduleBase.ToInt64()
                 : 0;
 
+            string codeName = er.ExceptionCode switch
+            {
+                EXCEPTION_ACCESS_VIOLATION    => "ACCESS_VIOLATION",
+                EXCEPTION_ILLEGAL_INSTRUCTION => "ILLEGAL_INSTRUCTION",
+                EXCEPTION_PRIV_INSTRUCTION    => "PRIV_INSTRUCTION",
+                EXCEPTION_INT_DIVIDE_BY_ZERO  => "DIVIDE_BY_ZERO",
+                EXCEPTION_STACK_OVERFLOW      => "STACK_OVERFLOW",
+                _                             => "UNKNOWN",
+            };
+
+            RynthLog.Info("================================================================");
+            RynthLog.Info($"==== CRASH ({codeName})  build={EntryPoint.BuildStamp}  initCount={EntryPoint.InitCount}  thread={Environment.CurrentManagedThreadId}");
             RynthLog.Info(
-                $"CRASH: code=0x{er.ExceptionCode:X8} addr=0x{er.ExceptionAddress.ToInt64():X8} " +
-                $"module={ShortModule(module)} base=0x{moduleBase.ToInt64():X8} rva=0x{rva:X}");
+                $"  code=0x{er.ExceptionCode:X8}  addr=0x{er.ExceptionAddress.ToInt64():X8}  " +
+                $"module={ShortModule(module)}  base=0x{moduleBase.ToInt64():X8}  rva=0x{rva:X}");
 
             // Decode AV operation from ExceptionInformation[0..1] (first param =
             // 0 read / 1 write / 8 DEP, second param = faulting data address).
@@ -164,10 +176,11 @@ internal static class CrashLogger
                 uint avKind = (uint)Marshal.ReadInt32(ep.ExceptionRecord, infoOffset);
                 IntPtr avAddr = (IntPtr)Marshal.ReadInt32(ep.ExceptionRecord, infoOffset + 4);
                 string kind = avKind switch { 0 => "read", 1 => "write", 8 => "DEP", _ => $"?{avKind}" };
-                RynthLog.Info($"CRASH AV: {kind} faultAddr=0x{avAddr.ToInt64():X8}");
+                RynthLog.Info($"  AV kind={kind}  faultAddr=0x{avAddr.ToInt64():X8}");
             }
 
             DumpContext(ep.ContextRecord);
+            RynthLog.Info("================================================================");
         }
         catch
         {

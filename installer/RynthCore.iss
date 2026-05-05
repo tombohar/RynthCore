@@ -61,6 +61,7 @@ Name: "C:\Games\RynthSuite\RynthAi\ItemGiver";                   Flags: uninsnev
 [Icons]
 ; Start Menu
 Name: "{group}\RynthCore"; Filename: "{app}\RynthCore.exe"; WorkingDir: "{app}"; Comment: "Launch RynthCore and inject into Asheron's Call"
+Name: "{group}\Loot Editor"; Filename: "{app}\Tools\LootEditor\RynthCore.LootEditor.exe"; WorkingDir: "{app}\Tools\LootEditor"; Comment: "Edit VTank-style loot profiles"
 Name: "{group}\Uninstall RynthCore"; Filename: "{uninstallexe}"
 
 ; Optional Desktop shortcut (created only when the desktopicon task is checked)

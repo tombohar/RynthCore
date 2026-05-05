@@ -12,7 +12,12 @@ namespace RynthCore.Injector;
 public sealed class EngineInjectionService
 {
     public const string DefaultAcProcessName = "acclient";
-    public const string EngineDllName = "RynthCore.Engine.dll";
+    /// <summary>The DLL we actually inject — RynthCore.Loader.dll, which then
+    /// loads RynthCore.Engine.dll and can later FreeLibrary + reload it.</summary>
+    public const string EngineDllName = "RynthCore.Loader.dll";
+    /// <summary>Legacy filename — if the user's saved path points to this, we
+    /// transparently redirect to the Loader sibling in the same directory.</summary>
+    private const string LegacyEngineDllName = "RynthCore.Engine.dll";
     private const string InitExport = "RynthCoreInit";
     private const string RuntimeDirectoryName = "Runtime";
 
@@ -417,6 +422,18 @@ public sealed class EngineInjectionService
         if (!string.IsNullOrWhiteSpace(explicitEnginePath))
         {
             string explicitFullPath = Path.GetFullPath(explicitEnginePath);
+
+            // If the user's saved path points to the legacy engine DLL, prefer
+            // the Loader sibling so we get the hot-reload-capable injection
+            // path. Falls through to the explicit path if the Loader isn't
+            // beside it.
+            if (string.Equals(Path.GetFileName(explicitFullPath), LegacyEngineDllName, StringComparison.OrdinalIgnoreCase))
+            {
+                string? legacyDir = Path.GetDirectoryName(explicitFullPath);
+                if (!string.IsNullOrWhiteSpace(legacyDir))
+                    AddCandidate(candidates, Path.Combine(legacyDir, EngineDllName));
+            }
+
             string? runtimeSibling = TryGetRuntimeSiblingEnginePath(explicitFullPath);
             AddCandidate(candidates, runtimeSibling);
             AddCandidate(candidates, explicitFullPath);

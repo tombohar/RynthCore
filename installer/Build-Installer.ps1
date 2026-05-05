@@ -44,18 +44,20 @@ if (-not $RynthSuiteRoot) {
     $RynthSuiteRoot = "$ProjectsRoot\RynthSuite"
 }
 
-$LauncherProject = "$RepoRoot\src\RynthCore.App.Avalonia\RynthCore.App.Avalonia.csproj"
-$EngineProject   = "$RepoRoot\src\RynthCore.Engine\RynthCore.Engine.csproj"
-$PluginProject   = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\RynthCore.Plugin.RynthAi.csproj"
+$LauncherProject   = "$RepoRoot\src\RynthCore.App.Avalonia\RynthCore.App.Avalonia.csproj"
+$EngineProject     = "$RepoRoot\src\RynthCore.Engine\RynthCore.Engine.csproj"
+$PluginProject     = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\RynthCore.Plugin.RynthAi.csproj"
+$LootEditorProject = "$RynthSuiteRoot\Tools\RynthCore.LootEditor\RynthCore.LootEditor.csproj"
 
-$LauncherPublish = "$RepoRoot\src\RynthCore.App.Avalonia\bin\$Configuration\net10.0-windows7.0\win-x86\publish"
-$EnginePublish   = "$RepoRoot\src\RynthCore.Engine\bin\$Configuration\net10.0-windows\win-x86\publish"
-$PluginPublish   = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\bin\$Configuration\net10.0-windows\win-x86\publish"
+$LauncherPublish   = "$RepoRoot\src\RynthCore.App.Avalonia\bin\$Configuration\net10.0-windows7.0\win-x86\publish"
+$EnginePublish     = "$RepoRoot\src\RynthCore.Engine\bin\$Configuration\net10.0-windows\win-x86\publish"
+$PluginPublish     = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\bin\$Configuration\net10.0-windows\win-x86\publish"
+$LootEditorPublish = "$RynthSuiteRoot\Tools\RynthCore.LootEditor\bin\$Configuration\net10.0\win-x86\publish"
 
 $StagingDir  = "$ScriptDir\staging\app"
 
 # ── Validate projects ───────────────────────────────────────────────────────
-foreach ($p in @($LauncherProject, $EngineProject, $PluginProject)) {
+foreach ($p in @($LauncherProject, $EngineProject, $PluginProject, $LootEditorProject)) {
     if (-not (Test-Path $p)) {
         throw "Project not found: $p`nUpdate paths in Build-Installer.ps1 if your repo layout differs."
     }
@@ -64,21 +66,27 @@ foreach ($p in @($LauncherProject, $EngineProject, $PluginProject)) {
 if (-not $SkipBuild) {
     # ── 1. Launcher (self-contained Avalonia WinExe) ─────────────────────────
     Write-Host ""
-    Write-Host "[1/3] Publishing Launcher (self-contained, x86)..." -ForegroundColor Cyan
+    Write-Host "[1/4] Publishing Launcher (self-contained, x86)..." -ForegroundColor Cyan
     dotnet publish $LauncherProject -c $Configuration -r win-x86 --self-contained true
     if ($LASTEXITCODE -ne 0) { throw "Launcher publish failed (exit $LASTEXITCODE)" }
 
     # ── 2. Engine (NativeAOT — the slow one) ──────────────────────────────────
     Write-Host ""
-    Write-Host "[2/3] Publishing Engine (NativeAOT, ~2 min)..." -ForegroundColor Cyan
+    Write-Host "[2/4] Publishing Engine (NativeAOT, ~2 min)..." -ForegroundColor Cyan
     dotnet publish $EngineProject -c $Configuration
     if ($LASTEXITCODE -ne 0) { throw "Engine publish failed (exit $LASTEXITCODE)" }
 
     # ── 3. Plugin (NativeAOT) ─────────────────────────────────────────────────
     Write-Host ""
-    Write-Host "[3/3] Publishing Plugin (NativeAOT)..." -ForegroundColor Cyan
+    Write-Host "[3/4] Publishing Plugin (NativeAOT)..." -ForegroundColor Cyan
     dotnet publish $PluginProject -c $Configuration
     if ($LASTEXITCODE -ne 0) { throw "Plugin publish failed (exit $LASTEXITCODE)" }
+
+    # ── 4. Loot Editor (self-contained Avalonia tool) ─────────────────────────
+    Write-Host ""
+    Write-Host "[4/4] Publishing Loot Editor (self-contained, x86)..." -ForegroundColor Cyan
+    dotnet publish $LootEditorProject -c $Configuration -r win-x86 --self-contained true
+    if ($LASTEXITCODE -ne 0) { throw "Loot Editor publish failed (exit $LASTEXITCODE)" }
 }
 
 # ── Stage ────────────────────────────────────────────────────────────────────
@@ -90,6 +98,7 @@ if (Test-Path "$ScriptDir\staging") {
 }
 New-Item -ItemType Directory -Path "$StagingDir\Runtime\Native"   -Force | Out-Null
 New-Item -ItemType Directory -Path "$StagingDir\Runtime\Plugins"  -Force | Out-Null
+New-Item -ItemType Directory -Path "$StagingDir\Tools\LootEditor" -Force | Out-Null
 
 # Launcher root files (rename .exe → RynthCore.exe; drop .pdb)
 foreach ($file in (Get-ChildItem "$LauncherPublish" -File)) {
@@ -116,6 +125,18 @@ if (Test-Path "$EnginePublish\Native") {
 $pluginDll = "$PluginPublish\RynthCore.Plugin.RynthAi.dll"
 if (-not (Test-Path $pluginDll)) { throw "Plugin DLL not found at: $pluginDll" }
 Copy-Item $pluginDll "$StagingDir\Runtime\Plugins\" -Force
+
+# Loot Editor (self-contained — copy everything from publish, drop pdbs)
+if (-not (Test-Path $LootEditorPublish)) { throw "Loot Editor publish not found at: $LootEditorPublish" }
+foreach ($file in (Get-ChildItem "$LootEditorPublish" -File)) {
+    if ($file.Extension -eq '.pdb') { continue }
+    Copy-Item $file.FullName "$StagingDir\Tools\LootEditor\$($file.Name)" -Force
+}
+foreach ($dir in (Get-ChildItem "$LootEditorPublish" -Directory)) {
+    Copy-Item $dir.FullName "$StagingDir\Tools\LootEditor\" -Recurse -Force
+    # Drop pdbs from copied subdirs
+    Get-ChildItem "$StagingDir\Tools\LootEditor\$($dir.Name)" -Recurse -File -Filter '*.pdb' | Remove-Item -Force
+}
 
 # Report staged sizes
 $engineDll = "$StagingDir\Runtime\RynthCore.Engine.dll"

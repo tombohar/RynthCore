@@ -32,6 +32,108 @@ internal static class PlayerVitalsHooks
             KnownPlayerQualitiesPtr = ptr;
     }
 
+    /// <summary>
+    /// Drops the cached qualities ptr on logout so the next buffed-max inq
+    /// call can't dereference a freed allocation. Called by PluginManager's
+    /// logout dispatch.
+    /// </summary>
+    internal static void ResetSession()
+    {
+        KnownPlayerQualitiesPtr = IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Re-seed the qualities ptr and the vital snapshot from the live player object
+    /// without waiting for SendNoticePlayerDescReceived. Used by the engine's
+    /// hot-reload path: after a reload the new engine's static state is fresh,
+    /// so KnownPlayerQualitiesPtr starts at zero and AC won't fire the
+    /// notification again until the player relogs. Returns true if a non-zero
+    /// qualities ptr was found and applied.
+    /// </summary>
+    public static bool TryReseedFromCurrentPlayer()
+    {
+        if (!ClientObjectHooks.TryGetPlayerQualitiesPtr(out IntPtr qualitiesPtr) || qualitiesPtr == IntPtr.Zero)
+            return false;
+
+        KnownPlayerQualitiesPtr = qualitiesPtr;
+        ClientObjectHooks.SetKnownPlayerQualitiesPtr(qualitiesPtr);
+
+        try
+        {
+            // Struct path first — gives us current health/stamina/mana plus
+            // a baseline max (treated as a floor, not the truth).
+            SeedSnapshotFromQualities(qualitiesPtr);
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"PlayerVitalsHooks: TryReseedFromCurrentPlayer struct seed threw {ex.GetType().Name}: {ex.Message}");
+        }
+
+        try
+        {
+            // Buffed-uint path — what AC actually shows on the vital bars.
+            // This OVERRIDES the max values from the struct path.
+            ReseedBuffedMaxFromQualities(qualitiesPtr);
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"PlayerVitalsHooks: TryReseedFromCurrentPlayer buffed-max threw {ex.GetType().Name}: {ex.Message}");
+        }
+
+        return true;
+    }
+
+    private static unsafe void ReseedBuffedMaxFromQualities(IntPtr qualitiesPtr)
+    {
+        if (qualitiesPtr == IntPtr.Zero || _inqAttribute2ndUint == null)
+            return;
+
+        if (!TryInqUint(qualitiesPtr, MaxHealthType, out uint maxHealth) ||
+            !TryInqUint(qualitiesPtr, MaxStaminaType, out uint maxStamina) ||
+            !TryInqUint(qualitiesPtr, MaxManaType, out uint maxMana))
+        {
+            return;
+        }
+
+        bool changed = false;
+        lock (CacheLock)
+        {
+            PlayerVitalsSnapshot current = _snapshot;
+            PlayerVitalsSnapshot updated = current with
+            {
+                MaxHealth = maxHealth != 0 ? maxHealth : current.MaxHealth,
+                MaxStamina = maxStamina != 0 ? maxStamina : current.MaxStamina,
+                MaxMana = maxMana != 0 ? maxMana : current.MaxMana,
+            };
+            if (!EqualityComparer<PlayerVitalsSnapshot>.Default.Equals(current, updated))
+            {
+                _snapshot = updated;
+                changed = true;
+            }
+        }
+
+        if (changed)
+            RynthLog.Compat($"Compat: player vitals buffed-max re-seed hp_max={maxHealth} st_max={maxStamina} mn_max={maxMana}");
+    }
+
+    private static unsafe bool TryInqUint(IntPtr qualitiesPtr, uint stype, out uint value)
+    {
+        value = 0;
+        try
+        {
+            uint result = 0;
+            // raw=0 → buffed effective (the same number AC renders on the bars).
+            int rc = _inqAttribute2ndUint!(qualitiesPtr, stype, &result, 0);
+            if (rc == 0) return false;
+            value = result;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private const int UpdateAttribute2ndVa = 0x00559900;
     private const int UpdateAttribute2ndLevelVa = 0x00559920;
     private const int PrivateUpdateAttribute2ndVa = 0x00559B20;
@@ -100,6 +202,13 @@ internal static class PlayerVitalsHooks
             }
 
             _inqAttribute2ndStruct = Marshal.GetDelegateForFunctionPointer<InqAttribute2ndStructDelegate>(inqAttribute2ndStructPtr);
+
+            // Buffed-uint overload — used by hot-reload re-seed and any path
+            // that needs the same number AC's vital bars render. The struct
+            // overload returns base values; this one returns buffed.
+            IntPtr inqAttribute2ndUintPtr = new(InqAttribute2ndUintVa);
+            if (SmartBoxLocator.IsPointerInModule(inqAttribute2ndUintPtr))
+                _inqAttribute2ndUint = Marshal.GetDelegateForFunctionPointer<InqAttribute2ndUintDelegate>(inqAttribute2ndUintPtr);
 
             unsafe
             {
@@ -371,6 +480,39 @@ internal static class PlayerVitalsHooks
             string scope = isPrivate ? "private" : $"sender=0x{sender:X8}";
             RynthLog.Verbose($"Compat: player vital update #{_updateLogCount} {scope} stype={stype} value={value}");
         }
+
+        // Diagnostic: log every max-vital update so we can see whether the
+        // UpdateAttribute2nd hook is actually firing for stype 1/3/5 after a
+        // hot reload, vs being silenced. Cheap (only fires on max changes).
+        if (changed && (stype == MaxHealthType || stype == MaxStaminaType || stype == MaxManaType))
+        {
+            RynthLog.Compat($"PlayerVitals: max update stype={stype} value={value} private={isPrivate}");
+        }
+
+        // Refresh MaxHealth from the live buffed-uint inq. Runs from the
+        // detour context (game thread, AC just finished an event), so the
+        // nested-pointer derefs inside InqAttribute2nd are safe. Catches
+        // god-mode / enchantment-drop cases where the buffed effective max
+        // changes without a server-pushed UpdateAttribute2nd(MaxHealth) event.
+        TryRefreshLiveMaxHealth();
+    }
+
+    private static void TryRefreshLiveMaxHealth()
+    {
+        if (_inqAttribute2ndUint == null) return;
+        IntPtr qualities = KnownPlayerQualitiesPtr;
+        if (qualities == IntPtr.Zero) return;
+        if (!LoginLifecycleHooks.HasObservedLoginComplete) return;
+        if (!ClientObjectHooks.IsReadablePointer(qualities)) return;
+
+        if (!TryInqUint(qualities, MaxHealthType, out uint live) || live == 0)
+            return;
+
+        lock (CacheLock)
+        {
+            if (_snapshot.MaxHealth != live)
+                _snapshot = _snapshot with { MaxHealth = live };
+        }
     }
 
     private static unsafe void SeedSnapshotFromQualities(IntPtr playerDescPtr)
@@ -490,4 +632,16 @@ internal static class PlayerVitalsHooks
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private unsafe delegate int InqAttribute2ndStructDelegate(IntPtr thisPtr, uint stype, SecondaryAttributeNative* retval);
+
+    /// <summary>
+    /// CACQualities::InqAttribute2nd uint overload at 0x00592D20.
+    /// raw=0 → returns buffed effective value (initLevel + levelFromCp +
+    /// endurance contribution + EnchantAttribute2nd buffs). raw=1 → unbuffed.
+    /// This is the function AC itself uses to render the vital bars.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private unsafe delegate int InqAttribute2ndUintDelegate(IntPtr thisPtr, uint stype, uint* retval, int raw);
+
+    private const int InqAttribute2ndUintVa = 0x00592D20;
+    private static InqAttribute2ndUintDelegate? _inqAttribute2ndUint;
 }

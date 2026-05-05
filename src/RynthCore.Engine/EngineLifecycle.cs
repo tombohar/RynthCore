@@ -1,0 +1,143 @@
+// ============================================================================
+//  RynthCore.Engine - EngineLifecycle.cs
+//  Orderly engine teardown so the loader can FreeLibrary RynthCore.Engine.dll
+//  without crashing acclient.exe.
+//
+//  Order matters. Each phase is wrapped so a failure does not abort the rest:
+//
+//   1. EndSceneHook.Uninstall — chains into ImGuiController.Shutdown which
+//      tears down PluginManager (RynthPluginShutdown + FreeLibrary plugins),
+//      OverlayTextureRenderer, ViewportRendererBackend, ViewportPlatformBackend,
+//      DX9Backend, Win32Backend (restores WndProc), and destroys ImGui context.
+//   2. Drain — sleep so any in-flight EndScene call has returned through the
+//      trampoline before we tear down anything else.
+//   3. AvaloniaOverlay.Stop — Dispatcher shutdown, join STA thread.
+//   4. PluginManager.ShutdownAll — defensive (no-op if step 1 already ran).
+//   5. MH_DisableHook(ALL) + MH_Uninitialize — safety net for Compatibility/*
+//      hooks that aren't in the ImGui chain.
+//
+//  After this returns, the engine has stopped reading game memory, stopped
+//  drawing, and stopped servicing callbacks. The loader may now FreeLibrary
+//  the engine module.
+//
+//  IMPORTANT: do not call from the AC render thread (an EndScene detour) —
+//  the caller must be on a separate thread so the detour can return cleanly
+//  before we disable the hook.
+// ============================================================================
+
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using RynthCore.Engine.D3D9;
+using RynthCore.Engine.Hooking;
+using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI;
+
+namespace RynthCore.Engine;
+
+internal static class EngineLifecycle
+{
+    private static int _shuttingDown;
+    private static int _hasShutDown;
+
+    /// <summary>
+    /// Named auto-reset event the loader (RynthCore.Loader.dll) waits on.
+    /// Signaling it triggers shutdown + FreeLibrary + LoadLibrary + re-init.
+    /// Must match the constant in RynthCore.Loader.EntryPoint.
+    /// </summary>
+    private const string ReloadEventName = "Local\\RynthCore.Engine.RequestReload";
+
+    private const uint EVENT_MODIFY_STATE = 0x0002;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenEventW(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetEvent(IntPtr hEvent);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    internal static bool IsShuttingDown => Volatile.Read(ref _shuttingDown) != 0;
+    internal static bool HasShutDown => Volatile.Read(ref _hasShutDown) != 0;
+
+    /// <summary>
+    /// Asks the loader to reload the engine. Returns immediately; the loader's
+    /// watcher thread runs the actual shutdown+reload sequence so the caller
+    /// (typically the ImGui shell on the render thread) can finish its frame.
+    /// </summary>
+    public static bool SignalReload()
+    {
+        IntPtr hEvent = OpenEventW(EVENT_MODIFY_STATE, false, ReloadEventName);
+        if (hEvent == IntPtr.Zero)
+        {
+            int err = Marshal.GetLastWin32Error();
+            RynthLog.Info($"SignalReload: OpenEventW failed (error {err}). Loader watcher may not be running.");
+            return false;
+        }
+
+        try
+        {
+            bool ok = SetEvent(hEvent);
+            if (!ok)
+                RynthLog.Info($"SignalReload: SetEvent failed (error {Marshal.GetLastWin32Error()}).");
+            else
+                RynthLog.Info("SignalReload: reload event signaled — loader will run reload sequence.");
+            return ok;
+        }
+        finally
+        {
+            CloseHandle(hEvent);
+        }
+    }
+
+    public static void Shutdown()
+    {
+        if (Interlocked.CompareExchange(ref _shuttingDown, 1, 0) != 0)
+        {
+            RynthLog.Info("EngineLifecycle: Shutdown already in progress — ignoring repeat call.");
+            return;
+        }
+
+        RynthLog.Info("EngineLifecycle: Shutdown beginning.");
+
+        Step("EndSceneHook.Uninstall", () => EndSceneHook.Uninstall());
+
+        // Give in-flight EndScene calls a chance to drain. AC's render thread
+        // may still be inside our detour right now; sleeping a few frames is
+        // a cheap way to ensure it has returned through the trampoline before
+        // we tear down anything else.
+        Thread.Sleep(80);
+
+        Step("AvaloniaOverlay.Stop", () => AvaloniaOverlay.Stop());
+
+        Step("PluginManager.ShutdownAll (defensive)", () => PluginManager.ShutdownAll());
+
+        Step("MH_DisableHook(ALL) + Uninitialize", () =>
+        {
+            int disable = MinHook.MH_DisableHook(MinHook.MH_ALL_HOOKS);
+            RynthLog.Info($"MH_DisableHook(ALL) = {MinHook.StatusString(disable)}");
+            int uninit = MinHook.MH_Uninitialize();
+            RynthLog.Info($"MH_Uninitialize = {MinHook.StatusString(uninit)}");
+        });
+
+        Volatile.Write(ref _hasShutDown, 1);
+        RynthLog.Info("EngineLifecycle: Shutdown complete.");
+    }
+
+    private static void Step(string name, Action action)
+    {
+        try
+        {
+            RynthLog.Info($"EngineLifecycle: -> {name}");
+            action();
+            RynthLog.Info($"EngineLifecycle:    {name} ok");
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Info($"EngineLifecycle:    {name} FAILED: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+}
