@@ -22,7 +22,7 @@
 #>
 param(
     [string]$Configuration = "Release",
-    [string]$IsccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    [string]$IsccPath = "",
     # Explicit path to the RynthSuite repo root. When omitted, defaults to the
     # sibling directory of RynthCore (i.e. ..\RynthSuite relative to this repo).
     [string]$RynthSuiteRoot = "",
@@ -150,13 +150,18 @@ Write-Host "  Total staged: ${totalMb} MB"
 Write-Host "Staging complete: $StagingDir" -ForegroundColor Green
 
 # ── Inno Setup ───────────────────────────────────────────────────────────────
-if (-not (Test-Path $IsccPath)) {
+# Auto-detect ISCC if not specified: try standard install location then user-local.
+if (-not $IsccPath) {
+    $candidates = @(
+        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+    )
+    foreach ($c in $candidates) { if (Test-Path $c) { $IsccPath = $c; break } }
+}
+if (-not $IsccPath -or -not (Test-Path $IsccPath)) {
     Write-Host ""
-    Write-Warning "Inno Setup compiler not found at:"
-    Write-Warning "  $IsccPath"
-    Write-Warning "Install Inno Setup 6 from: https://jrsoftware.org/isdl.php"
-    Write-Warning "Then re-run this script, or invoke ISCC manually:"
-    Write-Warning "  `"$IsccPath`" `"$ScriptDir\RynthCore.iss`""
+    Write-Warning "Inno Setup compiler not found. Install Inno Setup 6 from: https://jrsoftware.org/isdl.php"
+    Write-Warning "Or pass -IsccPath to this script explicitly."
     exit 0
 }
 
