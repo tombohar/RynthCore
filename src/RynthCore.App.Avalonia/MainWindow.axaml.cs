@@ -20,6 +20,12 @@ internal partial class MainWindow : Window
 {
     private static readonly TimeSpan AutoLaunchCooldown = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan AutoLaunchServerDownLogCooldown = TimeSpan.FromSeconds(30);
+
+    // Auto-inject only after the external AC client has been continuously
+    // graphics-ready for this long. The window gives Decal/UBLoader time to
+    // install its own EndScene/WndProc hooks before RynthCore detours on top.
+    private static readonly TimeSpan AutoInjectStableReadyWindow = TimeSpan.FromSeconds(5);
+
     private readonly AcLaunchArgumentBuilder _launchArgumentBuilder = new();
     private readonly AcClientLaunchSettingsService _launchSettings = new();
     private readonly AcClientLoginAutomationService _loginAutomation = new();
@@ -29,6 +35,9 @@ internal partial class MainWindow : Window
     private readonly ObservableCollection<string> _sessionItems = [];
     private readonly ObservableCollection<string> _pluginDllPaths = [];
     private readonly HashSet<int> _launchedSessionPids = [];
+    private readonly Dictionary<int, DateTime> _autoInjectFirstReadyAtUtc = [];
+    private readonly HashSet<int> _autoInjectAttemptedPids = [];
+    private readonly HashSet<int> _autoInjectInFlightPids = [];
     private readonly Dictionary<string, TextBlock> _launchTargetStatusTexts = [];
     private readonly Dictionary<string, CheckBox> _launchTargetChecks = [];
     private readonly Dictionary<string, ComboBox> _launchTargetCharacterDropdowns = [];
@@ -1287,6 +1296,128 @@ internal partial class MainWindow : Window
 
         UpdateLaunchTargetStatuses(targets, activeContexts, activeSessions);
         MaybeQueueAutoLaunch(activeContexts, activeSessions);
+        MaybeAutoInjectExternalClients(targets, activePids, activeContexts, activeSessions);
+    }
+
+    /// <summary>
+    /// Watches each polling tick for acclient.exe processes that the launcher
+    /// did NOT start (e.g., spawned by Decal/UBLoader/ThwargLauncher) and
+    /// auto-injects RynthCore once the client has been graphics-ready for
+    /// <see cref="AutoInjectStableReadyWindow"/> consecutive seconds. The
+    /// stable window gives the foreign launcher time to install its own
+    /// EndScene/WndProc hooks before we detour on top.
+    /// </summary>
+    private void MaybeAutoInjectExternalClients(
+        Process[] targets,
+        HashSet<int> activePids,
+        IReadOnlyDictionary<int, LaunchContextRecord> activeContexts,
+        IReadOnlyDictionary<int, SessionStateRecord> activeSessions)
+    {
+        // Drop bookkeeping for processes that have exited so a future PID
+        // recycle doesn't inherit our previous decision.
+        foreach (int pid in _autoInjectFirstReadyAtUtc.Keys.ToList())
+        {
+            if (!activePids.Contains(pid))
+                _autoInjectFirstReadyAtUtc.Remove(pid);
+        }
+        _autoInjectAttemptedPids.RemoveWhere(pid => !activePids.Contains(pid));
+        _autoInjectInFlightPids.RemoveWhere(pid => !activePids.Contains(pid));
+
+        if (!_settings.WatchForAcStart || _operationBusy)
+            return;
+
+        if (!GetSelectedPluginIds().Contains("rynthcore-engine", StringComparer.OrdinalIgnoreCase))
+            return;
+
+        string enginePath = EnginePathTextBox.Text?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(enginePath))
+            enginePath = _injector.TryResolveEnginePath(null) ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(enginePath))
+            return;
+
+        DateTime nowUtc = DateTime.UtcNow;
+
+        foreach (Process target in targets)
+        {
+            int pid = target.Id;
+
+            if (_autoInjectAttemptedPids.Contains(pid) || _autoInjectInFlightPids.Contains(pid))
+                continue;
+
+            // Skip clients tied to this launcher — manual / on-launch inject
+            // owns those, the watcher only handles foreign processes.
+            if (_launchedSessionPids.Contains(pid) ||
+                activeContexts.ContainsKey(pid) ||
+                activeSessions.ContainsKey(pid))
+            {
+                continue;
+            }
+
+            // Already injected (manually, by another launcher instance, or
+            // via reload) — don't re-inject.
+            if (_injector.IsRynthCoreLoaded(target))
+            {
+                _autoInjectAttemptedPids.Add(pid);
+                continue;
+            }
+
+            if (!_injector.TryDescribeGraphicsReadiness(target, out _))
+            {
+                _autoInjectFirstReadyAtUtc.Remove(pid);
+                continue;
+            }
+
+            if (!_autoInjectFirstReadyAtUtc.TryGetValue(pid, out DateTime firstReadyUtc))
+            {
+                _autoInjectFirstReadyAtUtc[pid] = nowUtc;
+                string? decalModule = _injector.TryDetectDecalStack(target);
+                AppendActivity(decalModule != null
+                    ? $"Auto-inject: external AC PID {pid} detected with {decalModule} loaded — waiting {AutoInjectStableReadyWindow.TotalSeconds:0}s for stable readiness."
+                    : $"Auto-inject: external AC PID {pid} detected — waiting {AutoInjectStableReadyWindow.TotalSeconds:0}s for stable readiness.");
+                continue;
+            }
+
+            if (nowUtc - firstReadyUtc < AutoInjectStableReadyWindow)
+                continue;
+
+            _autoInjectAttemptedPids.Add(pid);
+            _autoInjectInFlightPids.Add(pid);
+            _ = AutoInjectExternalClientAsync(target, pid, enginePath);
+        }
+    }
+
+    private async Task AutoInjectExternalClientAsync(Process target, int pid, string enginePath)
+    {
+        try
+        {
+            AppendActivity($"Auto-inject: starting injection into external AC PID {pid}.");
+            InjectionResult result = await Task.Run(() => _injector.InjectIntoProcess(
+                target,
+                enginePath,
+                line => Dispatcher.UIThread.Post(() => AppendActivity(line))));
+
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                if (result.Success)
+                {
+                    _launchedSessionPids.Add(pid);
+                    AppendActivity($"Auto-inject: success for external PID {pid}.");
+                }
+                else
+                {
+                    AppendActivity($"Auto-inject: failed for PID {pid}: {result.Summary}");
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.UIThread.InvokeAsync(() =>
+                AppendActivity($"Auto-inject: exception for PID {pid}: {ex.Message}"));
+        }
+        finally
+        {
+            await Dispatcher.UIThread.InvokeAsync(() => _autoInjectInFlightPids.Remove(pid));
+        }
     }
 
     private static string SimplifyReadinessStatus(string status)

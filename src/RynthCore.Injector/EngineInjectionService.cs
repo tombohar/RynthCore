@@ -646,6 +646,49 @@ public sealed class EngineInjectionService
         return false;
     }
 
+    /// <summary>Names that signal a Decal-style coexistence stack is loaded
+    /// inside the target acclient.exe. Match is case-insensitive.</summary>
+    private static readonly string[] DecalStackModuleNames =
+    {
+        "decal.dll",
+        "UBLoader.dll",
+        "Decal.Adapter.dll",
+        "phatacd.dll",
+    };
+
+    /// <summary>Names that signal RynthCore is already mapped into the target,
+    /// so the watcher should treat the process as already-injected.</summary>
+    private static readonly string[] RynthCoreModuleNames =
+    {
+        "RynthCore.Loader.dll",
+        "RynthCore.Engine.dll",
+    };
+
+    public bool IsRynthCoreLoaded(Process targetProcess)
+    {
+        foreach (string name in RynthCoreModuleNames)
+        {
+            if (IsModuleLoaded(targetProcess, name))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Inspects loaded modules in the target acclient.exe and returns
+    /// the first Decal-stack module name found, or null if none are present.
+    /// Informational only — used to log when we're attaching alongside Decal.</summary>
+    public string? TryDetectDecalStack(Process targetProcess)
+    {
+        foreach (string name in DecalStackModuleNames)
+        {
+            if (IsModuleLoaded(targetProcess, name))
+                return name;
+        }
+
+        return null;
+    }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct STARTUPINFO
     {

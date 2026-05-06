@@ -28,6 +28,7 @@ internal static class CreateObjectHooks
 
     public static bool IsInstalled { get; private set; }
     public static string StatusMessage => _statusMessage;
+    public static int DispatchCount => _dispatchCount;
 
     public static void Initialize()
     {

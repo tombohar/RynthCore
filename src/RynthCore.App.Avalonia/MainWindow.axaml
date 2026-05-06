@@ -284,7 +284,9 @@
                     <CheckBox x:Name="SkipIntroVideosCheckBox" Content="Skip intro videos" />
                     <CheckBox x:Name="SkipLoginLogosCheckBox" Content="Skip login logos" />
                     <CheckBox x:Name="AutoInjectAfterLaunchCheckBox" Content="Auto inject after launch" />
-                    <CheckBox x:Name="WatchForAcStartCheckBox" Content="Watch for AC start" />
+                    <CheckBox x:Name="WatchForAcStartCheckBox"
+                              Content="Auto-inject into externally-launched AC"
+                              ToolTip.Tip="Watches for acclient.exe processes started by other launchers (Decal, UBLoader, ThwargLauncher). Once the client's graphics state is stable, RynthCore is injected automatically. Skips processes the launcher started itself or that already have RynthCore loaded." />
                     <Button x:Name="SaveBehaviorButton"
                             Content="Save Launch Behavior"
                             HorizontalAlignment="Left" />

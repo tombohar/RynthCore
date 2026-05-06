@@ -171,6 +171,11 @@ internal sealed unsafe class LayeredWindow : IDisposable
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern int    ReleaseDC(IntPtr hWnd, IntPtr hDC);
     [DllImport("user32.dll")] private static extern IntPtr SetCapture(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool   SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern bool   BringWindowToTop(IntPtr hWnd);
+    private const uint GW_OWNER = 4;
     [DllImport("user32.dll")] private static extern bool   ReleaseCapture();
 
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
@@ -383,6 +388,15 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 // Don't activate the layered window on click — preserves AC's
                 // foreground/focus. WS_EX_NOACTIVATE makes this redundant on
                 // most paths but doesn't cover every code path Win32 takes.
+                //
+                // Side effect of returning MA_NOACTIVATE: when both AC and
+                // RynthAi are buried behind another app, clicking RynthAi
+                // would otherwise leave AC in the background. Forward focus
+                // to the owner (AC) so the whole owner-chain comes forward.
+                // Same-process activations bypass the Win32 foreground-rights
+                // restriction, so SetForegroundWindow works without an
+                // explicit AllowSetForegroundWindow grant.
+                BringOwnerToForeground();
                 return (IntPtr)MA_NOACTIVATE;
 
             case WM_ENTERSIZEMOVE:
@@ -512,6 +526,39 @@ internal sealed unsafe class LayeredWindow : IDisposable
         int cy = (short)(((long)lParam >> 16) & 0xFFFF);
         try { OnInput?.Invoke(msg, wParam, lParam, cx, cy); }
         catch { /* best-effort: don't let a forwarder error kill the WndProc */ }
+    }
+
+    /// <summary>
+    /// Pulls the layered window's owner (AC's main HWND) to the foreground.
+    /// Called from WM_MOUSEACTIVATE so a click on RynthAi while AC is buried
+    /// behind another app brings the whole pair to the top together — owned
+    /// non-topmost children follow their owner up the Z-order automatically.
+    /// </summary>
+    private void BringOwnerToForeground()
+    {
+        try
+        {
+            IntPtr owner = GetWindow(Hwnd, GW_OWNER);
+            if (owner == IntPtr.Zero) return;
+
+            if (GetForegroundWindow() == owner)
+            {
+                // Owner already foreground; just make sure we're on top of
+                // any sibling owned-window (e.g., a Decal panel) that might
+                // be sitting above us in AC's owned-children stack.
+                BringWindowToTop(Hwnd);
+                return;
+            }
+
+            SetForegroundWindow(owner);
+            // BringWindowToTop after foreground transfer so we're at the top
+            // of AC's owned-children, not just somewhere in the chain.
+            BringWindowToTop(Hwnd);
+        }
+        catch
+        {
+            // Best-effort z-order management; never let failure kill input.
+        }
     }
 
     private void EnsureDib(int width, int height)

@@ -213,6 +213,18 @@ internal static class PluginManager
     public static bool IsRescanQueued => _rescanRequested;
     public static string PluginDirectory => _pluginsDir;
     public static IReadOnlyList<string> ExtraPluginPaths => EngineSettings.PluginPaths;
+
+    /// <summary>Diagnostic: how many live objects have we observed via the
+    /// CreateObject hook. Zero at plugin-init means our hook never caught
+    /// the initial world load (likely either the hook didn't install or
+    /// Decal intercepted the call without chaining).</summary>
+    public static int LiveObjectCount
+    {
+        get
+        {
+            lock (LiveObjectsLock) return _liveObjects.Count;
+        }
+    }
     public static bool HasObservedUIInitialized => _uiInitializedObserved;
     public static bool HasObservedLoginComplete => _loginCompleteObserved;
 

@@ -417,8 +417,28 @@ public static class EntryPoint
             // the game's device is fully initialized and stable, avoiding the
             // race condition that intermittently crashes NULLREF device creation
             // on Win11's d3d9-on-d3d12 wrapper.
+            //
+            // When Decal is loaded into the same acclient.exe, both we and
+            // Decal install EndScene detours and modify D3D9 render state
+            // each frame; symmetric save/restore between two independent
+            // hookers is impossible, so the second hook leaves garbage state
+            // behind and AC + Decal both stop rendering. In that case we
+            // skip the entire D3D9 path: no EndScene hook, no ImGui, no
+            // viewport platform/renderer. Avalonia floating panels still
+            // work because they ride a separate LayeredWindow (GDI), not
+            // the D3D9 swap chain.
             LoginLifecycleHooks.LoginComplete += () =>
             {
+                if (DecalDetection.IsDecalLoaded)
+                {
+                    RynthLog.Info(
+                        $"D3D9: Decal coexistence — '{DecalDetection.DetectedModule}' loaded, " +
+                        "skipping EndScene hook and ImGui init. " +
+                        "In-game overlay bars are disabled; Avalonia floating panels still work.");
+                    InitPluginsForDecalCoexistence();
+                    return;
+                }
+
                 RynthLog.Info("D3D9: Login complete — starting D3D9 bootstrapper.");
                 D3D9Bootstrapper.Start();
             };
@@ -431,8 +451,18 @@ public static class EntryPoint
             // protects against can't happen post-login.
             if (_initCount >= 2)
             {
-                RynthLog.Info($"D3D9: Hot reload detected (initCount={_initCount}) — starting D3D9 bootstrapper directly.");
-                D3D9Bootstrapper.Start();
+                if (DecalDetection.IsDecalLoaded)
+                {
+                    RynthLog.Info(
+                        $"D3D9: Hot reload (initCount={_initCount}) — Decal coexistence " +
+                        $"('{DecalDetection.DetectedModule}' loaded), skipping D3D9 bootstrapper.");
+                    InitPluginsForDecalCoexistence();
+                }
+                else
+                {
+                    RynthLog.Info($"D3D9: Hot reload detected (initCount={_initCount}) — starting D3D9 bootstrapper directly.");
+                    D3D9Bootstrapper.Start();
+                }
 
                 // Synthesize the LoginComplete signal so subscribers
                 // (PluginManager and others) finish wiring up their post-login
@@ -472,6 +502,128 @@ public static class EntryPoint
         {
             RynthLog.Info($"FATAL in InitWorker: {ex}");
         }
+    }
+
+    // In the no-Decal flow, plugin init happens on the first ImGui EndScene
+    // frame, which empirically lands ~17s after LoginComplete (D3D9 bootstrap
+    // → device discovery → first frame). Those seconds matter: AC fills the
+    // live-object cache (148 objects in our reference run) and the player
+    // qualities pointer gets seeded via SendNoticePlayerDescReceived. If we
+    // call InitPlugins immediately at LoginComplete in coexistence mode,
+    // the plugin loads into an empty world and never gets a replay.
+    //
+    // Mirror the natural latency with an explicit delay so the plugin sees
+    // the same warmed-up state it would get under D3D9.
+    private static readonly TimeSpan DecalCoexistencePluginInitDelay = TimeSpan.FromSeconds(10);
+
+    // PluginManager.TickAll() is normally pumped from inside the ImGui
+    // EndScene frame loop. With ImGui disabled in coexistence mode, the
+    // plugin's per-frame tick (combat scanner, buff manager, target
+    // tracking, snapshot publishing, ...) never iterates — the macro flag
+    // flips on click but the work that flag controls never runs. Drive it
+    // from a worker thread instead. 30 Hz matches normal AC framerate
+    // closely enough for combat reactivity without burning cycles.
+    private static readonly TimeSpan DecalCoexistenceTickInterval = TimeSpan.FromMilliseconds(33);
+
+    /// <summary>
+    /// In Decal coexistence mode the D3D9 bootstrapper never runs, so the
+    /// per-frame ImGui path that normally calls
+    /// <see cref="Plugins.PluginManager.InitPlugins"/> never fires. Plugins
+    /// would then load but never receive Initialize / OnUIInitialized /
+    /// OnLoginComplete and the world-state replay, leaving their UI alive
+    /// but lifeless. Wire that init explicitly here, with IntPtr.Zero for
+    /// the ImGui context and D3D device since we have neither — plugins
+    /// that need them already null-check, and headless plugins (Avalonia-
+    /// rendered like RynthAi) work fine without them.
+    /// </summary>
+    private static void InitPluginsForDecalCoexistence()
+    {
+        IntPtr hwnd = global::RynthCore.Engine.ImGuiBackend.ImGuiController.FindGameWindow();
+        if (hwnd != IntPtr.Zero)
+        {
+            GameHwnd = hwnd;
+            RynthLog.Info($"DecalCoexistence: AC game HWND = 0x{hwnd.ToInt64():X8}");
+        }
+        else
+        {
+            RynthLog.Info("DecalCoexistence: AC game HWND not found — plugins will init without owner HWND.");
+        }
+
+        // Run the delay + init on a worker so we don't block the login
+        // lifecycle callback chain.
+        RynthLog.Info($"DecalCoexistence: deferring plugin init by {DecalCoexistencePluginInitDelay.TotalSeconds:0}s so AC can populate world state.");
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                Thread.Sleep(DecalCoexistencePluginInitDelay);
+
+                // Reseed the qualities pointer from the live player object
+                // before plugins look at vitals. Auto-inject lands AFTER AC
+                // is already past login, so SendNoticePlayerDescReceived may
+                // have fired before our hook was armed; without an explicit
+                // reseed the buffed max falls back to "highest seen" and the
+                // panel reports wrong max HP/Stam/Mana.
+                if (Compatibility.PlayerVitalsHooks.TryReseedFromCurrentPlayer())
+                    RynthLog.Info("DecalCoexistence: qualities ptr re-seeded from live player.");
+                else
+                    RynthLog.Info("DecalCoexistence: could not derive qualities ptr (will fall back to event-driven path).");
+
+                // Surface hook + cache state right before plugin init so the
+                // log answers "did our CreateObject hook actually fire?"
+                // instead of relying on absence-of-replay-line as the only
+                // signal. Zero dispatches with IsInstalled=true is the
+                // smoking gun for Decal having intercepted upstream and
+                // not chained to our detour.
+                RynthLog.Info(
+                    $"DecalCoexistence: hook diagnostics: " +
+                    $"CreateObject installed={Compatibility.CreateObjectHooks.IsInstalled} " +
+                    $"dispatchCount={Compatibility.CreateObjectHooks.DispatchCount}, " +
+                    $"liveObjects={Plugins.PluginManager.LiveObjectCount}");
+
+                Plugins.PluginManager.InitPlugins(IntPtr.Zero, IntPtr.Zero, hwnd);
+
+                // Drive the plugin tick loop. Without this, the macro
+                // toggle flips but the scanner / buff manager / target
+                // tracking never iterate, so panel data stays static and
+                // commands like "start scanner" appear inert.
+                RynthLog.Info($"DecalCoexistence: starting plugin tick pump at ~{1000 / DecalCoexistenceTickInterval.TotalMilliseconds:0} Hz.");
+                int consecutiveFailures = 0;
+                while (true)
+                {
+                    Thread.Sleep(DecalCoexistenceTickInterval);
+                    try
+                    {
+                        Plugins.PluginManager.TickAll();
+                        consecutiveFailures = 0;
+                    }
+                    catch (Exception tickEx)
+                    {
+                        consecutiveFailures++;
+                        // First failure logs full details; after that
+                        // throttle to avoid log floods if tick keeps
+                        // crashing. Bail entirely after sustained failure
+                        // so we don't burn CPU pumping a broken plugin.
+                        if (consecutiveFailures == 1)
+                            RynthLog.Plugin($"DecalCoexistence: TickAll threw {tickEx.GetType().Name}: {tickEx.Message}");
+                        else if (consecutiveFailures == 50)
+                        {
+                            RynthLog.Plugin("DecalCoexistence: TickAll has thrown 50 times in a row — stopping the tick pump. Plugin will be inert until reload.");
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                RynthLog.Plugin($"DecalCoexistence: deferred plugin init threw {ex.GetType().Name}: {ex.Message}");
+            }
+        })
+        {
+            Name = "RynthCore.DecalCoexistence.PluginInit",
+            IsBackground = true,
+        };
+        worker.Start();
     }
 
     private static void RunInitStep(string name, Action action)

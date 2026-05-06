@@ -320,7 +320,7 @@ internal static class ImGuiController
         }
     }
 
-    private static IntPtr FindGameWindow()
+    internal static IntPtr FindGameWindow()
     {
         uint pid = GetCurrentProcessId();
         IntPtr found = IntPtr.Zero;

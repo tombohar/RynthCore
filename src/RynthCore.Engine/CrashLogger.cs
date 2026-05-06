@@ -146,9 +146,19 @@ internal static class CrashLogger
                 return EXCEPTION_CONTINUE_SEARCH;
 
             string module = ResolveModule(er.ExceptionAddress, out IntPtr moduleBase);
-            long rva = moduleBase != IntPtr.Zero
-                ? er.ExceptionAddress.ToInt64() - moduleBase.ToInt64()
-                : 0;
+
+            // Skip exceptions from JIT'd / non-module memory. .NET Framework's
+            // CLR uses speculative null-deref + SEH for some null checks, so
+            // every nullable read in a managed plugin (Decal, etc.) faults
+            // first, then the CLR's own VEH resolves it into a NullReference.
+            // Logging those would flood the log with phantom crashes that
+            // aren't real crashes. Real fatal AVs in our own DLLs or in
+            // acclient.exe always resolve to a loaded module, so this filter
+            // costs us nothing on the signal side.
+            if (moduleBase == IntPtr.Zero)
+                return EXCEPTION_CONTINUE_SEARCH;
+
+            long rva = er.ExceptionAddress.ToInt64() - moduleBase.ToInt64();
 
             string codeName = er.ExceptionCode switch
             {
