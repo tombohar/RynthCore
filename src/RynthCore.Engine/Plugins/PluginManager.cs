@@ -277,7 +277,36 @@ internal static class PluginManager
         InitializeLoadedPlugins();
         DispatchUIInitializedToLoadedPlugins();
         DispatchLoginCompleteToLoadedPlugins();
+        SeedLiveObjectsFromCObjectMaint();
         ReplayPrePluginCreateObjects();
+    }
+
+    /// <summary>
+    /// Seed _liveObjects from AC's authoritative CObjectMaint::weenie_object_table.
+    ///
+    /// On hot-reload the new engine module's static state is empty — without this
+    /// step ReplayPrePluginCreateObjects has nothing to send the freshly loaded
+    /// plugin and combat/inventory/loot all start blind to the existing world.
+    /// On cold-start it also catches any CreateObject events that fired before
+    /// the plugin was ready or were dropped by queue overflow.
+    /// </summary>
+    private static void SeedLiveObjectsFromCObjectMaint()
+    {
+        var collected = new HashSet<uint>();
+        int visited = CObjectMaintHooks.EnumerateLiveWeenieObjectIds(id => collected.Add(id));
+        if (visited <= 0)
+        {
+            RynthLog.Plugin("PluginManager: CObjectMaint enumerate unavailable (maintainer not ready or table empty).");
+            return;
+        }
+
+        int added = 0;
+        lock (LiveObjectsLock)
+        {
+            foreach (uint id in collected)
+                if (_liveObjects.Add(id)) added++;
+        }
+        RynthLog.Plugin($"PluginManager: Seeded {added} new live object id(s) from CObjectMaint (visited {visited}).");
     }
 
     private static void ReplayPrePluginCreateObjects()

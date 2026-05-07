@@ -99,6 +99,7 @@ internal static class ClientObjectHooks
     // SerializeUsingPackDBObj (0x38) + CBaseQualities (0x28) + _attribCache (0x04) = 0x64.
     private const int SkillStatsTableOffset = 0x64;
     private static int _weenieQualitiesOffset = -1;
+    private static int _weenieNullCount = 0;
 
     /// <summary>
     /// The resolved offset from ACCWeenieObject* to its m_pQualities (CACQualities*).
@@ -1338,7 +1339,14 @@ internal static class ClientObjectHooks
             // that bypass managed try/catch in NativeAOT.
             IntPtr weeniePtr = _getWeenieObject(objectId);
             if (weeniePtr == IntPtr.Zero)
-                return false;
+            {
+                // Weenie not in client table yet (post-login burst / fresh spawn).
+                // Can't safely call _objectIsAttackable without the weenie pointer,
+                // so default-true consistent with all other "I don't know" paths.
+                if (System.Threading.Interlocked.Increment(ref _weenieNullCount) <= 20)
+                    RynthLog.Compat($"ObjectIsAttackable: weenie null for 0x{objectId:X8} (count {_weenieNullCount})");
+                return true;
+            }
 
             IntPtr combatSystem = _getCombatSystem();
             if (combatSystem == IntPtr.Zero)
