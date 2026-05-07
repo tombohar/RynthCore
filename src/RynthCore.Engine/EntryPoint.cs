@@ -99,6 +99,20 @@ public static class EntryPoint
             RynthLog.Info("================================================================");
 
             CrashLogger.Install();
+
+            // MultiClientHooks.Initialize installs MinHook detours synchronously
+            // here, BEFORE InitWorker spawns and runs the main PreloadNativeDll
+            // pass. If we don't preload minhook.x86.dll first, the P/Invoke
+            // into minhook fails with DllNotFoundException and the multi-
+            // client hook silently skips — which means AC's
+            // Client::IsAlreadyRunning check fires unpatched on the second-
+            // and-later concurrent acclient.exe processes.
+            string? earlyEngineDir = GetEngineDirectory();
+            if (!string.IsNullOrEmpty(earlyEngineDir))
+                PreloadNativeDll(earlyEngineDir, "minhook.x86.dll");
+            else
+                RynthLog.Info("Early-init: could not resolve engine directory — minhook may not be preloaded before MultiClientHooks.");
+
             RunInitStep("early multi-client hooks", MultiClientHooks.Initialize);
 
             var thread = new Thread(InitWorker)

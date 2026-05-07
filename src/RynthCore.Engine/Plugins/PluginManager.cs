@@ -1674,11 +1674,11 @@ internal static class PluginManager
     {
         _loadGeneration++;
 
-        // Default directory
-        var loaded = PluginLoader.LoadAll(_pluginsDir, _shadowRootDir, _loadGeneration);
-        _plugins.AddRange(loaded);
-
-        // Extra DLL paths from engine settings
+        // Plugin discovery is opt-in via the launcher UI: users add specific
+        // DLL paths through "Add Plugin DLL", which the launcher persists to
+        // %APPDATA%\RynthCore\engine.json. The engine never auto-scans a
+        // bundled Plugins\ folder — that historically caused stray DLLs to
+        // load on next start (or after hot-reload) without the user knowing.
         var extraPaths = EngineSettings.PluginPaths;
         for (int i = 0; i < extraPaths.Count; i++)
         {

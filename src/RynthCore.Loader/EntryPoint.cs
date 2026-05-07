@@ -186,7 +186,23 @@ public static class EntryPoint
             string stagingDir = Path.Combine(canonicalDir, ReloadStagingSubdir);
             Directory.CreateDirectory(stagingDir);
 
-            string stagedPath = Path.Combine(stagingDir, $"RynthCore.Engine.gen{generation}.dll");
+            // Stage to a per-PID, per-generation filename. The PID component
+            // matters when multiple acclient.exe processes run concurrently
+            // (multi-client launches): each process used to collide on the
+            // same `RynthCore.Engine.gen1.dll` filename, and once the first
+            // process had it mapped, every subsequent client failed staging
+            // (sharing violation) and never loaded the engine — which then
+            // skipped MultiClientHooks and tripped AC's single-instance check.
+            string stagedPath = Path.Combine(
+                stagingDir,
+                $"RynthCore.Engine.p{Environment.ProcessId}.gen{generation}.dll");
+
+            // Best-effort sweep of stale per-PID staging files left behind by
+            // previous acclient.exe processes that exited without cleanup.
+            // Files still mapped by a live process will fail Delete with a
+            // sharing violation — harmless, just skip them.
+            TryCleanStaleStagingFiles(stagingDir);
+
             File.Copy(canonicalPath, stagedPath, overwrite: true);
 
             // Skia/HarfBuzz/cimgui are loaded from the canonical Runtime
@@ -200,6 +216,33 @@ public static class EntryPoint
         {
             Log($"StageReloadCopy: {ex.GetType().Name}: {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Delete staged engine copies left behind by previous acclient.exe
+    /// processes. Files still mapped by a live process will fail with a
+    /// sharing violation — that's expected and we silently skip them.
+    /// </summary>
+    private static void TryCleanStaleStagingFiles(string stagingDir)
+    {
+        try
+        {
+            foreach (string path in Directory.EnumerateFiles(stagingDir, "RynthCore.Engine.p*.gen*.dll"))
+            {
+                try
+                {
+                    File.Delete(path);
+                }
+                catch
+                {
+                    // File is still mapped by a live process — leave it.
+                }
+            }
+        }
+        catch
+        {
+            // staging dir might not exist yet on a fresh install — Directory.CreateDirectory above handles that
         }
     }
 

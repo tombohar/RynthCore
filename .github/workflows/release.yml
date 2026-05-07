@@ -43,10 +43,10 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw "git clone RynthSuite failed" }
 
     # ── Toolchain ─────────────────────────────────────────────────────────────
-    - name: Setup .NET 9
+    - name: Setup .NET 10
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '10.0.x'
 
     - name: Install Inno Setup 6
       run: choco install innosetup --yes --no-progress
@@ -99,17 +99,42 @@ jobs:
           ## Installation
 
           1. Download **RynthCore-Setup.exe** below and run it
-          2. Start Asheron's Call and log in to your character
-          3. Open **RynthCore** from the Start Menu or Desktop shortcut
-          4. Click **Inject Running AC** in the launcher
-          5. The RynthAi panel will appear inside the AC window
+          2. Open **RynthCore** from the Start Menu or Desktop shortcut
 
           ---
 
-          **First-time setup** — in the RynthCore launcher:
-          - Set your `acclient.exe` path under **Runtime Paths** if prompted
-          - The plugin auto-loads from `C:\Games\RynthCore\Runtime\Plugins\`
+          ## ⚠ Important first-time setup
 
-          Loot, nav, and meta profiles go in `C:\Games\RynthSuite\RynthAi\`
+          ### 1. Second AC client install (required for multi-client coexistence)
 
-          Log file: `%USERPROFILE%\Desktop\RynthCore.log`
+          If you also play Asheron's Call through ThwargLauncher or another launcher, you **must** keep a separate copy of the AC client for RynthCore launches. Otherwise the two stacks fight over the same DAT files and one of them will fail with "cannot access the data files."
+
+          Run this once in PowerShell:
+
+          ```powershell
+          robocopy "C:\Turbine\Asheron's Call" "C:\Games\RynthCore\AcClient" /E /MT:8 /NFL /NDL /NJH /NJS /NP /XF "acclient_*.log" "acclient.log"
+          ```
+
+          Then in the RynthCore launcher, set **AC Client Path** to:
+          ```
+          C:\Games\RynthCore\AcClient\acclient.exe
+          ```
+
+          (~1.4 GB extra disk. The two installs share `Documents\Asheron's Call\UserPreferences.ini` so multi-port stays in sync.)
+
+          ### 2. Add the RynthAi plugin (opt-in)
+
+          The installer drops the plugin DLL at `C:\Games\RynthSuite\RynthAi\RynthCore.Plugin.RynthAi.dll`. The engine does **not** auto-scan a Plugins folder. To enable RynthAi:
+
+          - Open the launcher → **Plugins** tab → **Add Plugin DLL**
+          - Browse to `C:\Games\RynthSuite\RynthAi\RynthCore.Plugin.RynthAi.dll`
+          - Launch AC. The RynthAi panel appears inside the AC window.
+
+          Loot, nav, and meta profiles also live under `C:\Games\RynthSuite\RynthAi\`.
+
+          ---
+
+          ## Logs
+
+          - Unified RynthCore log: `C:\Games\RynthCore\Logs\RynthCore.log`
+          - Crash dumps and engine init traces show up there with `[loader]`, `[engine]`, `[plugin]`, and `[compat]` tags.

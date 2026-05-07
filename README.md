@@ -1,60 +1,70 @@
 # RynthCore
 
-RynthCore is a modern .NET 9 modding host for Asheron's Call. It combines an x86 NativeAOT in-process engine, an injector, a desktop launcher, and a plugin surface.
+RynthCore is a modern .NET 10 modding host for Asheron's Call. It combines an x86 NativeAOT in-process engine, a hot-reload-capable loader, an injector, an Avalonia desktop launcher, and a plugin surface that replaces the legacy Decal + UBService + VTank stack with a self-contained RynthCore-native API.
 
-The project is currently focused on three things:
+The plugin code (RynthAi etc.) lives in a sibling repository: [RynthSuite](https://github.com/tombohar/RynthSuite).
 
-- launching and injecting the RynthCore engine into `acclient.exe`
-- hosting in-game UI through an embedded overlay stack
-- building a RynthCore-native plugin API with hooks for chat, combat, targeting, movement, object, and UI events
+## What it does
+
+- Launches `acclient.exe` (suspended if needed) and injects the RynthCore loader
+- Hosts in-game UI through an embedded ImGui overlay, with a parallel Avalonia overlay stack for floating panels (and for Decal coexistence mode where ImGui is disabled)
+- Exposes a growing plugin host API with hooks for chat, combat, targeting, movement, object lifecycle, vendor/trade, vitals, enchantments, and UI events
+- Hot-reloads plugin DLLs without restarting AC; hot-reloads the engine itself via the loader DLL
+- Detects Decal/UBService/VTank coexistence and degrades gracefully (skips D3D9 path, drives plugin tick from a worker thread)
 
 ## Solution layout
 
-The repository currently ships these main projects:
-
-- `src/RynthCore.Engine` - x86 NativeAOT runtime injected into the game client
-- `src/RynthCore.Injector` - process launch and DLL injection service
-- `src/RynthCore.App` - Windows desktop launcher
-- `src/RynthCore.App.Avalonia` - Avalonia launcher preview and profile manager
-- `src/RynthCore.PluginSdk` - public host API surface for plugins
-- `src/RynthCore.PluginCore` - runtime helpers for plugin bootstrap/lifecycle
-- `Plugins/RynthCore.Plugin.HelloBox` - sample plugin used for end-to-end testing
-
-## Current capabilities
-
-- injects `RynthCore.Engine.dll` into the x86 Asheron's Call client
-- hosts overlay panels inside the game process
-- includes launcher/profile flows for servers, accounts, and saved launch targets
-- exposes a growing plugin host API for chat, target, combat, movement, object, and UI-related hooks
-- includes legal guardrails and hook planning docs
+```
+RynthCore.sln
+├── src/RynthCore.Loader            x86 NativeAOT DLL — injection target.
+│                                    Owns RynthCoreInit; loads + reloads
+│                                    the Engine.
+├── src/RynthCore.Engine             x86 NativeAOT DLL — the runtime
+│                                    injected into acclient.exe. Pattern-
+│                                    scanned hooks, D3D9 + ImGui + Avalonia
+│                                    overlays, plugin manager, crash logger.
+├── src/RynthCore.Injector           x86 console — Win32 LoadLibrary +
+│                                    CreateRemoteThread injector with a
+│                                    suspended-launch / early-inject path.
+├── src/RynthCore.App.Avalonia       Desktop launcher (Avalonia 11.2.3,
+│                                    Fluent theme). Profile management,
+│                                    server status, launches and injects.
+├── src/RynthCore.App                Shared service classes linked into
+│                                    both Engine and Avalonia launcher
+│                                    via <Compile Include /> — not built
+│                                    standalone.
+├── src/RynthCore.PluginSdk          Public host API surface for plugins.
+└── src/RynthCore.PluginCore         RynthPluginBase + lifecycle helpers.
+```
 
 ## Prerequisites
 
-- Windows
-- .NET 9 SDK
-- Visual Studio 2022 with the .NET desktop and C++ desktop workloads
+- Windows 10 or 11
+- **.NET 10 SDK (x86)**
+- Visual Studio 2022 Build Tools with the **.NET desktop** and **C++ desktop** workloads (the C++ tools are required by the NativeAOT ILC linker)
+- Asheron's Call client installed (default: `C:\Turbine\Asheron's Call\`)
 
-The engine project targets `win-x86` and uses NativeAOT. A bundled `cimgui.dll` is included under `src/RynthCore.Engine/Native/`.
+The Engine, Loader, and plugin projects target `net10.0-windows` with `RuntimeIdentifier=win-x86` and `PublishAot=true`. A bundled `cimgui.dll` ships under `src/RynthCore.Engine/Native/`.
 
 ## Build
 
 From the repository root:
 
 ```powershell
-$env:DOTNET_CLI_HOME = "$PWD\\.dotnet-home"
+$env:DOTNET_CLI_HOME = "$PWD\.dotnet-home"
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
 dotnet build .\RynthCore.sln -c Release
 ```
 
-To publish the main runtime pieces individually:
+To publish the runtime pieces individually (use **`publish`**, not `build`, for any NativeAOT project):
 
 ```powershell
+dotnet publish .\src\RynthCore.Loader\RynthCore.Loader.csproj -c Release
 dotnet publish .\src\RynthCore.Engine\RynthCore.Engine.csproj -c Release
-dotnet publish .\src\RynthCore.App\RynthCore.App.csproj -c Release -r win-x86
 dotnet publish .\src\RynthCore.App.Avalonia\RynthCore.App.Avalonia.csproj -c Release
 ```
 
-For a clean local deployment, keep the launcher at the top level of `C:\Games\RynthCore` and place the injectable engine payload under `C:\Games\RynthCore\Runtime\`. The injector now resolves `Runtime\RynthCore.Engine.dll` by default, which keeps the game folder tidier while still allowing manual overrides.
+For a clean local deployment, keep the launcher at the top level of `C:\Games\RynthCore\` and place the injectable engine and loader payloads under `C:\Games\RynthCore\Runtime\`. The injector's saved-path resolver prefers `Runtime\RynthCore.Loader.dll`, falls back to `Runtime\RynthCore.Engine.dll` for legacy direct-load setups, and walks up sibling directories so manual layouts still work.
 
 You can produce that layout with:
 
@@ -62,18 +72,21 @@ You can produce that layout with:
 .\scripts\Deploy-RynthCore.ps1
 ```
 
+For full deploy details, the Inno Setup installer, and gotchas, see [`BUILD.md`](BUILD.md).
+
+## Documentation
+
+- `BUILD.md` — full build, deploy, and installer instructions
+- `CLAUDE.md` — project memory file (architecture orientation, technical facts, common pitfalls)
+- `docs/ACCLIENT_HOOK_INVENTORY.md` — hook target inventory against the user's live `acclient.exe`
+- `docs/PLUGIN_HOOK_MATRIX.md` — clean-room hook surface matrix
+- `docs/LEGAL_COMPATIBILITY.md` — project policy on Decal/VTank compatibility
+- `docs/archive/` — archived plans and one-off utilities
+
 ## Repository notes
 
-- local settings and machine-specific files are ignored through `.gitignore`
-- generated `bin/`, `obj/`, `.vs/`, and `.dotnet-home/` content should not be committed
-- launcher data such as profiles and runtime state is expected to live outside the repository
-- compatibility planning and legal guardrails live in `docs/`
-
-See:
-
-- `docs/ACCLIENT_HOOK_INVENTORY.md`
-- `docs/PLUGIN_HOOK_MATRIX.md`
-- `docs/LEGAL_COMPATIBILITY.md`
+- Local settings, machine-specific files, generated `bin/`, `obj/`, `.vs/`, `.dotnet-home/` content, and launcher data (profiles, runtime state) are kept out of source control via `.gitignore`
+- Plugin code lives in the [RynthSuite](https://github.com/tombohar/RynthSuite) repo as a sibling clone
 
 ## Security and secrets
 

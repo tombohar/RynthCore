@@ -40,8 +40,13 @@ Name: desktopicon; Description: "Create a &desktop shortcut"; GroupDescription: 
 
 ; Program files
 [Files]
-; Installs the entire staging layout (launcher, Runtime\, Runtime\Plugins\, etc.)
+; Launcher + engine runtime + Loot Editor go to {app} (default C:\Games\RynthCore\)
 Source: "staging\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; Plugin DLL goes to its canonical home next to plugin data dirs.
+; Engine does NOT auto-scan this folder — user adds the full DLL path in the
+; launcher's Plugins tab to enable the plugin. See BUILD.md "Deploy RynthAi Plugin".
+Source: "staging\plugins\RynthAi\RynthCore.Plugin.RynthAi.dll"; DestDir: "C:\Games\RynthSuite\RynthAi"; Flags: ignoreversion
 
 ; Data directories (created once; never removed on uninstall)
 [Dirs]

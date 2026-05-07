@@ -97,8 +97,15 @@ if (Test-Path "$ScriptDir\staging") {
     Remove-Item "$ScriptDir\staging" -Recurse -Force
 }
 New-Item -ItemType Directory -Path "$StagingDir\Runtime\Native"   -Force | Out-Null
-New-Item -ItemType Directory -Path "$StagingDir\Runtime\Plugins"  -Force | Out-Null
 New-Item -ItemType Directory -Path "$StagingDir\Tools\LootEditor" -Force | Out-Null
+# Plugin DLLs are staged into a separate top-level folder (not under
+# Runtime\) because the engine no longer auto-scans Runtime\Plugins\.
+# The .iss file installs this folder to C:\Games\RynthSuite\<PluginName>\
+# (an absolute destination outside {app}) so the plugin lives next to its
+# data dirs and the user adds the path via the launcher's Plugins tab.
+$pluginStagingDir = "$ScriptDir\staging\plugins"
+if (Test-Path $pluginStagingDir) { Remove-Item $pluginStagingDir -Recurse -Force }
+New-Item -ItemType Directory -Path "$pluginStagingDir\RynthAi" -Force | Out-Null
 
 # Launcher root files (rename .exe → RynthCore.exe; drop .pdb)
 foreach ($file in (Get-ChildItem "$LauncherPublish" -File)) {
@@ -121,10 +128,12 @@ if (Test-Path "$EnginePublish\Native") {
     }
 }
 
-# Plugin DLL only (cimgui.dll excluded — already in Runtime from Engine)
+# Plugin DLL only — staged separately so the .iss file can install it to an
+# absolute path outside {app}. The engine no longer auto-scans Runtime\Plugins\;
+# the user explicitly adds the plugin path via the launcher's Plugins tab.
 $pluginDll = "$PluginPublish\RynthCore.Plugin.RynthAi.dll"
 if (-not (Test-Path $pluginDll)) { throw "Plugin DLL not found at: $pluginDll" }
-Copy-Item $pluginDll "$StagingDir\Runtime\Plugins\" -Force
+Copy-Item $pluginDll "$pluginStagingDir\RynthAi\" -Force
 
 # Loot Editor (self-contained — copy everything from publish, drop pdbs)
 if (-not (Test-Path $LootEditorPublish)) { throw "Loot Editor publish not found at: $LootEditorPublish" }
