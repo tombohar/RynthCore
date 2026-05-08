@@ -17,6 +17,10 @@ internal sealed class AppSettings
     public bool AutoLaunch { get; set; }
     public bool AutoInjectAfterLaunch { get; set; } = true;
     public bool WatchForAcStart { get; set; } = true;
+    public int LaunchStaggerMs { get; set; } = 250;
+    public int CrashRelaunchLimitInWindow { get; set; } = 3;
+    public int CrashRelaunchWindowMinutes { get; set; } = 5;
+    public bool OverrideWindowTitle { get; set; } = true;
     public List<string> EnabledPluginIds { get; set; } = [];
     public List<string> PluginDllPaths { get; set; } = [];
     public List<LaunchServerProfile> ServerProfiles { get; set; } = [];

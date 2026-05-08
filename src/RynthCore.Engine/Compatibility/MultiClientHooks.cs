@@ -10,7 +10,13 @@ internal static class MultiClientHooks
     private const int ExpectedImageSize = 0x56D000;
     private const int IsAlreadyRunningVa = 0x004122A0;
     private const int OpenDataFileVa = 0x00675920;
-    private const uint OpenDataFileSharedAccessFlag = 0x4;
+    // OpenDataFile's prologue tests bit 1 (value 0x2) of openFlags:
+    //   and cl, 2
+    //   cmp cl, 2
+    // That's the bit AC's code dispatches on for "shared access" — the prior
+    // value 0x4 was a misread of the byte sequence. Decal's coexisting clients
+    // open with bit 1 set; matching that lets us share with their handles.
+    private const uint OpenDataFileSharedAccessFlag = 0x2;
 
     private static readonly byte?[] IsAlreadyRunningSignature =
     [
@@ -109,7 +115,7 @@ internal static class MultiClientHooks
             }
 
             if (IsInstalled)
-                _statusMessage = $"Hooked Client::IsAlreadyRunning @ 0x{IsAlreadyRunningVa:X8} and CLBlockAllocator::OpenDataFile @ 0x{OpenDataFileVa:X8}.";
+                _statusMessage = $"Hooked Client::IsAlreadyRunning @ 0x{IsAlreadyRunningVa:X8} and CLBlockAllocator::OpenDataFile @ 0x{OpenDataFileVa:X8} (share flag 0x2).";
             else
                 _statusMessage = $"Partial install. alreadyRunning={IsAlreadyRunningInstalled}, dataFile={OpenDataFileInstalled}.";
         }
@@ -182,6 +188,10 @@ internal static class MultiClientHooks
 
     private static byte IsAlreadyRunningDetour(IntPtr thisPtr)
     {
+        // Skip the original entirely: it has a side-effect MessageBox path
+        // that surfaces the "client is already running on this machine" dialog
+        // even when we'd later override its return value, so calling it makes
+        // things worse. Returning 0 unconditionally was the original design.
         return 0;
     }
 

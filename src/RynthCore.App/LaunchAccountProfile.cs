@@ -16,6 +16,19 @@ internal sealed class LaunchAccountProfile
     public string Alias { get; set; } = string.Empty;
     public string ServerId { get; set; } = string.Empty;
 
+    // Saved AC client window placement, restored on next launch and updated
+    // when the user moves/resizes the window. Null until first save.
+    public int? WindowX { get; set; }
+    public int? WindowY { get; set; }
+    public int? WindowWidth { get; set; }
+    public int? WindowHeight { get; set; }
+
+    /// Optional path to a per-account stash of UserPreferences.ini. If set, the
+    /// launcher copies this file over My Documents\Asheron's Call\UserPreferences.ini
+    /// before launching this account. Empty/missing path = no swap, AC reads
+    /// whatever happens to be in place.
+    public string UserPrefsPath { get; set; } = string.Empty;
+
     public string DisplayName
     {
         get
@@ -39,7 +52,12 @@ internal sealed class LaunchAccountProfile
             Password = Password,
             CharacterName = CharacterName,
             Alias = Alias,
-            ServerId = ServerId
+            ServerId = ServerId,
+            WindowX = WindowX,
+            WindowY = WindowY,
+            WindowWidth = WindowWidth,
+            WindowHeight = WindowHeight,
+            UserPrefsPath = UserPrefsPath,
         };
     }
 
@@ -51,6 +69,11 @@ internal sealed class LaunchAccountProfile
         CharacterName = source.CharacterName;
         Alias = source.Alias;
         ServerId = source.ServerId;
+        WindowX = source.WindowX;
+        WindowY = source.WindowY;
+        WindowWidth = source.WindowWidth;
+        WindowHeight = source.WindowHeight;
+        UserPrefsPath = source.UserPrefsPath;
     }
 
     public override string ToString()

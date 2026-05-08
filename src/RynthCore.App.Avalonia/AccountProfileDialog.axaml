@@ -1,8 +1,8 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="RynthCore.App.Avalonia.AccountProfileDialog"
-        Width="520"
-        Height="310"
+        Width="600"
+        Height="620"
         CanResize="False"
         WindowStartupLocation="CenterOwner"
         Title="Account Profile"
@@ -26,6 +26,21 @@
                  TextWrapping="Wrap" />
       <TextBlock Text="Alias" Foreground="#EAF0F4" />
       <TextBox x:Name="AliasBox" />
+
+      <TextBlock Text="Per-account UserPreferences.ini stash (optional)" Foreground="#EAF0F4" />
+      <Grid ColumnDefinitions="*,Auto,Auto">
+        <TextBox x:Name="UserPrefsPathBox"
+                 Grid.Column="0"
+                 Margin="0,0,6,0"
+                 Watermark="Leave blank to share the global UserPreferences.ini" />
+        <Button x:Name="BrowseUserPrefsButton" Grid.Column="1" Margin="0,0,6,0" Content="Browse..." />
+        <Button x:Name="SnapshotUserPrefsButton" Grid.Column="2" Content="Snapshot live →" />
+      </Grid>
+      <TextBlock x:Name="UserPrefsHintText"
+                 Foreground="#9AA8B3"
+                 TextWrapping="Wrap"
+                 Text="Leave blank for the default path under %APPDATA%\RynthCore\prefs. The launcher snapshots live UserPreferences.ini back to the stash automatically when this client exits, so per-account chat tabs / hotkeys / UI layout persist across sessions." />
+
       <TextBlock x:Name="ValidationText" Foreground="#E2B348" TextWrapping="Wrap" />
     </StackPanel>
 

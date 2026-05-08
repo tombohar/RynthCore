@@ -287,6 +287,21 @@
                     <CheckBox x:Name="WatchForAcStartCheckBox"
                               Content="Auto-inject into externally-launched AC"
                               ToolTip.Tip="Watches for acclient.exe processes started by other launchers (Decal, UBLoader, ThwargLauncher). Once the client's graphics state is stable, RynthCore is injected automatically. Skips processes the launcher started itself or that already have RynthCore loaded." />
+                    <CheckBox x:Name="OverrideWindowTitleCheckBox"
+                              Content="Rewrite AC window titles per account"
+                              ToolTip.Tip="Replaces &quot;Asheron's Call&quot; with &quot;Account / Character @ Server&quot; on tracked clients so multi-box taskbars are readable. Untracked external clients are left alone." />
+
+                    <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto" Margin="0,8,0,0">
+                      <TextBlock Grid.Row="0" Grid.Column="0" Text="Inter-launch stagger (ms)" Foreground="#EAF0F4" VerticalAlignment="Center" Margin="0,0,8,6" />
+                      <NumericUpDown Grid.Row="0" Grid.Column="1" x:Name="LaunchStaggerMsBox" Minimum="0" Maximum="5000" Increment="50" Width="120" Margin="0,0,0,6" />
+
+                      <TextBlock Grid.Row="1" Grid.Column="0" Text="Crash-relaunch limit per window" Foreground="#EAF0F4" VerticalAlignment="Center" Margin="0,0,8,6" />
+                      <NumericUpDown Grid.Row="1" Grid.Column="1" x:Name="CrashRelaunchLimitBox" Minimum="1" Maximum="20" Increment="1" Width="120" Margin="0,0,0,6" />
+
+                      <TextBlock Grid.Row="2" Grid.Column="0" Text="Crash-relaunch window (minutes)" Foreground="#EAF0F4" VerticalAlignment="Center" Margin="0,0,8,0" />
+                      <NumericUpDown Grid.Row="2" Grid.Column="1" x:Name="CrashRelaunchWindowBox" Minimum="1" Maximum="60" Increment="1" Width="120" />
+                    </Grid>
+
                     <Button x:Name="SaveBehaviorButton"
                             Content="Save Launch Behavior"
                             HorizontalAlignment="Left" />

@@ -4,7 +4,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
@@ -35,6 +38,29 @@ internal partial class MainWindow : Window
     private readonly ObservableCollection<string> _sessionItems = [];
     private readonly ObservableCollection<string> _pluginDllPaths = [];
     private readonly HashSet<int> _launchedSessionPids = [];
+    // Per-PID metadata for crash detection: which account this client belongs
+    // to and when we launched it. Used by the auto-relaunch circuit breaker
+    // to distinguish "exited normally after a long session" from "quick exit".
+    private readonly Dictionary<int, (string AccountKey, DateTime LaunchedAtUtc)> _launchedPidInfo = [];
+    // Sliding-window crash history per account-key. RecordCrash appends; the
+    // breaker check trims entries older than CrashRelaunchWindowMinutes.
+    private readonly Dictionary<string, List<DateTime>> _crashHistoryByAccount = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTime> _crashBreakerLogTimesUtc = new(StringComparer.OrdinalIgnoreCase);
+    // Clients that exit faster than this (from the launcher's perspective) are
+    // counted as crashes for the auto-relaunch circuit breaker.
+    private static readonly TimeSpan CrashQuickExitWindow = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan CrashBreakerLogCooldown = TimeSpan.FromMinutes(2);
+    // Tracks PIDs we've already applied a saved window position to. Once
+    // applied, we switch to save-on-change mode so the user can freely move
+    // the window without us snapping it back.
+    private readonly HashSet<int> _windowPositionAppliedPids = [];
+    // Serializes prefs-swap launches so two accounts don't race on the live
+    // UserPreferences.ini. Non-prefs launches don't acquire this and stay
+    // parallel.
+    private readonly SemaphoreSlim _userPrefsSwapLock = new(1, 1);
+    // After CreateProcess+inject+resume, hold the prefs lock this long so AC
+    // has a chance to read UserPreferences.ini before another account swaps.
+    private static readonly TimeSpan UserPrefsSettleDelay = TimeSpan.FromSeconds(2);
     private readonly Dictionary<int, DateTime> _autoInjectFirstReadyAtUtc = [];
     private readonly HashSet<int> _autoInjectAttemptedPids = [];
     private readonly HashSet<int> _autoInjectInFlightPids = [];
@@ -161,6 +187,10 @@ internal partial class MainWindow : Window
         AutoLaunchHeaderCheckBox.IsChecked = _settings.AutoLaunch;
         AutoInjectAfterLaunchCheckBox.IsChecked = _settings.AutoInjectAfterLaunch;
         WatchForAcStartCheckBox.IsChecked = _settings.WatchForAcStart;
+        OverrideWindowTitleCheckBox.IsChecked = _settings.OverrideWindowTitle;
+        LaunchStaggerMsBox.Value = _settings.LaunchStaggerMs;
+        CrashRelaunchLimitBox.Value = _settings.CrashRelaunchLimitInWindow;
+        CrashRelaunchWindowBox.Value = _settings.CrashRelaunchWindowMinutes;
     }
 
     private void BuildPluginLoadout()
@@ -740,6 +770,13 @@ internal partial class MainWindow : Window
         _settings.AutoLaunch = AutoLaunchHeaderCheckBox.IsChecked == true;
         _settings.AutoInjectAfterLaunch = AutoInjectAfterLaunchCheckBox.IsChecked == true;
         _settings.WatchForAcStart = WatchForAcStartCheckBox.IsChecked == true;
+        _settings.OverrideWindowTitle = OverrideWindowTitleCheckBox.IsChecked == true;
+        if (LaunchStaggerMsBox.Value is decimal staggerMs)
+            _settings.LaunchStaggerMs = (int)staggerMs;
+        if (CrashRelaunchLimitBox.Value is decimal crashLimit)
+            _settings.CrashRelaunchLimitInWindow = (int)crashLimit;
+        if (CrashRelaunchWindowBox.Value is decimal crashWindow)
+            _settings.CrashRelaunchWindowMinutes = (int)crashWindow;
         _settings.EnabledPluginIds = GetSelectedPluginIds().ToList();
         if (_settings.EnabledPluginIds.Count == 0)
             _settings.EnabledPluginIds.Add("rynthcore-engine");
@@ -846,9 +883,28 @@ internal partial class MainWindow : Window
             AppendActivity($"Preparing {launchLabel}.");
             HashSet<string> activeAccountKeys = GetActiveAccountKeys();
 
-            for (int i = 0; i < accountsToLaunch.Count; i++)
+            // Manual launch is the user saying "try again" — clear any crash
+            // history for the accounts they're explicitly launching so the
+            // circuit breaker doesn't immediately fire on their next auto-tick.
+            if (!isAutomaticLaunch)
             {
-                LaunchAccountProfile account = accountsToLaunch[i];
+                foreach (LaunchAccountProfile account in accountsToLaunch)
+                {
+                    string key = BuildAccountKey(account.AccountName);
+                    if (!string.IsNullOrEmpty(key))
+                    {
+                        _crashHistoryByAccount.Remove(key);
+                        _crashBreakerLogTimesUtc.Remove(key);
+                    }
+                }
+            }
+
+            // Validation + already-running filter pass. Runs synchronously on
+            // the UI thread; all skips emit activity messages here so they're
+            // ordered and easy to read.
+            var prepared = new List<(LaunchAccountProfile Account, string Args, string Summary, LaunchContextRecord Context)>();
+            foreach (LaunchAccountProfile account in accountsToLaunch)
+            {
                 if (!TryGetLaunchArgumentsForAccount(
                     account,
                     allowArgumentOverride: !isAutomaticLaunch,
@@ -870,67 +926,35 @@ internal partial class MainWindow : Window
                 }
 
                 LaunchContextRecord launchContext = BuildLaunchContext(account, contextServer);
+                // Best-effort legacy write — last writer wins. The PID-specific
+                // writes inside the launch task are the authoritative path.
                 LaunchContextStore.WriteLegacy(launchContext);
 
-                if (shouldInject)
-                {
-                    InjectionResult result = await Task.Run(() =>
-                        _injector.LaunchSuspendedAndInject(
-                            acPath,
-                            launchArguments,
-                            enginePath,
-                            AppendActivity,
-                            processId =>
-                            {
-                                LaunchContextStore.WriteForProcess(processId, launchContext);
-                                WritePendingSessionState(processId, launchContext);
-                            }));
+                if (!string.IsNullOrWhiteSpace(accountKey))
+                    activeAccountKeys.Add(accountKey);
 
-                    if (result.Success)
-                    {
-                        if (result.ProcessId is int trackedPid)
-                        {
-                            _launchedSessionPids.Add(trackedPid);
-                            activeAccountKeys.Add(accountKey);
-                        }
-
-                        AppendActivity(result.ProcessId is int pid
-                            ? $"Launch complete for {launchSummary} (PID {pid})."
-                            : $"Launch complete for {launchSummary}.");
-                    }
-                    else
-                    {
-                        AppendActivity($"Launch failed for {launchSummary}: {result.Summary}");
-                    }
-                }
-                else
-                {
-                    try
-                    {
-                        var psi = new System.Diagnostics.ProcessStartInfo(acPath, launchArguments)
-                        {
-                            UseShellExecute = false,
-                            WorkingDirectory = Path.GetDirectoryName(acPath) ?? string.Empty
-                        };
-                        var proc = System.Diagnostics.Process.Start(psi);
-                        if (proc != null)
-                        {
-                            _launchedSessionPids.Add(proc.Id);
-                            LaunchContextStore.WriteForProcess(proc.Id, launchContext);
-                            WritePendingSessionState(proc.Id, launchContext);
-                            activeAccountKeys.Add(accountKey);
-                        }
-                        AppendActivity($"Launched AC (no injection) using {launchSummary}.");
-                    }
-                    catch (Exception launchEx)
-                    {
-                        AppendActivity($"Launch failed for {launchSummary}: {launchEx.Message}");
-                    }
-                }
-
-                if (i < accountsToLaunch.Count - 1)
-                    await Task.Delay(500);
+                prepared.Add((account, launchArguments, launchSummary, launchContext));
             }
+
+            // Launch pass: parallel with stagger. Each task awaits Task.Run for
+            // the heavy CreateProcess+inject work, so result-handling resumes
+            // back on the UI thread (Avalonia captures the dispatcher context).
+            int staggerMs = Math.Max(0, _settings.LaunchStaggerMs);
+            var launchTasks = new List<Task>(prepared.Count);
+            for (int i = 0; i < prepared.Count; i++)
+            {
+                if (i > 0 && staggerMs > 0)
+                    await Task.Delay(staggerMs);
+
+                var p = prepared[i];
+                Task launchTask = shouldInject
+                    ? LaunchOneInjectedAsync(p.Account, acPath, p.Args, enginePath, p.Summary, p.Context)
+                    : LaunchOneNoInjectAsync(p.Account, acPath, p.Args, p.Summary, p.Context);
+                launchTasks.Add(launchTask);
+            }
+
+            if (launchTasks.Count > 0)
+                await Task.WhenAll(launchTasks);
         }
         catch (Exception ex)
         {
@@ -940,6 +964,132 @@ internal partial class MainWindow : Window
         {
             SetOperationState(false);
             RefreshSessionState();
+        }
+    }
+
+    private async Task LaunchOneInjectedAsync(
+        LaunchAccountProfile account,
+        string acPath,
+        string launchArguments,
+        string enginePath,
+        string launchSummary,
+        LaunchContextRecord launchContext)
+    {
+        string resolvedPrefsPath = ResolveUserPrefsPath(account);
+        bool needsPrefsSwap = !string.IsNullOrEmpty(resolvedPrefsPath) && File.Exists(resolvedPrefsPath);
+        if (needsPrefsSwap)
+            await _userPrefsSwapLock.WaitAsync();
+
+        try
+        {
+            if (needsPrefsSwap)
+            {
+                _launchSettings.SwapUserPreferences(resolvedPrefsPath, _settings.AllowMultipleClients, AppendActivity);
+            }
+
+            InjectionResult result = await Task.Run(() =>
+                _injector.LaunchSuspendedAndInject(
+                    acPath,
+                    launchArguments,
+                    enginePath,
+                    AppendActivity,
+                    processId =>
+                    {
+                        LaunchContextStore.WriteForProcess(processId, launchContext);
+                        WritePendingSessionState(processId, launchContext);
+                    }));
+
+            string accountKey = BuildAccountKey(launchContext.AccountName);
+
+            if (result.Success)
+            {
+                if (result.ProcessId is int trackedPid)
+                {
+                    _launchedSessionPids.Add(trackedPid);
+                    _launchedPidInfo[trackedPid] = (accountKey, DateTime.UtcNow);
+                }
+
+                AppendActivity(result.ProcessId is int pid
+                    ? $"Launch complete for {launchSummary} (PID {pid})."
+                    : $"Launch complete for {launchSummary}.");
+            }
+            else
+            {
+                RecordCrash(accountKey);
+                AppendActivity($"Launch failed for {launchSummary}: {result.Summary}");
+            }
+
+            if (needsPrefsSwap)
+                await Task.Delay(UserPrefsSettleDelay);
+        }
+        finally
+        {
+            if (needsPrefsSwap)
+                _userPrefsSwapLock.Release();
+        }
+    }
+
+    private async Task LaunchOneNoInjectAsync(
+        LaunchAccountProfile account,
+        string acPath,
+        string launchArguments,
+        string launchSummary,
+        LaunchContextRecord launchContext)
+    {
+        string resolvedPrefsPath = ResolveUserPrefsPath(account);
+        bool needsPrefsSwap = !string.IsNullOrEmpty(resolvedPrefsPath) && File.Exists(resolvedPrefsPath);
+        if (needsPrefsSwap)
+            await _userPrefsSwapLock.WaitAsync();
+
+        try
+        {
+            if (needsPrefsSwap)
+            {
+                _launchSettings.SwapUserPreferences(resolvedPrefsPath, _settings.AllowMultipleClients, AppendActivity);
+            }
+
+            Process? proc = null;
+            Exception? launchEx = null;
+
+            await Task.Run(() =>
+            {
+                try
+                {
+                    var psi = new ProcessStartInfo(acPath, launchArguments)
+                    {
+                        UseShellExecute = false,
+                        WorkingDirectory = Path.GetDirectoryName(acPath) ?? string.Empty
+                    };
+                    proc = Process.Start(psi);
+                }
+                catch (Exception ex)
+                {
+                    launchEx = ex;
+                }
+            });
+
+            if (launchEx != null)
+            {
+                AppendActivity($"Launch failed for {launchSummary}: {launchEx.Message}");
+                return;
+            }
+
+            if (proc != null)
+            {
+                _launchedSessionPids.Add(proc.Id);
+                _launchedPidInfo[proc.Id] = (BuildAccountKey(launchContext.AccountName), DateTime.UtcNow);
+                LaunchContextStore.WriteForProcess(proc.Id, launchContext);
+                WritePendingSessionState(proc.Id, launchContext);
+            }
+            AppendActivity($"Launched AC (no injection) using {launchSummary}.");
+
+            if (needsPrefsSwap)
+                await Task.Delay(UserPrefsSettleDelay);
+        }
+        finally
+        {
+            if (needsPrefsSwap)
+                _userPrefsSwapLock.Release();
         }
     }
 
@@ -1235,6 +1385,12 @@ internal partial class MainWindow : Window
 
     private void AppendActivity(string message)
     {
+        if (!Dispatcher.UIThread.CheckAccess())
+        {
+            Dispatcher.UIThread.Post(() => AppendActivity(message));
+            return;
+        }
+
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
         _activityItems.Insert(0, line);
 
@@ -1272,7 +1428,9 @@ internal partial class MainWindow : Window
         SessionStateStore.DeleteStaleProcessFiles(activePids);
         Dictionary<int, LaunchContextRecord> activeContexts = LaunchContextStore.ReadForActiveProcesses(activePids);
         Dictionary<int, SessionStateRecord> activeSessions = SessionStateStore.ReadForActiveProcesses(activePids);
+        DetectQuickExits(activePids);
         _launchedSessionPids.RemoveWhere(pid => !activePids.Contains(pid));
+        _windowPositionAppliedPids.RemoveWhere(pid => !activePids.Contains(pid));
 
         AcStatusText.Text = targets.Length switch
         {
@@ -1284,11 +1442,15 @@ internal partial class MainWindow : Window
         _sessionItems.Clear();
         foreach (Process process in targets.OrderBy(p => p.Id))
         {
-            string readiness = _injector.TryDescribeGraphicsReadiness(process, out string status)
-                ? "graphics ready"
-                : SimplifyReadinessStatus(status);
+            bool graphicsReady = _injector.TryDescribeGraphicsReadiness(process, out string status);
+            string readiness = graphicsReady ? "graphics ready" : SimplifyReadinessStatus(status);
             string origin = DescribeSessionOrigin(process, activeContexts, activeSessions);
             _sessionItems.Add($"PID {process.Id}  |  {origin}  |  {readiness}");
+
+            if (_settings.OverrideWindowTitle)
+                ApplyDesiredWindowTitle(process, activeContexts, activeSessions);
+
+            ApplyOrPersistWindowPlacement(process, graphicsReady, activeContexts, activeSessions);
         }
 
         if (_sessionItems.Count == 0)
@@ -1504,6 +1666,331 @@ internal partial class MainWindow : Window
             ? string.Empty
             : accountName.Trim().ToUpperInvariant();
 
+    /// <summary>
+    /// Walks <see cref="_launchedPidInfo"/> and counts any client that exited
+    /// within <see cref="CrashQuickExitWindow"/> as a crash, feeding the
+    /// auto-relaunch circuit breaker. Long-lived sessions that exit normally
+    /// (user closed the window after playing) are silently dropped.
+    /// </summary>
+    private void DetectQuickExits(HashSet<int> activePids)
+    {
+        if (_launchedPidInfo.Count == 0)
+            return;
+
+        DateTime nowUtc = DateTime.UtcNow;
+        List<int>? toRemove = null;
+        foreach (KeyValuePair<int, (string AccountKey, DateTime LaunchedAtUtc)> entry in _launchedPidInfo)
+        {
+            if (activePids.Contains(entry.Key))
+                continue;
+
+            (toRemove ??= []).Add(entry.Key);
+            TimeSpan uptime = nowUtc - entry.Value.LaunchedAtUtc;
+            if (uptime < CrashQuickExitWindow && !string.IsNullOrEmpty(entry.Value.AccountKey))
+            {
+                RecordCrash(entry.Value.AccountKey);
+                AppendActivity($"Account '{entry.Value.AccountKey}' client (PID {entry.Key}) exited after {uptime.TotalSeconds:F0}s — counted as crash.");
+            }
+            else if (!string.IsNullOrEmpty(entry.Value.AccountKey))
+            {
+                // Real play session ended. Snapshot live UserPreferences.ini
+                // back to this account's stash so settings the user changed
+                // in-game survive into next launch.
+                AutoSnapshotUserPrefs(entry.Value.AccountKey);
+            }
+        }
+
+        if (toRemove != null)
+        {
+            foreach (int pid in toRemove)
+                _launchedPidInfo.Remove(pid);
+        }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowTextW(IntPtr hWnd, string lpString);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WinRect { public int Left, Top, Right, Bottom; }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hWnd, out WinRect lpRect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
+
+    /// <summary>
+    /// On the first tick after AC reaches graphics-ready for a tracked client,
+    /// applies the saved window placement for that account. After that, every
+    /// tick reads the current rect and persists changes back to the profile so
+    /// user-initiated moves/resizes survive restart. Idempotent within a tolerance
+    /// to avoid spamming SaveSettings on DWM-frame fudge.
+    /// </summary>
+    private void ApplyOrPersistWindowPlacement(
+        Process process,
+        bool graphicsReady,
+        IReadOnlyDictionary<int, LaunchContextRecord> activeContexts,
+        IReadOnlyDictionary<int, SessionStateRecord> activeSessions)
+    {
+        string? accountName = null;
+        if (activeSessions.TryGetValue(process.Id, out SessionStateRecord? s))
+            accountName = s.AccountName;
+        else if (activeContexts.TryGetValue(process.Id, out LaunchContextRecord? c))
+            accountName = c.AccountName;
+
+        if (string.IsNullOrWhiteSpace(accountName))
+            return;
+
+        LaunchAccountProfile? profile = _settings.AccountProfiles.FirstOrDefault(a =>
+            string.Equals(a.AccountName, accountName, StringComparison.OrdinalIgnoreCase));
+        if (profile == null)
+            return;
+
+        IntPtr hwnd;
+        try
+        {
+            process.Refresh();
+            hwnd = process.MainWindowHandle;
+        }
+        catch
+        {
+            return;
+        }
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        bool hasSaved = profile.WindowX.HasValue && profile.WindowY.HasValue
+                        && profile.WindowWidth.HasValue && profile.WindowHeight.HasValue;
+
+        if (!_windowPositionAppliedPids.Contains(process.Id))
+        {
+            // Wait until AC is past its own window-setup before applying ours,
+            // otherwise AC will move the window after we set it.
+            if (!graphicsReady)
+                return;
+
+            _windowPositionAppliedPids.Add(process.Id);
+            if (hasSaved)
+            {
+                SetWindowPos(
+                    hwnd,
+                    IntPtr.Zero,
+                    profile.WindowX!.Value,
+                    profile.WindowY!.Value,
+                    profile.WindowWidth!.Value,
+                    profile.WindowHeight!.Value,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+                return;
+            }
+            // No saved position — fall through to capture the current placement
+            // so we have something to restore next launch.
+        }
+
+        if (!GetWindowRect(hwnd, out WinRect rect))
+            return;
+
+        int x = rect.Left;
+        int y = rect.Top;
+        int w = rect.Right - rect.Left;
+        int h = rect.Bottom - rect.Top;
+
+        // AC sometimes reports tiny default-window placements before the real
+        // game window is up — ignore those so we don't blow away a real saved
+        // position with junk.
+        if (w < 200 || h < 200)
+            return;
+
+        const int Tolerance = 2;
+        bool changed = !hasSaved
+            || Math.Abs(profile.WindowX!.Value - x) > Tolerance
+            || Math.Abs(profile.WindowY!.Value - y) > Tolerance
+            || Math.Abs(profile.WindowWidth!.Value - w) > Tolerance
+            || Math.Abs(profile.WindowHeight!.Value - h) > Tolerance;
+
+        if (changed)
+        {
+            profile.WindowX = x;
+            profile.WindowY = y;
+            profile.WindowWidth = w;
+            profile.WindowHeight = h;
+            SaveSettings();
+        }
+    }
+
+    /// <summary>
+    /// Re-applies a launcher-controlled title (e.g. "Buffi / Buffi @ RynthAce")
+    /// to a tracked acclient.exe window. AC overwrites its own title back to
+    /// "Asheron's Call" periodically, so this fires every <see cref="_sessionTimer"/>
+    /// tick. Untracked clients (no LaunchContext / SessionState record) are
+    /// left alone — those are foreign launches we don't own naming for.
+    /// </summary>
+    private static void ApplyDesiredWindowTitle(
+        Process process,
+        IReadOnlyDictionary<int, LaunchContextRecord> activeContexts,
+        IReadOnlyDictionary<int, SessionStateRecord> activeSessions)
+    {
+        string desired = ComputeDesiredWindowTitle(process.Id, activeContexts, activeSessions);
+        if (string.IsNullOrEmpty(desired))
+            return;
+
+        IntPtr hwnd;
+        try
+        {
+            process.Refresh();
+            hwnd = process.MainWindowHandle;
+        }
+        catch
+        {
+            return;
+        }
+
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        SetWindowTextW(hwnd, desired);
+    }
+
+    private static string ComputeDesiredWindowTitle(
+        int pid,
+        IReadOnlyDictionary<int, LaunchContextRecord> activeContexts,
+        IReadOnlyDictionary<int, SessionStateRecord> activeSessions)
+    {
+        string account = string.Empty;
+        string server = string.Empty;
+        string character = string.Empty;
+
+        if (activeSessions.TryGetValue(pid, out SessionStateRecord? session))
+        {
+            account = session.AccountName ?? string.Empty;
+            server = session.ServerName ?? string.Empty;
+            character = !string.IsNullOrWhiteSpace(session.CharacterName)
+                ? session.CharacterName
+                : (session.TargetCharacter ?? string.Empty);
+        }
+        else if (activeContexts.TryGetValue(pid, out LaunchContextRecord? context))
+        {
+            account = context.AccountName ?? string.Empty;
+            server = context.ServerName ?? string.Empty;
+            character = context.TargetCharacter ?? string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(account))
+            return string.Empty;
+
+        var sb = new StringBuilder(account.Trim());
+        if (!string.IsNullOrWhiteSpace(character))
+            sb.Append(" / ").Append(character.Trim());
+        if (!string.IsNullOrWhiteSpace(server))
+            sb.Append(" @ ").Append(server.Trim());
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Resolves the per-account UserPreferences.ini stash path. If the profile
+    /// has an explicit path set, that wins (advanced override). Otherwise the
+    /// launcher uses an auto-managed file under %APPDATA%\RynthCore\prefs\
+    /// keyed by account name. Returns empty when the account has no name yet
+    /// (new profile, can't pick a filename).
+    /// </summary>
+    private static string ResolveUserPrefsPath(LaunchAccountProfile account)
+    {
+        if (!string.IsNullOrWhiteSpace(account.UserPrefsPath))
+            return account.UserPrefsPath.Trim();
+
+        if (string.IsNullOrWhiteSpace(account.AccountName))
+            return string.Empty;
+
+        string appdata = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        string prefsDir = Path.Combine(appdata, "RynthCore", "prefs");
+        string safeName = string.Join("_", account.AccountName.Trim().Split(Path.GetInvalidFileNameChars()));
+        return Path.Combine(prefsDir, $"{safeName}.ini");
+    }
+
+    /// <summary>
+    /// Copies the current live UserPreferences.ini to the resolved stash for
+    /// the named account. Called on tracked-client exit so per-account prefs
+    /// stay current without the user clicking anything. Silently no-ops if
+    /// AC isn't present or the account can't be resolved.
+    /// </summary>
+    private void AutoSnapshotUserPrefs(string accountKey)
+    {
+        if (string.IsNullOrEmpty(accountKey))
+            return;
+
+        LaunchAccountProfile? profile = _settings.AccountProfiles.FirstOrDefault(a =>
+            string.Equals(BuildAccountKey(a.AccountName), accountKey, StringComparison.OrdinalIgnoreCase));
+        if (profile == null)
+            return;
+
+        string stashPath = ResolveUserPrefsPath(profile);
+        if (string.IsNullOrEmpty(stashPath))
+            return;
+
+        string livePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "Asheron's Call",
+            "UserPreferences.ini");
+        if (!File.Exists(livePath))
+            return;
+
+        try
+        {
+            string? dir = Path.GetDirectoryName(stashPath);
+            if (!string.IsNullOrWhiteSpace(dir))
+                Directory.CreateDirectory(dir);
+            File.Copy(livePath, stashPath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            AppendActivity($"Auto-snapshot of UserPreferences.ini failed for {profile.AccountName}: {ex.Message}");
+        }
+    }
+
+    private void RecordCrash(string accountKey)
+    {
+        if (string.IsNullOrEmpty(accountKey))
+            return;
+
+        if (!_crashHistoryByAccount.TryGetValue(accountKey, out List<DateTime>? history))
+            _crashHistoryByAccount[accountKey] = history = [];
+
+        history.Add(DateTime.UtcNow);
+    }
+
+    private bool IsAccountInCircuitBreaker(string accountKey, DateTime nowUtc)
+    {
+        if (string.IsNullOrEmpty(accountKey))
+            return false;
+
+        if (!_crashHistoryByAccount.TryGetValue(accountKey, out List<DateTime>? history) || history.Count == 0)
+            return false;
+
+        TimeSpan window = TimeSpan.FromMinutes(Math.Max(1, _settings.CrashRelaunchWindowMinutes));
+        history.RemoveAll(t => nowUtc - t > window);
+        return history.Count >= Math.Max(1, _settings.CrashRelaunchLimitInWindow);
+    }
+
+    private void MaybeLogCircuitBreaker(LaunchAccountProfile account, DateTime nowUtc)
+    {
+        string accountKey = BuildAccountKey(account.AccountName);
+        if (_crashBreakerLogTimesUtc.TryGetValue(accountKey, out DateTime lastLogUtc) &&
+            nowUtc - lastLogUtc < CrashBreakerLogCooldown)
+        {
+            return;
+        }
+
+        _crashBreakerLogTimesUtc[accountKey] = nowUtc;
+        int limit = Math.Max(1, _settings.CrashRelaunchLimitInWindow);
+        int window = Math.Max(1, _settings.CrashRelaunchWindowMinutes);
+        AppendActivity($"Auto launch paused for {account.DisplayName}: {limit} quick exits in {window} min. Manually relaunch to retry.");
+    }
+
     private void MaybeQueueAutoLaunch(
         IReadOnlyDictionary<int, LaunchContextRecord> activeContexts,
         IReadOnlyDictionary<int, SessionStateRecord> activeSessions)
@@ -1540,6 +2027,13 @@ internal partial class MainWindow : Window
             if (_autoLaunchAttemptTimesUtc.TryGetValue(account.Id, out DateTime lastAttemptUtc) &&
                 nowUtc - lastAttemptUtc < AutoLaunchCooldown)
             {
+                continue;
+            }
+
+            string accountKey = BuildAccountKey(account.AccountName);
+            if (IsAccountInCircuitBreaker(accountKey, nowUtc))
+            {
+                MaybeLogCircuitBreaker(account, nowUtc);
                 continue;
             }
 
