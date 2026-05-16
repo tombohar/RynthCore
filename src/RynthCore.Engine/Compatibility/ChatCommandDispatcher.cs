@@ -1,5 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
+using RynthCore.Engine.Plugins;
 
 namespace RynthCore.Engine.Compatibility;
 
@@ -32,6 +34,16 @@ internal static unsafe class ChatCommandDispatcher
     /// rather than direct function calls.
     /// </summary>
     public static bool UseDirectChatInput { get; set; }
+
+    /// <summary>
+    /// Recursion guard for the plugin pre-dispatch step. A plugin's
+    /// OnChatBarEnter handler may chain by calling Host.InvokeChatParser →
+    /// PluginManager.InvokeChatParser → ClientHelperHooks.InvokeParser →
+    /// ChatCommandDispatcher.Dispatch. Without this guard the plugin would
+    /// re-enter its own OnChatBarEnter on the chained line and could loop.
+    /// </summary>
+    [ThreadStatic]
+    private static bool _inPluginPreDispatch;
 
     /// <summary>
     /// AC1Legacy::PStringBase&lt;char&gt; for Event_* functions.
@@ -77,6 +89,32 @@ internal static unsafe class ChatCommandDispatcher
 
             // Expand shorthand: /s → /say, /t → /tell, /e → /emote
             trimmed = ExpandShorthand(trimmed);
+
+            // Plugin pre-dispatch: matches AC's natural OutgoingChatDetour
+            // behavior — when a user types in the chat bar, plugins
+            // (RynthAi /ra, VTank /vt, UBService /ub, MagTools /mt, etc.) get
+            // first dibs via OnChatBarEnter and can eat the line. We mirror
+            // that here so callers like OnLoginCommandRunner and
+            // Host.InvokeChatParser produce identical-to-typed semantics.
+            //
+            // Skipped when:
+            //  - Already inside a plugin pre-dispatch on this thread
+            //    (avoids infinite loops on chained Host.InvokeChatParser calls)
+            //  - UseDirectChatInput is on (raw simulate mode bypasses this)
+            if (!UseDirectChatInput && !_inPluginPreDispatch)
+            {
+                _inPluginPreDispatch = true;
+                try
+                {
+                    if (PluginManager.DispatchChatBarEnter(trimmed))
+                        return true;
+                }
+                catch (Exception ex)
+                {
+                    RynthLog.Compat($"ChatDispatch: plugin pre-dispatch threw on '{trimmed}' - {ex.GetType().Name}: {ex.Message}");
+                }
+                finally { _inPluginPreDispatch = false; }
+            }
 
             // Direct Chat Input mode — everything goes through keyboard sim
             if (UseDirectChatInput)

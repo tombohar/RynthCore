@@ -113,18 +113,34 @@ internal static class CommandInterpreterHooks
         }
     }
 
+    // Rate-limited diag counters — see why patrol "creates a route but stands
+    // still" by surfacing the actual movement API calls in RynthCore.log.
+    private static int _setAutoRunCalls;
+    private static int _turnToHeadingCalls;
+    private static int _setMotionCalls;
+    private static bool ShouldLogMove(int n) => n <= 3 || (n & 0x7) == 0;
+
     public static bool SetAutoRun(bool enabled)
     {
+        int n = System.Threading.Interlocked.Increment(ref _setAutoRunCalls);
         if (!TryBindDelegates())
+        {
+            if (ShouldLogMove(n))
+                RynthLog.Compat($"Move: SetAutoRun({enabled}) #{n} — TryBindDelegates failed: {_statusMessage}");
             return false;
+        }
 
         try
         {
             _setAutoRun!(_boundCmdInterp, enabled ? 1 : 0, 1);
+            if (ShouldLogMove(n))
+                RynthLog.Compat($"Move: SetAutoRun({enabled}) #{n} -> ok (cmdInterp=0x{_boundCmdInterp.ToInt32():X8})");
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            if (ShouldLogMove(n))
+                RynthLog.Compat($"Move: SetAutoRun({enabled}) #{n} threw {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }
@@ -163,16 +179,25 @@ internal static class CommandInterpreterHooks
 
     public static bool TurnToHeading(float headingDegrees)
     {
+        int n = System.Threading.Interlocked.Increment(ref _turnToHeadingCalls);
         if (!TryBindDelegates() || _turnToHeading == null)
+        {
+            if (ShouldLogMove(n))
+                RynthLog.Compat($"Move: TurnToHeading({headingDegrees:0.0}) #{n} — bind={(_turnToHeading != null)} status='{_statusMessage}'");
             return false;
+        }
 
         try
         {
             _turnToHeading(_boundCmdInterp, headingDegrees);
+            if (ShouldLogMove(n))
+                RynthLog.Compat($"Move: TurnToHeading({headingDegrees:0.0}) #{n} -> ok");
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            if (ShouldLogMove(n))
+                RynthLog.Compat($"Move: TurnToHeading({headingDegrees:0.0}) #{n} threw {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }

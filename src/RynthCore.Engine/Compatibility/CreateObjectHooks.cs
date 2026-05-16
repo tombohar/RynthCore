@@ -71,6 +71,7 @@ internal static class CreateObjectHooks
 
     private static IntPtr CreateObjectDetour(IntPtr thisPtr, uint objectId, IntPtr visualDesc, IntPtr physicsDesc, IntPtr weenieDesc)
     {
+        RecursionGuard.Tick("CreateObjectHooks.CreateObject");
         if (objectId != 0 && visualDesc != IntPtr.Zero)
             PaletteCache.ReadFromObjDesc(objectId, visualDesc);
 

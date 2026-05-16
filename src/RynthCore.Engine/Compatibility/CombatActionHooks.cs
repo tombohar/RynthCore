@@ -206,7 +206,7 @@ internal static class CombatActionHooks
             {
                 int requestIdVa = textSection.TextBaseVa + requestIdFuncOff;
                 _requestId = Marshal.GetDelegateForFunctionPointer<RequestIdDelegate>(new IntPtr(requestIdVa));
-                RynthLog.Verbose($"Compat: RequestId (IdentifyObject 0xC8) found at 0x{requestIdVa:X8}");
+                RynthLog.Compat($"Compat: RequestId (IdentifyObject 0xC8) found at 0x{requestIdVa:X8}");
             }
             else
             {
@@ -217,7 +217,7 @@ internal static class CombatActionHooks
             {
                 int castSpellVa = textSection.TextBaseVa + castSpellFuncOff;
                 _castSpell = Marshal.GetDelegateForFunctionPointer<CastSpellDelegate>(new IntPtr(castSpellVa));
-                RynthLog.Verbose($"Compat: CastSpell (0x4A) found at 0x{castSpellVa:X8}");
+                RynthLog.Compat($"Compat: CastSpell (0x4A) found at 0x{castSpellVa:X8}");
             }
             else
             {
@@ -231,7 +231,7 @@ internal static class CombatActionHooks
             {
                 _castSpellClient = Marshal.GetDelegateForFunctionPointer<CastSpellClientDelegate>(
                     new IntPtr(ClientMagicSystemCastSpellVa));
-                RynthLog.Verbose($"Compat: ClientMagicSystem::CastSpell bound at 0x{ClientMagicSystemCastSpellVa:X8}");
+                RynthLog.Compat($"Compat: ClientMagicSystem::CastSpell bound at 0x{ClientMagicSystemCastSpellVa:X8}");
             }
             else
             {
@@ -239,12 +239,26 @@ internal static class CombatActionHooks
             }
 
             InstallQueryHealthResponseHook();
-            InstallInnerDispatcherHook();
+            // InstallInnerDispatcherHook intentionally disabled 2026-05-14.
+            // Its anchor-then-scan-backward heuristic (find CALL to
+            // QueryHealthResponseVa, then walk back ≤0x1000 bytes looking for
+            // `SUB ESP, 0x1C0`) lands on a function that — on this ACE
+            // build at least — AC traverses during world-entry, and the
+            // MinHook trampoline at that entry point hangs the load (player
+            // stuck on "Entering World", no SendLoginCompleteNotification).
+            // The 0xF658 character-list and 0xC9 IdentifyObject packets we
+            // were collecting here are redundantly captured by SmartBoxHooks'
+            // DispatchSmartBoxEvent / DispatchGameEvent hooks (see
+            // SmartBoxHooks.DispatchSmartBoxEventDetour → ProcessPotentialCharacterMessage
+            // at line ~117). Re-enabling requires a tighter pattern that
+            // *uniquely* identifies the intended inner dispatcher, plus a
+            // verification that AC's world-load path is unaffected.
+            // InstallInnerDispatcherHook();
 
             IsInitialized = true;
             _statusMessage = "Ready.";
 
-            RynthLog.Verbose($"Compat: combat hooks ready - cancel=0x{cancelVa:X8}, mode=0x{changeModeVa:X8}, health=0x{queryHealthVa:X8}, melee=0x{meleeVa:X8}, missile=0x{missileVa:X8}");
+            RynthLog.Compat($"Compat: combat hooks ready - cancel=0x{cancelVa:X8}, mode=0x{changeModeVa:X8}, health=0x{queryHealthVa:X8}, melee=0x{meleeVa:X8}, missile=0x{missileVa:X8}");
             return true;
         }
         catch (Exception ex)
@@ -351,23 +365,45 @@ internal static class CombatActionHooks
         if (spellId <= 0) return false;
 
         // Prefer ClientMagicSystem::CastSpell — initiates the full client-side
-        // cast sequence (animation, state, network). The target must already be
-        // selected via SelectItem before calling this.
+        // cast sequence (animation, state, network). AC's CastSpell reads its
+        // "currently selected target" when `targetIsSelected=1`; if nothing
+        // is actually selected in the UI, AC dereferences null at offset 0x28
+        // inside the spell-target lookup (observed crash at 0x00416C86 when
+        // BuffManager called CastSpell(playerId, spellId) without first
+        // selecting the player). Defensively call SelectItem(targetId) here
+        // so AC's selection is in sync with what the caller intended,
+        // regardless of whether the plugin remembered to.
         if (_castSpellClient != null)
         {
             try
             {
-                byte targetIsSelected = targetId != 0 ? (byte)1 : (byte)0;
+                byte targetIsSelected;
+                if (targetId != 0)
+                {
+                    ClientHelperHooks.SelectItem(targetId);
+                    targetIsSelected = 1;
+                }
+                else
+                {
+                    targetIsSelected = 0;
+                }
                 _castSpellClient((uint)spellId, targetIsSelected);
                 return true;
             }
             catch
             {
-                // Fall through to game action method
+                // Fall through to "refuse" rather than the pattern-scanned
+                // _castSpell — see the comment block on that fallback.
             }
         }
 
-        // Fallback: direct game action 0x4A (network message only)
+        // Fallback: pattern-scanned game-action 0x4A wrapper. Re-enabled
+        // 2026-05-14 after retail-vs-ACE binary diff showed only 3 bytes
+        // differ between the two acclient.exe builds (both PE-header
+        // metadata), so the pattern scan resolves to the same retail
+        // function on both. The earlier 0x00416C86 crash this fallback was
+        // blamed for was actually from ClientObjectHooks passing a bogus
+        // qualitiesPtr to InqSkill — not from _castSpell itself.
         if (_castSpell == null || targetId == 0)
             return false;
 

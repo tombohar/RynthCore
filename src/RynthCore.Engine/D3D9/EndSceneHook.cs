@@ -28,6 +28,12 @@ internal static class EndSceneHook
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint lpdwProcessId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentProcessId();
+
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int EndSceneDelegate(IntPtr pDevice);
 
@@ -143,7 +149,7 @@ internal static class EndSceneHook
         // Let the render thread return through the trampoline.
         Thread.Sleep(80);
 
-        ImGuiController.Shutdown();
+        EngineFrameController.Shutdown();
 
         status = MinHook.MH_RemoveHook(_endSceneAddr);
         RynthLog.D3D9($"EndSceneHook: Remove = {MinHook.StatusString(status)}");
@@ -215,6 +221,10 @@ internal static class EndSceneHook
 
             // Per-frame chatbox visibility assertion (no-op unless plugin enables suppression).
             try { ChatHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
+            // Per-frame retail-radar visibility assertion (no-op unless plugin enables suppression).
+            try { RadarHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
+            // Per-frame retail-powerbar visibility assertion (no-op unless plugin enables suppression).
+            try { PowerbarHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
 
             if (_renderCount == 1 && _offscreenFilterDisabled && _skipCount > 0)
             {
@@ -267,11 +277,35 @@ internal static class EndSceneHook
                 RynthLog.D3D9("EndSceneHook: Warmup complete - initializing ImGui.");
             }
 
-            ImGuiController.OnEndScene(pDevice);
+            // EngineFrameController.OnEndScene runs the always-on engine work
+            // (matrix capture, plugin tick, nav rendering, pending action drains)
+            // every frame. The EnableImGuiBackend gate moved INSIDE the
+            // controller so it scopes only the ImGui-specific block; this call
+            // site no longer needs to gate it.
+            EngineFrameController.OnEndScene(pDevice);
             _uiFrameCount++;
 
-            if (_uiFrameCount == 60)
+            if (_uiFrameCount == 60 && RynthCore.Engine.Plugins.EngineSettings.EnableImGuiBackend)
                 RynthLog.D3D9("EndSceneHook: 60 UI frames - ImGui is stable.");
+            if (_renderCount == UiInitWarmupFrames && !RynthCore.Engine.Plugins.EngineSettings.EnableImGuiBackend)
+                RynthLog.D3D9("EndSceneHook: ImGui backend disabled via engine.json (EnableImGuiBackend=false). Always-on engine work still runs; only ImGui draw calls are skipped.");
+
+            // Avalonia compositor: independent of ImGui. Reads the latest
+            // Avalonia surface from OverlaySurfaceBridge and blits it as a
+            // fullscreen alpha-blended quad onto AC's back buffer. Runs every
+            // frame regardless of EnableImGuiBackend so the Avalonia overlay
+            // is visible even when ImGui per-frame work is disabled. Driven
+            // here exclusively — EngineFrameController.OnEndScene intentionally
+            // does NOT call it (avoids double-blit / TryConsume races).
+            try
+            {
+                OverlayTextureRenderer.Render(pDevice);
+            }
+            catch (Exception ovEx)
+            {
+                if (_uiFrameCount < 30)
+                    RynthLog.D3D9($"EndSceneHook: OverlayTextureRenderer.Render error: {ovEx.GetType().Name}: {ovEx.Message}");
+            }
         }
         catch (Exception ex)
         {
@@ -283,8 +317,13 @@ internal static class EndSceneHook
         if (FpsLimitEnabled)
         {
             IntPtr fgWnd = GetForegroundWindow();
-            // Only "focused" when the AC game window itself is foreground — not viewport popups.
-            bool isFocused = fgWnd != IntPtr.Zero && fgWnd == Win32Backend.GameHwnd;
+            // Focused when AC itself is foreground, OR when any window belonging
+            // to our process is foreground (covers DComp overlay, any Avalonia
+            // child window, etc.). PID comparison is reliable regardless of how
+            // the owner chain was established (GWL_HWNDPARENT vs CreateWindow).
+            GetWindowThreadProcessId(fgWnd, out uint fgPid);
+            bool isFocused = fgWnd != IntPtr.Zero &&
+                (fgWnd == Win32Backend.GameHwnd || fgPid == GetCurrentProcessId());
             int targetFps = isFocused ? FpsTargetFocused : FpsTargetBackground;
             double minFrameMs = 1000.0 / Math.Max(targetFps, 1);
 

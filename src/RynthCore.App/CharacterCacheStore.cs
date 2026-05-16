@@ -10,6 +10,28 @@ namespace RynthCore.App;
 
 internal static class CharacterCacheStore
 {
+    /// Strict reader — only returns characters from the server-scoped file
+    /// for this (account, server) pair. Will NOT fall through to the
+    /// account-only file. Use this when correctness across accounts/servers
+    /// matters more than tolerance for missing data (e.g. UI dropdowns where
+    /// stale legacy files would leak the wrong account's characters).
+    public static List<string> ReadStrict(string accountName, string serverName)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(accountName) || string.IsNullOrWhiteSpace(serverName))
+                return [];
+
+            string safeAccount = SanitizeFileName(accountName);
+            string safeServer = SanitizeFileName(serverName);
+            return ReadCharacterFile(GetServerScopedPath(safeServer, safeAccount));
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
     public static List<string> Read(string accountName, string serverName = "")
     {
         try

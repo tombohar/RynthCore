@@ -37,9 +37,24 @@ internal sealed class OverlaySurfaceFrame
         Height = sharedTexture.Height;
     }
 
-    public OverlaySurfaceKind Kind { get; }
-    public byte[]? SoftwarePixels { get; }
-    public OverlaySharedTextureDescriptor? SharedTexture { get; }
-    public int Width { get; }
-    public int Height { get; }
+    public OverlaySurfaceKind Kind { get; private set; }
+    public byte[]? SoftwarePixels { get; private set; }
+    public OverlaySharedTextureDescriptor? SharedTexture { get; private set; }
+    public int Width { get; private set; }
+    public int Height { get; private set; }
+
+    /// <summary>
+    /// Reuses this instance for a new software frame. Lets the bridge avoid
+    /// allocating a new <see cref="OverlaySurfaceFrame"/> on every consumed
+    /// frame at 36-60 Hz — the small-bucket LFH churn from that allocation
+    /// was bisected as residual heap-corruption pressure.
+    /// </summary>
+    internal void ResetSoftware(byte[] pixels, int width, int height)
+    {
+        Kind = OverlaySurfaceKind.SoftwareBgra32;
+        SoftwarePixels = pixels;
+        SharedTexture = null;
+        Width = width;
+        Height = height;
+    }
 }

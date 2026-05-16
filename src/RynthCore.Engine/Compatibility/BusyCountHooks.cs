@@ -8,14 +8,43 @@ namespace RynthCore.Engine.Compatibility;
 
 internal static class BusyCountHooks
 {
-    private const int IncrementBusyCountVa = 0x00565610;
-    private const int DecrementBusyCountVa = 0x00565630;
-
-    // ClientUISystem::UpdateCursorState — per-frame cursor evaluation
-    private const int UpdateCursorStateVa = 0x005653D0;
+    // Fallback VAs (4,841,472-byte client). Pattern-scan is now the source of truth.
+    private const int IncrementBusyCountFallbackVa = 0x00565610;
+    private const int DecrementBusyCountFallbackVa = 0x00565630;
+    private const int UpdateCursorStateFallbackVa  = 0x005653D0;
 
     // ClientUISystem struct field offset for m_cBusy (confirmed via runtime dump)
     private const int OffsetMCBusy = 0x14;
+
+    // ClientUISystem::IncrementBusyCount — entire function is short:
+    //   mov edx,[ecx+14]; inc edx; mov eax,edx; cmp eax,1; mov [ecx+14],edx;
+    //   jne +5; jmp UpdateCursorState; ret
+    private static readonly byte?[] IncrementBusyCountPattern =
+    [
+        0x8B, 0x51, 0x14, 0x42, 0x8B, 0xC2, 0x83, 0xF8,
+        0x01, 0x89, 0x51, 0x14, 0x75, 0x05,
+        0xE9, null, null, null, null,        // jmp rel32 -> UpdateCursorState
+        0xC3
+    ];
+
+    // ClientUISystem::DecrementBusyCount — also short:
+    //   dec [ecx+14]; jne +5; jmp UpdateCursorState; ret
+    private static readonly byte?[] DecrementBusyCountPattern =
+    [
+        0xFF, 0x49, 0x14, 0x75, 0x05,
+        0xE9, null, null, null, null,        // jmp rel32 -> UpdateCursorState
+        0xC3
+    ];
+
+    // ClientUISystem::UpdateCursorState — large prologue with cmp/setcc pair.
+    private static readonly byte?[] UpdateCursorStatePattern =
+    [
+        0x83, 0xEC, 0x08, 0x53, 0x55, 0x56, 0x57, 0x89,
+        0x4C, 0x24, 0x10,
+        0xE8, null, null, null, null,        // call rel32
+        0x85, 0xC0, 0x0F, 0x95, 0xC3, 0x33, 0xC0, 0x84,
+        0xDB
+    ];
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void BusyCountDelegate(IntPtr thisPtr);
@@ -29,6 +58,7 @@ internal static class BusyCountHooks
     private static BusyCountDelegate? _decrementBusyCountDetour;
     private static IntPtr _incrementTargetAddress;
     private static IntPtr _decrementTargetAddress;
+    private static IntPtr _updateCursorStateAddress;
     private static string _statusMessage = "Not probed yet.";
     private static int _incrementDispatchCount;
     private static int _decrementDispatchCount;
@@ -41,9 +71,7 @@ internal static class BusyCountHooks
     /// <summary>Returns 0 if the character is idle, positive if a UI action is in progress.</summary>
     public static int GetBusyState() => Math.Max(0, _netBusyCount);
 
-    /// <summary>Force-reset the client's busy count to zero and re-evaluate the cursor.
-    /// Directly writes m_cBusy=0 then calls UpdateCursorState so the game
-    /// switches from hourglass back to the default arrow.</summary>
+    /// <summary>Force-reset the client's busy count to zero and re-evaluate the cursor.</summary>
     public static void ForceResetBusyCount()
     {
         if (!IsInstalled || _lastThisPtr == IntPtr.Zero)
@@ -51,8 +79,6 @@ internal static class BusyCountHooks
 
         int was = _netBusyCount;
 
-        // Call the original decrement a few times to let the client run
-        // its own cleanup path (cursor reset, etc) for any non-zero count.
         if (_originalDecrementBusyCount != null)
         {
             int calls = Math.Max(was, 3);
@@ -62,24 +88,22 @@ internal static class BusyCountHooks
 
         Interlocked.Exchange(ref _netBusyCount, 0);
 
-        // Directly zero m_cBusy — DecrementBusyCount guards with if(m_cBusy>0)
-        // so it's a no-op when our tracked count drifts from the real value.
         try { Marshal.WriteInt32(_lastThisPtr + OffsetMCBusy, 0); }
         catch { /* non-fatal */ }
 
-        // Clear pending commands and restore client control
         CommandInterpreterHooks.ClearAllCommands();
         CommandInterpreterHooks.TakeControlFromServer();
         CommandInterpreterHooks.PlayerTeleported();
 
-        // Force the game's own cursor evaluation with the cleared state
-        try
+        if (_updateCursorStateAddress != IntPtr.Zero)
         {
-            var updateCursor = Marshal.GetDelegateForFunctionPointer<UpdateCursorStateDelegate>(
-                new IntPtr(UpdateCursorStateVa));
-            updateCursor(_lastThisPtr);
+            try
+            {
+                var updateCursor = Marshal.GetDelegateForFunctionPointer<UpdateCursorStateDelegate>(_updateCursorStateAddress);
+                updateCursor(_lastThisPtr);
+            }
+            catch { /* non-fatal */ }
         }
-        catch { /* non-fatal */ }
 
         RynthLog.Verbose($"Compat: force-reset busy count (was {was})");
     }
@@ -95,75 +119,131 @@ internal static class BusyCountHooks
             return;
         }
 
-        int incrementOff = IncrementBusyCountVa - textSection.TextBaseVa;
-        int decrementOff = DecrementBusyCountVa - textSection.TextBaseVa;
-        if (!LooksHookable(textSection.Bytes, incrementOff, out byte incrementByte))
-        {
-            _statusMessage = $"ClientUISystem::IncrementBusyCount looks invalid @ 0x{IncrementBusyCountVa:X8}.";
-            RynthLog.Compat($"Compat: busy-count hook failed - {_statusMessage}");
-            return;
-        }
+        var inc = HookResolver.Resolve(textSection, "BusyCountHooks.IncrementBusyCount",
+            IncrementBusyCountPattern, IncrementBusyCountFallbackVa);
+        var dec = HookResolver.Resolve(textSection, "BusyCountHooks.DecrementBusyCount",
+            DecrementBusyCountPattern, DecrementBusyCountFallbackVa);
+        var cursor = HookResolver.Resolve(textSection, "BusyCountHooks.UpdateCursorState",
+            UpdateCursorStatePattern, UpdateCursorStateFallbackVa);
 
-        if (!LooksHookable(textSection.Bytes, decrementOff, out byte decrementByte))
+        if (cursor.Success) _updateCursorStateAddress = cursor.Address;
+
+        if (!inc.Success || !dec.Success)
         {
-            _statusMessage = $"ClientUISystem::DecrementBusyCount looks invalid @ 0x{DecrementBusyCountVa:X8}.";
-            RynthLog.Compat($"Compat: busy-count hook failed - {_statusMessage}");
+            _statusMessage = $"Resolve failed — increment={inc.Detail}, decrement={dec.Detail}.";
+            RynthLog.Compat($"BusyCountHooks: {_statusMessage}");
             return;
         }
 
         try
         {
-            _incrementTargetAddress = new IntPtr(textSection.TextBaseVa + incrementOff);
+            _incrementTargetAddress = inc.Address;
             _incrementBusyCountDetour = IncrementBusyCountDetour;
             IntPtr incrementDetourPtr = Marshal.GetFunctionPointerForDelegate(_incrementBusyCountDetour);
-            _originalIncrementBusyCount = Marshal.GetDelegateForFunctionPointer<BusyCountDelegate>(MinHook.HookCreate(_incrementTargetAddress, incrementDetourPtr));
+            _originalIncrementBusyCount = Marshal.GetDelegateForFunctionPointer<BusyCountDelegate>(
+                MinHook.HookCreate(_incrementTargetAddress, incrementDetourPtr));
 
-            _decrementTargetAddress = new IntPtr(textSection.TextBaseVa + decrementOff);
+            _decrementTargetAddress = dec.Address;
             _decrementBusyCountDetour = DecrementBusyCountDetour;
             IntPtr decrementDetourPtr = Marshal.GetFunctionPointerForDelegate(_decrementBusyCountDetour);
-            _originalDecrementBusyCount = Marshal.GetDelegateForFunctionPointer<BusyCountDelegate>(MinHook.HookCreate(_decrementTargetAddress, decrementDetourPtr));
+            _originalDecrementBusyCount = Marshal.GetDelegateForFunctionPointer<BusyCountDelegate>(
+                MinHook.HookCreate(_decrementTargetAddress, decrementDetourPtr));
 
             Thread.MemoryBarrier();
             MinHook.Enable(_incrementTargetAddress);
             MinHook.Enable(_decrementTargetAddress);
 
             IsInstalled = true;
-            _statusMessage = $"Hooked busy-count seams @ 0x{_incrementTargetAddress.ToInt32():X8}/0x{_decrementTargetAddress.ToInt32():X8}.";
-            RynthLog.Verbose($"Compat: busy-count hooks installed");
+            _statusMessage = $"Hooked busy-count seams (inc=0x{_incrementTargetAddress.ToInt32():X8}, dec=0x{_decrementTargetAddress.ToInt32():X8}).";
+            RynthLog.Compat($"BusyCountHooks: hooks installed.");
         }
         catch (Exception ex)
         {
             _statusMessage = ex.Message;
-            RynthLog.Compat($"Compat: busy-count hook failed - {ex.Message}");
+            RynthLog.Compat($"BusyCountHooks: install threw {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    private static int _incFires, _decFires;
+
+    // ── Auto-watchdog: force-clear busy if it stays >0 too long ──────────
+    // Engine-side safety net so the bot self-heals when its busy tracking
+    // desyncs from AC's m_cBusy (e.g., a hook miss, RDP-eaten chat input
+    // preventing the user from running /ra clearbusy manually, or AC's
+    // own busy state going stuck after a server-rejected action).
+    //
+    // Trigger: any of our main-thread detours can call CheckWatchdog().
+    // SmartBoxHooks.DispatchGameEventDetour wires this in — it fires
+    // frequently on AC's main thread while in-world, so the watchdog
+    // gets a tick at least every server event.
+    //
+    // Heuristic: if busy has been positive for > BusyWatchdogTimeoutMs
+    // with no transitions back to zero, fire ForceResetBusyCount. We
+    // do this regardless of why it got stuck — combat-urgent or not —
+    // because the alternative is an inert bot.
+    private static long _busyBecamePositiveTickMs;
+    private static long _lastWatchdogFireTickMs;
+    private const long BusyWatchdogTimeoutMs = 5_000;
+    private const long BusyWatchdogCooldownMs = 2_000;
+
+    /// <summary>
+    /// Auto-clear busy state if it has been positive for too long.
+    /// Safe to call from any thread; only performs work on AC's main
+    /// thread (via MainThreadGuard) since ForceResetBusyCount writes
+    /// AC memory and calls AC functions that aren't thread-safe.
+    /// </summary>
+    public static void CheckWatchdog()
+    {
+        long stuckSince = Volatile.Read(ref _busyBecamePositiveTickMs);
+        if (stuckSince == 0)
+            return;
+
+        long now = Environment.TickCount64;
+        long elapsed = now - stuckSince;
+        if (elapsed < BusyWatchdogTimeoutMs)
+            return;
+
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+
+        long lastFire = Volatile.Read(ref _lastWatchdogFireTickMs);
+        if (now - lastFire < BusyWatchdogCooldownMs)
+            return;
+
+        Volatile.Write(ref _lastWatchdogFireTickMs, now);
+        RynthLog.Compat($"BusyCountHooks: watchdog auto-resetting — busy stuck at {_netBusyCount} for {elapsed}ms.");
+        ForceResetBusyCount();
+        Volatile.Write(ref _busyBecamePositiveTickMs, 0);
     }
 
     private static void IncrementBusyCountDetour(IntPtr thisPtr)
     {
+        RecursionGuard.Tick("BusyCountHooks.Increment");
         _lastThisPtr = thisPtr;
-        _originalIncrementBusyCount!(thisPtr);
+        if (++_incFires <= 3)
+            RynthLog.Compat($"BusyCountHooks: Increment fired #{_incFires} this=0x{thisPtr.ToInt32():X8}");
+        try { _originalIncrementBusyCount!(thisPtr); }
+        catch (Exception ex) { try { RynthLog.Compat($"BusyCountHooks: Increment original threw {ex.GetType().Name}: {ex.Message}"); } catch { } throw; }
         Interlocked.Increment(ref _incrementDispatchCount);
-        Interlocked.Increment(ref _netBusyCount);
+        int after = Interlocked.Increment(ref _netBusyCount);
+        if (after == 1)
+            Volatile.Write(ref _busyBecamePositiveTickMs, Environment.TickCount64);
         PluginManager.QueueBusyCountIncremented();
     }
 
     private static void DecrementBusyCountDetour(IntPtr thisPtr)
     {
+        RecursionGuard.Tick("BusyCountHooks.Decrement");
         if (_lastThisPtr == IntPtr.Zero)
             _lastThisPtr = thisPtr;
-        _originalDecrementBusyCount!(thisPtr);
+        if (++_decFires <= 3)
+            RynthLog.Compat($"BusyCountHooks: Decrement fired #{_decFires} this=0x{thisPtr.ToInt32():X8}");
+        try { _originalDecrementBusyCount!(thisPtr); }
+        catch (Exception ex) { try { RynthLog.Compat($"BusyCountHooks: Decrement original threw {ex.GetType().Name}: {ex.Message}"); } catch { } throw; }
         Interlocked.Increment(ref _decrementDispatchCount);
-        Interlocked.Decrement(ref _netBusyCount);
+        int after = Interlocked.Decrement(ref _netBusyCount);
+        if (after <= 0)
+            Volatile.Write(ref _busyBecamePositiveTickMs, 0);
         PluginManager.QueueBusyCountDecremented();
-    }
-
-    private static bool LooksHookable(byte[] textBytes, int offset, out byte firstByte)
-    {
-        firstByte = 0;
-        if (offset < 0 || offset >= textBytes.Length)
-            return false;
-
-        firstByte = textBytes[offset];
-        return firstByte is not (0x00 or 0xCC or 0xC3);
     }
 }

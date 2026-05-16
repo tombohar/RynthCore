@@ -19,6 +19,7 @@ public sealed class EngineInjectionService
     /// transparently redirect to the Loader sibling in the same directory.</summary>
     private const string LegacyEngineDllName = "RynthCore.Engine.dll";
     private const string InitExport = "RynthCoreInit";
+    private const string DecalInitExport = "DecalStartup";
     private const string RuntimeDirectoryName = "Runtime";
 
     private const uint ProcessAllAccess = 0x001F0FFF;
@@ -172,8 +173,32 @@ public sealed class EngineInjectionService
         else
             log("MinHook found beside engine DLL.");
 
-        log($"{InitExport} RVA: 0x{initRva:X8}");
+        return InjectDllAndCallExport(
+            targetProcess,
+            resolvedEnginePath,
+            initRva,
+            InitExport,
+            stackLabel: "RynthCore",
+            successMessage: "RynthCore injected successfully.",
+            log);
+    }
 
+    /// <summary>
+    /// Injects a generic DLL into <paramref name="targetProcess"/> via remote
+    /// LoadLibraryA, then calls the export at <paramref name="exportRva"/> as a
+    /// new thread (entry signature: <c>uint __stdcall(void)</c> — matches
+    /// LPTHREAD_START_ROUTINE). Used by both the engine path and the Decal path.
+    /// </summary>
+    private InjectionResult InjectDllAndCallExport(
+        Process targetProcess,
+        string dllPath,
+        uint exportRva,
+        string exportName,
+        string stackLabel,
+        string successMessage,
+        Action<string> log)
+    {
+        log($"{exportName} RVA: 0x{exportRva:X8}");
         log($"Target PID: {targetProcess.Id} ({targetProcess.ProcessName})");
 
         IntPtr hProcess = OpenProcess(ProcessAllAccess, false, targetProcess.Id);
@@ -182,7 +207,7 @@ public sealed class EngineInjectionService
             return InjectionResult.Failure(
                 1,
                 $"OpenProcess failed (error {Marshal.GetLastWin32Error()}). Try running as Administrator.",
-                resolvedEnginePath,
+                dllPath,
                 targetProcess.Id);
         }
 
@@ -191,12 +216,12 @@ public sealed class EngineInjectionService
             IntPtr hKernel32 = GetModuleHandleA("kernel32.dll");
             IntPtr loadLibAddr = GetProcAddress(hKernel32, "LoadLibraryA");
             if (loadLibAddr == IntPtr.Zero)
-                return InjectionResult.Failure(1, "Could not locate LoadLibraryA.", resolvedEnginePath, targetProcess.Id);
+                return InjectionResult.Failure(1, "Could not locate LoadLibraryA.", dllPath, targetProcess.Id);
 
-            byte[] dllPathBytes = Encoding.ASCII.GetBytes(resolvedEnginePath + "\0");
+            byte[] dllPathBytes = Encoding.ASCII.GetBytes(dllPath + "\0");
             IntPtr remoteStr = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)dllPathBytes.Length, MemCommit | MemReserve, PageReadWrite);
             if (remoteStr == IntPtr.Zero)
-                return InjectionResult.Failure(1, "VirtualAllocEx failed for remote DLL path.", resolvedEnginePath, targetProcess.Id);
+                return InjectionResult.Failure(1, "VirtualAllocEx failed for remote DLL path.", dllPath, targetProcess.Id);
 
             try
             {
@@ -205,18 +230,18 @@ public sealed class EngineInjectionService
                     return InjectionResult.Failure(
                         1,
                         $"WriteProcessMemory failed (error {Marshal.GetLastWin32Error()}).",
-                        resolvedEnginePath,
+                        dllPath,
                         targetProcess.Id);
                 }
 
-                log("[1/2] Injecting engine DLL...");
+                log($"[1/2] Injecting {stackLabel} DLL...");
                 IntPtr loadThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibAddr, remoteStr, 0, out _);
                 if (loadThread == IntPtr.Zero)
                 {
                     return InjectionResult.Failure(
                         1,
                         $"CreateRemoteThread for LoadLibraryA failed (error {Marshal.GetLastWin32Error()}).",
-                        resolvedEnginePath,
+                        dllPath,
                         targetProcess.Id);
                 }
 
@@ -235,23 +260,23 @@ public sealed class EngineInjectionService
                 {
                     return InjectionResult.Failure(
                         1,
-                        "LoadLibrary returned NULL. Check engine dependencies beside the DLL.",
-                        resolvedEnginePath,
+                        $"LoadLibrary returned NULL for {Path.GetFileName(dllPath)}. Check its dependencies beside the DLL.",
+                        dllPath,
                         targetProcess.Id);
                 }
 
                 IntPtr remoteBase = (IntPtr)loadLibResult;
-                log($"[1/2] Engine mapped at 0x{remoteBase:X8}");
+                log($"[1/2] {stackLabel} mapped at 0x{remoteBase:X8}");
 
-                log("[2/2] Calling RynthCoreInit...");
-                IntPtr remoteInitAddr = IntPtr.Add(remoteBase, (int)initRva);
+                log($"[2/2] Calling {exportName}...");
+                IntPtr remoteInitAddr = IntPtr.Add(remoteBase, (int)exportRva);
                 IntPtr initThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, remoteInitAddr, IntPtr.Zero, 0, out _);
                 if (initThread == IntPtr.Zero)
                 {
                     return InjectionResult.Failure(
                         1,
-                        $"CreateRemoteThread for {InitExport} failed (error {Marshal.GetLastWin32Error()}).",
-                        resolvedEnginePath,
+                        $"CreateRemoteThread for {exportName} failed (error {Marshal.GetLastWin32Error()}).",
+                        dllPath,
                         targetProcess.Id);
                 }
 
@@ -266,8 +291,8 @@ public sealed class EngineInjectionService
                     CloseHandle(initThread);
                 }
 
-                log(initResult == 0 ? "RynthCoreInit returned success." : $"RynthCoreInit returned {initResult}.");
-                return InjectionResult.SuccessResult("RynthCore injected successfully.", resolvedEnginePath, targetProcess.Id, initResult);
+                log(initResult == 0 ? $"{exportName} returned success." : $"{exportName} returned {initResult}.");
+                return InjectionResult.SuccessResult(successMessage, dllPath, targetProcess.Id, initResult);
             }
             finally
             {
@@ -280,6 +305,44 @@ public sealed class EngineInjectionService
         }
     }
 
+    /// <summary>
+    /// Injects Decal's <c>Inject.dll</c> into the target and invokes its
+    /// <c>DecalStartup</c> export — the same recipe ThwargLauncher's bundled
+    /// injector.dll uses. Resolves the DecalStartup RVA from the on-disk PE.
+    /// </summary>
+    public InjectionResult InjectDecalIntoProcess(Process targetProcess, string decalInjectDllPath, Action<string>? log = null)
+    {
+        log ??= _ => { };
+
+        if (string.IsNullOrWhiteSpace(decalInjectDllPath) || !File.Exists(decalInjectDllPath))
+            return InjectionResult.Failure(1, $"Decal Inject.dll not found: {decalInjectDllPath}", decalInjectDllPath, targetProcess.Id);
+
+        log($"Decal DLL: {decalInjectDllPath}");
+
+        uint decalStartupRva;
+        try
+        {
+            decalStartupRva = GetExportRva(decalInjectDllPath, DecalInitExport);
+        }
+        catch (Exception ex)
+        {
+            return InjectionResult.Failure(
+                1,
+                $"Could not locate {DecalInitExport} export in Decal Inject.dll: {ex.Message}",
+                decalInjectDllPath,
+                targetProcess.Id);
+        }
+
+        return InjectDllAndCallExport(
+            targetProcess,
+            decalInjectDllPath,
+            decalStartupRva,
+            DecalInitExport,
+            stackLabel: "Decal",
+            successMessage: "Decal injected successfully.",
+            log);
+    }
+
     public InjectionResult LaunchSuspendedAndInject(
         string clientPath,
         string arguments,
@@ -287,10 +350,55 @@ public sealed class EngineInjectionService
         Action<string>? log = null,
         Action<int>? onProcessCreated = null)
     {
+        return LaunchSuspendedAndInvoke(
+            clientPath,
+            arguments,
+            stackLabel: "RynthCore",
+            failureContextPath: enginePath,
+            successMessage: "Launched AC and injected RynthCore successfully.",
+            inject: (proc, perCallLog) => InjectIntoProcess(proc, enginePath, perCallLog),
+            log,
+            onProcessCreated);
+    }
+
+    /// <summary>
+    /// Launches AC suspended and injects Decal's <c>Inject.dll</c> + invokes
+    /// <c>DecalStartup</c>. The RynthCore engine is NOT loaded into the
+    /// process — this account runs against Decal's plugin stack alone, the
+    /// same way ThwargLauncher launches Decal-using accounts.
+    /// </summary>
+    public InjectionResult LaunchSuspendedAndInjectDecal(
+        string clientPath,
+        string arguments,
+        string decalInjectDllPath,
+        Action<string>? log = null,
+        Action<int>? onProcessCreated = null)
+    {
+        return LaunchSuspendedAndInvoke(
+            clientPath,
+            arguments,
+            stackLabel: "Decal",
+            failureContextPath: decalInjectDllPath,
+            successMessage: "Launched AC and injected Decal successfully.",
+            inject: (proc, perCallLog) => InjectDecalIntoProcess(proc, decalInjectDllPath, perCallLog),
+            log,
+            onProcessCreated);
+    }
+
+    private InjectionResult LaunchSuspendedAndInvoke(
+        string clientPath,
+        string arguments,
+        string stackLabel,
+        string failureContextPath,
+        string successMessage,
+        Func<Process, Action<string>, InjectionResult> inject,
+        Action<string>? log,
+        Action<int>? onProcessCreated)
+    {
         log ??= _ => { };
 
         if (string.IsNullOrWhiteSpace(clientPath) || !File.Exists(clientPath))
-            return InjectionResult.Failure(1, $"AC client not found: {clientPath}", enginePath);
+            return InjectionResult.Failure(1, $"AC client not found: {clientPath}", failureContextPath);
 
         string workingDirectory = Path.GetDirectoryName(clientPath) ?? Environment.CurrentDirectory;
         string commandLine = string.IsNullOrWhiteSpace(arguments)
@@ -317,7 +425,7 @@ public sealed class EngineInjectionService
             return InjectionResult.Failure(
                 1,
                 $"CreateProcessW failed (error {Marshal.GetLastWin32Error()}).",
-                enginePath);
+                failureContextPath);
         }
 
         bool resumed = false;
@@ -336,20 +444,20 @@ public sealed class EngineInjectionService
         }
 
         log($"Launched AC suspended (PID {processInfo.dwProcessId}).");
-        log("Launching suspended so RynthCore can patch early startup gates before AC runs its single-instance checks.");
+        log($"Launching suspended so {stackLabel} can install before AC's single-instance gate runs.");
         onProcessCreated?.Invoke((int)processInfo.dwProcessId);
 
         try
         {
             using var launchedProcess = Process.GetProcessById((int)processInfo.dwProcessId);
-            InjectionResult injectResult = InjectIntoProcess(launchedProcess, enginePath, log);
+            InjectionResult injectResult = inject(launchedProcess, log);
             ResumeMainThread();
 
             if (!injectResult.Success)
                 return InjectionResult.Failure(injectResult.ExitCode, injectResult.Summary, injectResult.EnginePath, (int)processInfo.dwProcessId);
 
             return InjectionResult.SuccessResult(
-                "Launched AC and injected RynthCore successfully.",
+                successMessage,
                 injectResult.EnginePath,
                 (int)processInfo.dwProcessId,
                 injectResult.InitResult ?? 0);
@@ -365,14 +473,14 @@ public sealed class EngineInjectionService
                 return InjectionResult.Failure(
                     1,
                     $"Launch + inject failed: {ex.Message} ResumeThread also failed: {resumeEx.Message}",
-                    enginePath,
+                    failureContextPath,
                     (int)processInfo.dwProcessId);
             }
 
             return InjectionResult.Failure(
                 1,
                 $"Launch + inject failed: {ex.Message}",
-                enginePath,
+                failureContextPath,
                 (int)processInfo.dwProcessId);
         }
         finally

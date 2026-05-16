@@ -62,6 +62,7 @@ internal static class RawPacketHooks
     private static unsafe int RecvFromDetour(
         IntPtr s, IntPtr buf, int len, int flags, IntPtr from, IntPtr fromlen)
     {
+        RecursionGuard.Tick("RawPacketHooks.RecvFrom");
         delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int, int, IntPtr, IntPtr, int> original =
             (delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int, int, IntPtr, IntPtr, int>)_originalRecvFromPtr;
 

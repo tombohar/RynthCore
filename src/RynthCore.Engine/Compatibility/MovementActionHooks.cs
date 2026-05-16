@@ -139,32 +139,62 @@ internal static class MovementActionHooks
         }
     }
 
+    // Light counters so we can see in the log that the bot's movement
+    // commands are actually reaching AC and what AC says about each call.
+    // Logged at Compat every 8th call after the first 3, so a busy patrol
+    // loop doesn't flood the log but a one-shot test still shows up.
+    private static int _doMovementCalls;
+    private static int _stopMovementCalls;
+    private static int _jumpCalls;
+    private static int _autonomyCalls;
+    private static bool ShouldLog(int n) => n <= 3 || (n & 0x7) == 0;
+
     public static bool DoMovement(uint motion, float speed = 1.0f, int holdKey = HoldKeyRun)
     {
+        int n = System.Threading.Interlocked.Increment(ref _doMovementCalls);
         if (_doMovement == null)
+        {
+            if (ShouldLog(n))
+                RynthLog.Compat($"Move: DoMovement(motion=0x{motion:X8}, speed={speed:0.00}, holdKey={holdKey}) #{n} — delegate null (probe failed).");
             return false;
+        }
 
         try
         {
-            return _doMovement(motion, speed, holdKey);
+            bool ok = _doMovement(motion, speed, holdKey);
+            if (ShouldLog(n))
+                RynthLog.Compat($"Move: DoMovement(motion=0x{motion:X8}, speed={speed:0.00}, holdKey={holdKey}) #{n} -> {ok}");
+            return ok;
         }
-        catch
+        catch (Exception ex)
         {
+            if (ShouldLog(n))
+                RynthLog.Compat($"Move: DoMovement(motion=0x{motion:X8}) #{n} threw {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }
 
     public static bool StopMovement(uint motion, int holdKey = HoldKeyRun)
     {
+        int n = System.Threading.Interlocked.Increment(ref _stopMovementCalls);
         if (_stopMovement == null)
+        {
+            if (ShouldLog(n))
+                RynthLog.Compat($"Move: StopMovement(motion=0x{motion:X8}, holdKey={holdKey}) #{n} — delegate null.");
             return false;
+        }
 
         try
         {
-            return _stopMovement(motion, holdKey);
+            bool ok = _stopMovement(motion, holdKey);
+            if (ShouldLog(n))
+                RynthLog.Compat($"Move: StopMovement(motion=0x{motion:X8}, holdKey={holdKey}) #{n} -> {ok}");
+            return ok;
         }
-        catch
+        catch (Exception ex)
         {
+            if (ShouldLog(n))
+                RynthLog.Compat($"Move: StopMovement(motion=0x{motion:X8}) #{n} threw {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }

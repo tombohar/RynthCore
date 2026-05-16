@@ -616,7 +616,7 @@ internal static unsafe class ViewportPlatformBackend
     private static void ViewportUpdate(ImGuiViewport* vp)
     {
         // No-op on Win32 — imgui_impl_win32 handles monitor updates and other
-        // housekeeping elsewhere. We refresh monitors from ImGuiController.
+        // housekeeping elsewhere. We refresh monitors from EngineFrameController.
     }
 
     private static bool TryGetState(ImGuiViewport* vp, out ViewportState state)

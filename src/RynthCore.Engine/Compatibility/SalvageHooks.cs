@@ -4,9 +4,6 @@
 //  Hooks gmSalvageUI::OpenSalvagePanel to capture the singleton 'this' pointer.
 //  The captured instance is used by ClientHelperHooks for SalvagePanelAddItem
 //  and SalvagePanelExecute, which call the thiscall instance methods directly.
-//
-//  VA derivation (map_offset + 0x00401000 = live VA):
-//    000CAF70 gmSalvageUI::OpenSalvagePanel → 0x004CBF70
 // ============================================================================
 
 using System;
@@ -18,15 +15,27 @@ namespace RynthCore.Engine.Compatibility;
 
 internal static class SalvageHooks
 {
-    // gmSalvageUI::OpenSalvagePanel(uint toolId) — thiscall
-    // Map: 000CAF70 → live VA: 0x004CBF70
-    private const int GmSalvageUIOpenSalvagePanelVa = 0x004CBF70;
+    private const int OpenSalvagePanelFallbackVa = 0x004CBF70;
+
+    // gmSalvageUI::OpenSalvagePanel(uint toolId)
+    // Reads the salvage UI element from [esi+0x600], pushes it as 'this' to
+    // call the +0x608 lookup. The two `[esi+0x600]` accesses + the two E8 calls
+    // are very specific to this function.
+    private static readonly byte?[] OpenSalvagePanelPattern =
+    [
+        0x8B, 0x44, 0x24, 0x04, 0x56, 0x8B, 0xF1, 0x8B,
+        0x8E, 0x00, 0x06, 0x00, 0x00, 0x51, 0x8B, 0xCE,
+        0x89, 0x86, 0x08, 0x06, 0x00, 0x00,
+        0xE8, null, null, null, null,         // call rel32
+        0x8B, 0x8E, 0x00, 0x06, 0x00, 0x00,
+        0xE8, null, null, null, null          // call rel32
+    ];
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void GmSalvageUIOpenSalvagePanelDelegate(IntPtr thisPtr, uint toolId);
 
     private static GmSalvageUIOpenSalvagePanelDelegate? _originalOpenSalvagePanel;
-    private static GmSalvageUIOpenSalvagePanelDelegate? _openSalvagePanelDetour; // held alive to prevent GC
+    private static GmSalvageUIOpenSalvagePanelDelegate? _openSalvagePanelDetour;
     private static IntPtr _gmSalvageUIInstance;
     private static bool _hookInstalled;
     private static string _statusMessage = "Not initialized.";
@@ -34,10 +43,6 @@ internal static class SalvageHooks
     public static bool IsInstalled => _hookInstalled;
     public static string StatusMessage => _statusMessage;
 
-    /// <summary>
-    /// The captured gmSalvageUI singleton. Zero until the salvage panel has been
-    /// opened at least once (either by the player or by SalvagePanelOpen).
-    /// </summary>
     public static IntPtr GmSalvageUIInstance => _gmSalvageUIInstance;
 
     public static void Initialize()
@@ -51,50 +56,44 @@ internal static class SalvageHooks
             return;
         }
 
-        int funcOff = GmSalvageUIOpenSalvagePanelVa - textSection.TextBaseVa;
-        if (funcOff < 0 || funcOff >= textSection.Bytes.Length)
+        var resolved = HookResolver.Resolve(textSection, "SalvageHooks.OpenSalvagePanel",
+            OpenSalvagePanelPattern, OpenSalvagePanelFallbackVa);
+        if (!resolved.Success)
         {
-            _statusMessage = $"gmSalvageUI::OpenSalvagePanel VA out of range @ 0x{GmSalvageUIOpenSalvagePanelVa:X8}.";
-            RynthLog.Compat($"Compat: salvage hook failed - {_statusMessage}");
-            return;
-        }
-
-        byte firstByte = textSection.Bytes[funcOff];
-        if (firstByte is 0x00 or 0xCC or 0xC3)
-        {
-            _statusMessage = $"gmSalvageUI::OpenSalvagePanel looks invalid @ 0x{GmSalvageUIOpenSalvagePanelVa:X8} (opcode 0x{firstByte:X2}).";
-            RynthLog.Compat($"Compat: salvage hook failed - {_statusMessage}");
+            _statusMessage = $"Resolve failed ({resolved.Detail}).";
             return;
         }
 
         try
         {
-            IntPtr targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
             _openSalvagePanelDetour = OpenSalvagePanelDetour;
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_openSalvagePanelDetour);
             _originalOpenSalvagePanel = Marshal.GetDelegateForFunctionPointer<GmSalvageUIOpenSalvagePanelDelegate>(
-                MinHook.HookCreate(targetAddress, detourPtr));
+                MinHook.HookCreate(resolved.Address, detourPtr));
             Thread.MemoryBarrier();
-            MinHook.Enable(targetAddress);
+            MinHook.Enable(resolved.Address);
 
             _hookInstalled = true;
-            _statusMessage = $"Hooked gmSalvageUI::OpenSalvagePanel @ 0x{targetAddress.ToInt32():X8}.";
-            RynthLog.Verbose($"Compat: salvage hook ready @ 0x{targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
+            _statusMessage = $"Hooked gmSalvageUI::OpenSalvagePanel @ 0x{resolved.Address.ToInt32():X8}.";
+            RynthLog.Compat($"SalvageHooks: install ok.");
         }
         catch (Exception ex)
         {
             _statusMessage = ex.Message;
-            RynthLog.Compat($"Compat: salvage hook failed - {ex.Message}");
+            RynthLog.Compat($"SalvageHooks: install threw {ex.GetType().Name}: {ex.Message}");
         }
     }
 
+    private static int _fires;
+
     private static void OpenSalvagePanelDetour(IntPtr thisPtr, uint toolId)
     {
-        // Capture the gmSalvageUI singleton on every open so it stays fresh
-        // even across hot-reloads or UI recreation.
         if (thisPtr != IntPtr.Zero)
             _gmSalvageUIInstance = thisPtr;
+        if (++_fires <= 3)
+            RynthLog.Compat($"SalvageHooks: OpenSalvagePanel fired #{_fires} this=0x{thisPtr.ToInt32():X8} toolId=0x{toolId:X}");
 
-        _originalOpenSalvagePanel!(thisPtr, toolId);
+        try { _originalOpenSalvagePanel!(thisPtr, toolId); }
+        catch (Exception ex) { try { RynthLog.Compat($"SalvageHooks: original threw {ex.GetType().Name}: {ex.Message}"); } catch { } throw; }
     }
 }

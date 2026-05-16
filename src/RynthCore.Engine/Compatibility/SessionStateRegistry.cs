@@ -18,6 +18,12 @@ internal static class SessionStateRegistry
 
         _initialized = true;
         LoginLifecycleHooks.LoginComplete += OnLoginComplete;
+        // No longer subscribe to LogoutLifecycleHooks. RecvNotice_Logoff has
+        // been observed firing during normal play (transient state changes,
+        // not actual logoff), and flipping IsLoggedIn=false on a per-process
+        // record would let the launcher's stuck-client reaper kill a healthy
+        // in-game client. The launcher's _everLoggedInPids latch handles the
+        // post-login case from its side without needing this signal.
     }
 
     public static void Poll()
@@ -31,6 +37,35 @@ internal static class SessionStateRegistry
     private static void OnLoginComplete()
     {
         TryWriteLoginState();
+    }
+
+    /// <summary>
+    /// Flip the persisted record to <c>IsLoggedIn=false</c> + record
+    /// <c>LogoutAtUtc</c>. Fires for both clean logout (CPlayerSystem::ExecuteLogOff)
+    /// and server-driven disconnect (gmGamePlayUI::RecvNotice_Logoff). The
+    /// launcher's stuck-client reaper uses LogoutAtUtc to detect a session
+    /// that's been sitting on the disconnect/char-select screen too long.
+    /// Resets <see cref="_loginRecorded"/> so a relogin within the same
+    /// process re-records correctly.
+    /// </summary>
+    private static void OnLogoutObserved()
+    {
+        try
+        {
+            SessionStateRecord? record = SessionStateStore.TryReadForProcess(Environment.ProcessId);
+            if (record == null)
+                return;
+
+            record.IsLoggedIn = false;
+            record.LogoutAtUtc = DateTime.UtcNow;
+            SessionStateStore.WriteForProcess(Environment.ProcessId, record);
+            _loginRecorded = false;
+            RynthLog.Verbose($"SessionState: recorded logout for PID {Environment.ProcessId}.");
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"SessionState: failed to record logout - {ex.Message}");
+        }
     }
 
     private static void TryWriteLoginState()
@@ -68,7 +103,7 @@ internal static class SessionStateRegistry
                 CharacterCacheStore.UpsertCharacter(accountName, serverName, characterName);
 
             _loginRecorded = true;
-            RynthLog.Verbose($"SessionState: recorded login session for PID {Environment.ProcessId} account='{accountName}' character='{characterName}'.");
+            RynthLog.Info($"SessionState: recorded login session for PID {Environment.ProcessId} account='{accountName}' character='{characterName}' (IsLoggedIn=true).");
         }
         catch (Exception ex)
         {
@@ -78,11 +113,19 @@ internal static class SessionStateRegistry
 
     private static string ResolveCharacterName(string fallbackCharacter)
     {
+        // DIAGNOSTIC: live-memory lookup disabled — ClientObjectHooks.TryGetObjectName
+        // chain (GetWeenieObject + GetObjectName variants) was bisected as the
+        // recursive AV trigger at LoginComplete. Returning the launch-context
+        // character name only until the lookup is fixed.
+        return fallbackCharacter ?? string.Empty;
+
+#pragma warning disable CS0162
         uint playerId = ClientHelperHooks.GetPlayerId();
         if (playerId != 0 && ClientObjectHooks.TryGetObjectName(playerId, out string actualName) && !string.IsNullOrWhiteSpace(actualName))
             return actualName;
 
         return fallbackCharacter ?? string.Empty;
+#pragma warning restore CS0162
     }
 
     private static DateTime GetProcessStartTimeUtc()

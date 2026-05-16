@@ -142,6 +142,36 @@ Implications:
 - `RynthCore.Plugin.RynthAi.csproj` no longer has a `CopyPublishedPluginToEngineOutputs` MSBuild target; building the plugin only emits to its own `bin\...\publish\`. Use `Deploy-RynthCore.ps1` for staged deploys.
 - After adding/removing a plugin path in the UI, the engine picks up the change on next AC client launch. To pick it up live in a running client, click the **RL** button on the RynthCore overlay bar to hot-reload the engine — `EngineSettings` re-reads `engine.json` on each engine init.
 
+## Disabling the ImGui shell + plugins
+
+`%APPDATA%\RynthCore\engine.json` has two boolean flags read by `EngineSettings`:
+
+- `EnableImGuiShell` — when `false`, the in-AC ImGui surface draws nothing: both `RynthCoreShell.Render` (the overlay bar) **and** `PluginManager.RenderAll` (any plugin-drawn ImGui windows) are skipped. D3D9/ImGui still init so `Win32Backend.GameHwnd` is available for Avalonia owner-window binding, and plugins still load/init/tick — they just don't draw, so Avalonia panels can keep driving them through the plugin's C exports (`RynthPluginToggleMacro`, etc.).
+- `EnablePlugins` — when `false`, `PluginManager.LoadPlugins` is skipped (no plugin loads/inits/ticks/renders). The Decal-coexistence plugin pump is also skipped. **Avalonia panels that wrap a plugin (RynthAi) become inert** — their `GetProcAddress` lookups resolve to null because the plugin DLL was never loaded.
+
+Both default to `true` if the field is missing. Avalonia floating panels and all `Compatibility/` hooks (login, chat, vitals, radar, packets, …) run regardless of these flags.
+
+**Common configurations:**
+
+| `EnableImGuiShell` | `EnablePlugins` | Result |
+|---|---|---|
+| `true`  | `true`  | Default. Bar visible, plugins load + draw their own ImGui windows, Avalonia panels work. |
+| `false` | `true`  | "Avalonia-only" mode. Bar + plugin ImGui hidden, plugins still tick, Avalonia RynthAi panel drives macros via plugin exports. ← *current dev mode* |
+| `false` | `false` | Pure engine mode. No bar, no plugin logic. Avalonia panels that wrap a plugin (RynthAi) won't function. |
+| `true`  | `false` | Bar visible but no plugins. Mostly useless. |
+
+**To re-enable everything:** set both to `true` (or delete the lines — missing = `true`):
+
+```json
+{
+  "PluginPaths": [ "..." ],
+  "EnableImGuiShell": true,
+  "EnablePlugins": true
+}
+```
+
+Picked up on next AC launch. Hot-reload via the **RL** button doesn't help when the bar is hidden — relaunch the client.
+
 ## Logging
 
 Unified log: **`C:\Games\RynthCore\Logs\RynthCore.log`**

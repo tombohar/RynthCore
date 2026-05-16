@@ -21,7 +21,14 @@ namespace RynthCore.App.Avalonia;
 
 internal partial class MainWindow : Window
 {
-    private static readonly TimeSpan AutoLaunchCooldown = TimeSpan.FromSeconds(60);
+    // Tick-rate race protection for auto-launch attempts. The crash-relaunch
+    // circuit breaker (configurable) handles abuse from clients that exit
+    // immediately after launch — this just stops a single tick from queuing
+    // the same account twice while CreateProcess is still in flight.
+    // _autoLaunchPassInFlight + HasTrackedPresence (sees the new PID's
+    // LaunchContextRecord, written synchronously on CreateProcessW return)
+    // handle most of the work; this cooldown is a final belt-and-braces.
+    private static readonly TimeSpan AutoLaunchCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan AutoLaunchServerDownLogCooldown = TimeSpan.FromSeconds(30);
 
     // Auto-inject only after the external AC client has been continuously
@@ -42,6 +49,12 @@ internal partial class MainWindow : Window
     // to and when we launched it. Used by the auto-relaunch circuit breaker
     // to distinguish "exited normally after a long session" from "quick exit".
     private readonly Dictionary<int, (string AccountKey, DateTime LaunchedAtUtc)> _launchedPidInfo = [];
+    /// PIDs we have observed as logged-in at least once. Once a PID is in this
+    /// set, the stuck-client reaper will never touch it. This is the safety
+    /// net against any session-state race that could spuriously flip a
+    /// logged-in client back to !IsLoggedIn — a kill-while-playing was
+    /// observed once in the wild and we never want it again.
+    private readonly HashSet<int> _everLoggedInPids = [];
     // Sliding-window crash history per account-key. RecordCrash appends; the
     // breaker check trims entries older than CrashRelaunchWindowMinutes.
     private readonly Dictionary<string, List<DateTime>> _crashHistoryByAccount = new(StringComparer.OrdinalIgnoreCase);
@@ -67,6 +80,7 @@ internal partial class MainWindow : Window
     private readonly Dictionary<string, TextBlock> _launchTargetStatusTexts = [];
     private readonly Dictionary<string, CheckBox> _launchTargetChecks = [];
     private readonly Dictionary<string, ComboBox> _launchTargetCharacterDropdowns = [];
+    private readonly Dictionary<string, ComboBox> _launchTargetInjectionDropdowns = [];
     private readonly Dictionary<string, DateTime> _autoLaunchAttemptTimesUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTime> _autoLaunchServerDownNoticeTimesUtc = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ServerAvailabilityState> _serverStatuses = new(StringComparer.OrdinalIgnoreCase);
@@ -90,6 +104,10 @@ internal partial class MainWindow : Window
     private bool _serverStatusRefreshInFlight;
     private bool _suppressPrimarySelectionChanged;
     private bool _suppressLaunchTargetCharacterSelectionChanged;
+    // Diagnostics: emit "reaper is OFF" to the activity log once per session
+    // when MaybeKillStuckClients sees KillStuckClients=false. Lets us
+    // definitively rule out the launcher when an AC client vanishes.
+    private bool _reaperOffLogged;
 
     public MainWindow()
     {
@@ -191,6 +209,28 @@ internal partial class MainWindow : Window
         LaunchStaggerMsBox.Value = _settings.LaunchStaggerMs;
         CrashRelaunchLimitBox.Value = _settings.CrashRelaunchLimitInWindow;
         CrashRelaunchWindowBox.Value = _settings.CrashRelaunchWindowMinutes;
+        KillStuckClientsCheckBox.IsChecked = _settings.KillStuckClients;
+        StuckClientTimeoutBox.Value = _settings.StuckClientTimeoutSeconds;
+
+        // Engine flags live in %APPDATA%\RynthCore\engine.json, not the
+        // launcher's own settings. The engine reads them on init; the launcher
+        // just provides a UI window into the same file.
+        EnableDcompOverlayCheckBox.IsChecked = EngineJsonStore.GetBool("EnableDcompOverlay") ?? false;
+        EnableDcompOverlayCheckBox.IsCheckedChanged += OnEnableDcompOverlayChanged;
+    }
+
+    private void OnEnableDcompOverlayChanged(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        bool value = EnableDcompOverlayCheckBox.IsChecked == true;
+        try
+        {
+            EngineJsonStore.SetBool("EnableDcompOverlay", value);
+            AppendActivity($"Engine setting saved: EnableDcompOverlay={value}. Takes effect on next AC client launch.");
+        }
+        catch (Exception ex)
+        {
+            AppendActivity($"Failed to save EnableDcompOverlay to engine.json: {ex.Message}");
+        }
     }
 
     private void BuildPluginLoadout()
@@ -579,6 +619,8 @@ internal partial class MainWindow : Window
         _launchTargetStatusTexts.Clear();
         _launchTargetChecks.Clear();
         _launchTargetCharacterDropdowns.Clear();
+        _launchTargetInjectionDropdowns.Clear();
+        bool decalAvailable = DecalLocator.IsInstalled();
         _settings.CheckedLaunchAccountProfileIds ??= [];
         bool characterNamesChanged = false;
 
@@ -596,7 +638,7 @@ internal partial class MainWindow : Window
 
             var container = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("Auto, *, Auto"),
+                ColumnDefinitions = new ColumnDefinitions("Auto, *, Auto, Auto, Auto"),
                 Margin = new Thickness(0, 0, 0, 1)
             };
 
@@ -675,24 +717,107 @@ internal partial class MainWindow : Window
                 }
             };
 
+            var loginCmdsButton = BuildLoginCommandsButton(account);
+            var injectDropdown = BuildInjectionMethodDropdown(account, decalAvailable);
+
             Grid.SetColumn(checkBox, 0);
             Grid.SetColumn(statusText, 1);
             Grid.SetColumn(charDropdown, 2);
+            Grid.SetColumn(loginCmdsButton, 3);
+            Grid.SetColumn(injectDropdown, 4);
 
             container.Children.Add(checkBox);
             container.Children.Add(statusText);
             container.Children.Add(charDropdown);
+            container.Children.Add(loginCmdsButton);
+            container.Children.Add(injectDropdown);
 
             LaunchTargetsPanel.Children.Add(container);
             _launchTargetStatusTexts[account.Id] = statusText;
             _launchTargetChecks[account.Id] = checkBox;
             _launchTargetCharacterDropdowns[account.Id] = charDropdown;
+            _launchTargetInjectionDropdowns[account.Id] = injectDropdown;
         }
 
         if (characterNamesChanged)
             SaveSettings();
 
         UpdateLaunchTargetStatuses();
+    }
+
+    private Button BuildLoginCommandsButton(LaunchAccountProfile account)
+    {
+        var button = new Button
+        {
+            Content = "OnLogin",
+            FontSize = 11.5,
+            Margin = new Thickness(6, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Padding = new Thickness(8, 2)
+        };
+        global::Avalonia.Controls.ToolTip.SetTip(button,
+            "Per-character chat commands dispatched after login. Examples: /fellow open, /say ready.");
+
+        button.Click += async (_, _) =>
+        {
+            LaunchServerProfile? server = _settings.ServerProfiles.FirstOrDefault(s => s.Id == account.ServerId);
+            var dialog = new LoginCommandsDialog(account, server);
+            await dialog.ShowDialog(this);
+            if (dialog.ChangesSaved)
+            {
+                SaveSettings();
+                AppendActivity($"Login commands updated for {account.DisplayName}.");
+            }
+        };
+
+        return button;
+    }
+
+    private ComboBox BuildInjectionMethodDropdown(LaunchAccountProfile account, bool decalAvailable)
+    {
+        var dropdown = new ComboBox
+        {
+            HorizontalAlignment = HorizontalAlignment.Right,
+            MinWidth = 110,
+            FontSize = 11.5,
+            Margin = new Thickness(6, 0, 0, 0)
+        };
+        global::Avalonia.Controls.ToolTip.SetTip(dropdown, decalAvailable
+            ? "Which modding stack to inject when this account launches."
+            : "Decal not detected in registry — install Decal to enable Decal mode.");
+
+        var rynthItem = new ComboBoxItem { Content = "RynthCore", Tag = InjectionMode.RynthCore };
+        var decalItem = new ComboBoxItem
+        {
+            Content = decalAvailable ? "Decal" : "Decal (not installed)",
+            Tag = InjectionMode.Decal,
+            IsEnabled = decalAvailable
+        };
+
+        dropdown.Items.Add(rynthItem);
+        dropdown.Items.Add(decalItem);
+
+        // If the account is set to Decal but Decal isn't installed, fall back to
+        // RynthCore in the UI so the user can't accidentally launch into a
+        // disabled mode. We don't mutate the saved profile until they click.
+        InjectionMode effectiveMode = (account.InjectionMode == InjectionMode.Decal && !decalAvailable)
+            ? InjectionMode.RynthCore
+            : account.InjectionMode;
+        dropdown.SelectedItem = effectiveMode == InjectionMode.Decal ? decalItem : rynthItem;
+
+        dropdown.SelectionChanged += (_, _) =>
+        {
+            if (dropdown.SelectedItem is ComboBoxItem item && item.Tag is InjectionMode mode)
+            {
+                if (account.InjectionMode == mode)
+                    return;
+                account.InjectionMode = mode;
+                SaveSettings();
+                AppendActivity($"{account.DisplayName}: injection method set to {mode}.");
+            }
+        };
+
+        return dropdown;
     }
 
     private void UpdateCheckedLaunchTargetsFromUi()
@@ -777,6 +902,9 @@ internal partial class MainWindow : Window
             _settings.CrashRelaunchLimitInWindow = (int)crashLimit;
         if (CrashRelaunchWindowBox.Value is decimal crashWindow)
             _settings.CrashRelaunchWindowMinutes = (int)crashWindow;
+        _settings.KillStuckClients = KillStuckClientsCheckBox.IsChecked == true;
+        if (StuckClientTimeoutBox.Value is decimal stuckTimeout)
+            _settings.StuckClientTimeoutSeconds = (int)stuckTimeout;
         _settings.EnabledPluginIds = GetSelectedPluginIds().ToList();
         if (_settings.EnabledPluginIds.Count == 0)
             _settings.EnabledPluginIds.Add("rynthcore-engine");
@@ -867,14 +995,35 @@ internal partial class MainWindow : Window
 
         bool shouldInject = AutoInjectAfterLaunchCheckBox.IsChecked == true;
 
-        if (shouldInject && !GetSelectedPluginIds().Contains("rynthcore-engine", StringComparer.OrdinalIgnoreCase))
+        // Engine plugin must be selected when at least one chosen account is
+        // RynthCore-mode AND auto-inject is on. Decal-mode accounts don't need
+        // it because they don't load the engine.
+        bool anyRynthCoreMode = accountsToLaunch.Any(a => a.InjectionMode == InjectionMode.RynthCore);
+        if (shouldInject && anyRynthCoreMode && !GetSelectedPluginIds().Contains("rynthcore-engine", StringComparer.OrdinalIgnoreCase))
         {
-            AppendActivity("Launch blocked: RynthCore Engine must stay selected in Runtime Loadout when auto-inject is enabled.");
+            AppendActivity("Launch blocked: RynthCore Engine must stay selected in Runtime Loadout when auto-inject is enabled for any RynthCore-mode account.");
+            return;
+        }
+
+        // Pre-resolve Decal Inject.dll once if any account needs it.
+        string? decalInjectPath = accountsToLaunch.Any(a => a.InjectionMode == InjectionMode.Decal && shouldInject)
+            ? DecalLocator.TryGetInjectDllPath()
+            : null;
+        if (shouldInject && accountsToLaunch.Any(a => a.InjectionMode == InjectionMode.Decal) && decalInjectPath == null)
+        {
+            AppendActivity("Launch blocked: one or more accounts are set to Decal mode but Decal is not installed (HKLM\\SOFTWARE\\Decal\\Agent\\AgentPath\\Inject.dll missing).");
             return;
         }
 
         SaveRuntimePaths(appendActivity: !isAutomaticLaunch);
         SaveLaunchBehavior(appendActivity: !isAutomaticLaunch);
+
+        LauncherDiag.Info($"LaunchAccountsAsync ENTRY label='{launchLabel}' auto={isAutomaticLaunch} count={accountsToLaunch.Count} semCount={_userPrefsSwapLock.CurrentCount} sessionPids={_launchedSessionPids.Count} pidInfo={_launchedPidInfo.Count} crashAccounts={_crashHistoryByAccount.Count}");
+        if (_launchedPidInfo.Count > 0)
+        {
+            foreach (KeyValuePair<int, (string AccountKey, DateTime LaunchedAtUtc)> kv in _launchedPidInfo)
+                LauncherDiag.Info($"  pidInfo[{kv.Key}] = account='{kv.Value.AccountKey}' launchedUtc={kv.Value.LaunchedAtUtc:HH:mm:ss}");
+        }
 
         try
         {
@@ -947,9 +1096,25 @@ internal partial class MainWindow : Window
                     await Task.Delay(staggerMs);
 
                 var p = prepared[i];
-                Task launchTask = shouldInject
-                    ? LaunchOneInjectedAsync(p.Account, acPath, p.Args, enginePath, p.Summary, p.Context)
-                    : LaunchOneNoInjectAsync(p.Account, acPath, p.Args, p.Summary, p.Context);
+                Task launchTask;
+                if (!shouldInject)
+                {
+                    launchTask = LaunchOneNoInjectAsync(p.Account, acPath, p.Args, p.Summary, p.Context);
+                }
+                else if (p.Account.InjectionMode == InjectionMode.Decal)
+                {
+                    // Decal-mode launches use Decal's registered acclient.exe
+                    // (PortalPath) when set; falls back to the global path. The
+                    // distinction matters because Decal is built around the
+                    // C:\Turbine\Asheron's Call install, while the RynthCore
+                    // path may point at the private AcClient duplicate.
+                    string decalAcPath = DecalLocator.TryGetDecalAcClientPath() ?? acPath;
+                    launchTask = LaunchOneDecalInjectedAsync(p.Account, decalAcPath, p.Args, decalInjectPath!, p.Summary, p.Context);
+                }
+                else
+                {
+                    launchTask = LaunchOneInjectedAsync(p.Account, acPath, p.Args, enginePath, p.Summary, p.Context);
+                }
                 launchTasks.Add(launchTask);
             }
 
@@ -977,8 +1142,17 @@ internal partial class MainWindow : Window
     {
         string resolvedPrefsPath = ResolveUserPrefsPath(account);
         bool needsPrefsSwap = !string.IsNullOrEmpty(resolvedPrefsPath) && File.Exists(resolvedPrefsPath);
+
+        string entryAccountKey = BuildAccountKey(launchContext.AccountName);
+        int crashHistCount = _crashHistoryByAccount.TryGetValue(entryAccountKey, out List<DateTime>? hist0) ? hist0.Count : 0;
+        LauncherDiag.Info($"LaunchOneInjected ENTRY account='{launchContext.AccountName}' needsPrefsSwap={needsPrefsSwap} semCount={_userPrefsSwapLock.CurrentCount} sessionPids={_launchedSessionPids.Count} pidInfo={_launchedPidInfo.Count} crashHist={crashHistCount}");
+
         if (needsPrefsSwap)
+        {
+            LauncherDiag.Info($"LaunchOneInjected acquiring _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
             await _userPrefsSwapLock.WaitAsync();
+            LauncherDiag.Info($"LaunchOneInjected acquired _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
+        }
 
         try
         {
@@ -1000,6 +1174,8 @@ internal partial class MainWindow : Window
                     }));
 
             string accountKey = BuildAccountKey(launchContext.AccountName);
+
+            LauncherDiag.Info($"LaunchOneInjected injection result: success={result.Success} pid={(result.ProcessId is int p ? p.ToString() : "null")} summary='{result.Summary}'");
 
             if (result.Success)
             {
@@ -1025,7 +1201,90 @@ internal partial class MainWindow : Window
         finally
         {
             if (needsPrefsSwap)
+            {
+                LauncherDiag.Info($"LaunchOneInjected releasing _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
                 _userPrefsSwapLock.Release();
+                LauncherDiag.Info($"LaunchOneInjected released _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
+            }
+            LauncherDiag.Info($"LaunchOneInjected EXIT account='{launchContext.AccountName}'");
+        }
+    }
+
+    private async Task LaunchOneDecalInjectedAsync(
+        LaunchAccountProfile account,
+        string acPath,
+        string launchArguments,
+        string decalInjectDllPath,
+        string launchSummary,
+        LaunchContextRecord launchContext)
+    {
+        string resolvedPrefsPath = ResolveUserPrefsPath(account);
+        bool needsPrefsSwap = !string.IsNullOrEmpty(resolvedPrefsPath) && File.Exists(resolvedPrefsPath);
+
+        string entryAccountKey = BuildAccountKey(launchContext.AccountName);
+        int crashHistCount = _crashHistoryByAccount.TryGetValue(entryAccountKey, out List<DateTime>? hist0) ? hist0.Count : 0;
+        LauncherDiag.Info($"LaunchOneDecal ENTRY account='{launchContext.AccountName}' needsPrefsSwap={needsPrefsSwap} semCount={_userPrefsSwapLock.CurrentCount} sessionPids={_launchedSessionPids.Count} pidInfo={_launchedPidInfo.Count} crashHist={crashHistCount}");
+
+        if (needsPrefsSwap)
+        {
+            LauncherDiag.Info($"LaunchOneDecal acquiring _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
+            await _userPrefsSwapLock.WaitAsync();
+            LauncherDiag.Info($"LaunchOneDecal acquired _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
+        }
+
+        try
+        {
+            if (needsPrefsSwap)
+            {
+                _launchSettings.SwapUserPreferences(resolvedPrefsPath, _settings.AllowMultipleClients, AppendActivity);
+            }
+
+            InjectionResult result = await Task.Run(() =>
+                _injector.LaunchSuspendedAndInjectDecal(
+                    acPath,
+                    launchArguments,
+                    decalInjectDllPath,
+                    AppendActivity,
+                    processId =>
+                    {
+                        LaunchContextStore.WriteForProcess(processId, launchContext);
+                        WritePendingSessionState(processId, launchContext);
+                    }));
+
+            string accountKey = BuildAccountKey(launchContext.AccountName);
+
+            LauncherDiag.Info($"LaunchOneDecal injection result: success={result.Success} pid={(result.ProcessId is int p ? p.ToString() : "null")} summary='{result.Summary}'");
+
+            if (result.Success)
+            {
+                if (result.ProcessId is int trackedPid)
+                {
+                    _launchedSessionPids.Add(trackedPid);
+                    _launchedPidInfo[trackedPid] = (accountKey, DateTime.UtcNow);
+                }
+
+                AppendActivity(result.ProcessId is int pid
+                    ? $"Decal launch complete for {launchSummary} (PID {pid})."
+                    : $"Decal launch complete for {launchSummary}.");
+            }
+            else
+            {
+                RecordCrash(accountKey);
+                AppendActivity($"Decal launch failed for {launchSummary}: {result.Summary}");
+            }
+
+            if (needsPrefsSwap)
+                await Task.Delay(UserPrefsSettleDelay);
+        }
+        finally
+        {
+            if (needsPrefsSwap)
+            {
+                LauncherDiag.Info($"LaunchOneDecal releasing _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
+                _userPrefsSwapLock.Release();
+                LauncherDiag.Info($"LaunchOneDecal released _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
+            }
+            LauncherDiag.Info($"LaunchOneDecal EXIT account='{launchContext.AccountName}'");
         }
     }
 
@@ -1038,8 +1297,15 @@ internal partial class MainWindow : Window
     {
         string resolvedPrefsPath = ResolveUserPrefsPath(account);
         bool needsPrefsSwap = !string.IsNullOrEmpty(resolvedPrefsPath) && File.Exists(resolvedPrefsPath);
+
+        LauncherDiag.Info($"LaunchOneNoInject ENTRY account='{launchContext.AccountName}' needsPrefsSwap={needsPrefsSwap} semCount={_userPrefsSwapLock.CurrentCount} sessionPids={_launchedSessionPids.Count} pidInfo={_launchedPidInfo.Count}");
+
         if (needsPrefsSwap)
+        {
+            LauncherDiag.Info($"LaunchOneNoInject acquiring _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
             await _userPrefsSwapLock.WaitAsync();
+            LauncherDiag.Info($"LaunchOneNoInject acquired _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
+        }
 
         try
         {
@@ -1080,6 +1346,11 @@ internal partial class MainWindow : Window
                 _launchedPidInfo[proc.Id] = (BuildAccountKey(launchContext.AccountName), DateTime.UtcNow);
                 LaunchContextStore.WriteForProcess(proc.Id, launchContext);
                 WritePendingSessionState(proc.Id, launchContext);
+                LauncherDiag.Info($"LaunchOneNoInject Process.Start ok pid={proc.Id}");
+            }
+            else
+            {
+                LauncherDiag.Info("LaunchOneNoInject Process.Start returned null");
             }
             AppendActivity($"Launched AC (no injection) using {launchSummary}.");
 
@@ -1089,18 +1360,37 @@ internal partial class MainWindow : Window
         finally
         {
             if (needsPrefsSwap)
+            {
+                LauncherDiag.Info($"LaunchOneNoInject releasing _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
                 _userPrefsSwapLock.Release();
+                LauncherDiag.Info($"LaunchOneNoInject released _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
+            }
+            LauncherDiag.Info($"LaunchOneNoInject EXIT account='{launchContext.AccountName}'");
         }
     }
 
     private LaunchContextRecord BuildLaunchContext(LaunchAccountProfile account, LaunchServerProfile? server)
     {
         string targetCharacter = ResolveTargetCharacterForLaunch(account, server);
+
+        // Resolve OnLogin commands for the resolved character. Empty/None
+        // selections produce no commands. Lookup is case-insensitive because
+        // the dictionary uses an OrdinalIgnoreCase comparer.
+        List<string>? onLoginCommands = null;
+        if (!string.IsNullOrWhiteSpace(targetCharacter)
+            && account.OnLoginCommandsByCharacter.TryGetValue(targetCharacter, out List<string>? cmds)
+            && cmds.Count > 0)
+        {
+            onLoginCommands = new List<string>(cmds);
+        }
+
         return LaunchContextStore.CreateRecord(
             account.AccountName,
             server?.Name ?? string.Empty,
             targetCharacter,
-            _settings.SkipLoginLogos);
+            _settings.SkipLoginLogos,
+            onLoginCommands,
+            account.OnLoginWaitMs);
     }
 
     private static void WritePendingSessionState(int processId, LaunchContextRecord launchContext)
@@ -1261,27 +1551,9 @@ internal partial class MainWindow : Window
 
     private void SyncPluginPathsToEngineSettings()
     {
-        string engineSettingsPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "RynthCore",
-            "engine.json");
-
         try
         {
-            string? dir = Path.GetDirectoryName(engineSettingsPath);
-            if (dir != null) Directory.CreateDirectory(dir);
-
-            using var ms = new MemoryStream();
-            using (var w = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
-            {
-                w.WriteStartObject();
-                w.WriteStartArray("PluginPaths");
-                foreach (string p in _pluginDllPaths)
-                    w.WriteStringValue(p);
-                w.WriteEndArray();
-                w.WriteEndObject();
-            }
-            File.WriteAllBytes(engineSettingsPath, ms.ToArray());
+            EngineJsonStore.SetStringArray("PluginPaths", _pluginDllPaths);
         }
         catch (Exception ex)
         {
@@ -1429,8 +1701,42 @@ internal partial class MainWindow : Window
         Dictionary<int, LaunchContextRecord> activeContexts = LaunchContextStore.ReadForActiveProcesses(activePids);
         Dictionary<int, SessionStateRecord> activeSessions = SessionStateStore.ReadForActiveProcesses(activePids);
         DetectQuickExits(activePids);
-        _launchedSessionPids.RemoveWhere(pid => !activePids.Contains(pid));
+
+        // Audit trail for vanished PIDs: log each removal so a "did the
+        // launcher kill this client?" question has a concrete answer. The
+        // reaper's own kill site logs separately ("Killing stuck PID …") —
+        // a PID's removal line without that preceding kill line means
+        // something OTHER than the launcher took it down (AC self-exit,
+        // network disconnect, manual close, OS).
+        List<int>? departedPids = null;
+        foreach (int pid in _launchedSessionPids)
+        {
+            if (!activePids.Contains(pid))
+                (departedPids ??= []).Add(pid);
+        }
+        if (departedPids != null)
+        {
+            foreach (int pid in departedPids)
+            {
+                _launchedSessionPids.Remove(pid);
+                AppendActivity($"PID {pid} removed from launcher tracking (process is no longer running).");
+                LauncherDiag.Info($"RefreshSessionState: PID {pid} departed; removed from _launchedSessionPids (now {_launchedSessionPids.Count}). _launchedPidInfo entry remains until DetectQuickExits processes it.");
+            }
+        }
+
         _windowPositionAppliedPids.RemoveWhere(pid => !activePids.Contains(pid));
+        _everLoggedInPids.RemoveWhere(pid => !activePids.Contains(pid));
+
+        // Latch any PID that's currently reporting IsLoggedIn=true. Once
+        // latched, the reaper will permanently exempt it — even if some race
+        // later flips IsLoggedIn back to false without LogoutAtUtc set.
+        foreach (KeyValuePair<int, SessionStateRecord> kvp in activeSessions)
+        {
+            if (kvp.Value.IsLoggedIn && _everLoggedInPids.Add(kvp.Key))
+            {
+                AppendActivity($"PID {kvp.Key} ({kvp.Value.AccountName}) logged in — exempted from stuck-client reaper.");
+            }
+        }
 
         AcStatusText.Text = targets.Length switch
         {
@@ -1459,6 +1765,124 @@ internal partial class MainWindow : Window
         UpdateLaunchTargetStatuses(targets, activeContexts, activeSessions);
         MaybeQueueAutoLaunch(activeContexts, activeSessions);
         MaybeAutoInjectExternalClients(targets, activePids, activeContexts, activeSessions);
+        MaybeKillStuckClients(targets, activeContexts, activeSessions);
+    }
+
+    /// <summary>
+    /// Reaps RynthCore-mode acclient.exe processes that we launched but never
+    /// reached IsLoggedIn within <see cref="AppSettings.StuckClientTimeoutSeconds"/>.
+    /// Catches stuck char-select, patcher hangs, and disconnect/login-error
+    /// screens at the front of the launch flow.
+    ///
+    /// Strict scoping rules — we only kill a process if ALL of the following:
+    ///   - The user opted in via <see cref="AppSettings.KillStuckClients"/>
+    ///   - We launched it ourselves (PID is in <see cref="_launchedSessionPids"/>)
+    ///   - The associated account profile is set to <see cref="InjectionMode.RynthCore"/>
+    ///     (Decal-mode clients have no engine = no IsLoggedIn signal, so this
+    ///     heuristic would falsely reap working Decal sessions)
+    ///   - <see cref="SessionStateRecord.IsLoggedIn"/> is still false
+    ///   - Time-since-launch exceeds the configured timeout
+    /// </summary>
+    private void MaybeKillStuckClients(
+        IReadOnlyList<Process> targets,
+        IReadOnlyDictionary<int, LaunchContextRecord> activeContexts,
+        IReadOnlyDictionary<int, SessionStateRecord> activeSessions)
+    {
+        if (!_settings.KillStuckClients)
+        {
+            if (!_reaperOffLogged)
+            {
+                AppendActivity("Stuck-client reaper is OFF (KillStuckClients=false). The launcher will not kill any AC clients this session.");
+                _reaperOffLogged = true;
+            }
+            return;
+        }
+
+        int timeoutSeconds = Math.Max(15, _settings.StuckClientTimeoutSeconds);
+        TimeSpan timeout = TimeSpan.FromSeconds(timeoutSeconds);
+        DateTime nowUtc = DateTime.UtcNow;
+
+        foreach (Process process in targets)
+        {
+            int pid = process.Id;
+
+            if (!_launchedSessionPids.Contains(pid))
+                continue;
+            if (!_launchedPidInfo.TryGetValue(pid, out (string AccountKey, DateTime LaunchedAtUtc) info))
+                continue;
+
+            // Hard exemption: once this PID has been observed logged in at
+            // any point, the reaper never touches it. Protects healthy
+            // in-game clients from any session-state race or transient
+            // logout signal that might flip IsLoggedIn back to false.
+            if (_everLoggedInPids.Contains(pid))
+                continue;
+
+            activeSessions.TryGetValue(pid, out SessionStateRecord? sess);
+
+            // Resolve the account profile to gate on injection mode. If we
+            // can't find a matching profile, skip rather than kill blindly.
+            string? accountName = sess?.AccountName
+                                  ?? (activeContexts.TryGetValue(pid, out LaunchContextRecord? ctx) ? ctx.AccountName : null);
+            if (string.IsNullOrWhiteSpace(accountName))
+                continue;
+
+            LaunchAccountProfile? profile = _settings.AccountProfiles.FirstOrDefault(a =>
+                string.Equals(a.AccountName, accountName, StringComparison.OrdinalIgnoreCase));
+            if (profile == null || profile.InjectionMode != InjectionMode.RynthCore)
+                continue;
+
+            // Two reap conditions, both gated on the same timeout:
+            //   1. Pre-login stuck — never reached IsLoggedIn within timeout
+            //      since launch (patcher hang, char-select sit, login error)
+            //   2. Post-login stuck — was logged in, then logged out (clean
+            //      OR server-driven disconnect), and has sat in that state
+            //      longer than the timeout (disconnect dialog, char-select)
+            string? reason = null;
+
+            if (sess != null && sess.LogoutAtUtc.HasValue && !sess.IsLoggedIn)
+            {
+                TimeSpan sinceLogout = nowUtc - sess.LogoutAtUtc.Value;
+                if (sinceLogout >= timeout)
+                    reason = $"logged out / disconnected for {(int)sinceLogout.TotalSeconds}s";
+            }
+            else if (sess == null || !sess.IsLoggedIn)
+            {
+                TimeSpan age = nowUtc - info.LaunchedAtUtc;
+                if (age >= timeout)
+                    reason = $"no login within {timeoutSeconds}s";
+            }
+
+            if (reason == null)
+                continue;
+
+            // Final safety gate — only kill if the process is genuinely
+            // unresponsive. A healthy AC client (even at char-select or on a
+            // disconnect dialog) keeps pumping its WndProc, so Process.Responding
+            // is true. A truly hung/crashed-but-not-exited client returns
+            // false. Without this gate, transient logoff-class signals (which
+            // SessionStateRegistry latches into LogoutAtUtc) could cause us to
+            // kill an in-game client that the user is actively interacting
+            // with — observed in practice.
+            bool responding;
+            try { process.Refresh(); responding = process.Responding; }
+            catch { responding = true; }
+
+            if (responding)
+                continue;
+
+            try
+            {
+                AppendActivity($"Killing stuck PID {pid} ({accountName}) — {reason} and window is not responding.");
+                process.Kill();
+                _launchedSessionPids.Remove(pid);
+                _launchedPidInfo.Remove(pid);
+            }
+            catch (Exception ex)
+            {
+                AppendActivity($"Failed to kill stuck PID {pid}: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>
@@ -1690,9 +2114,12 @@ internal partial class MainWindow : Window
             {
                 RecordCrash(entry.Value.AccountKey);
                 AppendActivity($"Account '{entry.Value.AccountKey}' client (PID {entry.Key}) exited after {uptime.TotalSeconds:F0}s — counted as crash.");
+                int hist = _crashHistoryByAccount.TryGetValue(entry.Value.AccountKey, out List<DateTime>? h) ? h.Count : 0;
+                LauncherDiag.Info($"DetectQuickExits: PID {entry.Key} ({entry.Value.AccountKey}) uptime={uptime.TotalSeconds:F1}s -> RecordCrash. crashHist now {hist}.");
             }
             else if (!string.IsNullOrEmpty(entry.Value.AccountKey))
             {
+                LauncherDiag.Info($"DetectQuickExits: PID {entry.Key} ({entry.Value.AccountKey}) uptime={uptime.TotalSeconds:F1}s -> normal close, snapshotting prefs.");
                 // Real play session ended. Snapshot live UserPreferences.ini
                 // back to this account's stash so settings the user changed
                 // in-game survive into next launch.
@@ -1704,6 +2131,7 @@ internal partial class MainWindow : Window
         {
             foreach (int pid in toRemove)
                 _launchedPidInfo.Remove(pid);
+            LauncherDiag.Info($"DetectQuickExits: removed {toRemove.Count} _launchedPidInfo entries; remaining={_launchedPidInfo.Count}.");
         }
     }
 
@@ -1768,13 +2196,18 @@ internal partial class MainWindow : Window
         bool hasSaved = profile.WindowX.HasValue && profile.WindowY.HasValue
                         && profile.WindowWidth.HasValue && profile.WindowHeight.HasValue;
 
+        // Only act once AC reports IsLoggedIn — graphicsReady fires while AC
+        // is still in its small login window, and AC will resize itself again
+        // at character-select / portal-in. SetWindowPos before that point
+        // visibly fights AC's own window setup (the "all over the place
+        // until login" symptom). Likewise, capturing during login locks in
+        // a transient size that gets restored too early next launch.
+        bool loggedIn = activeSessions.TryGetValue(process.Id, out SessionStateRecord? sess) && sess.IsLoggedIn;
+        if (!loggedIn)
+            return;
+
         if (!_windowPositionAppliedPids.Contains(process.Id))
         {
-            // Wait until AC is past its own window-setup before applying ours,
-            // otherwise AC will move the window after we set it.
-            if (!graphicsReady)
-                return;
-
             _windowPositionAppliedPids.Add(process.Id);
             if (hasSaved)
             {

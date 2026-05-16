@@ -10,6 +10,14 @@ internal static class SelectedTargetHooks
 {
     private const int SetSelectedObjectVa = 0x0058D110;
     private const int SelectedIdVa = 0x00871E54;
+
+    /// <summary>
+    /// Reads the AC client's currently-selected target id directly from the
+    /// global. Used by PluginManager.DispatchLoginCompleteToLoadedPlugins to
+    /// re-seed plugins with the live target after a deferred init (events
+    /// fired before <c>_initialized=true</c> are dropped by the queue gate).
+    /// </summary>
+    public static uint ReadCurrentSelectedId() => ReadUInt32(SelectedIdVa);
     private static readonly byte[] SetSelectedObjectSignature =
     [
         0x8B, 0x4C, 0x24, 0x08, 0x85, 0xC9, 0xA1, 0x54,
@@ -59,7 +67,7 @@ internal static class SelectedTargetHooks
 
             IsInstalled = true;
             _statusMessage = $"Hooked ACCWeenieObject::SetSelectedObject @ 0x{_targetAddress.ToInt32():X8}.";
-            RynthLog.Verbose(
+            RynthLog.Info(
                 $"Compat: selected-target hook ready - SetSelectedObject=0x{_targetAddress.ToInt32():X8}, selectedId=0x{SelectedIdVa:X8}");
         }
         catch (Exception ex)
@@ -87,8 +95,12 @@ internal static class SelectedTargetHooks
         if (currentTargetId == previousTargetId)
             return;
 
+        if (Interlocked.Increment(ref _detourLogCount) <= 5)
+            RynthLog.Compat($"Compat: selected-target detour fired (#{_detourLogCount}) - prev=0x{previousTargetId:X8} curr=0x{currentTargetId:X8} reselect={reselect}");
         PluginManager.QueueSelectedTargetChange(currentTargetId, previousTargetId);
     }
+
+    private static int _detourLogCount;
 
     private static uint ReadUInt32(int address)
     {

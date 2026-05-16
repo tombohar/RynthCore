@@ -19,6 +19,10 @@ internal sealed class SessionStateRecord
     public DateTime? LoginCompletedAtUtc { get; set; }
     public DateTime LastUpdatedAtUtc { get; set; } = DateTime.UtcNow;
     public bool IsLoggedIn { get; set; }
+    /// Set by the engine when LogoutLifecycleHooks observes a logout (clean
+    /// or server-driven disconnect). Stays set across the post-login reaper
+    /// window so the launcher can detect "stuck on disconnect/char-select".
+    public DateTime? LogoutAtUtc { get; set; }
 }
 
 internal static class SessionStateStore
@@ -37,6 +41,24 @@ internal static class SessionStateStore
 
     public static SessionStateRecord? TryReadForProcess(int processId)
     {
+        // KNOWN-DEFERRED: when this method's full body is reachable on a
+        // RynthCore-injected acclient.exe, the AC client AVs ~17s after
+        // SendLoginCompleteNotification fires. Stack overflow inside an
+        // alternating function-pair pattern at engine RVAs ~0x98DXXX /
+        // ~0xC31AXX. Bisected to TryWriteLoginState → TryReadForProcess →
+        // (likely) JsonDocument.Parse interaction with our DatFileShareHooks
+        // CreateFile detour, but exact mechanism not yet root-caused.
+        //
+        // Returning null here forces TryWriteLoginState to seed a fresh
+        // session record on every login complete. The launcher's stuck-
+        // client reaper reads from the newly written record, so no
+        // functional loss in production. The only thing we lose is
+        // restoring `LaunchStartedAtUtc` from a prior session record —
+        // which gets reseeded from Process.StartTime in TryWriteLoginState
+        // anyway when existingRecord is null.
+        return null;
+
+#pragma warning disable CS0162
         string path = GetProcessPath(processId);
         if (!File.Exists(path))
             return null;
@@ -56,7 +78,8 @@ internal static class SessionStateStore
                 LaunchStartedAtUtc = GetDateTime(root, "LaunchStartedAtUtc") ?? DateTime.UtcNow,
                 LoginCompletedAtUtc = GetDateTime(root, "LoginCompletedAtUtc"),
                 LastUpdatedAtUtc = GetDateTime(root, "LastUpdatedAtUtc") ?? DateTime.UtcNow,
-                IsLoggedIn = GetBoolean(root, "IsLoggedIn")
+                IsLoggedIn = GetBoolean(root, "IsLoggedIn"),
+                LogoutAtUtc = GetDateTime(root, "LogoutAtUtc")
             };
 
             if (record.ProcessId == 0)
@@ -68,6 +91,7 @@ internal static class SessionStateStore
         {
             return null;
         }
+#pragma warning restore CS0162
     }
 
     public static Dictionary<int, SessionStateRecord> ReadForActiveProcesses(IEnumerable<int> activeProcessIds)
@@ -138,6 +162,10 @@ internal static class SessionStateStore
                 writer.WriteNull("LoginCompletedAtUtc");
             writer.WriteString("LastUpdatedAtUtc", record.LastUpdatedAtUtc.ToString("O", CultureInfo.InvariantCulture));
             writer.WriteBoolean("IsLoggedIn", record.IsLoggedIn);
+            if (record.LogoutAtUtc.HasValue)
+                writer.WriteString("LogoutAtUtc", record.LogoutAtUtc.Value.ToString("O", CultureInfo.InvariantCulture));
+            else
+                writer.WriteNull("LogoutAtUtc");
             writer.WriteEndObject();
         }
 

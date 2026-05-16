@@ -5,7 +5,7 @@
 //
 //  Order matters. Each phase is wrapped so a failure does not abort the rest:
 //
-//   1. EndSceneHook.Uninstall — chains into ImGuiController.Shutdown which
+//   1. EndSceneHook.Uninstall — chains into EngineFrameController.Shutdown which
 //      tears down PluginManager (RynthPluginShutdown + FreeLibrary plugins),
 //      OverlayTextureRenderer, ViewportRendererBackend, ViewportPlatformBackend,
 //      DX9Backend, Win32Backend (restores WndProc), and destroys ImGui context.
@@ -43,9 +43,12 @@ internal static class EngineLifecycle
     /// <summary>
     /// Named auto-reset event the loader (RynthCore.Loader.dll) waits on.
     /// Signaling it triggers shutdown + FreeLibrary + LoadLibrary + re-init.
-    /// Must match the constant in RynthCore.Loader.EntryPoint.
+    /// Must match the helper in RynthCore.Loader.EntryPoint.
+    /// PID-suffixed so a reload click on one acclient.exe doesn't trigger
+    /// reload in every other acclient.exe in the same login session
+    /// (which is the broadcast scope of "Local\" without the suffix).
     /// </summary>
-    private const string ReloadEventName = "Local\\RynthCore.Engine.RequestReload";
+    private static string ReloadEventName => $"Local\\RynthCore.Engine.RequestReload.p{Environment.ProcessId}";
 
     private const uint EVENT_MODIFY_STATE = 0x0002;
 
@@ -113,14 +116,32 @@ internal static class EngineLifecycle
 
         Step("AvaloniaOverlay.Stop", () => AvaloniaOverlay.Stop());
 
+        // Stop the headless tick pump BEFORE plugin shutdown / FreeLibrary.
+        // Otherwise the pump's TickAll/ProcessPendingActions can be mid-call
+        // into a plugin whose code pages we're about to unmap → AV.
+        Step("TickPump.StopAndJoin", () => EntryPoint.StopTickPumpAndJoin());
+
         Step("PluginManager.ShutdownAll (defensive)", () => PluginManager.ShutdownAll());
 
-        Step("MH_DisableHook(ALL) + Uninitialize", () =>
+        // Stop HeartbeatLogger BEFORE MinHook teardown — it's a managed thread
+        // that keeps running and would execute code pages the loader is about to
+        // unmap (FreeLibrary on the engine module right after RynthCoreShutdown
+        // returns). Without this, hot-reload fires a CLR exception in the dying
+        // module's code at the moment of FreeLibrary.
+        Step("HeartbeatLogger.StopAndJoin", () => Compatibility.HeartbeatLogger.StopAndJoin());
+
+        Step("MH_DisableHook(ALL)", () =>
         {
+            // DisableHook restores the original code at every hooked function — that's
+            // what we actually need for safety. Do NOT call MH_Uninitialize: it frees
+            // the trampoline pool memory, and AC's CRT atexit chain (or cached engine
+            // delegates) can still reference those addresses during the rest of
+            // shutdown → AV at the trampoline block (e.g. 0x04CE0F60). Leaving the
+            // trampoline memory allocated for the remainder of the process lifetime
+            // is harmless; OS reclaims it on actual exit. On hot-reload, the new
+            // engine re-Initializes MinHook; existing process-wide state is fine.
             int disable = MinHook.MH_DisableHook(MinHook.MH_ALL_HOOKS);
             RynthLog.Info($"MH_DisableHook(ALL) = {MinHook.StatusString(disable)}");
-            int uninit = MinHook.MH_Uninitialize();
-            RynthLog.Info($"MH_Uninitialize = {MinHook.StatusString(uninit)}");
         });
 
         Volatile.Write(ref _hasShutDown, 1);

@@ -247,6 +247,7 @@ internal static class ChatCallbackHooks
 
     private static int IncomingChatWrapperDetour(int flags, IntPtr text, int chatChannel)
     {
+        RecursionGuard.Tick("ChatCallbackHooks.IncomingChatWrapper");
         try
         {
             return CurrentIncomingMode switch
@@ -269,6 +270,7 @@ internal static class ChatCallbackHooks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvThiscall) })]
     private static unsafe int IncomingChatAddTextDetour(IntPtr thisPtr, IntPtr text, uint chatType, uint unknown, IntPtr stringInfo)
     {
+        RecursionGuard.Tick("ChatCallbackHooks.IncomingChatAddText");
         // 1. Read string BEFORE original — buffer may be freed after
         string? line = (text != IntPtr.Zero) ? ReadIncomingChatLine(text, chatType) : null;
 
@@ -326,6 +328,7 @@ internal static class ChatCallbackHooks
 
     private static int OutgoingChatDetour(IntPtr thisPtr, IntPtr text, uint commandSource)
     {
+        RecursionGuard.Tick("ChatCallbackHooks.OutgoingChat");
         try
         {
             string? line = ReadWidePString(text);

@@ -491,10 +491,39 @@ internal static class ClientHelperHooks
         return containerId != 0;
     }
 
+    // Rate-limit + reentry guard for WriteToChat. AC's AddTextToScroll
+    // (0x005649F0) consistently AVs at 0x00460D1D after sustained re-entry
+    // from inside its own chat-add path (observed when RynthAi's buff retry
+    // loop spammed the same "Casting: X" message dozens of times). Plus we
+    // also hook the same function in ChatCallbackHooks.IncomingChatAddTextDetour,
+    // which fires when AC processes our own WriteToChat output — guard
+    // against unbounded recursion into ourselves.
+    private const int WriteToChatMinIntervalMs = 100;
+    [System.Runtime.CompilerServices.ModuleInitializer]
+    internal static void EnsureChatRateLimiterReady() { /* triggers static init */ }
+    private static long _lastWriteToChatTick;
+    [ThreadStatic] private static int _writeToChatDepth;
+
     public static bool WriteToChat(string? text, int chatType)
     {
         if (_addTextToScroll == null || string.IsNullOrWhiteSpace(text))
             return false;
+
+        // Re-entry guard: AC's AddTextToScroll calls into our hook chain,
+        // which may call back to WriteToChat (transitively, via plugin
+        // notifications). One level of nesting is fine; deeper risks the
+        // crashing accumulation pattern.
+        if (_writeToChatDepth > 0)
+            return false;
+
+        // Rate limit: bot retry loops + plugin Think exceptions historically
+        // produced bursts of identical chat writes. Cap at one every
+        // WriteToChatMinIntervalMs to keep AC's chat-add state healthy.
+        long now = Environment.TickCount64;
+        long last = System.Threading.Interlocked.Read(ref _lastWriteToChatTick);
+        if (last != 0 && now - last < WriteToChatMinIntervalMs)
+            return false;
+        System.Threading.Interlocked.Exchange(ref _lastWriteToChatTick, now);
 
         try
         {
@@ -506,11 +535,21 @@ internal static class ClientHelperHooks
             if (line.Length == 0)
                 return false;
 
+            // Strip any control chars that might confuse AC's chat tokenizer.
+            // The previous WriteToChat crashes correlated with bursts of
+            // bot retries that may have left malformed text in flight.
+            foreach (char c in line)
+            {
+                if (c < 0x20 && c != '\t')
+                    return false; // bail rather than feed AC bad input.
+            }
+
             ushort[] chars = new ushort[line.Length + 1]; // +1 for null terminator (wcslen requirement)
             for (int i = 0; i < line.Length; i++)
                 chars[i] = line[i];
 
             var wide = WidePString.Create(chars);
+            _writeToChatDepth++;
             try
             {
                 return _addTextToScroll(
@@ -522,6 +561,7 @@ internal static class ClientHelperHooks
             }
             finally
             {
+                _writeToChatDepth--;
                 wide.Dispose();
             }
         }

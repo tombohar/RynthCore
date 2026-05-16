@@ -180,6 +180,26 @@ internal static unsafe class OverlayTextureRenderer
             _delegatesCached = true;
         }
 
+        // Publish viewport size BEFORE consuming a frame so Avalonia has a non-zero
+        // game-surface size on the very first tick. Without this, the producer waits
+        // for size > 1 (set previously only inside DrawQuad), but DrawQuad doesn't
+        // run until a frame is uploaded — chicken-and-egg when ImGui's Win32Backend
+        // (which also publishes ClientPixelWidth/Height) is disabled.
+        D3DVIEWPORT9 earlyVp;
+        if (_getViewport!(pDevice, &earlyVp) >= 0)
+        {
+            int vw = (int)earlyVp.Width;
+            int vh = (int)earlyVp.Height;
+            if (vw > 1 && vh > 1)
+            {
+                bool changed = AvaloniaOverlay.ViewportWidth != vw || AvaloniaOverlay.ViewportHeight != vh;
+                AvaloniaOverlay.ViewportWidth = vw;
+                AvaloniaOverlay.ViewportHeight = vh;
+                if (changed)
+                    AvaloniaOverlay.NotifyGameSurfaceMetricsChanged();
+            }
+        }
+
         // Learn as early as possible whether this game device can consume shared
         // textures. That lets the producer stay on software submissions only on
         // unsupported clients instead of discovering it mid-session.
@@ -261,23 +281,31 @@ internal static unsafe class OverlayTextureRenderer
         }
 
         // Lock → copy → unlock
-        var lockRect  = GetTexMethod<TexLockRectD>(_texture, TextureVTableIndex.LockRect);
-        var unlockRect = GetTexMethod<TexUnlockRectD>(_texture, TextureVTableIndex.UnlockRect);
+        // Use raw function pointers (no GC delegate alloc) — Marshal.GetDelegateForFunctionPointer
+        // creates a small heap object per call, which at 60+ FPS hammers the LFH and was bisected
+        // as the cause of a heap-corruption AV in ntdll (write fault at addr ending in FFC).
+        IntPtr texVtbl = Marshal.ReadIntPtr(_texture);
+        var lockRectFn = (delegate* unmanaged[Stdcall]<IntPtr, uint, D3DLOCKED_RECT*, IntPtr, uint, int>)
+            Marshal.ReadIntPtr(texVtbl, TextureVTableIndex.LockRect * IntPtr.Size);
+        var unlockRectFn = (delegate* unmanaged[Stdcall]<IntPtr, uint, int>)
+            Marshal.ReadIntPtr(texVtbl, TextureVTableIndex.UnlockRect * IntPtr.Size);
 
         D3DLOCKED_RECT locked;
-        if (lockRect(_texture, 0, &locked, IntPtr.Zero, 0) < 0)
+        if (lockRectFn(_texture, 0, &locked, IntPtr.Zero, 0) < 0)
             return;
 
         // Avalonia Bgra8888 == D3DFMT_A8R8G8B8 in memory — direct copy, no swizzle
         int srcStride = w * 4;
-        for (int row = 0; row < h; row++)
+        fixed (byte* srcBase = pixels)
         {
-            IntPtr dst = locked.pBits + row * locked.Pitch;
-            fixed (byte* src = pixels)
-                Buffer.MemoryCopy(src + row * srcStride, (void*)dst, srcStride, srcStride);
+            for (int row = 0; row < h; row++)
+            {
+                IntPtr dst = locked.pBits + row * locked.Pitch;
+                Buffer.MemoryCopy(srcBase + row * srcStride, (void*)dst, srcStride, srcStride);
+            }
         }
 
-        unlockRect(_texture, 0);
+        unlockRectFn(_texture, 0);
     }
 
     private static bool TryUseSharedTexture(IntPtr pDevice, string label, OverlaySharedTextureDescriptor descriptor)
@@ -514,7 +542,9 @@ internal static unsafe class OverlayTextureRenderer
         if (_texture == IntPtr.Zero)
             return;
 
-        var release = GetTexMethod<ReleaseD>(_texture, TextureVTableIndex.Release);
+        IntPtr texVtbl = Marshal.ReadIntPtr(_texture);
+        var release = (delegate* unmanaged[Stdcall]<IntPtr, uint>)
+            Marshal.ReadIntPtr(texVtbl, TextureVTableIndex.Release * IntPtr.Size);
         release(_texture);
         _texture = IntPtr.Zero;
         _sharedTextureHandle = IntPtr.Zero;
@@ -526,8 +556,9 @@ internal static unsafe class OverlayTextureRenderer
     {
         if (pObj == IntPtr.Zero) return;
         IntPtr vtbl = Marshal.ReadIntPtr(pObj);
-        var rel = Marshal.GetDelegateForFunctionPointer<ReleaseD>(
-            Marshal.ReadIntPtr(vtbl, 2 * IntPtr.Size));
+        // Raw function pointer — avoids GC delegate alloc on every per-frame Release.
+        var rel = (delegate* unmanaged[Stdcall]<IntPtr, uint>)
+            Marshal.ReadIntPtr(vtbl, 2 * IntPtr.Size);
         rel(pObj);
     }
 

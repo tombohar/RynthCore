@@ -164,6 +164,19 @@ internal static unsafe class Win32Backend
     public static IntPtr GameHwnd => _gameHwnd;
 
     /// <summary>
+    /// Populate <see cref="GameHwnd"/> from outside the ImGui Init path.
+    /// Used by Avalonia-only overlay mode where ImGui is disabled but Avalonia
+    /// panels still need the game HWND for owner-window binding. Idempotent —
+    /// the WndProc subclass that <see cref="Init"/> installs is *not* set up by
+    /// this call, so don't use this if ImGui is going to init too.
+    /// </summary>
+    public static void SetGameHwndExternal(IntPtr hwnd)
+    {
+        if (hwnd != IntPtr.Zero && _gameHwnd == IntPtr.Zero)
+            _gameHwnd = hwnd;
+    }
+
+    /// <summary>
     /// Sends a message directly to the game's original WndProc, bypassing our subclass.
     /// </summary>
     public static IntPtr SendToGameWndProc(uint msg, IntPtr wParam, IntPtr lParam)
@@ -305,7 +318,7 @@ internal static unsafe class Win32Backend
         }
 
         // If GetClientRect returns 0x0 or 1x1, the HWND might be wrong.
-        // DisplaySize will be set from D3D viewport in ImGuiController instead.
+        // DisplaySize will be set from D3D viewport in EngineFrameController instead.
         if (w > 1 && h > 1)
             io.DisplaySize = new System.Numerics.Vector2(w, h);
 
@@ -414,10 +427,12 @@ internal static unsafe class Win32Backend
                 return CallWindowProcA(_originalWndProc, hWnd, msg, (IntPtr)1, lParam);
 
             // WM_ACTIVATE WA_INACTIVE fires when focus moves to another window in the SAME
-            // process (e.g. an ImGui viewport popup). WM_ACTIVATEAPP doesn't fire in that case,
-            // so AC would see its window go inactive and may idle-throttle its render loop.
-            // Intercept and lie: tell AC its window is still active.
-            if (msg == WM_ACTIVATE && EndSceneHook.FpsLimitEnabled)
+            // process (e.g. an ImGui viewport popup, the DComp overlay bar). WM_ACTIVATEAPP
+            // doesn't fire in that case, so AC would see its window go inactive and idle-
+            // throttle its render loop. Always intercept same-process activations — this is
+            // unconditionally correct for an injected overlay and must not be gated on
+            // FpsLimitEnabled (DComp overlay clicks cause 8fps without this fix).
+            if (msg == WM_ACTIVATE)
             {
                 int activationCode = (int)((long)wParam & 0xFFFF);
                 if (activationCode == WA_INACTIVE && lParam != IntPtr.Zero)

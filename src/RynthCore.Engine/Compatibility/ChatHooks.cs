@@ -3,15 +3,11 @@
 //
 //  Hooks gmMainChatUI::ListenToElementMessage purely to capture the widget's
 //  'this' pointer on first UI dispatch. Per-frame visibility assertion is
-//  driven from EndSceneHook (ChatHooks.TickHide), which avoids the unsafe
-//  UseTime trampoline that was crashing with 0xC000001D — UseTime's prologue
-//  contains a relative jump MinHook on x86 mis-relocated. ListenToElementMessage
-//  is a large function with a standard MSVC prologue, safe to hook.
+//  driven from EndSceneHook (ChatHooks.TickHide) and calls UIElement::SetVisible
+//  directly on the captured singleton.
 //
-//  VA derivation (map offset + 0x00401000 = live VA):
-//    000CD6F0 gmMainChatUI::ListenToElementMessage(UIElementMessageInfo const &)
-//                                                           → 0x004CE6F0
-//    00061390 UIElement::SetVisible(bool)                   → 0x00462390
+//  Both addresses (the listen hook and the SetVisible call target) are now
+//  resolved via HookResolver — pattern-scan first, fallback VA second.
 // ============================================================================
 
 using System;
@@ -23,30 +19,48 @@ namespace RynthCore.Engine.Compatibility;
 
 internal static class ChatHooks
 {
-    private const int GmMainChatUIListenMsgVa = 0x004CE6F0;
-    private const int UIElementSetVisibleVa   = 0x00462390;
+    // Fallback VAs (4,841,472-byte client). Pattern-scan is the source of truth.
+    private const int GmMainChatUIListenMsgFallbackVa = 0x004CE6F0;
+    private const int UIElementSetVisibleFallbackVa   = 0x00462390;
+
+    // gmMainChatUI::ListenToElementMessage(UIElementMessageInfo const&)
+    // Reads the message kind from [esi+8], decrements, switches on it (0x3C, 0x3E, ...).
+    private static readonly byte?[] ListenToElementMessagePattern =
+    [
+        0x56, 0x8B, 0x74, 0x24, 0x08, 0x8B, 0x46, 0x08,
+        0x48, 0x57, 0x8B, 0xF9, 0x74, 0x72, 0x83, 0xE8,
+        0x06, 0x75, 0x7D, 0x8B, 0x4E, 0x04, 0x8B, 0x01,
+        0x6A, 0x06, 0xFF, 0x90, 0x94, 0x00, 0x00, 0x00
+    ];
+
+    // UIElement::SetVisible(bool) — duplicated against RadarHooks deliberately;
+    // each consumer resolves independently so a partial failure isolates per-file.
+    private static readonly byte?[] UIElementSetVisiblePattern =
+    [
+        0x51, 0x53, 0x56, 0x57,
+        0x8B, 0x3D, null, null, null, null,   // mov edi, ds:[imm32]
+        0x8B, 0xF1,
+        0xE8, null, null, null, null,         // call rel32
+        0x8B, 0x9E, 0xA4, 0x00, 0x00, 0x00,
+        0x88, 0x44, 0x24, 0x0F
+    ];
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void ListenToElementMessageDelegate(IntPtr thisPtr, IntPtr msgInfo);
 
     private static ListenToElementMessageDelegate? _originalListen;
-    private static ListenToElementMessageDelegate? _listenDetour; // held alive to prevent GC
+    private static ListenToElementMessageDelegate? _listenDetour;
 
     private static IntPtr _gmMainChatInstance;
+    private static IntPtr _uiElementSetVisibleAddress;
     private static bool _hookInstalled;
     private static string _statusMessage = "Not initialized.";
 
     public static bool IsInstalled => _hookInstalled;
     public static string StatusMessage => _statusMessage;
 
-    /// <summary>
-    /// When true, TickHide() calls UIElement::SetVisible(false) on the captured
-    /// chat widget each frame, hiding the retail chatbox. Re-asserted every frame.
-    /// </summary>
     public static bool SuppressOriginalChat;
 
-    /// <summary>The captured gmMainChatUI singleton. Zero until the user interacts
-    /// with the chat at least once (hover, click, message dispatch).</summary>
     public static IntPtr GmMainChatInstance => _gmMainChatInstance;
 
     public static void Initialize()
@@ -60,106 +74,84 @@ internal static class ChatHooks
             return;
         }
 
-        int funcOff = GmMainChatUIListenMsgVa - textSection.TextBaseVa;
-        if (funcOff < 0 || funcOff >= textSection.Bytes.Length)
-        {
-            _statusMessage = $"ListenToElementMessage VA out of range @ 0x{GmMainChatUIListenMsgVa:X8}.";
-            RynthLog.Compat($"Compat: chat hook failed - {_statusMessage}");
-            return;
-        }
+        var setVisible = HookResolver.Resolve(textSection, "ChatHooks.UIElement::SetVisible",
+            UIElementSetVisiblePattern, UIElementSetVisibleFallbackVa);
+        if (setVisible.Success) _uiElementSetVisibleAddress = setVisible.Address;
 
-        byte firstByte = textSection.Bytes[funcOff];
-        if (firstByte is 0x00 or 0xCC or 0xC3)
+        var listen = HookResolver.Resolve(textSection, "ChatHooks.ListenToElementMessage",
+            ListenToElementMessagePattern, GmMainChatUIListenMsgFallbackVa);
+        if (!listen.Success)
         {
-            _statusMessage = $"ListenToElementMessage looks invalid @ 0x{GmMainChatUIListenMsgVa:X8} (opcode 0x{firstByte:X2}).";
-            RynthLog.Compat($"Compat: chat hook failed - {_statusMessage}");
+            _statusMessage = $"ListenToElementMessage resolve failed ({listen.Detail}).";
             return;
         }
 
         try
         {
-            IntPtr targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
             _listenDetour = ListenDetour;
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_listenDetour);
             _originalListen = Marshal.GetDelegateForFunctionPointer<ListenToElementMessageDelegate>(
-                MinHook.HookCreate(targetAddress, detourPtr));
+                MinHook.HookCreate(listen.Address, detourPtr));
             Thread.MemoryBarrier();
-            MinHook.Enable(targetAddress);
+            MinHook.Enable(listen.Address);
 
             _hookInstalled = true;
-            _statusMessage = $"Hooked gmMainChatUI::ListenToElementMessage @ 0x{targetAddress.ToInt32():X8}.";
-            RynthLog.Verbose($"Compat: chat hook ready @ 0x{targetAddress.ToInt32():X8}, firstByte=0x{firstByte:X2}");
+            _statusMessage = $"Hooked gmMainChatUI::ListenToElementMessage @ 0x{listen.Address.ToInt32():X8}.";
+            RynthLog.Compat($"ChatHooks: install ok.");
         }
         catch (Exception ex)
         {
             _statusMessage = ex.Message;
-            RynthLog.Compat($"Compat: chat hook failed - {ex.Message}");
+            RynthLog.Compat($"ChatHooks: install threw {ex.GetType().Name}: {ex.Message}");
         }
     }
 
+    private static int _listenFires;
+
     private static void ListenDetour(IntPtr thisPtr, IntPtr msgInfo)
     {
+        RecursionGuard.Tick("ChatHooks.Listen");
         if (thisPtr != IntPtr.Zero)
             _gmMainChatInstance = thisPtr;
-
-        _originalListen!(thisPtr, msgInfo);
+        if (++_listenFires <= 3)
+            RynthLog.Compat($"ChatHooks: Listen fired #{_listenFires} this=0x{thisPtr.ToInt32():X8}");
+        try { _originalListen!(thisPtr, msgInfo); }
+        catch (Exception ex) { try { RynthLog.Compat($"ChatHooks: Listen original threw {ex.GetType().Name}: {ex.Message}"); } catch { } throw; }
     }
 
-    /// <summary>True once we've issued SetVisible(false) — used so we know to
-    /// restore visibility one frame after the suppress flag flips off.</summary>
     private static bool _isHiddenAsserted;
 
-    /// <summary>
-    /// Per-frame visibility assertion — called from EndSceneHook every frame.
-    /// While suppression is on, calls SetVisible(false) every frame so the game
-    /// can't sneak the chat back on. When suppression flips off, calls
-    /// SetVisible(true) one time to restore the retail chatbox.
-    /// </summary>
     public static unsafe void TickHide()
     {
-        // CRITICAL: do not call SetVisible while AC is between in-world sessions.
-        // _gmMainChatInstance points at AC's gmMainChatUI singleton, which AC
-        // frees during the logout-to-charselect transition. Calling SetVisible
-        // on the freed pointer dereferences a stale vtable (filled with reused
-        // float/zero data) and AVs inside UIElement::IsVisible. We resume the
-        // assertion only after the next SendLoginCompleteNotification, by which
-        // time AC has rebuilt gmMainChatUI and ListenDetour has re-captured the
-        // fresh pointer.
         if (!LoginLifecycleHooks.HasObservedLoginComplete)
             return;
 
         IntPtr inst = _gmMainChatInstance;
         if (inst == IntPtr.Zero) return;
+        if (_uiElementSetVisibleAddress == IntPtr.Zero) return;
 
         if (SuppressOriginalChat)
         {
             try
             {
-                ((delegate* unmanaged[Thiscall]<IntPtr, int, void>)UIElementSetVisibleVa)(inst, 0);
+                ((delegate* unmanaged[Thiscall]<IntPtr, int, void>)_uiElementSetVisibleAddress)(inst, 0);
             }
             catch { /* best-effort */ }
             _isHiddenAsserted = true;
             return;
         }
 
-        // Suppression is off — if we previously hid it, show it again now.
         if (_isHiddenAsserted)
         {
             try
             {
-                ((delegate* unmanaged[Thiscall]<IntPtr, int, void>)UIElementSetVisibleVa)(inst, 1);
+                ((delegate* unmanaged[Thiscall]<IntPtr, int, void>)_uiElementSetVisibleAddress)(inst, 1);
             }
             catch { /* best-effort */ }
             _isHiddenAsserted = false;
         }
     }
 
-    /// <summary>
-    /// Drops the cached <c>gmMainChatUI</c> singleton pointer. Called from the
-    /// logout pipeline so we don't reuse a freed pointer after the next login —
-    /// <see cref="ListenDetour"/> re-captures the fresh instance on the next
-    /// chat-UI message dispatch.
-    /// </summary>
     public static void ResetCachedInstance()
     {
         _gmMainChatInstance = IntPtr.Zero;

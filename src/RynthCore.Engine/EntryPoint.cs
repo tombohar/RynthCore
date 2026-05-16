@@ -40,7 +40,7 @@ public static class EntryPoint
     /// <summary>Set true to enable verbose startup logging (hook ready messages, plugin lifecycle, etc.).</summary>
     internal static bool VerboseLogging = false;
 
-    /// <summary>Set by ImGuiController once the game window is confirmed. Read by AvaloniaOverlay.</summary>
+    /// <summary>Set by EngineFrameController once the game window is confirmed. Read by AvaloniaOverlay.</summary>
     internal static volatile IntPtr GameHwnd;
 
     // Legacy export: kept so an old launcher / injector that still targets
@@ -114,6 +114,23 @@ public static class EntryPoint
                 RynthLog.Info("Early-init: could not resolve engine directory — minhook may not be preloaded before MultiClientHooks.");
 
             RunInitStep("early multi-client hooks", MultiClientHooks.Initialize);
+            // DatFileShareHooks force-shares AC's data files at the CreateFile
+            // layer so we can coexist with Decal-injected clients that other
+            // launchers (Thwargle etc.) have already opened against the same
+            // install. Must run BEFORE AC's main thread resumes — same window
+            // as MultiClientHooks. Self-skips when AllowMultipleClients is off.
+            RunInitStep("early DAT share hooks", DatFileShareHooks.Initialize);
+            // ProcessExitHooks captures the exact native call site of any
+            // ExitProcess/TerminateProcess on this PID — the only way to see
+            // who killed us when the kill bypasses managed exception handlers
+            // and our VEH (NativeAOT __fastfail, AC self-exit on disconnect,
+            // etc.). Install early so we catch even very-early-startup kills.
+            RunInitStep("early process-exit hooks", ProcessExitHooks.Initialize);
+            // Heartbeat: one log line per second so we have a hard upper-bound
+            // timestamp for when AC went silent if it dies via a path our
+            // termination hooks don't catch (kernel-level kill, int 0x29 not
+            // routed through RtlFailFast, hardware fault, etc.).
+            RunInitStep("heartbeat logger", HeartbeatLogger.Start);
 
             var thread = new Thread(InitWorker)
             {
@@ -389,43 +406,82 @@ public static class EntryPoint
                 RynthLog.Info("  Ship RynthCore.cimgui.dll (or cimgui.dll) alongside RynthCore.Engine.dll");
             }
 
-            RynthLog.Info("InitWorker: starting hook init steps");
-            RunInitStep("RynthAi action hooks", ClientActionHooks.Initialize);
-            RunInitStep("client helper hooks", () => ClientHelperHooks.Probe());
-            RunInitStep("login lifecycle hooks", LoginLifecycleHooks.Initialize);
-            RunInitStep("logout lifecycle hooks", LogoutLifecycleHooks.Initialize);
-            RunInitStep("session state registry", SessionStateRegistry.Initialize);
-            RunInitStep("UI lifecycle hooks", UiLifecycleHooks.Initialize);
-            RunInitStep("logo bypass", LogoBypassHooks.Start);
-            RunInitStep("busy-count hooks", BusyCountHooks.Initialize);
-            RunInitStep("combat-mode hooks", CombatModeHooks.Initialize);
-            RunInitStep("teleport-state hooks", TeleportStateHooks.Initialize);
-            RunInitStep("salvage hooks", SalvageHooks.Initialize);
-            RunInitStep("radar hooks", RadarHooks.Initialize);
-            RunInitStep("chat hooks", ChatHooks.Initialize);
-            RunInitStep("powerbar hooks", PowerbarHooks.Initialize);
-            RunInitStep("do-motion hooks", DoMotionHooks.Initialize);
-            RunInitStep("smartbox-setstate hooks", SmartBoxSetStateHooks.Initialize);
-            RunInitStep("appraisal hooks", AppraisalHooks.Initialize);
-            RunInitStep("account hooks", AccountHooks.Initialize);
-            RunInitStep("client combat hooks", () => ClientCombatHooks.Probe());
-            RunInitStep("selected-target hooks", SelectedTargetHooks.Initialize);
-            RunInitStep("smartbox hooks", SmartBoxHooks.Initialize);
-            RunInitStep("player vitals hooks", PlayerVitalsHooks.Initialize);
-            RunInitStep("enchantment hooks", () => EnchantmentHooks.Initialize());
-            RunInitStep("time-sync hook", TimeSyncHooks.Initialize);
-            RunInitStep("create-object hooks", CreateObjectHooks.Initialize);
-            RunInitStep("delete-object hooks", DeleteObjectHooks.Initialize);
-            RunInitStep("update-object hooks", UpdateObjectServerDispatchHooks.Initialize);
-            RunInitStep("vector-update hooks", VectorUpdateServerDispatchHooks.Initialize);
-            RunInitStep("update-object-inventory hooks", UpdateObjectInventoryHooks.Initialize);
-            RunInitStep("view-object-contents hooks", ViewObjectContentsHooks.Initialize);
-            RunInitStep("vendor hooks", VendorHooks.Initialize);
-            RunInitStep("chat callback hooks", ChatCallbackHooks.Initialize);
-            RunInitStep("raw packet hooks", RawPacketHooks.Initialize);
-            RunInitStep("property-update hooks", PropertyUpdateHooks.Initialize);
-            RunInitStep("auto-id service", AutoIdService.Start);
-            PluginManager.LoadPlugins(engineDir);
+            if (!Plugins.EngineSettings.EnableEngine)
+            {
+                RynthLog.Info("InitWorker: ENGINE DISABLED via engine.json (EnableEngine=false). Skipping all Compatibility/* hook installs, all OverlayHost panels, AvaloniaOverlay, D3D9Bootstrapper. Heartbeat + ProcessExitHooks + MultiClientHooks + DatFileShareHooks (already running) remain.");
+                return;
+            }
+
+            // One-shot read-only string-anchor diagnostic. Runs only if the
+            // user has dropped a candidate-string list at
+            // %APPDATA%\RynthCore\string_anchors.txt — otherwise no-ops.
+            // No hooks installed, no AC code modified; pure pattern read.
+            StringAnchorDiagnostic.RunIfConfigured();
+
+            int hookBudget = Plugins.EngineSettings.EngineHookCount;
+            int hookIndex = 0;
+            RynthLog.Info($"InitWorker: starting hook init steps (budget={hookBudget})");
+            void Step(string name, Action action)
+            {
+                int idx = hookIndex++;
+                if (idx >= hookBudget)
+                {
+                    if (idx == hookBudget)
+                        RynthLog.Info($"InitWorker: hook budget exhausted at index {idx} — stopping at '{name}'.");
+                    return;
+                }
+                RunInitStep(name, action);
+            }
+            Step("RynthAi action hooks", ClientActionHooks.Initialize);
+            Step("client helper hooks", () => ClientHelperHooks.Probe());
+            Step("login lifecycle hooks", LoginLifecycleHooks.Initialize);
+            Step("OnLogin command runner", OnLoginCommandRunner.Initialize);
+            // File-driven chat command dispatcher: edit
+            // %APPDATA%\RynthCore\dispatch.txt to fire any /command without
+            // needing AC chat input. Critical for RDP / post-hot-reload
+            // scenarios where keyboard input isn't reaching AC's chat box.
+            Step("chat file dispatcher", ChatFileDispatcher.Start);
+            Step("logout lifecycle hooks", LogoutLifecycleHooks.Initialize);
+            Step("session state registry", SessionStateRegistry.Initialize);
+            Step("UI lifecycle hooks", UiLifecycleHooks.Initialize);
+            Step("logo bypass", LogoBypassHooks.Start);
+            Step("poll-driven auto-login", CharacterCaptureHooks.Initialize);
+            Step("busy-count hooks", BusyCountHooks.Initialize);
+            Step("combat-mode hooks", CombatModeHooks.Initialize);
+            Step("teleport-state hooks", TeleportStateHooks.Initialize);
+            Step("salvage hooks", SalvageHooks.Initialize);
+            Step("radar hooks", RadarHooks.Initialize);
+            Step("chat hooks", ChatHooks.Initialize);
+            Step("powerbar hooks", PowerbarHooks.Initialize);
+            Step("do-motion hooks", DoMotionHooks.Initialize);
+            Step("smartbox-setstate hooks", SmartBoxSetStateHooks.Initialize);
+            Step("appraisal hooks", AppraisalHooks.Initialize);
+            Step("account hooks", AccountHooks.Initialize);
+            Step("client combat hooks", () => ClientCombatHooks.Probe());
+            Step("selected-target hooks", SelectedTargetHooks.Initialize);
+            Step("smartbox hooks", SmartBoxHooks.Initialize);
+            Step("player vitals hooks", PlayerVitalsHooks.Initialize);
+            Step("enchantment hooks", () => EnchantmentHooks.Initialize());
+            Step("time-sync hook", TimeSyncHooks.Initialize);
+            Step("create-object hooks", CreateObjectHooks.Initialize);
+            Step("delete-object hooks", DeleteObjectHooks.Initialize);
+            Step("update-object hooks", UpdateObjectServerDispatchHooks.Initialize);
+            Step("vector-update hooks", VectorUpdateServerDispatchHooks.Initialize);
+            Step("update-object-inventory hooks", UpdateObjectInventoryHooks.Initialize);
+            Step("view-object-contents hooks", ViewObjectContentsHooks.Initialize);
+            Step("vendor hooks", VendorHooks.Initialize);
+            Step("chat callback hooks", ChatCallbackHooks.Initialize);
+            Step("raw packet hooks", RawPacketHooks.Initialize);
+            Step("property-update hooks", PropertyUpdateHooks.Initialize);
+            Step("auto-id service", AutoIdService.Start);
+            if (Plugins.EngineSettings.EnablePlugins)
+            {
+                RynthLog.Info("InitWorker DIAG — calling PluginManager.LoadPlugins.");
+                PluginManager.LoadPlugins(engineDir);
+                RynthLog.Info("InitWorker DIAG — PluginManager.LoadPlugins returned.");
+            }
+            else
+                RynthLog.Info("InitWorker: plugin loading disabled via engine.json (EnablePlugins=false).");
 
             // Defer D3D9 hooking until after character login. By that point
             // the game's device is fully initialized and stable, avoiding the
@@ -449,12 +505,38 @@ public static class EntryPoint
                         $"D3D9: Decal coexistence — '{DecalDetection.DetectedModule}' loaded, " +
                         "skipping EndScene hook and ImGui init. " +
                         "In-game overlay bars are disabled; Avalonia floating panels still work.");
-                    InitPluginsForDecalCoexistence();
+                    if (Plugins.EngineSettings.EnablePlugins)
+                        InitPluginsForDecalCoexistence();
+                    else
+                        RynthLog.Info("DecalCoexistence: plugin pump disabled via engine.json (EnablePlugins=false).");
                     return;
                 }
 
+                if (!Plugins.EngineSettings.EnableD3D9Hook)
+                {
+                    RynthLog.Info("D3D9: Login complete — D3D9Bootstrapper disabled via engine.json (EnableD3D9Hook=false). No EndScene hook will be installed.");
+                    return;
+                }
                 RynthLog.Info("D3D9: Login complete — starting D3D9 bootstrapper.");
                 D3D9Bootstrapper.Start();
+
+                // 2026-05-16: the plugin lifecycle no longer ticks from the
+                // EndScene path. The 2026-05-10 design ran InitPlugins/
+                // ProcessPendingActions/TickAll inline on AC's D3D9 render
+                // thread (the EndScene reverse-P/Invoke); a GC during the
+                // plugin tick on that AC-owned thread fail-fasts NativeAOT's
+                // RhpReversePInvokeAttachOrTrapThread2 (root cause proven from
+                // the 2026-05-16 09:39 dump — see crash memory). The tick now
+                // runs on a dedicated managed pump thread, off the render
+                // thread, mirroring the proven DecalCoexistence pump.
+                //
+                // Still EXACTLY ONE TickAll driver: non-Decal → this normal
+                // pump; Decal → InitPluginsForDecalCoexistence (the Decal
+                // branch above returns before reaching here). Never both.
+                if (Plugins.EngineSettings.EnablePlugins)
+                    StartNormalPluginPump();
+                else
+                    RynthLog.Info("NormalPluginPump: disabled via engine.json (EnablePlugins=false).");
             };
 
             RynthLog.Info($"InitWorker: post-init checkpoint, _initCount={_initCount}");
@@ -470,12 +552,23 @@ public static class EntryPoint
                     RynthLog.Info(
                         $"D3D9: Hot reload (initCount={_initCount}) — Decal coexistence " +
                         $"('{DecalDetection.DetectedModule}' loaded), skipping D3D9 bootstrapper.");
-                    InitPluginsForDecalCoexistence();
+                    if (Plugins.EngineSettings.EnablePlugins)
+                        InitPluginsForDecalCoexistence();
+                    else
+                        RynthLog.Info("DecalCoexistence: plugin pump disabled via engine.json (EnablePlugins=false).");
+                }
+                else if (!Plugins.EngineSettings.EnableD3D9Hook)
+                {
+                    RynthLog.Info($"D3D9: Hot reload (initCount={_initCount}) — D3D9Bootstrapper disabled via engine.json (EnableD3D9Hook=false).");
                 }
                 else
                 {
                     RynthLog.Info($"D3D9: Hot reload detected (initCount={_initCount}) — starting D3D9 bootstrapper directly.");
                     D3D9Bootstrapper.Start();
+                    // Non-Decal hot-reload: drive the plugin tick off the
+                    // render thread (see the StartNormalPluginPump rationale).
+                    if (Plugins.EngineSettings.EnablePlugins)
+                        StartNormalPluginPump();
                 }
 
                 // Synthesize the LoginComplete signal so subscribers
@@ -497,19 +590,39 @@ public static class EntryPoint
                     RynthLog.Info("PlayerVitals: hot reload — could not derive qualities ptr (will fall back to event-driven path).");
             }
 
-            PreloadNativeDll(engineDir, "libSkiaSharp.dll");
-            PreloadNativeDll(engineDir, "libHarfBuzzSharp.dll");
-            PreloadNativeDll(engineDir, "av_libglesv2.dll");
-            OverlayHost.RegisterPanel("Status",  StatusPanel.Create);
-            OverlayHost.RegisterPanel("Log",     LogPanel.Create);
-            OverlayHost.RegisterPanel("RynthAi", RynthAiPanel.Create);
-            OverlayHost.RegisterPanel("Monsters", MonstersPanel.Create);
-            OverlayHost.RegisterPanel("Items",    ItemsPanel.Create);
-            OverlayHost.RegisterPanel("Settings", SettingsPanel.Create);
-            OverlayHost.RegisterPanel("Nav",      NavPanel.Create);
-            OverlayHost.RegisterPanel("Meta",     MetaPanel.Create);
-            OverlayHost.RegisterPanel("Radar", RadarPanel.Create);
-            AvaloniaOverlay.Start();
+            if (Plugins.EngineSettings.EnableAvaloniaOverlay)
+            {
+                PreloadNativeDll(engineDir, "libSkiaSharp.dll");
+                PreloadNativeDll(engineDir, "libHarfBuzzSharp.dll");
+                PreloadNativeDll(engineDir, "av_libglesv2.dll");
+
+                // Parallel test harness — when env var RYNTHCORE_DCOMP_OVERLAY=1,
+                // skip the production AvaloniaOverlay and start the DComp test
+                // path instead. Both paths cannot coexist in one process (Avalonia
+                // is single-app-per-process). Default behavior is unchanged.
+                if (UI.Dcomp.DcompOverlayBootstrap.IsEnabled)
+                {
+                    RynthLog.Info("InitWorker: RYNTHCORE_DCOMP_OVERLAY=1 — starting DComp test overlay instead of production AvaloniaOverlay.");
+                    UI.Dcomp.DcompOverlayBootstrap.Start();
+                }
+                else
+                {
+                    OverlayHost.RegisterPanel("Status",  StatusPanel.Create);
+                    OverlayHost.RegisterPanel("Log",     LogPanel.Create);
+                    OverlayHost.RegisterPanel("RynthAi", RynthAiPanel.Create);
+                    OverlayHost.RegisterPanel("Monsters", MonstersPanel.Create);
+                    OverlayHost.RegisterPanel("Items",    ItemsPanel.Create);
+                    OverlayHost.RegisterPanel("Settings", SettingsPanel.Create);
+                    OverlayHost.RegisterPanel("Nav",      NavPanel.Create);
+                    OverlayHost.RegisterPanel("Meta",     MetaPanel.Create);
+                    OverlayHost.RegisterPanel("Radar", RadarPanel.Create);
+                    AvaloniaOverlay.Start();
+                }
+            }
+            else
+            {
+                RynthLog.Info("InitWorker: AvaloniaOverlay disabled via engine.json (EnableAvaloniaOverlay=false). No panels, no Skia, no offscreen window.");
+            }
             RynthLog.Info("RynthCore bootstrap initialized.");
         }
         catch (Exception ex)
@@ -552,7 +665,7 @@ public static class EntryPoint
     /// </summary>
     private static void InitPluginsForDecalCoexistence()
     {
-        IntPtr hwnd = global::RynthCore.Engine.ImGuiBackend.ImGuiController.FindGameWindow();
+        IntPtr hwnd = global::RynthCore.Engine.ImGuiBackend.EngineFrameController.FindGameWindow();
         if (hwnd != IntPtr.Zero)
         {
             GameHwnd = hwnd;
@@ -603,11 +716,21 @@ public static class EntryPoint
                 // commands like "start scanner" appear inert.
                 RynthLog.Info($"DecalCoexistence: starting plugin tick pump at ~{1000 / DecalCoexistenceTickInterval.TotalMilliseconds:0} Hz.");
                 int consecutiveFailures = 0;
-                while (true)
+                while (Volatile.Read(ref _tickPumpStopRequested) == 0)
                 {
                     Thread.Sleep(DecalCoexistenceTickInterval);
+                    if (Volatile.Read(ref _tickPumpStopRequested) != 0)
+                        break;
                     try
                     {
+                        // ProcessPendingActions drains ALL the engine→plugin event queues
+                        // (selected-target change, health update, enchantment add/remove,
+                        // create/delete object, combat mode, etc.). Without this call the
+                        // queues fill up but never reach the plugin: target panel stays
+                        // NO TARGET, BuffManager never sees enchantments land, combat
+                        // events evaporate. Historically driven from EngineFrameController's
+                        // per-frame loop; this is the headless equivalent.
+                        Plugins.PluginManager.ProcessPendingActions(IntPtr.Zero, IntPtr.Zero, hwnd);
                         Plugins.PluginManager.TickAll();
                         consecutiveFailures = 0;
                     }
@@ -627,17 +750,122 @@ public static class EntryPoint
                         }
                     }
                 }
+                RynthLog.Plugin("DecalCoexistence: tick pump exiting (stop requested).");
             }
             catch (Exception ex)
             {
                 RynthLog.Plugin($"DecalCoexistence: deferred plugin init threw {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _tickPumpExited, 1);
             }
         })
         {
             Name = "RynthCore.DecalCoexistence.PluginInit",
             IsBackground = true,
         };
+        _tickPumpThread = worker;
         worker.Start();
+    }
+
+    private static int _normalPumpStarted;
+    private static readonly TimeSpan NormalPluginPumpInterval = TimeSpan.FromMilliseconds(33);
+
+    /// <summary>
+    /// Starts the normal-mode (D3D9-hooked) plugin pump on a dedicated managed
+    /// thread. Delegates to EngineFrameController.PumpPluginFrame(), which
+    /// carries the device/hwnd/context the render path publishes. This
+    /// replaces the 2026-05-10 design that ticked plugins inline on AC's
+    /// EndScene render thread — the NativeAOT reverse-P/Invoke fail-fast root
+    /// cause fixed 2026-05-16.
+    ///
+    /// MUST stay mutually exclusive with InitPluginsForDecalCoexistence — only
+    /// one TickAll driver may exist (PluginManager.TickAll is not thread-safe).
+    /// Callers reach this only on the non-Decal path (the Decal branch returns
+    /// earlier). Reuses _tickPump* so EngineLifecycle.Shutdown's
+    /// StopTickPumpAndJoin already tears it down before plugin Shutdown /
+    /// FreeLibrary.
+    /// </summary>
+    private static void StartNormalPluginPump()
+    {
+        if (Interlocked.CompareExchange(ref _normalPumpStarted, 1, 0) != 0)
+            return; // login + hot-reload paths can both reach here; start once
+
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                RynthLog.Info($"NormalPluginPump: starting at ~{1000 / NormalPluginPumpInterval.TotalMilliseconds:0} Hz (plugin tick OFF AC's render thread).");
+                int consecutiveFailures = 0;
+                while (Volatile.Read(ref _tickPumpStopRequested) == 0)
+                {
+                    Thread.Sleep(NormalPluginPumpInterval);
+                    if (Volatile.Read(ref _tickPumpStopRequested) != 0)
+                        break;
+                    try
+                    {
+                        global::RynthCore.Engine.ImGuiBackend.EngineFrameController.PumpPluginFrame();
+                        consecutiveFailures = 0;
+                    }
+                    catch (Exception tickEx)
+                    {
+                        consecutiveFailures++;
+                        if (consecutiveFailures == 1)
+                            RynthLog.Plugin($"NormalPluginPump: PumpPluginFrame threw {tickEx.GetType().Name}: {tickEx.Message}");
+                        else if (consecutiveFailures == 50)
+                        {
+                            RynthLog.Plugin("NormalPluginPump: 50 consecutive failures — stopping pump. Plugin inert until reload.");
+                            break;
+                        }
+                    }
+                }
+                RynthLog.Plugin("NormalPluginPump: exiting (stop requested).");
+            }
+            catch (Exception ex)
+            {
+                RynthLog.Plugin($"NormalPluginPump: pump thread threw {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _tickPumpExited, 1);
+            }
+        })
+        {
+            Name = "RynthCore.NormalPluginPump",
+            IsBackground = true,
+        };
+        _tickPumpThread = worker;
+        worker.Start();
+    }
+
+    /// Signaled by EngineLifecycle.Shutdown to stop the Decal-coexistence
+    /// tick pump before plugin Shutdown / FreeLibrary so the pump can't
+    /// be mid-call into a plugin whose code pages are being unmapped.
+    private static int _tickPumpStopRequested;
+    private static int _tickPumpExited;
+    private static Thread? _tickPumpThread;
+
+    /// <summary>
+    /// Stops the headless tick pump and waits up to <paramref name="timeoutMs"/>
+    /// for it to exit. Returns true if the pump exited cleanly. Called from
+    /// EngineLifecycle.Shutdown before PluginManager.ShutdownAll.
+    /// </summary>
+    internal static bool StopTickPumpAndJoin(int timeoutMs = 2000)
+    {
+        if (_tickPumpThread == null)
+            return true;
+
+        Interlocked.Exchange(ref _tickPumpStopRequested, 1);
+
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Volatile.Read(ref _tickPumpExited) == 0 && Environment.TickCount64 < deadline)
+            Thread.Sleep(10);
+
+        bool exited = Volatile.Read(ref _tickPumpExited) != 0;
+        if (!exited)
+            RynthLog.Plugin($"DecalCoexistence: tick pump did NOT exit within {timeoutMs}ms.");
+        return exited;
     }
 
     private static void RunInitStep(string name, Action action)
@@ -683,6 +911,79 @@ public static class EntryPoint
         {
             RynthLog.Info($"InstallManagedExceptionHandlers: TaskScheduler hook failed - {ex.GetType().Name}: {ex.Message}");
         }
+
+        try
+        {
+            // First-chance hook fires before any catch block runs. We use it
+            // to capture the stack of "process-killer" exceptions (AVs, null
+            // derefs from native code, stack overflows) BEFORE the runtime's
+            // FailFast tears the process down. CSEs from native code (e.g.
+            // calling _inqType on a weenie with null qualities) bypass our
+            // VEH and managed catch blocks entirely — this is the only
+            // chance to log them. Filter aggressively: every IO/parse/etc.
+            // exception fires this event even when caught.
+            AppDomain.CurrentDomain.FirstChanceException += OnFirstChanceException;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Info($"InstallManagedExceptionHandlers: FirstChance hook failed - {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    [ThreadStatic] private static bool _inFirstChanceHandler;
+
+    /// <summary>
+    /// Wires <see cref="AppDomain.FirstChanceException"/> using the runtime's
+    /// own subscription mechanism (a separate static method so the
+    /// recursion-guard ThreadStatic can be referenced without capturing
+    /// closure state from the installer).
+    /// </summary>
+    private static void OnFirstChanceException(object? sender, System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs e)
+    {
+        if (_inFirstChanceHandler) return;
+        _inFirstChanceHandler = true;
+        try
+        {
+            Exception? ex = e.Exception;
+            if (ex == null) return;
+            if (!IsProcessKillerException(ex)) return;
+
+            RynthLog.Info("==== FIRST-CHANCE PROCESS-KILLER EXCEPTION ====");
+            RynthLog.Info($"  type:    {ex.GetType().FullName}");
+            RynthLog.Info($"  message: {ex.Message}");
+            RynthLog.Info($"  hresult: 0x{ex.HResult:X8}");
+            RynthLog.Info($"  thread:  {Thread.CurrentThread.ManagedThreadId}");
+            string st = ex.StackTrace ?? "<no stack>";
+            RynthLog.Info($"  stack:\r\n{st}");
+            RynthLog.Info("  NOTE: NativeAOT marks AVs from native code as Corrupted State Exceptions");
+            RynthLog.Info("        which bypass managed catch blocks and FailFast the process.");
+            RynthLog.Info("===============================================");
+        }
+        catch
+        {
+            // Logging path must not throw — we're already on the path to FailFast.
+        }
+        finally
+        {
+            _inFirstChanceHandler = false;
+        }
+    }
+
+    /// <summary>
+    /// True for exception types the runtime is likely to FailFast on (AVs from
+    /// native code, stack overflows, OOM). Skips routine exceptions that get
+    /// caught elsewhere — IOException, FormatException, JSON parse errors etc.
+    /// fire FirstChance constantly during normal operation.
+    /// </summary>
+    private static bool IsProcessKillerException(Exception ex)
+    {
+        return ex is AccessViolationException
+            || ex is StackOverflowException
+            || ex is OutOfMemoryException
+            || ex is System.Runtime.InteropServices.SEHException
+            || ex is AppDomainUnloadedException
+            || ex is BadImageFormatException
+            || ex is ExecutionEngineException;
     }
 
     private static void OnUnhandledException(object sender, UnhandledExceptionEventArgs e)

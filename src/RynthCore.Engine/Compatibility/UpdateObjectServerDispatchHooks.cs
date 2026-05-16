@@ -72,6 +72,7 @@ internal static class UpdateObjectServerDispatchHooks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static unsafe uint DispatchSbUpdateObjectDetour(IntPtr smartBoxPtr, IntPtr blob)
     {
+        RecursionGuard.Tick("UpdateObjectServerDispatchHooks.DispatchSbUpdateObject");
         var pOriginal = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, uint>)_originalDispatchSbUpdateObjectPtr;
         uint objectId = TryReadUpdatedObjectId(blob);
 

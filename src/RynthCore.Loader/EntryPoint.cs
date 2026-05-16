@@ -45,10 +45,14 @@ public static class EntryPoint
 
     /// <summary>
     /// Named auto-reset event the engine signals to request a full reload.
-    /// "Local\\" prefix scopes it to the current logon session — exactly the
-    /// AC process — so cross-process collisions can't occur.
+    /// "Local\\" scopes to the current login session, NOT to a single process —
+    /// any acclient.exe in the same session that opens the same name receives
+    /// the signal. PID-suffixing the name makes it per-process: each
+    /// acclient.exe creates and watches its OWN reload event, and the engine
+    /// inside it signals the same name. Reload clicks no longer broadcast to
+    /// sibling clients.
     /// </summary>
-    private const string ReloadEventName = "Local\\RynthCore.Engine.RequestReload";
+    private static string ReloadEventName => $"Local\\RynthCore.Engine.RequestReload.p{Environment.ProcessId}";
 
     private static int _initialized;
     private static IntPtr _engineModule;
@@ -64,6 +68,21 @@ public static class EntryPoint
     private static int _engineInitCount;
     /// <summary>Last-write timestamp the file watcher saw. New value triggers reload.</summary>
     private static DateTime _canonicalLastWriteUtc;
+
+    /// <summary>
+    /// Minimum gap between consecutive reloads. A signal arriving inside this
+    /// window after the previous reload completed is dropped — rapid RL clicks
+    /// don't change the engine binary, so one reload covers all of them. Without
+    /// this guard, back-to-back reloads can interleave gen N teardown threads
+    /// with gen N+1 init (Avalonia STA, MinHook trampolines), eventually
+    /// producing 0xC0000602 around gen 4-5.
+    /// </summary>
+    private const int MinReloadIntervalMs = 1500;
+    private static long _lastReloadCompletedTicks;
+    /// <summary>CAS gate around <see cref="Reload"/>. The watcher thread is the
+    /// only caller today, so this should never trip — it's a tripwire for any
+    /// future code path that signals reload reentrantly.</summary>
+    private static int _reloadInFlight;
 
     [UnmanagedCallersOnly(EntryPoint = "RynthCoreInit")]
     public static uint Initialize(IntPtr lpParam)
@@ -346,6 +365,31 @@ public static class EntryPoint
                 continue;
             }
 
+            // Cooldown: drop signals arriving too soon after the last reload.
+            // Engine binary doesn't change between rapid RL clicks; a single
+            // reload covers all of them. The first signal post-init has
+            // _lastReloadCompletedTicks == 0 and bypasses the cooldown.
+            long lastTicks = Volatile.Read(ref _lastReloadCompletedTicks);
+            if (lastTicks != 0)
+            {
+                long sinceMs = (DateTime.UtcNow.Ticks - lastTicks) / TimeSpan.TicksPerMillisecond;
+                if (sinceMs < MinReloadIntervalMs)
+                {
+                    Log($"ReloadWatcher: signal received {sinceMs}ms after last reload (< {MinReloadIntervalMs}ms cooldown) — coalesced.");
+                    continue;
+                }
+            }
+
+            // CAS gate. The watcher thread is the only caller, so this should
+            // never trip — but if it ever does (a future code path signals
+            // reload reentrantly, or someone adds a second watcher) we'd
+            // rather skip than corrupt state mid-teardown.
+            if (Interlocked.CompareExchange(ref _reloadInFlight, 1, 0) != 0)
+            {
+                Log("ReloadWatcher: reload already in flight — coalesced.");
+                continue;
+            }
+
             try
             {
                 Reload();
@@ -353,6 +397,22 @@ public static class EntryPoint
             catch (Exception ex)
             {
                 Log($"ReloadWatcher: Reload threw {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                Volatile.Write(ref _lastReloadCompletedTicks, DateTime.UtcNow.Ticks);
+                Volatile.Write(ref _reloadInFlight, 0);
+
+                // Drain any signals that piled up during the reload. An
+                // auto-reset event with WaitForSingleObject(0) returns
+                // immediately if signaled, atomically resetting it. This
+                // keeps the cooldown from having to reject every queued
+                // signal one at a time on subsequent loop iterations.
+                int drained = 0;
+                while (WaitForSingleObject(_reloadEvent, 0) == WAIT_OBJECT_0)
+                    drained++;
+                if (drained > 0)
+                    Log($"ReloadWatcher: drained {drained} pending signal(s) received during reload — coalesced.");
             }
         }
     }
@@ -393,7 +453,14 @@ public static class EntryPoint
         // before we yank the address space out from under them.
         Thread.Sleep(150);
 
-        // Step 3: FreeLibrary the current engine.
+        // Step 3: forget the old engine module — but DO NOT FreeLibrary it.
+        // The engine is NativeAOT and may still have live managed threads
+        // (Avalonia render thread, plugin internal threads, etc.) whose
+        // method frames live in the engine's code pages. FreeLibrary'ing
+        // unmaps those pages → CLR throws while walking a stack frame whose
+        // IL/native is gone → process AV. Leaking the module costs ~26 MB
+        // per reload; OS reclaims on actual exit. New shadow copy at a
+        // different path is loaded next, so new code runs cleanly.
         IntPtr oldModule;
         lock (Sync)
         {
@@ -402,10 +469,7 @@ public static class EntryPoint
         }
 
         if (oldModule != IntPtr.Zero)
-        {
-            bool freed = FreeLibrary(oldModule);
-            Log($"FreeLibrary(0x{oldModule:X8}) = {freed}");
-        }
+            Log($"Reload: skipping FreeLibrary(0x{oldModule:X8}) — module pages leaked intentionally (NativeAOT live threads).");
 
         // Step 4: re-load the engine from disk and call init.
         uint reinitRc = LoadAndInitEngine();

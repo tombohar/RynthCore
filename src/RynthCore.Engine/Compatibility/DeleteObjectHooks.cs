@@ -69,6 +69,7 @@ internal static class DeleteObjectHooks
 
     private static int DeleteObjectDetour(IntPtr thisPtr, uint objectId)
     {
+        RecursionGuard.Tick("DeleteObjectHooks.DeleteObject");
         if (objectId != 0)
         {
             PaletteCache.Remove(objectId);

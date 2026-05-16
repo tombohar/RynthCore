@@ -82,14 +82,15 @@ internal static class EnchantmentHooks
 
         int count = ReadEnchantmentsFromQualities(qualPtr, spellIds, expiryTimes, maxCount);
 
-        if (!_loggedFirstRead && count > 0)
+        if (_enchReadLogCount < 8)
         {
-            _loggedFirstRead = true;
-            RynthLog.Verbose($"[EnchRead] first player read: {count} enchantments");
+            System.Threading.Interlocked.Increment(ref _enchReadLogCount);
+            RynthLog.Info($"[EnchRead] player read #{_enchReadLogCount}: {count} enchantments (qualPtr=0x{qualPtr.ToInt64():X8})");
         }
 
         return count;
     }
+    private static int _enchReadLogCount;
 
     /// <summary>
     /// Reads active enchantments from any game object's CEnchantmentRegistry.

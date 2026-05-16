@@ -8,8 +8,8 @@ namespace RynthCore.Engine.Compatibility;
 internal static class MultiClientHooks
 {
     private const int ExpectedImageSize = 0x56D000;
-    private const int IsAlreadyRunningVa = 0x004122A0;
-    private const int OpenDataFileVa = 0x00675920;
+    private const int IsAlreadyRunningFallbackVa = 0x004122A0;
+    private const int OpenDataFileFallbackVa = 0x00675920;
     // OpenDataFile's prologue tests bit 1 (value 0x2) of openFlags:
     //   and cl, 2
     //   cmp cl, 2
@@ -85,25 +85,6 @@ internal static class MultiClientHooks
             if (textSection.ImageSize != ExpectedImageSize)
                 RynthLog.Verbose($"Compat: multi-client hook using unverified acclient image size 0x{textSection.ImageSize:X} (expected 0x{ExpectedImageSize:X}).");
 
-            int funcOff = IsAlreadyRunningVa - textSection.TextBaseVa;
-            if (funcOff < 0 || funcOff + IsAlreadyRunningSignature.Length > textSection.Bytes.Length)
-            {
-                _statusMessage = $"Client::IsAlreadyRunning VA 0x{IsAlreadyRunningVa:X8} is outside the readable text window.";
-                RynthLog.Compat($"Compat: multi-client hook failed - {_statusMessage}");
-                return;
-            }
-
-            for (int i = 0; i < IsAlreadyRunningSignature.Length; i++)
-            {
-                byte? expected = IsAlreadyRunningSignature[i];
-                if (expected.HasValue && textSection.Bytes[funcOff + i] != expected.Value)
-                {
-                    _statusMessage = $"Client::IsAlreadyRunning signature mismatch at 0x{IsAlreadyRunningVa + i:X8}.";
-                    RynthLog.Compat($"Compat: multi-client hook failed - {_statusMessage}");
-                    return;
-                }
-            }
-
             TryInstallIsAlreadyRunningHook(textSection);
             TryInstallOpenDataFileHook(textSection);
 
@@ -115,7 +96,7 @@ internal static class MultiClientHooks
             }
 
             if (IsInstalled)
-                _statusMessage = $"Hooked Client::IsAlreadyRunning @ 0x{IsAlreadyRunningVa:X8} and CLBlockAllocator::OpenDataFile @ 0x{OpenDataFileVa:X8} (share flag 0x2).";
+                _statusMessage = $"Hooked Client::IsAlreadyRunning @ 0x{_targetAddress.ToInt32():X8} and CLBlockAllocator::OpenDataFile @ 0x{_openDataFileAddress.ToInt32():X8} (share flag 0x2).";
             else
                 _statusMessage = $"Partial install. alreadyRunning={IsAlreadyRunningInstalled}, dataFile={OpenDataFileInstalled}.";
         }
@@ -128,62 +109,52 @@ internal static class MultiClientHooks
 
     private static void TryInstallIsAlreadyRunningHook(AcClientTextSection textSection)
     {
-        int funcOff = IsAlreadyRunningVa - textSection.TextBaseVa;
-        if (funcOff < 0 || funcOff + IsAlreadyRunningSignature.Length > textSection.Bytes.Length)
-        {
-            RynthLog.Compat($"Compat: multi-client hook unavailable - Client::IsAlreadyRunning VA 0x{IsAlreadyRunningVa:X8} is outside the readable text window.");
+        var resolved = HookResolver.Resolve(textSection, "MultiClientHooks.Client::IsAlreadyRunning",
+            IsAlreadyRunningSignature, IsAlreadyRunningFallbackVa);
+        if (!resolved.Success)
             return;
-        }
 
-        for (int i = 0; i < IsAlreadyRunningSignature.Length; i++)
+        try
         {
-            byte? expected = IsAlreadyRunningSignature[i];
-            if (expected.HasValue && textSection.Bytes[funcOff + i] != expected.Value)
-            {
-                RynthLog.Compat($"Compat: multi-client hook unavailable - Client::IsAlreadyRunning signature mismatch at 0x{IsAlreadyRunningVa + i:X8}.");
-                return;
-            }
+            _targetAddress = resolved.Address;
+            _detour = IsAlreadyRunningDetour;
+            IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_detour);
+            _originalIsAlreadyRunning = Marshal.GetDelegateForFunctionPointer<IsAlreadyRunningDelegate>(
+                MinHook.HookCreate(_targetAddress, detourPtr));
+            Thread.MemoryBarrier();
+            MinHook.Enable(_targetAddress);
+            IsAlreadyRunningInstalled = true;
+            RynthLog.Compat($"MultiClientHooks: IsAlreadyRunning hook ready @ 0x{_targetAddress.ToInt32():X8}.");
         }
-
-        _targetAddress = new IntPtr(IsAlreadyRunningVa);
-        _detour = IsAlreadyRunningDetour;
-        IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_detour);
-        _originalIsAlreadyRunning = Marshal.GetDelegateForFunctionPointer<IsAlreadyRunningDelegate>(MinHook.HookCreate(_targetAddress, detourPtr));
-        Thread.MemoryBarrier();
-        MinHook.Enable(_targetAddress);
-
-        IsAlreadyRunningInstalled = true;
-        RynthLog.Verbose($"Compat: multi-client hook ready - IsAlreadyRunning=0x{IsAlreadyRunningVa:X8}");
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"MultiClientHooks: IsAlreadyRunning install threw {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private static void TryInstallOpenDataFileHook(AcClientTextSection textSection)
     {
-        int funcOff = OpenDataFileVa - textSection.TextBaseVa;
-        if (funcOff < 0 || funcOff + OpenDataFileSignature.Length > textSection.Bytes.Length)
-        {
-            RynthLog.Compat($"Compat: multi-client data-file hook unavailable - CLBlockAllocator::OpenDataFile VA 0x{OpenDataFileVa:X8} is outside the readable text window.");
+        var resolved = HookResolver.Resolve(textSection, "MultiClientHooks.CLBlockAllocator::OpenDataFile",
+            OpenDataFileSignature, OpenDataFileFallbackVa);
+        if (!resolved.Success)
             return;
-        }
 
-        for (int i = 0; i < OpenDataFileSignature.Length; i++)
+        try
         {
-            byte? expected = OpenDataFileSignature[i];
-            if (expected.HasValue && textSection.Bytes[funcOff + i] != expected.Value)
-            {
-                RynthLog.Compat($"Compat: multi-client data-file hook unavailable - CLBlockAllocator::OpenDataFile signature mismatch at 0x{OpenDataFileVa + i:X8}.");
-                return;
-            }
+            _openDataFileAddress = resolved.Address;
+            _openDataFileDetour = OpenDataFileDetour;
+            IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_openDataFileDetour);
+            _originalOpenDataFile = Marshal.GetDelegateForFunctionPointer<OpenDataFileDelegate>(
+                MinHook.HookCreate(_openDataFileAddress, detourPtr));
+            Thread.MemoryBarrier();
+            MinHook.Enable(_openDataFileAddress);
+            OpenDataFileInstalled = true;
+            RynthLog.Compat($"MultiClientHooks: OpenDataFile hook ready @ 0x{_openDataFileAddress.ToInt32():X8}.");
         }
-
-        _openDataFileAddress = new IntPtr(OpenDataFileVa);
-        _openDataFileDetour = OpenDataFileDetour;
-        IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_openDataFileDetour);
-        _originalOpenDataFile = Marshal.GetDelegateForFunctionPointer<OpenDataFileDelegate>(MinHook.HookCreate(_openDataFileAddress, detourPtr));
-        Thread.MemoryBarrier();
-        MinHook.Enable(_openDataFileAddress);
-
-        OpenDataFileInstalled = true;
-        RynthLog.Verbose($"Compat: multi-client data-file hook ready - CLBlockAllocator::OpenDataFile=0x{OpenDataFileVa:X8}");
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"MultiClientHooks: OpenDataFile install threw {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private static byte IsAlreadyRunningDetour(IntPtr thisPtr)

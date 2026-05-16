@@ -302,12 +302,33 @@
                       <NumericUpDown Grid.Row="2" Grid.Column="1" x:Name="CrashRelaunchWindowBox" Minimum="1" Maximum="60" Increment="1" Width="120" />
                     </Grid>
 
+                    <CheckBox x:Name="KillStuckClientsCheckBox"
+                              Content="Kill stuck clients (pre- and post-login)"
+                              ToolTip.Tip="Kills RynthCore-mode acclient.exe processes we launched that are stuck in either: (1) never reached login within the timeout (patcher hangs, char-select sit, login errors), or (2) logged out / disconnected and sat there longer than the timeout (disconnect dialog, idle char-select). Decal-mode clients are skipped (no engine = no login signal)."
+                              Margin="0,8,0,4" />
+                    <Grid ColumnDefinitions="*,Auto">
+                      <TextBlock Grid.Column="0" Text="Stuck-client timeout (seconds)" Foreground="#EAF0F4" VerticalAlignment="Center" Margin="0,0,8,0" />
+                      <NumericUpDown Grid.Column="1" x:Name="StuckClientTimeoutBox" Minimum="15" Maximum="600" Increment="15" Width="120" />
+                    </Grid>
+
                     <Button x:Name="SaveBehaviorButton"
                             Content="Save Launch Behavior"
                             HorizontalAlignment="Left" />
                   </StackPanel>
                 </Border>
               </Grid>
+
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Engine Settings" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                  <TextBlock Text="These flags are read by RynthCore.Engine on each AC client launch. They write to %APPDATA%\RynthCore\engine.json — other engine flags in that file are preserved untouched."
+                             TextWrapping="Wrap"
+                             Foreground="#9AA8B3" />
+                  <CheckBox x:Name="EnableDcompOverlayCheckBox"
+                            Content="Use DComp overlay (experimental, GPU-rendered)"
+                            ToolTip.Tip="When ON, the engine starts the new DirectComposition overlay instead of the production AvaloniaOverlay. Mutually exclusive — Avalonia is single-app-per-process. Toggle takes effect on next AC client launch (a hot reload won't switch overlays)." />
+                </StackPanel>
+              </Border>
 
               <Border Background="#132028" CornerRadius="16" Padding="18">
                 <StackPanel Spacing="8">

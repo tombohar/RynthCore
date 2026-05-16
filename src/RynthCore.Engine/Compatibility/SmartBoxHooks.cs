@@ -109,6 +109,8 @@ internal static class SmartBoxHooks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvThiscall) })]
     private static unsafe uint DispatchSmartBoxEventDetour(IntPtr thisPtr, IntPtr blob)
     {
+        MainThreadGuard.RecordIfFirst();
+        RecursionGuard.Tick("SmartBoxHooks.DispatchSmartBoxEvent");
         var pOriginal = (delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint>)_originalDispatchSmartBoxEventPtr;
 
         if (!LoginLifecycleHooks.HasObservedLoginComplete)
@@ -148,6 +150,14 @@ internal static class SmartBoxHooks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvThiscall) })]
     private static unsafe uint DispatchGameEventDetour(IntPtr thisPtr, IntPtr blob)
     {
+        MainThreadGuard.RecordIfFirst();
+        // Engine-side BusyCount watchdog: piggyback on this detour (fires
+        // on every server game event while in-world, runs on AC's main
+        // thread). If busy count has been positive for > 5s, force-clear
+        // it. Self-heals from desync between our tracker and AC's m_cBusy
+        // when the user can't reach the chat box to run `/ra clearbusy`.
+        try { BusyCountHooks.CheckWatchdog(); } catch { }
+        RecursionGuard.Tick("SmartBoxHooks.DispatchGameEvent");
         var pOriginal = (delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint>)_originalDispatchGameEventPtr;
 
         SmartBoxEventInfo info = default;

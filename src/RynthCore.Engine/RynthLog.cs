@@ -9,11 +9,11 @@ internal static class RynthLog
 {
     // ── Category toggles (flip to false to silence a subsystem) ──────────
 
-    internal static bool D3D9Enabled    = false;
+    internal static bool D3D9Enabled    = true;
     internal static bool CompatEnabled  = true;
     internal static bool RenderEnabled  = false;   // ImGui, DX9Backend, Win32Backend
     internal static bool PluginEnabled  = true;
-    internal static bool UIEnabled      = false;
+    internal static bool UIEnabled      = true;
 
     // ── Category methods ─────────────────────────────────────────────────
 

@@ -69,6 +69,7 @@ internal static class VectorUpdateServerDispatchHooks
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static unsafe uint DispatchSbVectorUpdateDetour(IntPtr smartBoxPtr, IntPtr blob)
     {
+        RecursionGuard.Tick("VectorUpdateServerDispatchHooks.DispatchSbVectorUpdate");
         var pOriginal = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, uint>)_originalDispatchSbVectorUpdatePtr;
         VectorUpdateInfo info = ReadVectorUpdateInfo(blob);
 

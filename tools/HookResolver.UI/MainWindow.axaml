@@ -1,0 +1,540 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:RynthCore.HookResolver.UI"
+        xmlns:disc="clr-namespace:RynthCore.HookResolver.Core.Discovery;assembly=RynthCore.HookResolver.Core"
+        x:Class="RynthCore.HookResolver.UI.MainWindow"
+        x:DataType="local:MainViewModel"
+        Width="1440"
+        Height="820"
+        MinWidth="1000"
+        MinHeight="560"
+        Title="RynthCore Hook Resolver"
+        Background="#0B1218">
+  <Window.Styles>
+    <Style Selector="TextBlock">
+      <Setter Property="FontSize" Value="12.5" />
+      <Setter Property="Foreground" Value="#D6DDE3" />
+    </Style>
+    <Style Selector="TextBox">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Background" Value="#0F161D" />
+      <Setter Property="Foreground" Value="#D6DDE3" />
+      <Setter Property="BorderBrush" Value="#243742" />
+    </Style>
+    <Style Selector="ComboBox">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Background" Value="#0F161D" />
+      <Setter Property="Foreground" Value="#D6DDE3" />
+      <Setter Property="BorderBrush" Value="#243742" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Padding" Value="14,8" />
+      <Setter Property="Background" Value="#1A2E38" />
+      <Setter Property="Foreground" Value="#26C1A6" />
+      <Setter Property="BorderBrush" Value="#26C1A6" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="6" />
+    </Style>
+    <Style Selector="Button:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#26C1A6" />
+      <Setter Property="TextElement.Foreground" Value="#0B1218" />
+    </Style>
+    <Style Selector="Button:disabled">
+      <Setter Property="Opacity" Value="0.4" />
+    </Style>
+    <Style Selector="ListBox">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+    </Style>
+    <Style Selector="ListBoxItem">
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="ListBoxItem:selected /template/ ContentPresenter">
+      <Setter Property="Background" Value="#152633" />
+    </Style>
+    <Style Selector="ListBoxItem:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#12202A" />
+    </Style>
+    <Style Selector="TabItem">
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="MinHeight" Value="32" />
+      <Setter Property="Padding" Value="14,6" />
+      <Setter Property="Foreground" Value="#8896A0" />
+    </Style>
+    <Style Selector="TabItem:selected">
+      <Setter Property="Foreground" Value="#26C1A6" />
+    </Style>
+  </Window.Styles>
+
+  <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="14">
+
+    <Border Grid.Row="0"
+            Padding="14"
+            CornerRadius="14"
+            Background="#132028"
+            BorderBrush="#26C1A6"
+            BorderThickness="1"
+            Margin="0,0,0,10">
+      <StackPanel>
+        <TextBlock Text="RynthCore Hook Resolver"
+                   FontSize="18"
+                   FontWeight="SemiBold"
+                   Foreground="#26C1A6" />
+        <TextBlock Text="Offline resolver — pattern-scan known hooks (Hooks tab) or discover new ones by string reference (Discover tab)."
+                   Margin="0,4,0,0"
+                   Foreground="#8896A0"
+                   TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+
+    <Border Grid.Row="1"
+            Padding="12"
+            CornerRadius="12"
+            Background="#0F161D"
+            BorderBrush="#243742"
+            BorderThickness="1"
+            Margin="0,0,0,10">
+      <StackPanel>
+        <Grid ColumnDefinitions="Auto,*,Auto,Auto" RowDefinitions="Auto">
+          <TextBlock Grid.Column="0"
+                     Text="acclient.exe:"
+                     VerticalAlignment="Center"
+                     Margin="0,0,10,0"
+                     MinWidth="100" />
+          <TextBox Grid.Column="1"
+                   Text="{Binding AcClientPath, Mode=TwoWay}"
+                   VerticalAlignment="Center" />
+          <Button Grid.Column="2"
+                  Content="…"
+                  Margin="8,0,0,0"
+                  MinWidth="38"
+                  Click="OnBrowseAcClient" />
+          <Button Grid.Column="3"
+                  Content="Resolve"
+                  Margin="8,0,0,0"
+                  IsEnabled="{Binding CanResolve}"
+                  Click="OnResolveClick" />
+        </Grid>
+        <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto" Margin="0,8,0,0">
+          <TextBlock Grid.Column="0"
+                     Text="engine log:"
+                     VerticalAlignment="Center"
+                     Margin="0,0,10,0"
+                     MinWidth="100"
+                     Foreground="#8896A0" />
+          <TextBox Grid.Column="1"
+                   Text="{Binding LogPath, Mode=TwoWay}"
+                   VerticalAlignment="Center" />
+          <Button Grid.Column="2"
+                  Content="…"
+                  Margin="8,0,0,0"
+                  MinWidth="38"
+                  Click="OnBrowseLog" />
+        </Grid>
+      </StackPanel>
+    </Border>
+
+    <TabControl Grid.Row="2" Background="Transparent" BorderThickness="0" Padding="0">
+
+      <!-- ───────────── HOOKS TAB ───────────── -->
+      <TabItem Header="Hooks">
+        <Grid ColumnDefinitions="*,12,420" Margin="0,8,0,0">
+
+          <Border Grid.Column="0"
+                  Padding="0"
+                  CornerRadius="12"
+                  Background="#0F161D"
+                  BorderBrush="#243742"
+                  BorderThickness="1">
+            <Grid RowDefinitions="Auto,*">
+              <Grid Grid.Row="0"
+                    ColumnDefinitions="2.4*,0.9*,1.3*,1.3*,0.4*,2.2*"
+                    Margin="14,10,14,8">
+                <TextBlock Grid.Column="0" Text="Symbol" FontWeight="SemiBold" Foreground="#8896A0" />
+                <TextBlock Grid.Column="1" Text="Status" FontWeight="SemiBold" Foreground="#8896A0" />
+                <TextBlock Grid.Column="2" Text="Tool VA" FontWeight="SemiBold" Foreground="#8896A0" />
+                <TextBlock Grid.Column="3" Text="Engine VA" FontWeight="SemiBold" Foreground="#8896A0" />
+                <TextBlock Grid.Column="4" Text="Diff" FontWeight="SemiBold" Foreground="#8896A0" HorizontalAlignment="Center" />
+                <TextBlock Grid.Column="5" Text="Detail" FontWeight="SemiBold" Foreground="#8896A0" />
+              </Grid>
+
+              <ListBox Grid.Row="1"
+                       ItemsSource="{Binding Hooks}"
+                       SelectedItem="{Binding SelectedRow, Mode=TwoWay}"
+                       SelectionMode="Single">
+                <ListBox.ItemTemplate>
+                  <DataTemplate DataType="local:HookRow">
+                    <Border BorderBrush="#1A2730"
+                            BorderThickness="0,1,0,0"
+                            Padding="14,8">
+                      <Grid ColumnDefinitions="2.4*,0.9*,1.3*,1.3*,0.4*,2.2*">
+                        <TextBlock Grid.Column="0" Text="{Binding SymbolId}" VerticalAlignment="Center" FontFamily="Cascadia Mono, Consolas, monospace" />
+                        <TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="{Binding StatusBrush}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="2" Text="{Binding Va}" VerticalAlignment="Center" FontFamily="Cascadia Mono, Consolas, monospace" />
+                        <TextBlock Grid.Column="3" Text="{Binding EngineVa}" VerticalAlignment="Center" FontFamily="Cascadia Mono, Consolas, monospace" Foreground="#A8B2BB" />
+                        <TextBlock Grid.Column="4" Text="{Binding DiffSymbol}" Foreground="{Binding DiffBrush}" FontWeight="SemiBold" VerticalAlignment="Center" HorizontalAlignment="Center" ToolTip.Tip="{Binding DiffTooltip}" />
+                        <TextBlock Grid.Column="5" Text="{Binding Detail}" VerticalAlignment="Center" TextWrapping="Wrap" Foreground="#A8B2BB" />
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+            </Grid>
+          </Border>
+
+          <Border Grid.Column="2"
+                  Padding="14"
+                  CornerRadius="12"
+                  Background="#0F161D"
+                  BorderBrush="#243742"
+                  BorderThickness="1">
+            <ScrollViewer>
+              <StackPanel>
+                <TextBlock Text="Function context" FontSize="14" FontWeight="SemiBold" Foreground="#26C1A6" />
+                <TextBlock Text="Click a row to inspect the resolved function."
+                           Margin="0,4,0,0"
+                           IsVisible="{Binding !HasSelection}"
+                           Foreground="#8896A0" />
+
+                <StackPanel IsVisible="{Binding HasSelection}" Margin="0,8,0,0">
+                  <TextBlock Text="{Binding SelectedRow.SymbolId}" FontFamily="Cascadia Mono, Consolas, monospace" FontWeight="SemiBold" TextWrapping="Wrap" />
+
+                  <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto" Margin="0,8,0,0">
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="status: " Foreground="#8896A0" />
+                    <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding SelectedRow.Status}" Foreground="{Binding SelectedRow.StatusBrush}" />
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="tool VA: " Foreground="#8896A0" />
+                    <SelectableTextBlock Grid.Row="1" Grid.Column="1" Text="{Binding SelectedRow.Va}" FontFamily="Cascadia Mono, Consolas, monospace" />
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="engine VA: " Foreground="#8896A0" />
+                    <SelectableTextBlock Grid.Row="2" Grid.Column="1" Text="{Binding SelectedRow.EngineVa}" FontFamily="Cascadia Mono, Consolas, monospace" Foreground="#A8B2BB" />
+                  </Grid>
+
+                  <Separator Margin="0,10,0,8" Background="#1A2730" />
+                  <TextBlock Text="snapshot" FontWeight="SemiBold" Foreground="#26C1A6" />
+                  <TextBlock Text="{Binding SelectedRow.SnapshotSummary}" Margin="0,4,0,0" />
+
+                  <TextBlock Text="prologue (8 bytes)" Margin="0,10,0,4" Foreground="#8896A0" />
+                  <Border Background="#091017" BorderBrush="#1A2730" BorderThickness="1" CornerRadius="4" Padding="8,6">
+                    <SelectableTextBlock Text="{Binding SelectedRow.SnapshotPrologue}" FontFamily="Cascadia Mono, Consolas, monospace" />
+                  </Border>
+
+                  <TextBlock Text="CALL targets (offset → VA)" Margin="0,10,0,4" Foreground="#8896A0" />
+                  <Border Background="#091017" BorderBrush="#1A2730" BorderThickness="1" CornerRadius="4" Padding="8,6">
+                    <SelectableTextBlock Text="{Binding SelectedRow.SnapshotCallTargets}" FontFamily="Cascadia Mono, Consolas, monospace" />
+                  </Border>
+                </StackPanel>
+              </StackPanel>
+            </ScrollViewer>
+          </Border>
+        </Grid>
+      </TabItem>
+
+      <!-- ───────────── DISCOVER TAB ───────────── -->
+      <TabItem Header="Discover by string">
+        <Grid RowDefinitions="Auto,Auto,*" Margin="0,8,0,0">
+
+          <Border Grid.Row="0"
+                  Padding="12"
+                  CornerRadius="12"
+                  Background="#0F161D"
+                  BorderBrush="#243742"
+                  BorderThickness="1">
+            <StackPanel>
+              <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto">
+                <TextBlock Grid.Column="0" Text="string:" VerticalAlignment="Center" Margin="0,0,8,0" MinWidth="60" />
+                <TextBox Grid.Column="1" Text="{Binding SearchLiteral, Mode=TwoWay}" VerticalAlignment="Center" />
+                <Button Grid.Column="2"
+                        Content="Search"
+                        Margin="14,0,0,0"
+                        IsEnabled="{Binding CanSearch}"
+                        Click="OnSearchClick" />
+              </Grid>
+
+              <Grid ColumnDefinitions="Auto,1.4*,Auto,1.2*,Auto,70,Auto" RowDefinitions="Auto" Margin="0,8,0,0">
+                <TextBlock Grid.Column="0" Text="prologue:" VerticalAlignment="Center" Margin="0,0,8,0" MinWidth="60" />
+                <ComboBox Grid.Column="1"
+                          ItemsSource="{Binding Presets}"
+                          SelectedItem="{Binding SelectedPreset, Mode=TwoWay}"
+                          VerticalAlignment="Center"
+                          HorizontalAlignment="Stretch">
+                  <ComboBox.ItemTemplate>
+                    <DataTemplate DataType="disc:ProloguePreset">
+                      <TextBlock Text="{Binding Name}" />
+                    </DataTemplate>
+                  </ComboBox.ItemTemplate>
+                </ComboBox>
+
+                <TextBlock Grid.Column="2" Text="reference:" VerticalAlignment="Center" Margin="14,0,8,0" />
+                <ComboBox Grid.Column="3"
+                          ItemsSource="{Binding ReferenceModes}"
+                          SelectedItem="{Binding SelectedReferenceMode, Mode=TwoWay}"
+                          VerticalAlignment="Center"
+                          HorizontalAlignment="Stretch"
+                          ToolTip.Tip="PushImm32 = printf-style string arg (precise). AnyImm32InText = mov/lea/cmp immediate (broad). DataPointer = string used as a .rdata table entry (no function)." />
+
+                <TextBlock Grid.Column="4" Text="walk back:" VerticalAlignment="Center" Margin="14,0,8,0" />
+                <TextBox Grid.Column="5" Text="{Binding MaxBackward, Mode=TwoWay}" VerticalAlignment="Center" />
+
+                <CheckBox Grid.Column="6"
+                          Content="loose"
+                          IsChecked="{Binding LooseMatch, Mode=TwoWay}"
+                          VerticalAlignment="Center"
+                          Margin="14,0,0,0"
+                          Foreground="#D6DDE3"
+                          ToolTip.Tip="Match the string even if it isn't NUL-terminated (finds substrings embedded in longer strings)." />
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Grid.Row="1"
+                  Margin="0,10,0,10"
+                  Padding="12,10"
+                  CornerRadius="10"
+                  Background="#091017"
+                  BorderBrush="#1A2730"
+                  BorderThickness="1">
+            <SelectableTextBlock Text="{Binding DiscoveryStatus}" TextWrapping="Wrap" Foreground="#D6DDE3" />
+          </Border>
+
+          <Grid Grid.Row="2" ColumnDefinitions="*,12,420">
+
+            <Border Grid.Column="0"
+                    Padding="0"
+                    CornerRadius="12"
+                    Background="#0F161D"
+                    BorderBrush="#243742"
+                    BorderThickness="1">
+              <ListBox ItemsSource="{Binding DiscoveryCandidates}"
+                       SelectedItem="{Binding SelectedCandidate, Mode=TwoWay}"
+                       SelectionMode="Single">
+                <ListBox.ItemTemplate>
+                  <DataTemplate DataType="local:DiscoveryCandidateRow">
+                    <Border BorderBrush="#1A2730"
+                            BorderThickness="0,1,0,0"
+                            Padding="14,10">
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0">
+                          <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{Binding Va}"
+                                       FontFamily="Cascadia Mono, Consolas, monospace"
+                                       FontWeight="SemiBold"
+                                       Foreground="{Binding AccentBrush}" />
+                            <TextBlock Text="   "/>
+                            <TextBlock Text="{Binding Summary}" Foreground="#A8B2BB" />
+                          </StackPanel>
+                          <TextBlock Text="{Binding PushSiteVa}"
+                                     Margin="0,2,0,0"
+                                     FontFamily="Cascadia Mono, Consolas, monospace"
+                                     Foreground="#56646D" />
+                          <TextBlock Text="{Binding CallTargetsDisplay}"
+                                     Margin="0,2,0,0"
+                                     FontFamily="Cascadia Mono, Consolas, monospace"
+                                     FontSize="11"
+                                     Foreground="#56646D"
+                                     TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button Grid.Column="1"
+                                Content="Promote"
+                                VerticalAlignment="Center"
+                                Margin="10,0,0,0"
+                                Click="OnPromoteStringCandidate" />
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+            </Border>
+
+            <Border Grid.Column="2"
+                    Padding="14"
+                    CornerRadius="12"
+                    Background="#0F161D"
+                    BorderBrush="#243742"
+                    BorderThickness="1">
+              <ScrollViewer>
+                <StackPanel>
+                  <TextBlock Text="Candidate context" FontSize="14" FontWeight="SemiBold" Foreground="#26C1A6" />
+                  <TextBlock Text="Search for a string, then click a candidate to inspect."
+                             Margin="0,4,0,0"
+                             IsVisible="{Binding !HasDiscoverySelection}"
+                             Foreground="#8896A0" />
+
+                  <StackPanel IsVisible="{Binding HasDiscoverySelection}" Margin="0,8,0,0">
+                    <SelectableTextBlock Text="{Binding SelectedCandidate.Va}" FontFamily="Cascadia Mono, Consolas, monospace" FontSize="14" FontWeight="SemiBold" />
+                    <TextBlock Text="{Binding SelectedCandidate.Summary}" Margin="0,6,0,0" />
+
+                    <TextBlock Text="prologue (8 bytes)" Margin="0,10,0,4" Foreground="#8896A0" />
+                    <Border Background="#091017" BorderBrush="#1A2730" BorderThickness="1" CornerRadius="4" Padding="8,6">
+                      <SelectableTextBlock Text="{Binding SelectedCandidate.PrologueDisplay}" FontFamily="Cascadia Mono, Consolas, monospace" />
+                    </Border>
+
+                    <TextBlock Text="CALL targets" Margin="0,10,0,4" Foreground="#8896A0" />
+                    <Border Background="#091017" BorderBrush="#1A2730" BorderThickness="1" CornerRadius="4" Padding="8,6">
+                      <SelectableTextBlock Text="{Binding SelectedCandidate.CallTargetsDisplay}" FontFamily="Cascadia Mono, Consolas, monospace" TextWrapping="Wrap" />
+                    </Border>
+
+                    <TextBlock Text="push site" Margin="0,10,0,4" Foreground="#8896A0" />
+                    <SelectableTextBlock Text="{Binding SelectedCandidate.PushSiteVa}" FontFamily="Cascadia Mono, Consolas, monospace" />
+                  </StackPanel>
+                </StackPanel>
+              </ScrollViewer>
+            </Border>
+          </Grid>
+        </Grid>
+      </TabItem>
+
+      <!-- ───────────── DISCOVER BY CLASS (RTTI) TAB ───────────── -->
+      <TabItem Header="Discover by class">
+        <Grid RowDefinitions="Auto,Auto,*" Margin="0,8,0,0">
+
+          <Border Grid.Row="0"
+                  Padding="12"
+                  CornerRadius="12"
+                  Background="#0F161D"
+                  BorderBrush="#243742"
+                  BorderThickness="1">
+            <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto">
+              <TextBlock Grid.Column="0" Text="class name:" VerticalAlignment="Center" Margin="0,0,8,0" />
+              <TextBox Grid.Column="1"
+                       Text="{Binding SearchClass, Mode=TwoWay}"
+                       VerticalAlignment="Center" />
+              <Button Grid.Column="2"
+                      Content="Find vtable methods"
+                      Margin="14,0,0,0"
+                      IsEnabled="{Binding CanSearchClass}"
+                      Click="OnSearchClassClick" />
+            </Grid>
+          </Border>
+
+          <Border Grid.Row="1"
+                  Margin="0,10,0,10"
+                  Padding="12,10"
+                  CornerRadius="10"
+                  Background="#091017"
+                  BorderBrush="#1A2730"
+                  BorderThickness="1">
+            <SelectableTextBlock Text="{Binding ClassDiscoveryStatus}" TextWrapping="Wrap" Foreground="#D6DDE3" />
+          </Border>
+
+          <Grid Grid.Row="2" ColumnDefinitions="*,12,420">
+
+            <Border Grid.Column="0"
+                    Padding="0"
+                    CornerRadius="12"
+                    Background="#0F161D"
+                    BorderBrush="#243742"
+                    BorderThickness="1">
+              <ListBox ItemsSource="{Binding VtableMethods}"
+                       SelectedItem="{Binding SelectedVtableMethod, Mode=TwoWay}"
+                       SelectionMode="Single">
+                <ListBox.ItemTemplate>
+                  <DataTemplate DataType="local:VtableMethodRow">
+                    <Border BorderBrush="#1A2730"
+                            BorderThickness="0,1,0,0"
+                            Padding="14,8">
+                      <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0">
+                          <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{Binding Slot}"
+                                       FontFamily="Cascadia Mono, Consolas, monospace"
+                                       Foreground="#56646D"
+                                       Width="40" />
+                            <TextBlock Text="{Binding Va}"
+                                       FontFamily="Cascadia Mono, Consolas, monospace"
+                                       FontWeight="SemiBold"
+                                       Foreground="{Binding AccentBrush}" />
+                            <TextBlock Text="   "/>
+                            <TextBlock Text="{Binding Summary}" Foreground="#A8B2BB" />
+                          </StackPanel>
+                          <TextBlock Text="{Binding CallTargetsDisplay}"
+                                     Margin="40,2,0,0"
+                                     FontFamily="Cascadia Mono, Consolas, monospace"
+                                     FontSize="11"
+                                     Foreground="#56646D"
+                                     TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button Grid.Column="1"
+                                Content="Promote"
+                                VerticalAlignment="Center"
+                                Margin="10,0,0,0"
+                                Click="OnPromoteVtableMethod" />
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+            </Border>
+
+            <Border Grid.Column="2"
+                    Padding="14"
+                    CornerRadius="12"
+                    Background="#0F161D"
+                    BorderBrush="#243742"
+                    BorderThickness="1">
+              <ScrollViewer>
+                <StackPanel>
+                  <TextBlock Text="Vtable method" FontSize="14" FontWeight="SemiBold" Foreground="#26C1A6" />
+                  <TextBlock Text="Find a class, then click a slot to inspect."
+                             Margin="0,4,0,0"
+                             IsVisible="{Binding !HasVtableSelection}"
+                             Foreground="#8896A0" />
+
+                  <StackPanel IsVisible="{Binding HasVtableSelection}" Margin="0,8,0,0">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="{Binding SelectedVtableMethod.Slot}"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 Foreground="#56646D" />
+                      <TextBlock Text="  " />
+                      <SelectableTextBlock Text="{Binding SelectedVtableMethod.Va}"
+                                 FontFamily="Cascadia Mono, Consolas, monospace"
+                                 FontSize="14"
+                                 FontWeight="SemiBold" />
+                    </StackPanel>
+                    <TextBlock Text="{Binding SelectedVtableMethod.Summary}" Margin="0,6,0,0" />
+
+                    <TextBlock Text="prologue (8 bytes)" Margin="0,10,0,4" Foreground="#8896A0" />
+                    <Border Background="#091017" BorderBrush="#1A2730" BorderThickness="1" CornerRadius="4" Padding="8,6">
+                      <SelectableTextBlock Text="{Binding SelectedVtableMethod.PrologueDisplay}" FontFamily="Cascadia Mono, Consolas, monospace" />
+                    </Border>
+
+                    <TextBlock Text="CALL targets" Margin="0,10,0,4" Foreground="#8896A0" />
+                    <Border Background="#091017" BorderBrush="#1A2730" BorderThickness="1" CornerRadius="4" Padding="8,6">
+                      <SelectableTextBlock Text="{Binding SelectedVtableMethod.CallTargetsDisplay}" FontFamily="Cascadia Mono, Consolas, monospace" TextWrapping="Wrap" />
+                    </Border>
+                  </StackPanel>
+                </StackPanel>
+              </ScrollViewer>
+            </Border>
+          </Grid>
+        </Grid>
+      </TabItem>
+    </TabControl>
+
+    <Border Grid.Row="3"
+            Padding="12"
+            CornerRadius="12"
+            Background="#0F161D"
+            BorderBrush="#243742"
+            BorderThickness="1"
+            Margin="0,10,0,0">
+      <Grid ColumnDefinitions="*,Auto,Auto">
+        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+          <SelectableTextBlock Text="{Binding StatusText}" />
+          <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+            <TextBlock Text="{Binding CountsDisplay}" Foreground="#8896A0" />
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+            <TextBlock Text="{Binding DiffDisplay}" Foreground="#8896A0" />
+            <TextBlock Text="   •   SHA-256: " Foreground="#56646D" Margin="8,0,0,0" />
+            <TextBlock Text="{Binding Sha256Display}" Foreground="#56646D" FontFamily="Cascadia Mono, Consolas, monospace" />
+          </StackPanel>
+        </StackPanel>
+        <TextBox Grid.Column="1" Text="{Binding ManifestPath, Mode=TwoWay}" Width="320" VerticalAlignment="Center" Margin="0,0,8,0" />
+        <Button Grid.Column="2" Content="Save Manifest" VerticalAlignment="Center" IsEnabled="{Binding CanSave}" Click="OnSaveClick" />
+      </Grid>
+    </Border>
+
+  </Grid>
+</Window>

@@ -27,9 +27,19 @@ internal static class AccountHooks
 {
     private const int ReferenceClientGetInstance    = 0x004114C0;
     private const int ReferenceClientGetAccountName = 0x00401D90;
-    private const int SendNoticeWorldNameVa         = 0x00693A60;
+    private const int SendNoticeWorldNameFallbackVa = 0x00693A60;
     private const int PStringBufferLenOffset        = 8;
     private const int PStringBufferDataOffset       = 20;
+
+    // ECM_Login::SendNotice_WorldName(AC1Legacy::PStringBase<char> const&) — bool (cdecl)
+    // Distinctive: vftable-call via push 0x186A2 (UI message ID for world-name notice).
+    private static readonly byte?[] SendNoticeWorldNamePattern =
+    [
+        0xE8, null, null, null, null,         // call rel32
+        0x8B, 0x10, 0x68, 0xA2, 0x86, 0x01, 0x00,   // mov edx,[eax]; push 0x186A2
+        0x8B, 0xC8, 0xFF, 0x52, 0x10,         // mov ecx,eax; call [edx+0x10]
+        0x85, 0xC0, 0x74, 0x22, 0x56, 0x8B, 0x70, 0x04
+    ];
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate IntPtr ClientGetInstanceDelegate();
@@ -94,43 +104,34 @@ internal static class AccountHooks
         {
             if (!AcClientModule.TryReadTextSection(out AcClientTextSection textSection))
             {
-                RynthLog.Compat("Compat: world-name hook skipped - acclient.exe not available.");
+                RynthLog.Compat("AccountHooks: world-name hook skipped - acclient.exe not available.");
                 return;
             }
 
-            int funcOff = SendNoticeWorldNameVa - textSection.TextBaseVa;
-            if (funcOff < 0 || funcOff >= textSection.Bytes.Length)
-            {
-                RynthLog.Compat($"Compat: world-name hook failed - VA 0x{SendNoticeWorldNameVa:X8} out of text section range.");
+            var resolved = HookResolver.Resolve(textSection, "AccountHooks.SendNotice_WorldName",
+                SendNoticeWorldNamePattern, SendNoticeWorldNameFallbackVa);
+            if (!resolved.Success)
                 return;
-            }
 
-            byte firstByte = textSection.Bytes[funcOff];
-            if (firstByte is 0x00 or 0xCC or 0xC3)
-            {
-                RynthLog.Compat($"Compat: world-name hook failed - invalid opcode 0x{firstByte:X2} @ 0x{SendNoticeWorldNameVa:X8}.");
-                return;
-            }
-
-            IntPtr targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
             _sendNoticeWorldNameDetour = SendNoticeWorldNameDetour;
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_sendNoticeWorldNameDetour);
             _originalSendNoticeWorldName = Marshal.GetDelegateForFunctionPointer<SendNoticeWorldNameDelegate>(
-                MinHook.HookCreate(targetAddress, detourPtr));
+                MinHook.HookCreate(resolved.Address, detourPtr));
             Thread.MemoryBarrier();
-            MinHook.Enable(targetAddress);
+            MinHook.Enable(resolved.Address);
 
             WorldHookInstalled = true;
-            RynthLog.Verbose($"Compat: world-name hook ready - ECM_Login::SendNotice_WorldName @ 0x{targetAddress.ToInt32():X8}.");
+            RynthLog.Compat($"AccountHooks: world-name hook ready @ 0x{resolved.Address.ToInt32():X8}.");
         }
         catch (Exception ex)
         {
-            RynthLog.Compat($"Compat: world-name hook failed - {ex.Message}");
+            RynthLog.Compat($"AccountHooks: world-name hook install threw {ex.GetType().Name}: {ex.Message}");
         }
     }
 
     private static byte SendNoticeWorldNameDetour(IntPtr pstringPtr)
     {
+        RecursionGuard.Tick("AccountHooks.SendNoticeWorldName");
         byte result = 0;
         try { result = _originalSendNoticeWorldName!(pstringPtr); } catch { }
 

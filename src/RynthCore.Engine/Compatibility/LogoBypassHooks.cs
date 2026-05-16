@@ -25,6 +25,16 @@ internal static class LogoBypassHooks
     private const int DismissClickX = 350;
     private const int DismissClickY = 100;
 
+    // Early-burst dismiss: covers the pre-connect splash/EULA/Turbine logo
+    // screens. Those screens appear before AC contacts the server, so the
+    // packet-driven NotifyPostConnect / NotifyCharacterList triggers can never
+    // catch them. As soon as we find a window of our PID, fire a series of
+    // clicks at the splash hotspot to dismiss whatever shows up. Decal sidesteps
+    // this by directly patching AC's splash code; we don't have that path, so
+    // we brute-force it with PostMessage spam.
+    private const int EarlyBurstClicks = 12;
+    private const int EarlyBurstIntervalMs = 400;
+
     private const uint WM_MOUSEMOVE = 0x0200;
     private const uint WM_LBUTTONDOWN = 0x0201;
     private const uint WM_LBUTTONUP = 0x0202;
@@ -68,7 +78,7 @@ internal static class LogoBypassHooks
 
         if (LoginLifecycleHooks.HasObservedLoginComplete)
         {
-            RynthLog.Verbose("LogoBypass: Login already complete at start - skipping.");
+            RynthLog.Compat("LogoBypass: Login already complete at start - skipping.");
             return;
         }
 
@@ -87,7 +97,7 @@ internal static class LogoBypassHooks
         };
         thread.Start();
 
-        RynthLog.Verbose("LogoBypass: Started - waiting for post-connect or character-list signal before dismiss clicks.");
+        RynthLog.Compat("LogoBypass: Started - waiting for post-connect or character-list signal before dismiss clicks.");
     }
 
     public static void NotifyCharacterListObserved()
@@ -121,8 +131,28 @@ internal static class LogoBypassHooks
             return;
         }
 
-        RynthLog.Verbose($"LogoBypass: Found game HWND 0x{hwnd:X8} - awaiting post-connect or character-list signal.");
+        RynthLog.Compat($"LogoBypass: Found game HWND 0x{hwnd:X8} - firing {EarlyBurstClicks} early dismiss clicks before awaiting packet signals.");
+        EarlyBurstDismiss(hwnd);
         BypassLoop(hwnd);
+    }
+
+    /// <summary>
+    /// Fires a burst of dismiss clicks immediately, covering the pre-connect
+    /// splash/EULA screens that the packet-driven triggers can't catch.
+    /// Stops early if the client transitions out of the pre-login state
+    /// (LoginComplete or auto-login-already-fired). Cheap to call into a
+    /// post-splash window: the clicks just become spurious viewport clicks
+    /// that AC's pre-connect UI ignores.
+    /// </summary>
+    private static void EarlyBurstDismiss(IntPtr hwnd)
+    {
+        for (int i = 0; i < EarlyBurstClicks; i++)
+        {
+            if (LoginLifecycleHooks.HasObservedLoginComplete)
+                return;
+            SendDismissInput(hwnd);
+            Thread.Sleep(EarlyBurstIntervalMs);
+        }
     }
 
     private static void ScheduleDismissClicks(string triggerName, int startDelayMs)
@@ -147,7 +177,7 @@ internal static class LogoBypassHooks
 
         if (scheduled)
         {
-            RynthLog.Verbose(
+            RynthLog.Compat(
                 $"LogoBypass: {triggerName} observed - scheduling {ScheduledDismissClicks} dismiss click(s) at ({DismissClickX}, {DismissClickY}) with {startDelayMs}ms start delay.");
         }
     }
@@ -225,7 +255,7 @@ internal static class LogoBypassHooks
         PostMessage(hwnd, WM_MOUSEMOVE, IntPtr.Zero, lParam);
         PostMessage(hwnd, WM_LBUTTONDOWN, (IntPtr)0x0001, lParam);
         PostMessage(hwnd, WM_LBUTTONUP, IntPtr.Zero, lParam);
-        RynthLog.Verbose($"LogoBypass: Sent dismiss click at ({DismissClickX}, {DismissClickY}).");
+        RynthLog.Compat($"LogoBypass: Sent dismiss click at ({DismissClickX}, {DismissClickY}) to hwnd=0x{hwnd.ToInt64():X8}.");
     }
 
     private static IntPtr MakeLParam(int x, int y) =>
@@ -233,31 +263,58 @@ internal static class LogoBypassHooks
 
     private static bool ReadSkipLogosFromContext()
     {
+        string rootDir = "(unresolved)";
         try
         {
-            string rootDir = Path.Combine(
+            rootDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "RynthCore");
 
             string processPath = Path.Combine(rootDir, "launch_contexts", $"launch_context_{Environment.ProcessId}.json");
-            bool? processValue = ReadSkipLogosFromFile(processPath);
+            RynthLog.Compat($"LogoBypass: ReadSkipLogosFromContext processId={Environment.ProcessId} processPath='{processPath}'");
+            bool? processValue = ReadSkipLogosFromFile(processPath, "process");
             if (processValue.HasValue)
+            {
+                RynthLog.Compat($"LogoBypass: process-scoped context resolved SkipLoginLogos={processValue.Value}.");
                 return processValue.Value;
+            }
 
-            return ReadSkipLogosFromFile(Path.Combine(rootDir, "launch_context.json")) ?? false;
+            string rootPath = Path.Combine(rootDir, "launch_context.json");
+            RynthLog.Compat($"LogoBypass: process file did not yield value, falling back to rootPath='{rootPath}'");
+            bool? rootValue = ReadSkipLogosFromFile(rootPath, "root");
+            bool resolved = rootValue ?? false;
+            RynthLog.Compat($"LogoBypass: root context resolved SkipLoginLogos={(rootValue.HasValue ? rootValue.Value.ToString() : "MISSING")} (effective={resolved}).");
+            return resolved;
         }
-        catch
+        catch (Exception ex)
         {
+            RynthLog.Compat($"LogoBypass: ReadSkipLogosFromContext threw {ex.GetType().Name}: {ex.Message} (rootDir='{rootDir}'). Treating as SkipLoginLogos=false.");
             return false;
         }
     }
 
-    private static bool? ReadSkipLogosFromFile(string path)
+    private static bool? ReadSkipLogosFromFile(string path, string label)
     {
         if (!File.Exists(path))
+        {
+            RynthLog.Compat($"LogoBypass: {label} context file missing at '{path}'.");
             return null;
+        }
 
-        using JsonDocument doc = JsonDocument.Parse(File.ReadAllBytes(path));
-        return doc.RootElement.TryGetProperty("SkipLoginLogos", out JsonElement el) ? el.GetBoolean() : null;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(File.ReadAllBytes(path));
+            if (!doc.RootElement.TryGetProperty("SkipLoginLogos", out JsonElement el))
+            {
+                RynthLog.Compat($"LogoBypass: {label} context at '{path}' has no SkipLoginLogos property.");
+                return null;
+            }
+            return el.GetBoolean();
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"LogoBypass: {label} context at '{path}' read/parse failed: {ex.GetType().Name}: {ex.Message}.");
+            return null;
+        }
     }
 }

@@ -256,10 +256,26 @@ internal static class PluginManager
         _pluginsDir = engineDirIsRuntime
             ? Path.Combine(normalizedEngineDir, "Plugins")
             : Path.Combine(normalizedEngineDir, "Runtime", "Plugins");
-        _shadowRootDir = Path.Combine(_pluginsDir, ".runtime");
 
-        PluginLoader.CleanupShadowCopies(_shadowRootDir);
+        // Per-PID shadow root: each acclient.exe owns its own subtree under
+        // .runtime/p<PID>/. Eliminates the cross-process FS contention that
+        // produced multi-client load-time LFH AVs (failed Directory.Delete on
+        // another client's mapped plugin DLL → heap-pressure → AC main thread
+        // AV at ~5-6s). Also avoids the same-process hot-reload variant where
+        // gen2's cleanup attempts to delete gen1's still-mapped DLL.
+        string baseShadowRoot = Path.Combine(_pluginsDir, ".runtime");
+        _shadowRootDir = Path.Combine(baseShadowRoot, $"p{Environment.ProcessId}");
+
+        // Sweep orphans from previous-process runs (mutex-serialized across
+        // processes so concurrent clients don't race on the same dead-PID
+        // dirs). NOTE: intentionally do NOT call CleanupShadowCopies on
+        // _shadowRootDir from here — on hot-reload the still-mapped previous-
+        // gen plugin DLL would trip the same heap-hammer. Per-PID dir
+        // contents accumulate during process lifetime; OS reclaims at exit.
+        PluginLoader.CleanupOrphanShadowRoots(baseShadowRoot, Environment.ProcessId);
+        RynthLog.Plugin("PluginManager.LoadPlugins DIAG — CleanupOrphanShadowRoots returned, calling LoadPluginsFromDisk.");
         LoadPluginsFromDisk();
+        RynthLog.Plugin("PluginManager.LoadPlugins DIAG — LoadPluginsFromDisk returned, exiting LoadPlugins.");
     }
 
     public static void InitPlugins(IntPtr imguiContext, IntPtr d3dDevice, IntPtr gameHwnd)
@@ -277,7 +293,20 @@ internal static class PluginManager
         InitializeLoadedPlugins();
         DispatchUIInitializedToLoadedPlugins();
         DispatchLoginCompleteToLoadedPlugins();
-        SeedLiveObjectsFromCObjectMaint();
+        // SeedLiveObjectsFromCObjectMaint() disabled 2026-05-14.
+        // The walk reads AC's CObjectMaint::weenie_object_table — a hash
+        // bucket array AC's main thread also mutates in response to
+        // CreateObject/DeleteObject packets. Even with our IsMemoryReadable
+        // guards, a torn-read can pick up a node pointer that AC has just
+        // freed, store its id in _liveObjects, and later the plugin queries
+        // that id and reaches a now-recycled object whose vtable points
+        // somewhere weird (.text address showing up as a "live" pointer in
+        // AC's render iteration — exact pattern of the 5-min crash at
+        // 0x00460C71 writing into .text). On hot reload PluginManager
+        // misses the pre-load object stream but that's a smaller cost than
+        // the long-run crash. ReplayPrePluginCreateObjects below still
+        // covers events we did capture.
+        // SeedLiveObjectsFromCObjectMaint();
         ReplayPrePluginCreateObjects();
     }
 
@@ -668,6 +697,9 @@ internal static class PluginManager
         if (_plugins.Count == 0)
             return;
 
+        if (System.Threading.Interlocked.Increment(ref _enchantmentAddLogCount) <= 5)
+            RynthLog.Info($"PluginManager: QueueEnchantmentAdded #{_enchantmentAddLogCount} spellId={spellId} dur={durationSeconds:F1}s");
+
         lock (PendingEnchantmentAddedLock)
         {
             if (_pendingEnchantmentAdded.Count >= MaxPendingEnchantmentEvents)
@@ -676,6 +708,7 @@ internal static class PluginManager
             _pendingEnchantmentAdded.Enqueue(new PendingEnchantmentAdded(spellId, durationSeconds));
         }
     }
+    private static int _enchantmentAddLogCount;
 
     public static void QueueEnchantmentRemoved(uint enchantmentId)
     {
@@ -797,7 +830,13 @@ internal static class PluginManager
         LoginLifecycleHooks.LoginComplete -= OnLoginCompleteObserved;
         LogoutLifecycleHooks.LogoutComplete -= OnLogoutObserved;
         UnloadAllPlugins();
-        PluginLoader.CleanupShadowCopies(_shadowRootDir);
+        RynthLog.Info("ShutdownAll: post-UnloadAllPlugins");
+        // SKIP CleanupShadowCopies during shutdown — it walks the (still-mapped)
+        // plugin DLL directory and was a heavy heap-IO step during the 1.4s
+        // crash window. Old shadow copies are cleaned up on next launch via
+        // CleanupShadowCopies in LoadPlugins anyway.
+        // PluginLoader.CleanupShadowCopies(_shadowRootDir);
+        RynthLog.Info("ShutdownAll: post-CleanupShadowCopies (skipped)");
         _initialized = false;
         _loaded = false;
         _rescanRequested = false;
@@ -848,6 +887,7 @@ internal static class PluginManager
             _pendingEnchantmentAdded.Clear();
         lock (PendingEnchantmentRemovedLock)
             _pendingEnchantmentRemoved.Clear();
+        RynthLog.Info("ShutdownAll: post-queue-clears");
     }
 
     private static void LogFromPlugin(IntPtr messageUtf8)
@@ -913,6 +953,8 @@ internal static class PluginManager
         // instance gets re-captured on the next ListenToElementMessage call
         // after the next login completes.
         Compatibility.ChatHooks.ResetCachedInstance();
+        Compatibility.RadarHooks.ResetCachedInstance();
+        Compatibility.PowerbarHooks.ResetCachedInstance();
 
         // Drop the cached PlayerDesc/CACQualities pointer so the next call into the
         // buffed-max inq function can't AV on a freed allocation. Re-seeded on the next
@@ -1850,6 +1892,18 @@ internal static class PluginManager
         int actualCombatMode = CombatModeHooks.ReadCurrentCombatMode();
         QueueCombatModeChange(actualCombatMode, CombatActionHooks.CombatModeNonCombat);
         RynthLog.Plugin($"PluginManager: synced combat mode {actualCombatMode} to plugins.");
+
+        // Sync the currently-selected target id. Without this, a plugin that
+        // initializes after the user has already picked a target (deferred-init
+        // path, hot-reload, etc.) never learns the target — the SetSelectedObject
+        // detour only fires on *changes*, and QueueSelectedTargetChange drops
+        // events that arrive before _initialized=true.
+        uint currentTargetId = SelectedTargetHooks.ReadCurrentSelectedId();
+        if (currentTargetId != 0)
+        {
+            QueueSelectedTargetChange(currentTargetId, 0);
+            RynthLog.Plugin($"PluginManager: synced current target 0x{currentTargetId:X8} to plugins.");
+        }
     }
 
     private static unsafe void EnsureHostCallbacks()

@@ -65,9 +65,19 @@ internal static class CharacterManagementHooks
     }
 
     public static bool TryLogOnCharacter(string targetCharacter, out string matchedCharacter, out uint avatarId, out string status)
+        => TryLogOnCharacter(targetCharacter, out matchedCharacter, out avatarId, out _, out status);
+
+    /// <summary>
+    /// Same as the 4-arg overload, but also reports the matched character's
+    /// slot index in AC's native CharacterSet (-1 when no match was found).
+    /// The slot index is what the click fallback in CharacterCaptureHooks
+    /// needs to compute the y-offset for the character-list double-click.
+    /// </summary>
+    public static bool TryLogOnCharacter(string targetCharacter, out string matchedCharacter, out uint avatarId, out int slotIndex, out string status)
     {
         matchedCharacter = string.Empty;
         avatarId = 0;
+        slotIndex = -1;
 
         if (string.IsNullOrWhiteSpace(targetCharacter))
         {
@@ -113,8 +123,14 @@ internal static class CharacterManagementHooks
                 continue;
 
             availableCharacters.Add(candidateName);
-            if (!string.Equals(candidateName, targetCharacter, StringComparison.OrdinalIgnoreCase))
+            // Admin/staff character names render with a leading '+' in the AC
+            // client UI but the cached/launcher-side name often lacks it (or the
+            // server packet does). Match prefix-tolerantly so 'Buffi' matches
+            // '+Buffi' and vice versa.
+            if (!CharacterNamesMatch(candidateName, targetCharacter))
                 continue;
+
+            slotIndex = index;
 
             IntPtr playerSystemPtr = GetPlayerSystemPointer();
             if (playerSystemPtr == IntPtr.Zero)
@@ -142,6 +158,46 @@ internal static class CharacterManagementHooks
             ? $"Target '{targetCharacter}' not found in native character set [{string.Join(", ", availableCharacters)}]."
             : "Native character set is empty or not ready yet.";
         return false;
+    }
+
+    /// <summary>
+    /// Returns the count of populated character slots in AC's native
+    /// CharacterSet (slots where GetIdentity returns non-null). Used by the
+    /// click fallback in CharacterCaptureHooks when the 0xF658 packet parser
+    /// produced an empty list — typical on ACE where the packet shape differs
+    /// from retail.
+    /// </summary>
+    public static int GetNativeCharacterSetSlotCount()
+    {
+        if (!EnsureBound())
+            return 0;
+
+        IntPtr charSetPtr = GetCharacterSetPointer();
+        if (charSetPtr == IntPtr.Zero)
+            return 0;
+
+        int count = 0;
+        for (int index = 0; index < MaxCharacterSlots; index++)
+        {
+            IntPtr identityPtr;
+            try { identityPtr = _characterSetGetIdentity!(charSetPtr, index); }
+            catch { return count; }
+
+            if (identityPtr != IntPtr.Zero)
+                count++;
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// Compares two AC character names tolerantly of the leading '+' that the
+    /// client adds to admin/staff names. e.g. 'Buffi' matches '+Buffi'.
+    /// </summary>
+    internal static bool CharacterNamesMatch(string? a, string? b)
+    {
+        string lhs = (a ?? string.Empty).Trim().TrimStart('+');
+        string rhs = (b ?? string.Empty).Trim().TrimStart('+');
+        return lhs.Length > 0 && string.Equals(lhs, rhs, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool EnsureBound()

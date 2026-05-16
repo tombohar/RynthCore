@@ -21,6 +21,8 @@ internal static class MinHook
     public const int MH_OK                       = 0;
     public const int MH_ERROR_ALREADY_INITIALIZED = 1;
     public const int MH_ERROR_NOT_INITIALIZED     = 2;
+    public const int MH_ERROR_ALREADY_CREATED    = 3;
+    public const int MH_ERROR_NOT_CREATED        = 4;
 
     // ─── Core API ─────────────────────────────────────────────────────
 
@@ -76,7 +78,7 @@ internal static class MinHook
 
         // MH_CreateHook writes the trampoline through the ref — the caller's field
         // is populated here, before the hook goes live.
-        int status = MH_CreateHook(target, detour, out original);
+        int status = CreateHookWithReloadRecovery(target, detour, out original);
         if (status != MH_OK)
             throw new InvalidOperationException($"MH_CreateHook failed: {StatusString(status)}");
 
@@ -105,11 +107,40 @@ internal static class MinHook
     {
         EnsureInitialized();
 
-        int status = MH_CreateHook(target, detour, out IntPtr original);
+        int status = CreateHookWithReloadRecovery(target, detour, out IntPtr original);
         if (status != MH_OK)
             throw new InvalidOperationException($"MH_CreateHook failed: {StatusString(status)}");
 
         return original;
+    }
+
+    /// <summary>
+    /// Wraps <see cref="MH_CreateHook"/> with hot-reload recovery: when the
+    /// process has been hot-reloaded (gen2 engine init), the previous engine's
+    /// trampolines for the same target are still in MinHook's pool and a fresh
+    /// CreateHook returns <see cref="MH_ERROR_ALREADY_CREATED"/>. We disable +
+    /// remove the stale hook and retry.
+    ///
+    /// Safety contract: caller (gen2 init) must run AFTER gen1 has gone through
+    /// EngineLifecycle.Shutdown — which calls MH_DisableHook(MH_ALL_HOOKS) and
+    /// joins all known engine threads (TickPump, HeartbeatLogger, plugin
+    /// shutdowns, AvaloniaOverlay.Stop). After that point no live caller is in
+    /// flight through the dangling trampoline, so MH_RemoveHook is safe.
+    /// </summary>
+    private static int CreateHookWithReloadRecovery(IntPtr target, IntPtr detour, out IntPtr original)
+    {
+        int status = MH_CreateHook(target, detour, out original);
+        if (status != MH_ERROR_ALREADY_CREATED)
+            return status;
+
+        // Stale hook from a previous engine generation. Disable (idempotent if
+        // already disabled), remove (frees the trampoline), then retry.
+        MH_DisableHook(target);
+        int rmStatus = MH_RemoveHook(target);
+        if (rmStatus != MH_OK)
+            return rmStatus; // surface as failure — caller throws
+
+        return MH_CreateHook(target, detour, out original);
     }
 
     /// <summary>Enables a hook previously created with <see cref="HookCreate"/>.</summary>

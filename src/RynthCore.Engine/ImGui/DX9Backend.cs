@@ -312,22 +312,63 @@ internal static unsafe class DX9Backend
     private static SetIndicesD? _setIndices;
     private static GetIndicesD? _getIndices;
     private static IntPtr _fontTexture;
+    /// <summary>
+    /// True once <see cref="InitCore"/> has cached the D3D9 vtable delegates.
+    /// Required by <see cref="RenderNav3D"/>, <see cref="DeviceSetRenderState"/>,
+    /// and any non-ImGui render path. Independent of <see cref="_initialized"/>
+    /// (which means "ImGui-specific resources also ready").
+    /// </summary>
+    private static bool _coreInitialized;
+    /// <summary>
+    /// True once <see cref="InitImGui"/> has built the font texture and the
+    /// backend is fully ready for <see cref="RenderDrawData"/>. Implies
+    /// <see cref="_coreInitialized"/>.
+    /// </summary>
     private static bool _initialized;
 
     // ─── Public API ───────────────────────────────────────────────────
 
-    public static bool Init(IntPtr pDevice)
+    /// <summary>
+    /// Caches the D3D9 device function pointers that every render path here
+    /// (ImGui draw, Nav3D markers, callers like Nav3DRenderInjector) relies on.
+    /// Idempotent. Safe to call when ImGui is disabled — does NOT touch the
+    /// font texture or any ImGui state.
+    /// </summary>
+    public static bool InitCore(IntPtr pDevice)
     {
-        if (_initialized) return true;
+        if (_coreInitialized) return true;
+        if (pDevice == IntPtr.Zero) return false;
 
         CacheDelegates(pDevice);
+        _coreInitialized = true;
+        RynthLog.Render("DX9Backend: Core delegates cached.");
+        return true;
+    }
+
+    /// <summary>
+    /// Builds the ImGui font texture and marks the backend ready for
+    /// <see cref="RenderDrawData"/>. Calls <see cref="InitCore"/> first if it
+    /// hasn't run. Idempotent.
+    /// </summary>
+    public static bool InitImGui(IntPtr pDevice)
+    {
+        if (_initialized) return true;
+        if (!InitCore(pDevice)) return false;
+
         if (!CreateFontTexture(pDevice))
             return false;
 
         _initialized = true;
-        RynthLog.Render("DX9Backend: Initialized.");
+        RynthLog.Render("DX9Backend: ImGui resources initialized.");
         return true;
     }
+
+    /// <summary>
+    /// Backward-compat wrapper — initializes both core delegates and ImGui
+    /// resources. Prefer <see cref="InitCore"/> + <see cref="InitImGui"/>
+    /// directly so callers can skip the ImGui half when not needed.
+    /// </summary>
+    public static bool Init(IntPtr pDevice) => InitImGui(pDevice);
 
     public static void Shutdown()
     {
@@ -338,6 +379,7 @@ internal static unsafe class DX9Backend
             _fontTexture = IntPtr.Zero;
         }
         _initialized = false;
+        _coreInitialized = false;
     }
 
     public static void NewFrame()
@@ -1002,7 +1044,10 @@ internal static unsafe class DX9Backend
 
     public static void RenderNav3D(IntPtr pDevice)
     {
-        if (!_initialized || pDevice == IntPtr.Zero) return;
+        // Nav3D only needs the cached function pointers + nav trig + GameMatrixCapture;
+        // it doesn't touch the ImGui font texture / vertex buffers. Gate on the
+        // core init flag so this path runs even when EnableImGuiBackend=false.
+        if (!_coreInitialized || pDevice == IntPtr.Zero) return;
         if (!D3D9.GameMatrixCapture.HasCapturedFrame) return;
         if (D3D9.Nav3DRenderer.RingCount == 0 && D3D9.Nav3DRenderer.LineCount == 0) return;
 

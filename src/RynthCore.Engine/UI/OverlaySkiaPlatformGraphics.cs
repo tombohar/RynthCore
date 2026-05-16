@@ -70,6 +70,15 @@ internal sealed class OverlaySkiaGpuContext : ISkiaGpu
 internal sealed class OverlaySkiaRenderTarget : ISkiaGpuRenderTarget
 {
     private readonly object _sync = new();
+    /// <summary>
+    /// Exposed so OverlaySkiaRenderSession.Dispose can hold the same lock
+    /// while it touches _surface (via ReadPixels). Without this, a parallel
+    /// BeginRenderingSession that triggers EnsureSurface size-change can
+    /// dispose the SKSurface that a still-running session is reading from
+    /// → native UAF into Skia's heap → LFH freelist corruption surfaces
+    /// minutes later as the AV at ntdll!RtlpHeap RVA 0x5B10C.
+    /// </summary>
+    internal object SyncRoot => _sync;
     private OverlayD3D9SharedTexturePublisher? _sharedTexturePublisher;
     private SKSurface? _surface;
     private byte[]? _softwareBuffer;
@@ -109,7 +118,10 @@ internal sealed class OverlaySkiaRenderTarget : ISkiaGpuRenderTarget
     {
         lock (_sync)
         {
-            if (_softwareBuffer == null || _softwareBuffer.Length != byteCount)
+            // Only grow. Reallocating on every pixel-difference (Length != byteCount)
+            // produces ~MB-sized LOH allocations that churn the LFH and triggered
+            // the heap-corruption AV at ntdll!RtlpHeap RVA 0x5B10C.
+            if (_softwareBuffer == null || _softwareBuffer.Length < byteCount)
                 _softwareBuffer = new byte[byteCount];
 
             return _softwareBuffer;
@@ -214,26 +226,35 @@ internal sealed class OverlaySkiaRenderSession : ISkiaGpuRenderSession
         if (!AvaloniaOverlay.ShouldUseCustomSkiaProducer)
             return;
 
-        var info = new SKImageInfo(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
-        byte[] pixels = _owner.RentSoftwareBuffer(info.BytesSize);
-
-        fixed (byte* pixelPtr = pixels)
+        // Hold the owner's lock for the duration of the surface read. Without
+        // this, a parallel BeginRenderingSession on a different thread can
+        // size-change → dispose the SKSurface we still hold a ref to → ReadPixels
+        // writes into freed Skia native memory → LFH heap corruption. lock is
+        // reentrant so the inner RentSoftwareBuffer / TrySubmitSharedTexture
+        // calls (which also take _sync) are safe.
+        lock (_owner.SyncRoot)
         {
-            if (!_surface.ReadPixels(info, (IntPtr)pixelPtr, info.RowBytes, 0, 0))
-            {
-                RynthLog.UI("OverlaySkiaRenderSession: Failed to read pixels from custom render target.");
-                return;
-            }
+            var info = new SKImageInfo(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
+            byte[] pixels = _owner.RentSoftwareBuffer(info.BytesSize);
 
-            AvaloniaOverlay.SurfacePixelWidth = _width;
-            AvaloniaOverlay.SurfacePixelHeight = _height;
-            if (_owner.TrySubmitSharedTexture((IntPtr)pixelPtr, pixels.Length, _width, _height, info.RowBytes, out OverlaySharedTextureDescriptor sharedDescriptor))
+            fixed (byte* pixelPtr = pixels)
             {
-                OverlaySurfaceBridge.SubmitSharedTexture(OverlaySurfaceKind.D3D9SharedTexture, sharedDescriptor);
-            }
+                if (!_surface.ReadPixels(info, (IntPtr)pixelPtr, info.RowBytes, 0, 0))
+                {
+                    RynthLog.UI("OverlaySkiaRenderSession: Failed to read pixels from custom render target.");
+                    return;
+                }
 
-            OverlaySurfaceBridge.SubmitSoftwareFrame((IntPtr)pixelPtr, pixels.Length, _width, _height);
-            AvaloniaOverlay.NotifyCustomFrameSubmitted(_width, _height);
+                AvaloniaOverlay.SurfacePixelWidth = _width;
+                AvaloniaOverlay.SurfacePixelHeight = _height;
+                if (_owner.TrySubmitSharedTexture((IntPtr)pixelPtr, pixels.Length, _width, _height, info.RowBytes, out OverlaySharedTextureDescriptor sharedDescriptor))
+                {
+                    OverlaySurfaceBridge.SubmitSharedTexture(OverlaySurfaceKind.D3D9SharedTexture, sharedDescriptor);
+                }
+
+                OverlaySurfaceBridge.SubmitSoftwareFrame((IntPtr)pixelPtr, pixels.Length, _width, _height);
+                AvaloniaOverlay.NotifyCustomFrameSubmitted(_width, _height);
+            }
         }
     }
 }

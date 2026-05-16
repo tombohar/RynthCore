@@ -1193,6 +1193,9 @@ internal static partial class RynthAiPanel
     // ────────────────────────────────────────────────────────────────────────
 
     private static int _snapshotDiagsLogged;
+    private static string _lastLoggedTargetLabel = string.Empty;
+    private static uint _lastLoggedPlayerHealth;
+    private static uint _lastLoggedPlayerMaxHealth;
 
     private static Snapshot ReadSnapshot()
     {
@@ -1206,12 +1209,18 @@ internal static partial class RynthAiPanel
             if (string.IsNullOrWhiteSpace(json)) return new Snapshot();
             Snapshot snap = JsonSerializer.Deserialize(json, SnapshotJsonContext.Default.Snapshot) ?? new Snapshot();
 
-            // First-pass diag — log raw JSON + parsed vital fields once per
-            // panel session so we can verify the snapshot pipeline. After
-            // 3 ticks this stops to avoid spamming the log.
-            if (_snapshotDiagsLogged < 3)
+            // Log first 3 snapshots for pipeline-up diagnostic. Then log on
+            // any change to a vital/target field so we can see when data
+            // starts flowing post-login without flooding.
+            if (_snapshotDiagsLogged < 3 ||
+                snap.TargetLabel != _lastLoggedTargetLabel ||
+                snap.PlayerHealth != _lastLoggedPlayerHealth ||
+                snap.PlayerMaxHealth != _lastLoggedPlayerMaxHealth)
             {
                 _snapshotDiagsLogged++;
+                _lastLoggedTargetLabel = snap.TargetLabel;
+                _lastLoggedPlayerHealth = snap.PlayerHealth;
+                _lastLoggedPlayerMaxHealth = snap.PlayerMaxHealth;
                 RynthLog.Info(
                     $"RynthAiPanel.ReadSnapshot[{_snapshotDiagsLogged}]: " +
                     $"player HP={snap.PlayerHealth}/{snap.PlayerMaxHealth} " +

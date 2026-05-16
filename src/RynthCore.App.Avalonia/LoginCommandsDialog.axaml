@@ -1,0 +1,87 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="RynthCore.App.Avalonia.LoginCommandsDialog"
+        Width="780"
+        Height="540"
+        CanResize="True"
+        WindowStartupLocation="CenterOwner"
+        Title="OnLogin Commands"
+        Background="#132028">
+  <Grid ColumnDefinitions="260,*" Margin="14">
+    <Border Grid.Column="0" Background="#0F161D" CornerRadius="10" Padding="10" Margin="0,0,8,0">
+      <Grid RowDefinitions="Auto,Auto,*,Auto,Auto,Auto">
+        <TextBlock Grid.Row="0" Text="Characters" FontSize="14" FontWeight="SemiBold" Foreground="#26C1A6" Margin="0,0,0,4" />
+        <TextBlock Grid.Row="1"
+                   x:Name="ScopeText"
+                   Foreground="#9AA8B3"
+                   FontSize="11.5"
+                   TextWrapping="Wrap"
+                   Margin="0,0,0,8" />
+        <ListBox Grid.Row="2"
+                 x:Name="CharacterList"
+                 Background="Transparent"
+                 BorderBrush="#243742"
+                 Foreground="#EAF0F4"
+                 FontSize="12.5" />
+        <TextBlock Grid.Row="3" Text="Add a character" Foreground="#EAF0F4" Margin="0,10,0,4" />
+        <Grid Grid.Row="4" ColumnDefinitions="*,Auto">
+          <TextBox Grid.Column="0" x:Name="NewCharacterBox" Watermark="Character name" />
+          <Button Grid.Column="1" x:Name="AddCharacterButton" Content="Add" Margin="6,0,0,0" />
+        </Grid>
+        <StackPanel Grid.Row="5" Orientation="Horizontal" Spacing="6" Margin="0,8,0,0">
+          <Button x:Name="RefreshCharactersButton"
+                  Content="Refresh from cache"
+                  ToolTip.Tip="Pulls the character roster captured at last char-select for this account+server. The engine writes this on every char-select visit." />
+          <Button x:Name="RemoveCharacterButton" Content="Remove" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <Border Grid.Column="1" Background="#0F161D" CornerRadius="10" Padding="14">
+      <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
+        <TextBlock Grid.Row="0"
+                   x:Name="HeaderText"
+                   Text="Select a character on the left."
+                   FontSize="15"
+                   FontWeight="SemiBold"
+                   Foreground="#EAF0F4"
+                   Margin="0,0,0,4" />
+        <TextBlock Grid.Row="1"
+                   x:Name="SubHeaderText"
+                   Text=""
+                   Foreground="#9AA8B3"
+                   Margin="0,0,0,12" />
+
+        <Grid Grid.Row="2" ColumnDefinitions="Auto,Auto,*" Margin="0,0,0,10">
+          <TextBlock Grid.Column="0" Text="Wait after login (ms):" Foreground="#EAF0F4" VerticalAlignment="Center" Margin="0,0,8,0" />
+          <NumericUpDown Grid.Column="1" x:Name="WaitMsBox" Minimum="0" Maximum="60000" Increment="500" Width="120" />
+          <TextBlock Grid.Column="2"
+                     Text="Per-account. Default 3000ms. Wait runs after the engine sees AC's login-complete signal."
+                     Foreground="#73828D"
+                     TextWrapping="Wrap"
+                     VerticalAlignment="Center"
+                     Margin="10,0,0,0" />
+        </Grid>
+
+        <Border Grid.Row="3" BorderBrush="#243742" BorderThickness="1" CornerRadius="6">
+          <TextBox x:Name="CommandsBox"
+                   AcceptsReturn="True"
+                   AcceptsTab="False"
+                   TextWrapping="NoWrap"
+                   VerticalContentAlignment="Top"
+                   Watermark="One command per line. Examples:&#10;/fellow open&#10;/say ready&#10;/cm channel join allegiance"
+                   Background="#0B1116"
+                   Foreground="#EAF0F4"
+                   BorderThickness="0"
+                   Padding="8" />
+        </Border>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,12,0,0">
+          <TextBlock x:Name="StatusText" Foreground="#9AA8B3" VerticalAlignment="Center" Margin="0,0,12,0" />
+          <Button x:Name="SaveButton" Content="Save" />
+          <Button x:Name="CloseButton" Content="Close" />
+        </StackPanel>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

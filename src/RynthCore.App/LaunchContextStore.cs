@@ -14,6 +14,16 @@ internal sealed class LaunchContextRecord
     public string TargetCharacter { get; set; } = string.Empty;
     public bool SkipLoginLogos { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+
+    /// Chat commands the engine should dispatch after login-complete fires
+    /// for this PID. Resolved by the launcher from
+    /// LaunchAccountProfile.OnLoginCommandsByCharacter at launch time. Null /
+    /// empty = nothing to dispatch.
+    public List<string>? OnLoginCommands { get; set; }
+
+    /// Milliseconds to wait after login-complete before sending the first
+    /// command. 0 (or omitted) = use the engine's default.
+    public int OnLoginWaitMs { get; set; }
 }
 
 internal static class LaunchContextStore
@@ -25,7 +35,9 @@ internal static class LaunchContextStore
         string accountName,
         string serverName,
         string targetCharacter,
-        bool skipLoginLogos)
+        bool skipLoginLogos,
+        List<string>? onLoginCommands = null,
+        int onLoginWaitMs = 0)
     {
         return new LaunchContextRecord
         {
@@ -33,7 +45,9 @@ internal static class LaunchContextStore
             ServerName = serverName ?? string.Empty,
             TargetCharacter = targetCharacter ?? string.Empty,
             SkipLoginLogos = skipLoginLogos,
-            CreatedAtUtc = DateTime.UtcNow
+            CreatedAtUtc = DateTime.UtcNow,
+            OnLoginCommands = onLoginCommands,
+            OnLoginWaitMs = onLoginWaitMs
         };
     }
 
@@ -56,7 +70,9 @@ internal static class LaunchContextStore
             ServerName = context.ServerName,
             TargetCharacter = context.TargetCharacter,
             SkipLoginLogos = context.SkipLoginLogos,
-            CreatedAtUtc = DateTime.UtcNow
+            CreatedAtUtc = DateTime.UtcNow,
+            OnLoginCommands = context.OnLoginCommands,
+            OnLoginWaitMs = context.OnLoginWaitMs
         };
 
         File.WriteAllText(GetProcessPath(processId), JsonSerializer.Serialize(processContext));

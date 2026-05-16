@@ -170,7 +170,7 @@ internal static class RynthCoreShell
 
         // With ViewportsEnable, ImGui expects absolute screen coords. We store
         // the bar position as client-relative, so offset by the main viewport's
-        // origin (which ImGuiController sets to ClientToScreen(0,0) each frame).
+        // origin (which EngineFrameController sets to ClientToScreen(0,0) each frame).
         Vector2 viewportOrigin = ImGui.GetMainViewport().Pos;
         Vector2 screenPos = _barPosition + viewportOrigin;
 

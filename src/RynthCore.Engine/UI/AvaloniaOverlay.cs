@@ -256,8 +256,13 @@ internal static class AvaloniaOverlay
         Dispatcher.UIThread.Post(() => _window?.RequestCapture(), DispatcherPriority.Input);
     }
 
+    // Set by DcompOverlayWindow to intercept RynthAiPanel launcher clicks in the DComp path.
+    internal static Action<string>? DcompActivateBarButton;
+
     internal static void ActivateBarButton(string title)
     {
+        var dcomp = DcompActivateBarButton;
+        if (dcomp != null) { dcomp(title); return; }
         Dispatcher.UIThread.Post(() => _window?.ActivateBarButton(title), DispatcherPriority.Input);
     }
 
@@ -399,6 +404,46 @@ internal static class AvaloniaOverlay
     {
         if (_started) return;
         _started = true;
+
+        // When ImGui's per-frame backend isn't running, EngineFrameController.Init
+        // never executes — and that's the path that normally populates
+        // Win32Backend.GameHwnd + EntryPoint.GameHwnd. Avalonia panels read
+        // those for owner-window binding (see Win32Backend.GameHwnd usages
+        // in this file). Spawn a small background poller that finds AC's
+        // visible window via EnumWindows and writes both fields. This
+        // de-couples Avalonia mode from the D3D9/ImGui path entirely.
+        if (!Plugins.EngineSettings.EnableImGuiBackend || !Plugins.EngineSettings.EnableD3D9Hook)
+        {
+            new Thread(() =>
+            {
+                long deadline = Environment.TickCount64 + 60_000;
+                while (Environment.TickCount64 < deadline)
+                {
+                    IntPtr hwnd = ImGuiBackend.EngineFrameController.FindGameWindow();
+                    if (hwnd != IntPtr.Zero)
+                    {
+                        ImGuiBackend.Win32Backend.SetGameHwndExternal(hwnd);
+                        EntryPoint.GameHwnd = hwnd;
+                        // Subclass the game's WndProc so mouse/keyboard input gets
+                        // routed to Avalonia panels. Win32Backend.Init is normally
+                        // called by EngineFrameController.Init, but with ImGui disabled
+                        // we still need the subclass to forward input to Avalonia.
+                        // ImGui-specific capture flags stay false; only Avalonia
+                        // hit-testing in WndProcHook activates per panel-area.
+                        if (ImGuiBackend.Win32Backend.Init(hwnd))
+                            RynthLog.UI($"AvaloniaOverlay: WndProc subclassed for input (ImGui-less mode).");
+                        else
+                            RynthLog.UI("AvaloniaOverlay: WndProc subclass FAILED — Avalonia panels will not receive input.");
+                        RynthLog.UI($"AvaloniaOverlay: GameHwnd populated externally via EnumWindows = 0x{hwnd:X8}.");
+                        return;
+                    }
+                    Thread.Sleep(100);
+                }
+                RynthLog.UI("AvaloniaOverlay: EnumWindows poll timed out without finding the game window.");
+            })
+            { Name = "RynthCore.GameHwndPoller", IsBackground = true }.Start();
+        }
+
         _thread = new Thread(ThreadMain) { Name = "RynthCore.Avalonia", IsBackground = true };
         _thread.SetApartmentState(ApartmentState.STA);
         _thread.Start();
@@ -547,6 +592,14 @@ public class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            // Default ShutdownMode is OnLastWindowClose, which calls
+            // Environment.Exit(0) → ExitProcess(0) the moment our last
+            // Avalonia window closes. We're hosted INSIDE acclient.exe, so
+            // an Avalonia-driven Environment.Exit kills the entire AC client.
+            // Switch to OnExplicitShutdown — only EngineLifecycle.Shutdown
+            // (or AC closing on its own) ends the process.
+            desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+
             var window = new RynthOverlayWindow();
             desktop.MainWindow = window;
             window.Show();
@@ -2636,7 +2689,8 @@ internal class RynthOverlayWindow : Window
         _rtt.Render(_desktopCanvas);
 
         int byteCount = w * h * 4;
-        if (_softwareBuffer == null || _softwareBuffer.Length != byteCount)
+        // Only grow — see FloatingPanelHost.Tick for the LFH-corruption rationale.
+        if (_softwareBuffer == null || _softwareBuffer.Length < byteCount)
             _softwareBuffer = new byte[byteCount];
 
         AvaloniaOverlay.SurfacePixelWidth = w;
@@ -3155,7 +3209,13 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
                 _layered.CaptionHeight = desiredCaption;
         }
 
-        if (_rtt == null || _rtt.PixelSize.Width != pxW || _rtt.PixelSize.Height != pxH)
+        // Only grow — never shrink. Pop-out triggers a flurry of size oscillations
+        // for several seconds while OS layout, Avalonia layout, and DPI settle.
+        // Reallocating the RenderTargetBitmap (Skia surface in native heap) and
+        // the BGRA byte[] (LOH) on every pixel difference produced the LFH
+        // freelist corruption bisected to ntdll!RtlpHeap RVA 0x5B10C. CopyPixels
+        // takes an explicit rect so an RTT larger than (pxW,pxH) is safe.
+        if (_rtt == null || _rtt.PixelSize.Width < pxW || _rtt.PixelSize.Height < pxH)
         {
             _rtt?.Dispose();
             _rtt = new RenderTargetBitmap(new PixelSize(pxW, pxH), new Vector(96 * scale, 96 * scale));
@@ -3167,7 +3227,7 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         _rtt.Render(PanelBorder);
 
         int byteCount = pxW * pxH * 4;
-        if (_pixelBuffer == null || _pixelBuffer.Length != byteCount)
+        if (_pixelBuffer == null || _pixelBuffer.Length < byteCount)
             _pixelBuffer = new byte[byteCount];
 
         fixed (byte* p = _pixelBuffer)

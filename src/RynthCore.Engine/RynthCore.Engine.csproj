@@ -15,7 +15,10 @@
     <!-- NativeAOT settings -->
     <InvariantGlobalization>true</InvariantGlobalization>
     <IlcOptimizationPreference>Size</IlcOptimizationPreference>
-    <StackTraceSupport>false</StackTraceSupport>
+    <!-- DIAGNOSTIC: was false. true emits method-name metadata so Environment.StackTrace
+         resolves to real symbols. Adds ~5-10 MB to engine.dll. Flip back to false once the
+         silent-ExitProcess investigation is closed. -->
+    <StackTraceSupport>true</StackTraceSupport>
 
     <!-- Keep ImGui.NET's P/Invoke bindings intact -->
     <TrimMode>link</TrimMode>

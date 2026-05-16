@@ -264,6 +264,96 @@ internal static class ClientObjectHooks
         return true;
     }
 
+    /// <summary>
+    /// Stronger check than <see cref="IsReadablePointer"/>: confirms the pointer
+    /// looks like a heap-allocated AC C++ object. Every CACQualities /
+    /// ACCWeenieObject / etc. instance starts with a vtable pointer whose value
+    /// is the address of a vtable in acclient.exe's .rdata. If the first 4
+    /// bytes don't resolve to an address inside the acclient.exe module
+    /// window, the pointer isn't pointing at a real C++ object and using it
+    /// will AV downstream inside AC's code.
+    ///
+    /// Caller's job is the page-readability check; this only re-validates
+    /// after reading.
+    /// </summary>
+    internal static bool LooksLikeAcHeapObject(IntPtr ptr)
+    {
+        return TryReadAcObjectVtable(ptr, out _);
+    }
+
+    /// <summary>
+    /// Same vtable-in-module check as <see cref="LooksLikeAcHeapObject"/> but
+    /// also yields the vtable pointer so callers can compare against a known
+    /// reference vtable (e.g. "is this the same C++ class as the player's
+    /// CACQualities").
+    /// </summary>
+    internal static bool TryReadAcObjectVtable(IntPtr ptr, out IntPtr vtable)
+    {
+        vtable = IntPtr.Zero;
+        if (!IsReadablePointer(ptr))
+            return false;
+
+        try
+        {
+            vtable = Marshal.ReadIntPtr(ptr);
+        }
+        catch
+        {
+            vtable = IntPtr.Zero;
+            return false;
+        }
+
+        if (vtable == IntPtr.Zero || vtable.ToInt64() < 0x10000)
+        {
+            vtable = IntPtr.Zero;
+            return false;
+        }
+
+        return SmartBoxLocator.IsPointerInModule(vtable);
+    }
+
+    /// <summary>
+    /// The vtable pointer at offset 0 of a real CACQualities object.
+    /// Discovered the first time we see the player's known-good qualities ptr,
+    /// then used to filter out same-shape-but-wrong-class pointers we may
+    /// read from non-player weenies whose m_pQualities offset is different
+    /// (or whose qualities slot holds a sibling C++ object that happens to
+    /// also live in the module). Once captured, ANY pointer we treat as
+    /// CACQualities must have *ptr == _cacQualitiesVtable.
+    /// </summary>
+    private static IntPtr _cacQualitiesVtable;
+
+    /// <summary>
+    /// True if the given pointer's first 4 bytes match the cached
+    /// CACQualities vtable. Falls back to permissive vtable-in-module
+    /// check until we've observed a known-good qualities pointer to learn
+    /// the canonical vtable.
+    /// </summary>
+    private static bool IsCacQualitiesObject(IntPtr ptr)
+    {
+        if (!TryReadAcObjectVtable(ptr, out IntPtr vtable))
+            return false;
+
+        if (_cacQualitiesVtable == IntPtr.Zero)
+            return true; // not yet calibrated — accept any module-vtable object.
+
+        return vtable == _cacQualitiesVtable;
+    }
+
+    /// <summary>
+    /// Capture the canonical CACQualities vtable from a known-good qualities
+    /// pointer (the player's). Idempotent.
+    /// </summary>
+    private static void CaptureCacQualitiesVtable(IntPtr knownGoodPtr)
+    {
+        if (_cacQualitiesVtable != IntPtr.Zero)
+            return;
+        if (!TryReadAcObjectVtable(knownGoodPtr, out IntPtr vtable))
+            return;
+        _cacQualitiesVtable = vtable;
+        RynthLog.Compat($"ClientObjectHooks: CACQualities vtable captured = 0x{vtable.ToInt32():X8} (from known player qualities ptr 0x{knownGoodPtr.ToInt32():X8}).");
+    }
+
     private static string _statusMessage = "Not probed yet.";
     private static GetWeenieObjectDelegate? _getWeenieObject;
     private static GetObjectNameStaticDelegate? _getObjectNameStatic;
@@ -526,14 +616,27 @@ internal static class ClientObjectHooks
             if (qualitiesPtr == IntPtr.Zero)
                 return false;
 
-            // Validate the qualities pointer itself — a real CACQualities* on the heap
-            // should be at a committed, readable page.
-            if (!IsReadablePointer(qualitiesPtr))
+            // Strongest validation we can do cheaply: a real CACQualities*
+            // must begin with the SAME vtable pointer the player's qualities
+            // begins with (we capture that as _cacQualitiesVtable on first
+            // sight). If the read produced a same-shape-but-different-class
+            // C++ object — observed on some weenies where m_pQualities
+            // appears to point at a sibling type that has a module vtable
+            // but isn't CACQualities — InqSkill will dereference fields
+            // that don't exist for that class and AV inside AC.
+            if (!IsCacQualitiesObject(qualitiesPtr))
+            {
+                qualitiesPtr = IntPtr.Zero;
                 return false;
+            }
 
             return true;
         }
-        catch { return false; }
+        catch
+        {
+            qualitiesPtr = IntPtr.Zero;
+            return false;
+        }
     }
 
     /// <summary>
@@ -571,6 +674,13 @@ internal static class ClientObjectHooks
             // character whose true buffed Creature Enchantment was 360+.
             int rawBase = unchecked((int)(skill.InitialLevel + skill.LevelFromPracticePoints));
             int trulyBuffed = rawBase;
+            // Re-enabled 2026-05-14 after determining retail and ACE acclient.exe
+            // are byte-identical except for 3 PE-header bytes — so 0x00593380 IS
+            // CACQualities::InqSkill on both. Earlier 0x00416C86 crashes were
+            // from us passing a bogus qualitiesPtr (wrong probe offset on some
+            // weenie types). TryGetObjectQualitiesPtr now rejects pointers that
+            // don't look like AC C++ heap objects (vtable-in-module check), so
+            // by this point qualitiesPtr is verified.
             if (_inqSkillLevel != null)
             {
                 int retval = 0;
@@ -803,15 +913,69 @@ internal static class ClientObjectHooks
         }
     }
 
+    /// <summary>
+    /// Master gate: if false, <see cref="TryGetObjectQualitiesPtr"/> only ever
+    /// returns the player's qualities, never anyone else's. Set false 2026-05-14
+    /// after extensive crash logs showed AC's CACQualities accessor functions
+    /// (InqSkill, InqInt, InqFloat, ...) AV at 0x00416C86 / 0x00460BE1 when
+    /// called on non-player CACQualities objects on this ACE build — even when
+    /// the qualities pointer itself passes a vtable-in-module check.
+    ///
+    /// AC's Inq* helpers reach 3+ frames deep into sub-table lookups, and on
+    /// monsters/items the sub-tables aren't fully populated client-side: the
+    /// outer struct is a real CACQualities but its internal stat/skill tables
+    /// are null, so any helper that dereferences those tables faults.
+    ///
+    /// Until we have an SEH-guarded native trampoline that can catch AVs
+    /// inside AC and return false to the caller, "player only" is the safe
+    /// behavior — bots lose the ability to introspect monster/item stats
+    /// via these native calls, but the client doesn't crash.
+    /// Set true at your own risk on a binary you've verified.
+    /// </summary>
+    internal static bool AllowNonPlayerQualities;
+
     private static bool TryGetObjectQualitiesPtr(uint objectId, out IntPtr qualitiesPtr)
     {
         qualitiesPtr = IntPtr.Zero;
+
+        // AC's client is not thread-safe. Any caller that's about to cross
+        // into AC's Inq* helpers via this pointer must be running on AC's
+        // main thread, or we'll observe sub-pointers in mid-reassignment
+        // and AV deep inside AC code (consistent crash at 0x00416C86 from
+        // the DecalCoexistence plugin-tick thread, 2026-05-14).
+        //
+        // Fails closed: before any Compatibility detour has fired (and so
+        // the main thread isn't yet known), IsOnMainThread returns false
+        // and we refuse the lookup. That's OK — the plugin tick pump only
+        // starts well after several detours have fired.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
 
         uint playerId = ClientHelperHooks.GetPlayerId();
         if (objectId == playerId && PlayerVitalsHooks.KnownPlayerQualitiesPtr != IntPtr.Zero)
         {
             qualitiesPtr = PlayerVitalsHooks.KnownPlayerQualitiesPtr;
-            return IsReadablePointer(qualitiesPtr);
+            // Even the cached "known" qualities ptr can be stale across logout/login
+            // or on a hot-reload — verify it's still a live AC C++ object before
+            // returning it. The player's qualities is by definition a real
+            // CACQualities, so use it to learn the canonical vtable for filtering
+            // other objects' would-be qualities pointers later.
+            if (!LooksLikeAcHeapObject(qualitiesPtr))
+            {
+                qualitiesPtr = IntPtr.Zero;
+                return false;
+            }
+            CaptureCacQualitiesVtable(qualitiesPtr);
+            return true;
+        }
+
+        if (!AllowNonPlayerQualities)
+        {
+            // Hard gate: refuse to expose non-player CACQualities pointers
+            // until we can call into AC's Inq* helpers without risking AV.
+            // Callers fall back to packet-driven ObjectQualityCache where
+            // available, or just return defaults.
+            return false;
         }
 
         IntPtr weeniePtr = _getWeenieObject!(objectId);

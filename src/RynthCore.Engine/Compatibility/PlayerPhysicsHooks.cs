@@ -180,11 +180,17 @@ internal static class PlayerPhysicsHooks
     /// so it's reliable whenever pose reads work. Does not depend on any
     /// hardcoded function VAs.
     /// </summary>
+    private static int _setHeadingCalls;
+    private static bool ShouldLogHeading(int n) => n <= 3 || (n & 0xF) == 0;
+
     public static bool SetPlayerHeadingDirect(float decalHeadingDeg)
     {
+        int n = System.Threading.Interlocked.Increment(ref _setHeadingCalls);
         if (!SmartBoxLocator.TryGetPlayer(out IntPtr player, out _, out string failure))
         {
             _statusMessage = failure;
+            if (ShouldLogHeading(n))
+                RynthLog.Compat($"Move: SetPlayerHeadingDirect({decalHeadingDeg:0.0}) #{n} — no player: {failure}");
             return false;
         }
 
@@ -204,11 +210,15 @@ internal static class PlayerPhysicsHooks
 
             IsInitialized = true;
             _statusMessage = "Ready.";
+            if (ShouldLogHeading(n))
+                RynthLog.Compat($"Move: SetPlayerHeadingDirect({decalHeadingDeg:0.0}) #{n} -> qw={newQw:0.000} qz={newQz:0.000} (player=0x{player.ToInt32():X8})");
             return true;
         }
         catch (Exception ex)
         {
             _statusMessage = ex.Message;
+            if (ShouldLogHeading(n))
+                RynthLog.Compat($"Move: SetPlayerHeadingDirect({decalHeadingDeg:0.0}) #{n} threw {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }
