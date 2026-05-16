@@ -5,7 +5,7 @@ namespace RynthCore.PluginSdk;
 
 public readonly unsafe struct RynthCoreHost
 {
-    public const uint CurrentApiVersion = 40;
+    public const uint CurrentApiVersion = 41;
 
     private readonly RynthCoreApiNative _api;
 
@@ -62,6 +62,7 @@ public readonly unsafe struct RynthCoreHost
     public bool HasGetObjectHeading    => _api.GetObjectHeadingFn    != IntPtr.Zero;
     public bool HasGetBusyState        => _api.GetBusyStateFn        != IntPtr.Zero;
     public bool HasForceResetBusyCount => _api.ForceResetBusyCountFn != IntPtr.Zero;
+    public bool HasGetCastBusyState    => _api.GetCastBusyStateFn    != IntPtr.Zero;
     public bool HasGetObjectSpellIds   => _api.GetObjectSpellIdsFn   != IntPtr.Zero;
     public bool HasSetMotion => _api.SetMotionFn != IntPtr.Zero;
     public bool HasStopCompletely => _api.StopCompletelyFn != IntPtr.Zero;
@@ -617,6 +618,27 @@ public readonly unsafe struct RynthCoreHost
         if (_api.ForceResetBusyCountFn != IntPtr.Zero)
             ((delegate* unmanaged[Cdecl]<void>)_api.ForceResetBusyCountFn)();
     }
+
+    /// <summary>
+    /// The REAL cast gate: 0 = clear to cast, 1 = a cast/action gesture is
+    /// animating. Distinct from <see cref="GetBusyState"/> (the ClientUISystem
+    /// hourglass, which reads 0 while AC still rejects a cast with "You're too
+    /// busy!"). Returns 0 (clear) on an engine that predates this API field —
+    /// callers should pair it with their own throttle so a missing gate
+    /// degrades gracefully rather than spamming.
+    /// </summary>
+    public int GetCastBusyState()
+    {
+        if (_api.GetCastBusyStateFn == IntPtr.Zero) return 0;
+        return ((delegate* unmanaged[Cdecl]<int>)_api.GetCastBusyStateFn)();
+    }
+
+    /// <summary>
+    /// True when no cast/action gesture is animating (clear to issue a cast).
+    /// Defaults to true on an engine without the cast-gate field so older
+    /// engines fall back to the consumer's throttle/park behaviour.
+    /// </summary>
+    public bool CanCastNow => GetCastBusyState() == 0;
 
     public bool TryGetObjectName(uint objectId, out string name)
     {

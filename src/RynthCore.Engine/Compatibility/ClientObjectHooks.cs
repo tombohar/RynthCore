@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace RynthCore.Engine.Compatibility;
@@ -116,6 +117,35 @@ internal static class ClientObjectHooks
     }
     private static IntPtr _pendingPlayerDescPtr = IntPtr.Zero;
     private static int _skillProbeLogCount;
+
+    // Cold-start lazy-reseed throttle. On a normal launch the player's
+    // CACQualities* is seeded by the SendNoticePlayerDescReceived detour
+    // during login. If auto-login reaches in-world before that hook is armed
+    // (fast launch / mid-session inject), the ptr stays zero all session and
+    // every player Inq* (skills/attributes/enchantments) silently fails.
+    // Hot-reload and Decal paths reseed explicitly; the normal cold path had
+    // no fallback. We self-heal in TryGetObjectQualitiesPtr, throttled so a
+    // per-tick skill poll doesn't run the full reseed every frame.
+    private static DateTime _lastLazyQualitiesReseedUtc = DateTime.MinValue;
+    private static bool _loggedLazyQualitiesReseed;
+    private const int LazyQualitiesReseedThrottleMs = 1000;
+
+    // Main-thread player-skill snapshot cache. As of 2026-05-16 the plugin
+    // tick NEVER runs on AC's main thread (it's pumped from a managed worker
+    // to keep a GC off AC's reverse-P/Invoke thread). But every player skill
+    // read funnels through TryGetObjectQualitiesPtr, which fail-closes off
+    // the main thread for AV-safety. Net: every plugin skill read would
+    // return (0,0) → tier-1 casts + "skill not usable" → bot never buffs.
+    // Fix: refresh skills ON the main thread (PrefetchPlayerSkills, driven
+    // from the EndScene always-on path) into this cache, and serve it to the
+    // off-thread plugin pump. Reads still only ever touch AC on the main
+    // thread — the cache is the only thing crossing threads.
+    private static readonly object _playerSkillCacheLock = new();
+    private static readonly Dictionary<uint, (int buffed, int training)> _playerSkillCache = new();
+    private static uint _playerSkillCacheOwner;
+    private static DateTime _lastPlayerSkillPrefetchUtc = DateTime.MinValue;
+    private static bool _loggedSkillCacheServe;
+    private const int PlayerSkillPrefetchThrottleMs = 1000;
 
     // CPhysicsObj.m_position offset (same as PlayerPhysicsHooks.PhysicsPositionOffset)
     private const int PhysicsPositionOffset = 0x48;
@@ -657,6 +687,12 @@ internal static class ClientObjectHooks
         {
             if (!TryGetObjectQualitiesPtr(objectId, out IntPtr qualitiesPtr))
             {
+                // Off-thread (plugin pump) or not-yet-seeded callers can't
+                // safely touch AC. Serve the main-thread-populated snapshot
+                // so the pump still gets real skill levels instead of (0,0)
+                // → tier-1 / "skill not usable" / never buffs.
+                if (TryServeCachedPlayerSkill(objectId, skillStype, out buffed, out training))
+                    return true;
                 RynthLog.Verbose($"TryGetObjectSkill: m_pQualities null for 0x{objectId:X8}");
                 return false;
             }
@@ -689,6 +725,21 @@ internal static class ClientObjectHooks
             }
             buffed = trulyBuffed;
 
+            // This read happened on the main thread (TryGetObjectQualitiesPtr
+            // passed). Snapshot it so off-thread callers can be served.
+            if (objectId != 0 && objectId == ClientHelperHooks.GetPlayerId())
+            {
+                lock (_playerSkillCacheLock)
+                {
+                    if (_playerSkillCacheOwner != objectId)
+                    {
+                        _playerSkillCache.Clear();
+                        _playerSkillCacheOwner = objectId;
+                    }
+                    _playerSkillCache[skillStype] = (buffed, training);
+                }
+            }
+
             if (_skillProbeLogCount < 6)
             {
                 _skillProbeLogCount++;
@@ -703,6 +754,129 @@ internal static class ClientObjectHooks
         {
             RynthLog.Compat($"TryGetObjectSkill exception: {ex.Message}");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Serves a previously snapshotted player skill to callers that can't
+    /// read AC live — i.e. the off-thread plugin pump, where
+    /// TryGetObjectQualitiesPtr fail-closes. False if cache is cold or the
+    /// object isn't the player.
+    /// </summary>
+    private static bool TryServeCachedPlayerSkill(uint objectId, uint skillStype, out int buffed, out int training)
+    {
+        buffed = 0;
+        training = 0;
+        if (objectId == 0 || objectId != ClientHelperHooks.GetPlayerId())
+            return false;
+        lock (_playerSkillCacheLock)
+        {
+            if (_playerSkillCacheOwner != objectId ||
+                !_playerSkillCache.TryGetValue(skillStype, out var v))
+                return false;
+            buffed = v.buffed;
+            training = v.training;
+        }
+        if (!_loggedSkillCacheServe)
+        {
+            _loggedSkillCacheServe = true;
+            RynthLog.Compat("ClientObjectHooks: serving player skills from main-thread snapshot cache (off-thread plugin pump).");
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Refreshes the whole player-skill snapshot from AC. MUST run on AC's
+    /// main thread — driven from the EndScene always-on path. Throttled:
+    /// skills change slowly and tier decisions tolerate ~1s lag. One table
+    /// walk caches every skill the character has; the off-thread plugin pump
+    /// then reads the snapshot via TryServeCachedPlayerSkill instead of
+    /// getting (0,0) and dropping to tier-1 / "skill not usable".
+    /// </summary>
+    public static unsafe void PrefetchPlayerSkills()
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        if ((DateTime.UtcNow - _lastPlayerSkillPrefetchUtc).TotalMilliseconds < PlayerSkillPrefetchThrottleMs)
+            return;
+        _lastPlayerSkillPrefetchUtc = DateTime.UtcNow;
+
+        uint playerId = ClientHelperHooks.GetPlayerId();
+        if (playerId == 0)
+            return;
+
+        if (_getWeenieObject == null)
+        {
+            if (!Probe() || _getWeenieObject == null)
+                return;
+        }
+
+        try
+        {
+            // On the main thread this resolves — and the lazy reseed inside
+            // also covers the cold-start unseeded-ptr case for free.
+            if (!TryGetObjectQualitiesPtr(playerId, out IntPtr qualitiesPtr))
+                return;
+
+            IntPtr tableFieldPtr = qualitiesPtr + SkillStatsTableOffset;
+            if (!IsReadablePointer(tableFieldPtr))
+                return;
+            IntPtr skillTablePtr = Marshal.ReadIntPtr(tableFieldPtr);
+            if (skillTablePtr == IntPtr.Zero || !IsReadablePointer(skillTablePtr))
+                return;
+
+            PackableHashTableUInt32SkillNative table =
+                Marshal.PtrToStructure<PackableHashTableUInt32SkillNative>(skillTablePtr);
+            if (table.TableSize == 0 || table.TableSize > 4096 ||
+                table.Buckets == IntPtr.Zero || !IsReadablePointer(table.Buckets))
+                return;
+
+            var snapshot = new Dictionary<uint, (int buffed, int training)>();
+            for (uint b = 0; b < table.TableSize; b++)
+            {
+                IntPtr bucketPtrAddr = table.Buckets + unchecked((int)(b * (uint)IntPtr.Size));
+                if (!IsReadablePointer(bucketPtrAddr))
+                    continue;
+                IntPtr nodePtr = Marshal.ReadIntPtr(bucketPtrAddr);
+                int guard = 0;
+                while (nodePtr != IntPtr.Zero && guard++ < 512)
+                {
+                    if (!IsReadablePointer(nodePtr))
+                        break;
+                    PackableHashDataUInt32SkillNative node =
+                        Marshal.PtrToStructure<PackableHashDataUInt32SkillNative>(nodePtr);
+
+                    int training = unchecked((int)node.Data.AdvancementClass);
+                    int buffed = unchecked((int)(node.Data.InitialLevel + node.Data.LevelFromPracticePoints));
+                    if (_inqSkillLevel != null)
+                    {
+                        int retval = 0;
+                        if (_inqSkillLevel(qualitiesPtr, node.Key, &retval, 0) != 0)
+                            buffed = retval;
+                    }
+                    snapshot[node.Key] = (buffed, training);
+
+                    nodePtr = node.Next;
+                }
+            }
+
+            if (snapshot.Count == 0)
+                return;
+
+            lock (_playerSkillCacheLock)
+            {
+                if (_playerSkillCacheOwner != playerId)
+                {
+                    _playerSkillCache.Clear();
+                    _playerSkillCacheOwner = playerId;
+                }
+                foreach (var kv in snapshot)
+                    _playerSkillCache[kv.Key] = kv.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"PrefetchPlayerSkills exception: {ex.Message}");
         }
     }
 
@@ -952,6 +1126,29 @@ internal static class ClientObjectHooks
             return false;
 
         uint playerId = ClientHelperHooks.GetPlayerId();
+
+        // Cold-start self-heal: if this is the player and the qualities ptr
+        // was never seeded (SendNoticePlayerDescReceived fired before our
+        // detour armed, and this is neither a hot-reload nor a Decal-
+        // coexistence launch — the only two paths with an explicit reseed),
+        // derive it on demand. Covers every caller funnelling through this
+        // gate (skills, attributes, enchantments). Throttled, and only
+        // attempted while still unseeded. TryReseedFromCurrentPlayer resolves
+        // the ptr via TryGetPlayerQualitiesPtr (a separate path that does not
+        // re-enter this method) and is already main-thread-guarded above.
+        if (objectId == playerId &&
+            playerId != 0 &&
+            PlayerVitalsHooks.KnownPlayerQualitiesPtr == IntPtr.Zero &&
+            (DateTime.UtcNow - _lastLazyQualitiesReseedUtc).TotalMilliseconds > LazyQualitiesReseedThrottleMs)
+        {
+            _lastLazyQualitiesReseedUtc = DateTime.UtcNow;
+            if (PlayerVitalsHooks.TryReseedFromCurrentPlayer() && !_loggedLazyQualitiesReseed)
+            {
+                _loggedLazyQualitiesReseed = true;
+                RynthLog.Compat("PlayerVitals: cold-start — player qualities ptr lazily re-seeded (SendNoticePlayerDescReceived missed before hook arm).");
+            }
+        }
+
         if (objectId == playerId && PlayerVitalsHooks.KnownPlayerQualitiesPtr != IntPtr.Zero)
         {
             qualitiesPtr = PlayerVitalsHooks.KnownPlayerQualitiesPtr;

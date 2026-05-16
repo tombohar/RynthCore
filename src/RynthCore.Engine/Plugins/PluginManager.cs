@@ -195,6 +195,7 @@ internal static class PluginManager
     private static GetLastIdTimeCallbackDelegate? _getLastIdTimeCallback;
     private static GetObjectHeadingCallbackDelegate? _getObjectHeadingCallback;
     private static GetBusyStateCallbackDelegate? _getBusyStateCallback;
+    private static GetCastBusyStateCallbackDelegate? _getCastBusyStateCallback;
     private static ForceResetBusyCountCallbackDelegate? _forceResetBusyCountCallback;
     private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
     private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
@@ -336,6 +337,70 @@ internal static class PluginManager
                 if (_liveObjects.Add(id)) added++;
         }
         RynthLog.Plugin($"PluginManager: Seeded {added} new live object id(s) from CObjectMaint (visited {visited}).");
+    }
+
+    private static int _cObjectMaintSeedDone;     // 0 = pending this login, 1 = done/given-up
+    private static int _cObjectMaintSeedAttempts;
+    private static long _cObjectMaintSeedLastMs;
+    private static int _cObjectMaintSeedNotMainLogged;
+
+    /// <summary>
+    /// Cold-login object backfill. The incremental CreateObject hook only
+    /// catches objects created AFTER it installed, so mobs already present at
+    /// login are never delivered and the plugin's WorldObjectCache never sees
+    /// them (the proven "bot ignores login mobs" bug — those ids show ZERO
+    /// classify activity and only enter combat via manual select).
+    /// SeedLiveObjectsFromCObjectMaint was disabled 2026-05-14 because walking
+    /// AC's weenie_object_table OFF AC's thread torn-reads concurrently-freed
+    /// nodes (the 5-min AV). Fix: the SAME walk, but ONLY on AC's main thread —
+    /// AC mutates that table on its own main thread, so a same-thread walk is
+    /// consistent — delivering ids through the existing guarded
+    /// QueueCreateObject path (→ _liveObjects + _pendingCreateObjects →
+    /// DispatchQueuedCreateObject → guarded plugin.OnCreateObject → guarded
+    /// TryClassify). One-shot per login, throttled + attempt-bounded. Called
+    /// from SmartBoxHooks.DispatchGameEventDetour (AC main thread, fires every
+    /// server event in-world) exactly like BusyCountHooks.CheckWatchdog.
+    /// </summary>
+    public static void TrySeedLiveObjectsFromCObjectMaintOnce()
+    {
+        if (System.Threading.Volatile.Read(ref _cObjectMaintSeedDone) != 0) return;
+        if (!_initialized || !_loginCompleteObserved || _plugins.Count == 0) return;
+        // CRITICAL: never walk AC's object table off AC's main thread — that
+        // off-thread torn read is the exact 5-min AV the 2026-05-14 disable
+        // was protecting against. Called from OnEndScene, which the engine
+        // already treats as AC's main thread (PrefetchPlayerSkills runs there
+        // under the same guard).
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            // One-shot breadcrumb: if this is the ONLY thing logged, the guard
+            // never identifies the main thread on this acclient build → the
+            // anchor problem is MainThreadGuard, not the seed logic.
+            if (System.Threading.Interlocked.Exchange(ref _cObjectMaintSeedNotMainLogged, 1) == 0)
+                RynthLog.Plugin("PluginManager: CObjectMaint seed gated — MainThreadGuard not yet on main thread at the EndScene anchor.");
+            return;
+        }
+
+        long now = Environment.TickCount64;
+        if (_cObjectMaintSeedLastMs != 0 && now - _cObjectMaintSeedLastMs < 2000) return;
+        _cObjectMaintSeedLastMs = now;
+        int attempt = ++_cObjectMaintSeedAttempts;
+        if (attempt > 8)
+        {
+            System.Threading.Volatile.Write(ref _cObjectMaintSeedDone, 1);
+            RynthLog.Plugin("PluginManager: CObjectMaint seed gave up after 8 main-thread attempts (maintainer/table never ready).");
+            return;
+        }
+
+        int delivered = 0;
+        int visited = CObjectMaintHooks.EnumerateLiveWeenieObjectIds(id =>
+        {
+            QueueCreateObject(id); // existing safe path; dedups via _liveObjects, plugin TryClassify is guarded
+            delivered++;
+        });
+        RynthLog.Plugin($"PluginManager: CObjectMaint seed attempt {attempt}/8 — visited={visited} delivered={delivered}.");
+        if (visited > 0)
+            System.Threading.Volatile.Write(ref _cObjectMaintSeedDone, 1);
+        // visited <= 0 → maintainer/table not ready yet; retry next frame (bounded by attempts)
     }
 
     private static void ReplayPrePluginCreateObjects()
@@ -778,6 +843,11 @@ internal static class PluginManager
 
     public static void TickAll()
     {
+        // Sample the real cast gate on the single 30 Hz plugin heartbeat (this
+        // is the one TickAll driver, off AC's render thread). Self-guarded;
+        // never throws. Plugins read it via the GetCastBusyState host pull.
+        CastGate.Sample();
+
         for (int i = 0; i < _plugins.Count; i++)
         {
             var plugin = _plugins[i];
@@ -914,6 +984,11 @@ internal static class PluginManager
 
         _loginCompleteObserved = true;
         _loginDispatchPending = true;
+        // Re-arm the cold-login CObjectMaint backfill for this fresh login.
+        System.Threading.Volatile.Write(ref _cObjectMaintSeedDone, 0);
+        _cObjectMaintSeedAttempts = 0;
+        _cObjectMaintSeedLastMs = 0;
+        System.Threading.Volatile.Write(ref _cObjectMaintSeedNotMainLogged, 0);
         RynthLog.Plugin("PluginManager: OnLoginComplete observed - queued login lifecycle callbacks.");
     }
 
@@ -1997,6 +2072,7 @@ internal static class PluginManager
         _getLastIdTimeCallback ??= GetLastIdTimeAction;
         _getObjectHeadingCallback ??= GetObjectHeadingAction;
         _getBusyStateCallback ??= GetBusyStateAction;
+        _getCastBusyStateCallback ??= GetCastBusyStateAction;
         _forceResetBusyCountCallback ??= ForceResetBusyCountAction;
         _getObjectSpellIdsCallback ??= GetObjectSpellIdsAction;
         _getObjectSkillBuffedCallback ??= GetObjectSkillLevelAction;
@@ -2088,6 +2164,7 @@ internal static class PluginManager
         _api.GetLastIdTimeFn = Marshal.GetFunctionPointerForDelegate(_getLastIdTimeCallback);
         _api.GetObjectHeadingFn = Marshal.GetFunctionPointerForDelegate(_getObjectHeadingCallback);
         _api.GetBusyStateFn = Marshal.GetFunctionPointerForDelegate(_getBusyStateCallback);
+        _api.GetCastBusyStateFn = Marshal.GetFunctionPointerForDelegate(_getCastBusyStateCallback);
         _api.GetObjectSpellIdsFn = Marshal.GetFunctionPointerForDelegate(_getObjectSpellIdsCallback);
         _api.GetObjectSkillBuffedFn = Marshal.GetFunctionPointerForDelegate(_getObjectSkillBuffedCallback);
         _api.GetObjectAttributeFn = Marshal.GetFunctionPointerForDelegate(_getObjectAttributeCallback);
@@ -2701,6 +2778,8 @@ internal static class PluginManager
     }
 
     private static int GetBusyStateAction() => BusyCountHooks.GetBusyState();
+
+    private static int GetCastBusyStateAction() => CastGate.GetCastBusyState();
 
     private static void ForceResetBusyCountAction() => BusyCountHooks.ForceResetBusyCount();
 

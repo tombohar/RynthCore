@@ -503,6 +503,14 @@ internal struct RynthCoreAPI
     /// Level/Finish), so the retail attack/magic power bar never renders.
     /// Requires API v56+.</summary>
     public IntPtr SetPowerbarSuppressedFn;
+
+    /// <summary>Function pointer: int GetCastBusyState()
+    /// 0 = clear to cast, 1 = a cast/action gesture is animating. This is the
+    /// REAL cast gate (CMotionInterp sequenced-motion queue), distinct from
+    /// GetBusyState (the ClientUISystem hourglass, which reads 0 while AC still
+    /// rejects a cast with "You're too busy!"). Sampled on the plugin pump; no
+    /// acclient.exe hook. Returns 0 when not reachable. Requires API v58+.</summary>
+    public IntPtr GetCastBusyStateFn;
 }
 
 
@@ -510,7 +518,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 57;
+    public const uint Current = 58;
 }
 
 internal static class ClientActionHookFlags
@@ -885,6 +893,9 @@ internal unsafe delegate int GetObjectHeadingCallbackDelegate(uint objectId, flo
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int GetBusyStateCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int GetCastBusyStateCallbackDelegate();
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int GetObjectSpellIdsCallbackDelegate(uint guid, uint* spellIds, int maxCount);

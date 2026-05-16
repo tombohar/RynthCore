@@ -21,6 +21,18 @@ internal static class PlayerPhysicsHooks
     // The CMotionInterp pointer is the first field of MovementManager.
     private const int MovementManagerOffset = 0xC4;
 
+    // CMotionInterp +0x80 = head of the sequenced/one-shot motion node list
+    // (singly-linked, head=+0x80 / tail=+0x84; nodes popped+heap-freed as each
+    // motion completes — confirmed via offline RE of acclient.exe: ctor 0x529810
+    // zeroes it, pop sites 0x528AD0/0x528B40, stop-all 0x528A50). A spell-cast
+    // wind-up/release gesture is queued here while it animates and the list
+    // empties when it finishes. Locomotion uses the +0x4C/+0x54 channels
+    // directly and does NOT enqueue here, so a non-empty list is a clean
+    // "an action gesture is in progress" signal. We read ONLY the head pointer
+    // value and never dereference it, so this is safe against AC freeing nodes
+    // on its own thread.
+    private const int CMotionPendingMotionsHeadOffset = 0x80;
+
     // CMotionInterp::get_max_speed — Chorizite RVA 0x001278C0, our client is +0x1000
     // from Chorizite (confirmed via set_heading/get_heading/CommenceJump addresses).
     private const int ReferenceGetMaxSpeed = 0x005288C0;
@@ -304,6 +316,34 @@ internal static class PlayerPhysicsHooks
         catch (Exception ex)
         {
             RynthLog.Compat($"LaunchJumpWithMotion: write failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// AC's local cast gate. True when CMotionInterp has a sequenced/one-shot
+    /// motion queued — i.e. a spell-cast (or other action) gesture is currently
+    /// animating. Empty queue = idle/ready. Returns the read success (false when
+    /// the player/CMotionInterp isn't reachable yet — pre-login / between
+    /// worlds); callers should treat "couldn't read" as "no opinion" and fall
+    /// back to their own throttle. Reads only the list-head pointer value and
+    /// never walks it, so it cannot fault on nodes AC frees concurrently.
+    /// </summary>
+    public static bool TryGetCastGestureInProgress(out bool inProgress)
+    {
+        inProgress = false;
+
+        if (!TryGetCMotionInterp(out IntPtr cmi) || cmi == IntPtr.Zero)
+            return false;
+
+        try
+        {
+            IntPtr head = Marshal.ReadIntPtr(cmi + CMotionPendingMotionsHeadOffset);
+            inProgress = head != IntPtr.Zero;
+            return true;
+        }
+        catch
+        {
             return false;
         }
     }

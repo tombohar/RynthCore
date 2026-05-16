@@ -256,6 +256,24 @@ internal static class EngineFrameController
             // Capture the game's View/Projection matrices before ImGui touches them
             GameMatrixCapture.CaptureFrame(pDevice);
 
+            // Refresh the player-skill snapshot on AC's main thread (this
+            // EndScene runs on it). The plugin tick is pumped off-thread and
+            // can't read skills live (TryGetObjectQualitiesPtr fail-closes);
+            // without this it gets (0,0) → tier-1 casts and never buffs.
+            // Throttled internally.
+            Compatibility.ClientObjectHooks.PrefetchPlayerSkills();
+
+            // Cold-login object backfill on the SAME AC main thread as the
+            // skill prefetch above: deliver objects already present at login
+            // (the incremental CreateObject hook only catches NEW spawns, so
+            // login-present mobs were never reaching the plugin — proven via
+            // per-id ClassifyTrace). One-shot per login, IsOnMainThread-gated
+            // and attempt-bounded internally; reuses the guarded
+            // QueueCreateObject delivery path. EndScene is a build-independent
+            // anchor (D3D9 hook, not string-resolved like SmartBox).
+            try { Plugins.PluginManager.TrySeedLiveObjectsFromCObjectMaintOnce(); }
+            catch (Exception ex) { RynthLog.Plugin($"CObjectMaint seed threw {ex.GetType().Name}: {ex.Message}"); }
+
             // Install the SetRenderState hook that injects Nav3D rendering
             // before the game's 2D UI pass (once, after DX9Backend is ready)
             Nav3DRenderInjector.Install(pDevice);

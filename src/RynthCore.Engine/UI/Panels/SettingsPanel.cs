@@ -19,6 +19,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
@@ -937,6 +938,7 @@ internal static class SettingsPanel
             VerticalContentAlignment = VerticalAlignment.Center,
             HorizontalContentAlignment = HorizontalAlignment.Center,
         };
+        DisableInnerScroll(tb);
         tb.GotFocus += (_, _) => { /* suppress poll while typing */ };
         tb.LostFocus += (_, _) =>
         {
@@ -1009,6 +1011,7 @@ internal static class SettingsPanel
             VerticalContentAlignment = VerticalAlignment.Center,
             HorizontalContentAlignment = HorizontalAlignment.Center,
         };
+        DisableInnerScroll(tb);
 
         void Commit()
         {
@@ -1081,6 +1084,7 @@ internal static class SettingsPanel
             VerticalContentAlignment = VerticalAlignment.Center,
             HorizontalContentAlignment = HorizontalAlignment.Center,
         };
+        DisableInnerScroll(tb);
 
         void Commit()
         {
@@ -1177,6 +1181,17 @@ internal static class SettingsPanel
             ToolTip.SetShowDelay(row, 400);
         }
         return row;
+    }
+
+    // SimpleTheme wraps TextBox content in a ScrollViewer, and its vertical
+    // scrollbar's up RepeatButton is a filled triangle Path. On these short
+    // (Height=20) single-line numeric fields that scrollbar shows and the
+    // triangle lands on top of the digits. These fields never scroll —
+    // disable both inner scrollbars so the glyph is gone.
+    private static void DisableInnerScroll(Control c)
+    {
+        ScrollViewer.SetHorizontalScrollBarVisibility(c, ScrollBarVisibility.Disabled);
+        ScrollViewer.SetVerticalScrollBarVisibility(c, ScrollBarVisibility.Disabled);
     }
 
     private static Button StepButton(string label) => new Button
