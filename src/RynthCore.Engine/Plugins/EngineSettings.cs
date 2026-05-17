@@ -32,17 +32,15 @@ internal static class EngineSettings
         }
     }
 
-    /// <summary>When false, the in-AC ImGui overlay bar (RynthCoreShell) does not render.
-    /// Avalonia floating panels and the D3D9/ImGui infrastructure (used to discover the
-    /// game HWND) keep working. Default true.</summary>
+    /// <summary>Force-disabled in code: RynthCore's in-AC UI is the Avalonia overlay, so the
+    /// ImGui shell (RynthCoreShell bar + plugin ImGui windows) never renders. engine.json and
+    /// the launcher Plugins tab can no longer toggle this; the persisted field is now a no-op.
+    /// A developer can opt back in for debugging by setting env var RYNTHCORE_FORCE_IMGUI=1
+    /// before launching AC — normal users never set this.</summary>
     public static bool EnableImGuiShell
-    {
-        get
-        {
-            EnsureLoaded();
-            return _enableImGuiShell;
-        }
-    }
+        => string.Equals(
+               System.Environment.GetEnvironmentVariable("RYNTHCORE_FORCE_IMGUI"),
+               "1", System.StringComparison.Ordinal);
 
     /// <summary>When false, PluginManager.LoadPlugins is skipped so no plugin DLLs load,
     /// init, tick, or render. Decal-coexistence plugin pump is also skipped. Default true.</summary>
