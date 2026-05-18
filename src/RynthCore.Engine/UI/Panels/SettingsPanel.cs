@@ -139,6 +139,7 @@ internal static class SettingsPanel
         public float NavRingThickness { get; set; } = 6f;
         public float NavLineThickness { get; set; } = 6f;
         public float NavHeightOffset { get; set; } = 0.05f;
+        public float NavSlopeSink { get; set; } = 1.5f;
         public bool ShowTerrainPassability { get; set; } = true;
         public bool OpenDoors { get; set; }
         public float OpenDoorRange { get; set; } = 5f;
@@ -666,6 +667,9 @@ internal static class SettingsPanel
         p.Children.Add(FloatRow("Height Offset", state.Data.NavHeightOffset, -5f, 5f, 0.05f,
             v => { state.Data.NavHeightOffset = v; Push(state); },
             "Vertical offset for nav markers above the ground. Negative = lower."));
+        p.Children.Add(FloatRow("Slope Sink", state.Data.NavSlopeSink, 0f, 8f, 0.1f,
+            v => { state.Data.NavSlopeSink = v; Push(state); },
+            "Extra downward offset on slopes only, per unit of terrain steepness. 0 = off; flat ground is unaffected. ~1.5 cancels the float for a default-radius ring."));
         p.Children.Add(BoolRow("Show Terrain Passability", state.Data.ShowTerrainPassability,
             v => { state.Data.ShowTerrainPassability = v; Push(state); },
             "Highlight impassable terrain triangles in red."));

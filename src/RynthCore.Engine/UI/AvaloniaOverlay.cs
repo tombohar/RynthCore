@@ -464,6 +464,17 @@ internal static class AvaloniaOverlay
             {
                 try
                 {
+                    // Persist docked panels that are open right now so they
+                    // reappear on the next launch. RestoreOpenPanels only
+                    // reopens entries marked open=true; the open path doesn't
+                    // re-persist that flag once a saved entry exists (it would
+                    // corrupt coords against the placeholder canvas), so a
+                    // docked panel the user opened but never dragged/resized
+                    // stayed marked closed and never came back after a reload
+                    // / AC restart. Mirrors the floating-panel persistence in
+                    // CloseAllFloatingPanels below.
+                    _window?.PersistOpenDockedPanels();
+
                     // Close any floating panels first. Their windows aren't
                     // owned by the off-screen main window (which lives at
                     // -10000,-10000), so they don't auto-close on lifetime
@@ -2449,6 +2460,32 @@ internal class RynthOverlayWindow : Window
     internal void RequestRedock(string title)
     {
         Dispatcher.UIThread.Post(() => RedockPanel(title), DispatcherPriority.Background);
+    }
+
+    /// <summary>
+    /// Persist every currently-docked panel as open=true with its live
+    /// position/size so the next launch restores it. Called from
+    /// AvaloniaOverlay.Stop on engine reload / process exit. Safe here:
+    /// PersistPanelState only reads the panel's current canvas position (it
+    /// never clamps), so the coords captured are exactly where the user left
+    /// the panel — none of the placeholder-canvas corruption the open path
+    /// guards against. The floating-panel equivalent is CloseAllFloatingPanels.
+    /// </summary>
+    internal void PersistOpenDockedPanels()
+    {
+        if (_activePanels.Count == 0) return;
+
+        foreach ((string title, Border panel) in _activePanels.ToArray())
+        {
+            try
+            {
+                PersistPanelState(title, panel, open: true);
+            }
+            catch (Exception ex)
+            {
+                RynthLog.UI($"AvaloniaOverlay.PersistOpenDockedPanels({title}): {ex.GetType().Name}: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>

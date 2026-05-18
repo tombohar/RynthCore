@@ -511,6 +511,12 @@ internal struct RynthCoreAPI
     /// rejects a cast with "You're too busy!"). Sampled on the plugin pump; no
     /// acclient.exe hook. Returns 0 when not reachable. Requires API v58+.</summary>
     public IntPtr GetCastBusyStateFn;
+
+    /// <summary>Function pointer: int ReadKnownSpells(uint* spellIds, int maxCount)
+    /// Fills the array with the character's known spell ids from a main-thread
+    /// spellbook snapshot. Returns count written, or -1 if unavailable (cold
+    /// snapshot / not logged in). Requires API v59+.</summary>
+    public IntPtr ReadKnownSpellsFn;
 }
 
 
@@ -518,7 +524,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 58;
+    public const uint Current = 59;
 }
 
 internal static class ClientActionHookFlags
@@ -811,6 +817,9 @@ internal delegate void PluginOnEnchantmentRemovedDelegate(uint enchantmentId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int ReadPlayerEnchantmentsCallbackDelegate(uint* spellIds, double* expiryTimes, int maxCount);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int ReadKnownSpellsCallbackDelegate(uint* spellIds, int maxCount);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate double GetServerTimeCallbackDelegate();

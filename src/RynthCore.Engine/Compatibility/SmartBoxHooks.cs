@@ -131,7 +131,10 @@ internal static class SmartBoxHooks
             if (info.Opcode == GameEventOpcode)
                 TryHandleGameEvent(blob, info);
             else if (info.Opcode == 0xC9 && info.RawObjectId != 0)
+            {
+                WireParseIdentifyFromBlob(blob, info.BlobSize, wrapped: false);
                 TryCacheVitalsFromIdentify(info.RawObjectId);
+            }
 
             if (info.RawObjectId != 0 &&
                 (info.Opcode == PositionUpdateOpcode ||
@@ -176,7 +179,10 @@ internal static class SmartBoxHooks
         try
         {
             if (info.Opcode == 0xC9 && info.RawObjectId != 0)
+            {
+                WireParseIdentifyFromBlob(blob, info.BlobSize, wrapped: false);
                 TryCacheVitalsFromIdentify(info.RawObjectId);
+            }
         }
         catch { }
 
@@ -226,13 +232,15 @@ internal static class SmartBoxHooks
 
             uint maxHealth = 0;
             uint currentHealth = 0;
-            if (ClientObjectHooks.TryGetWeenieObjectPtr(targetId, out IntPtr pWeenie))
+            // Appraisal-only: emit an absolute health pair ONLY from a real
+            // appraisal's wire-parsed CreatureProfile (id-keyed). With no
+            // appraisal, leave max=0 so the UI falls back to a % — the
+            // pointer-cache and creature Inq maxes are unreliable on ACE and
+            // fabricated wildly wrong values (e.g. 50/50 for a 190-hp mob).
+            if (ObjectQualityCache.TryGetCreatureVitals(targetId, out CreatureVitals exact) && exact.MaxHealth > 0)
             {
-                if (ObjectQualityCache.TryGetMaxHealth(pWeenie, out uint cached))
-                {
-                    maxHealth = cached;
-                    currentHealth = (uint)Math.Round(maxHealth * Math.Clamp(ratio, 0f, 1f));
-                }
+                maxHealth = exact.MaxHealth;
+                currentHealth = (uint)Math.Round(maxHealth * Math.Clamp(ratio, 0f, 1f));
             }
 
             PluginManager.QueueUpdateHealth(targetId, ratio, currentHealth, maxHealth);
@@ -265,7 +273,10 @@ internal static class SmartBoxHooks
             {
                 uint objectId = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, 16)));
                 if (objectId != 0)
+                {
+                    WireParseIdentifyFromBlob(blob, info.BlobSize, wrapped: true);
                     TryCacheVitalsFromIdentify(objectId);
+                }
             }
         }
         catch
@@ -288,6 +299,41 @@ internal static class SmartBoxHooks
                 int count = Interlocked.Increment(ref _identifyLogCount);
                 if (count <= 12)
                     RynthLog.Verbose($"Compat: identify 0xC9 obj=0x{objectId:X8} maxHealth={maxHealth}");
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>
+    /// Parses the 0xC9 IdentifyObject CreatureProfile straight from the packet
+    /// wire bytes (authoritative absolute health/maxHealth), as opposed to a
+    /// post-handler creature InqAttribute2nd read which is unreliable on ACE.
+    /// The CombatActionHooks parser expects [_][objectId][flags][success][sections];
+    /// the 0xF7B0 game-event wrapper prepends [F7B0][playerId][seq] (12 bytes).
+    /// </summary>
+    private static void WireParseIdentifyFromBlob(IntPtr blob, uint blobSize, bool wrapped)
+    {
+        if (blob == IntPtr.Zero)
+            return;
+        try
+        {
+            IntPtr payloadPtr = Marshal.ReadIntPtr(IntPtr.Add(blob, NetBlobBufPtrOffset));
+            if (payloadPtr == IntPtr.Zero)
+                return;
+
+            if (wrapped)
+            {
+                if (blobSize < 28)
+                    return;
+                CombatActionHooks.TryParseIdentifyResponse(IntPtr.Add(payloadPtr, 12), blobSize - 12);
+            }
+            else
+            {
+                if (blobSize < 16)
+                    return;
+                CombatActionHooks.TryParseIdentifyResponse(payloadPtr, blobSize);
             }
         }
         catch

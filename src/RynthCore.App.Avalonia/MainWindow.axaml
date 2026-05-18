@@ -339,8 +339,10 @@
                   <WrapPanel Orientation="Horizontal" ItemWidth="176" ItemHeight="40">
                     <Button x:Name="InjectRunningAcButton" Content="Inject Into Running AC" Margin="0,0,8,8" />
                     <Button x:Name="RefreshSessionsButton" Content="Refresh Sessions" Margin="0,0,8,8" />
+                    <Button x:Name="ResetOverlayBarButton" Content="Reset Overlay Bar" Margin="0,0,8,8"
+                            ToolTip.Tip="Drags the in-game RynthCore overlay bar back to the top-left corner. Use this if the bar was moved off-screen and can no longer be reached. Applies to every running RynthCore client." />
                   </WrapPanel>
-                  <TextBlock Text="Manual inject targets the first detected acclient.exe session."
+                  <TextBlock Text="Manual inject targets the first detected acclient.exe session. Reset Overlay Bar signals all running RynthCore clients via the dispatch file."
                              TextWrapping="Wrap"
                              Foreground="#9AA8B3" />
                 </StackPanel>

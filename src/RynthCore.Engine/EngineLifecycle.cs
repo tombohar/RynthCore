@@ -116,6 +116,16 @@ internal static class EngineLifecycle
 
         Step("AvaloniaOverlay.Stop", () => AvaloniaOverlay.Stop());
 
+        // Restore AC's original window WndProc. EngineFrameController.Shutdown
+        // also calls Win32Backend.Shutdown, but it early-returns when ImGui
+        // never initialized (EnableImGuiBackend=false) — and in that mode the
+        // subclass is installed by AvaloniaOverlay.Start()'s GameHwnd poller,
+        // so it would otherwise never be removed. It then leaks across hot
+        // reloads (each gen stacks on the last; the frozen gen swallows WM_CHAR
+        // → AC chat box stops receiving input after a reload). Idempotent —
+        // no-ops if Init never ran or the ImGui path already tore it down.
+        Step("Win32Backend.Shutdown (input subclass)", () => ImGuiBackend.Win32Backend.Shutdown());
+
         // Stop the headless tick pump BEFORE plugin shutdown / FreeLibrary.
         // Otherwise the pump's TickAll/ProcessPendingActions can be mid-call
         // into a plugin whose code pages we're about to unmap → AV.

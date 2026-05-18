@@ -147,6 +147,20 @@ internal static class ClientObjectHooks
     private static bool _loggedSkillCacheServe;
     private const int PlayerSkillPrefetchThrottleMs = 1000;
 
+    // Main-thread known-spell (spellbook) snapshot — same off-thread-safe
+    // pattern as the skill cache above. AC's spellbook is a PackableHashTable
+    // at [CACQualities+0x6C] (buckets +0x0C, count +0x10, node key +0x00,
+    // next +0x0C — confirmed by disasm of CACQualities::IsSpellKnown @
+    // 0x596420). Read on the main thread (TryGetObjectQualitiesPtr fail-closes
+    // off-thread) and served as a snapshot to the off-thread plugin pump.
+    private static readonly object _knownSpellCacheLock = new();
+    private static readonly HashSet<uint> _knownSpellCache = new();
+    private static uint _knownSpellCacheOwner;
+    private static DateTime _lastKnownSpellPrefetchUtc = DateTime.MinValue;
+    private static bool _loggedKnownSpellServe;
+    private const int KnownSpellPrefetchThrottleMs = 2000;
+    private const int SpellBookTableOffset = 0x6C;
+
     // CPhysicsObj.m_position offset (same as PlayerPhysicsHooks.PhysicsPositionOffset)
     private const int PhysicsPositionOffset = 0x48;
     private const int PositionObjCellIdOffset = 0x04;
@@ -621,6 +635,24 @@ internal static class ClientObjectHooks
     private static bool TryGetQualitiesPtr(IntPtr weeniePtr, out IntPtr qualitiesPtr)
     {
         qualitiesPtr = IntPtr.Zero;
+
+        // P0-2 (2026-05-17): the dominant off-main-thread chokepoint. ~10
+        // public accessors (Inq* int/float/bool/string/quad/attribute2nd,
+        // IsSpellKnown, Vitae, ItemType, ObjectName) resolve their qualities
+        // ptr here and then call straight into AC's helpers. AC's client is
+        // not thread-safe; on the plugin pump thread we observe a qualities
+        // sub-table mid-reassignment, AC walks a transiently-null pointer and
+        // AVs in its OWN code (read [null+0xC] at acclient.exe+0x27E779 during
+        // combat classification; read [null+0x1C] at acclient.exe+0x16547B
+        // during corpse-loot — 3 crashes 2026-05-17 10:06/10:23/10:26). The
+        // capital-O TryGetObjectQualitiesPtr already fails closed off-thread
+        // for the player-skill path (snapshot-cache served instead); this is
+        // the same gate for every OTHER accessor that bypasses it. Off-thread
+        // callers fall back to their packet/appraisal/PWD-direct paths (which
+        // every caller already has) instead of crashing the client.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+
         if (weeniePtr == IntPtr.Zero)
             return false;
 
@@ -877,6 +909,124 @@ internal static class ClientObjectHooks
         catch (Exception ex)
         {
             RynthLog.Compat($"PrefetchPlayerSkills exception: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Refreshes the known-spell (spellbook) snapshot from AC. MUST run on AC's
+    /// main thread — driven from the same EndScene path as PrefetchPlayerSkills.
+    /// Walks the [CACQualities+0x6C] PackableHashTable; fully defensive (any
+    /// layout mismatch / bad pointer yields no change, never an AC fault).
+    /// </summary>
+    public static void PrefetchKnownSpells()
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        if ((DateTime.UtcNow - _lastKnownSpellPrefetchUtc).TotalMilliseconds < KnownSpellPrefetchThrottleMs)
+            return;
+        _lastKnownSpellPrefetchUtc = DateTime.UtcNow;
+
+        uint playerId = ClientHelperHooks.GetPlayerId();
+        if (playerId == 0)
+            return;
+
+        if (_getWeenieObject == null)
+        {
+            if (!Probe() || _getWeenieObject == null)
+                return;
+        }
+
+        try
+        {
+            if (!TryGetObjectQualitiesPtr(playerId, out IntPtr qualitiesPtr))
+                return;
+
+            IntPtr tableFieldPtr = qualitiesPtr + SpellBookTableOffset;
+            if (!IsReadablePointer(tableFieldPtr))
+                return;
+            IntPtr tablePtr = Marshal.ReadIntPtr(tableFieldPtr);
+            if (tablePtr == IntPtr.Zero || !IsReadablePointer(tablePtr))
+                return;
+
+            // PackableHashTable: buckets ptr at +0x0C, bucket count at +0x10.
+            IntPtr bucketsFieldPtr = tablePtr + 0x0C;
+            IntPtr countFieldPtr   = tablePtr + 0x10;
+            if (!IsReadablePointer(bucketsFieldPtr) || !IsReadablePointer(countFieldPtr))
+                return;
+            IntPtr buckets = Marshal.ReadIntPtr(bucketsFieldPtr);
+            uint bucketCount = unchecked((uint)Marshal.ReadInt32(countFieldPtr));
+            if (buckets == IntPtr.Zero || !IsReadablePointer(buckets) ||
+                bucketCount == 0 || bucketCount > 8192)
+                return;
+
+            var snapshot = new HashSet<uint>();
+            int totalGuard = 0;
+            for (uint b = 0; b < bucketCount; b++)
+            {
+                IntPtr bucketAddr = buckets + unchecked((int)(b * (uint)IntPtr.Size));
+                if (!IsReadablePointer(bucketAddr))
+                    continue;
+                IntPtr nodePtr = Marshal.ReadIntPtr(bucketAddr);
+                int chainGuard = 0;
+                while (nodePtr != IntPtr.Zero && chainGuard++ < 1024 && totalGuard++ < 20000)
+                {
+                    if (!IsReadablePointer(nodePtr))
+                        break;
+                    // node: key (spell id) at +0x00, next at +0x0C.
+                    uint spellId = unchecked((uint)Marshal.ReadInt32(nodePtr));
+                    if (spellId != 0 && spellId < 0x10000)
+                        snapshot.Add(spellId);
+                    IntPtr nextAddr = nodePtr + 0x0C;
+                    if (!IsReadablePointer(nextAddr))
+                        break;
+                    nodePtr = Marshal.ReadIntPtr(nextAddr);
+                }
+            }
+
+            if (snapshot.Count == 0)
+                return;
+
+            lock (_knownSpellCacheLock)
+            {
+                _knownSpellCache.Clear();
+                _knownSpellCacheOwner = playerId;
+                foreach (uint id in snapshot)
+                    _knownSpellCache.Add(id);
+            }
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"PrefetchKnownSpells exception: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Serves the main-thread known-spell snapshot to the off-thread plugin
+    /// pump. Returns -1 (cold / wrong owner / empty) so the caller keeps its
+    /// existing fallback behavior; otherwise the count written to outIds.
+    /// </summary>
+    public static unsafe int CopyCachedKnownSpells(uint* outIds, int maxCount)
+    {
+        if (outIds == null || maxCount <= 0)
+            return -1;
+        uint playerId = ClientHelperHooks.GetPlayerId();
+        lock (_knownSpellCacheLock)
+        {
+            if (_knownSpellCacheOwner == 0 || _knownSpellCacheOwner != playerId ||
+                _knownSpellCache.Count == 0)
+                return -1;
+            int i = 0;
+            foreach (uint id in _knownSpellCache)
+            {
+                if (i >= maxCount) break;
+                outIds[i++] = id;
+            }
+            if (!_loggedKnownSpellServe)
+            {
+                _loggedKnownSpellServe = true;
+                RynthLog.Compat($"ClientObjectHooks: serving {_knownSpellCache.Count} known spells from main-thread snapshot (off-thread pump).");
+            }
+            return i;
         }
     }
 
@@ -1688,6 +1838,16 @@ internal static class ClientObjectHooks
     /// </summary>
     public static bool ObjectIsAttackable(uint objectId)
     {
+        // P0-2 (2026-05-17): bypasses TryGetQualitiesPtr — calls
+        // _getWeenieObject + ClientCombatSystem::ObjectIsAttackable directly
+        // (AC walks its object table + qualities lattice). Same cross-thread
+        // AV class as the qualities chokepoint. Off the AC main thread, return
+        // the method's existing "I don't know → assume attackable" default
+        // WITHOUT entering AC, so combat targeting is unchanged but the client
+        // can't AV here.
+        if (!MainThreadGuard.IsOnMainThread())
+            return true;
+
         if (_getCombatSystem == null || _objectIsAttackable == null || _getWeenieObject == null)
         {
             if (!Probe() || _getCombatSystem == null || _objectIsAttackable == null || _getWeenieObject == null)
@@ -2032,6 +2192,17 @@ internal static class ClientObjectHooks
     /// </summary>
     public static int GetNumContainedItems(uint objectId)
     {
+        // P0-2 (2026-05-17): bypasses TryGetQualitiesPtr — direct thiscall
+        // into ACCWeenieObject::GetNumContainedItems, which walks the weenie's
+        // container list. Called during corpse-loot; cross-thread against AC
+        // streaming items into a just-opened corpse on the main thread reads a
+        // torn pointer and AVs in AC code (read [null+0x1C] at
+        // acclient.exe+0x16547B, 2026-05-17 10:06). Off the AC main thread,
+        // return the existing "unavailable" sentinel; the loot controller
+        // already handles -1 by waiting / using packet inventory.
+        if (!MainThreadGuard.IsOnMainThread())
+            return -1;
+
         if (_getWeenieObject == null && !Probe())
             return -1;
         if (_getWeenieObject == null)
@@ -2053,6 +2224,12 @@ internal static class ClientObjectHooks
     /// </summary>
     public static int GetNumContainedContainers(uint objectId)
     {
+        // P0-2 (2026-05-17): same cross-thread AV class as
+        // GetNumContainedItems — direct thiscall into AC's container walk.
+        // Off the AC main thread, return the "unavailable" sentinel.
+        if (!MainThreadGuard.IsOnMainThread())
+            return -1;
+
         if (_getWeenieObject == null && !Probe())
             return -1;
         if (_getWeenieObject == null)

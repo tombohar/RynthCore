@@ -152,6 +152,7 @@ internal partial class MainWindow : Window
         SaveBehaviorButton.Click += (_, _) => SaveLaunchBehavior();
         InjectRunningAcButton.Click += async (_, _) => await InjectRunningAcAsync();
         RefreshSessionsButton.Click += (_, _) => RefreshSessionState();
+        ResetOverlayBarButton.Click += (_, _) => ResetOverlayBar();
         AddPluginDllButton.Click += async (_, _) => await AddPluginDllAsync();
 
         ServerProfilesList.SelectionChanged += (_, _) => OnPrimarySelectionChanged();
@@ -1680,6 +1681,41 @@ internal partial class MainWindow : Window
         SaveBehaviorButton.IsEnabled = !isBusy;
         InjectRunningAcButton.IsEnabled = !isBusy;
         RefreshSessionsButton.IsEnabled = !isBusy;
+        ResetOverlayBarButton.IsEnabled = !isBusy;
+    }
+
+    /// <summary>
+    /// Recovers an off-screen RynthCore overlay bar by writing the
+    /// <c>/rc resetbar</c> engine command to %APPDATA%\RynthCore\dispatch.txt.
+    /// Every running RynthCore client watches that file (ChatFileDispatcher)
+    /// and routes the line through the same chat-command path a typed command
+    /// would take, so each one snaps its bar back to the top-left corner.
+    /// The <c>force:</c> prefix makes repeated clicks re-fire even though the
+    /// file content is unchanged (the dispatcher dedups otherwise).
+    /// </summary>
+    private void ResetOverlayBar()
+    {
+        try
+        {
+            string path = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "RynthCore",
+                "dispatch.txt");
+
+            string? dir = Path.GetDirectoryName(path);
+            if (dir != null)
+                Directory.CreateDirectory(dir);
+
+            File.WriteAllText(path,
+                "# RynthCore dispatch — written by the launcher's Reset Overlay Bar button.\n" +
+                "force:/rc resetbar\n");
+
+            AppendActivity("Reset Overlay Bar: signalled running RynthCore client(s) via dispatch.txt.");
+        }
+        catch (Exception ex)
+        {
+            AppendActivity($"Reset Overlay Bar failed: {ex.Message}");
+        }
     }
 
     private void RefreshSessionState()

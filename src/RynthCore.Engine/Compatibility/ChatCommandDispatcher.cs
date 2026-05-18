@@ -87,6 +87,12 @@ internal static unsafe class ChatCommandDispatcher
             string trimmed = text.Trim();
             if (trimmed.Length == 0) return false;
 
+            // RynthCore engine commands (/rc ...) are handled before plugin
+            // pre-dispatch and before any AC chat routing so they work even
+            // when the overlay is hidden and no plugin can eat the line.
+            if (RynthCoreChatCommands.TryHandle(trimmed))
+                return true;
+
             // Expand shorthand: /s → /say, /t → /tell, /e → /emote
             trimmed = ExpandShorthand(trimmed);
 

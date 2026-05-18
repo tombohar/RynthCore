@@ -52,8 +52,24 @@ internal static class RynthCoreShell
     private static Vector2 _barPosition = new(12f, 12f);
     private static bool _barPositionInitialized;
     private static bool _barResetRequested = true;
+    /// <summary>Previous frame's in-world state, tracked in <see cref="Render"/>
+    /// so the logout→login rising edge can re-assert the remembered bar
+    /// position (ImGui silently clamps the inactive bar window while logged
+    /// out if AC's DisplaySize shrinks during the login transition).</summary>
+    private static bool _wasInWorld;
     private static long _lastBarSaveTick;
     private static Vector2 _lastSavedBarPosition;
+
+    /// <summary>Set from outside AC's render thread (the /rc resetbar chat
+    /// command, or the launcher's Reset Overlay Bar button via dispatch.txt)
+    /// to drag the bar back on-screen. Consumed at the top of
+    /// <see cref="RenderControlBar"/>. Volatile: written by a worker thread,
+    /// read by the render thread.</summary>
+    private static volatile bool _externalResetPending;
+
+    /// <summary>Serializes the two cross-thread writers of the bar cfg file:
+    /// the render-thread throttled save vs. the worker-thread external reset.</summary>
+    private static readonly object BarCfgLock = new();
 
     private static readonly string BarPositionPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
@@ -89,6 +105,20 @@ internal static class RynthCoreShell
         // during that window has been observed to crash D3D9 because plugin
         // controls reach into half-released game data.
         bool inWorld = LoginLifecycleHooks.HasObservedLoginComplete;
+
+        // Logout→login rising edge. While logged out the bar window is not
+        // submitted (early-return below); if AC's DisplaySize transiently
+        // shrinks during the login transition (D3D9 device reset / login
+        // screen) ImGui clamps the inactive bar window toward a corner. On
+        // re-login the FirstUseEver SetNextWindowPos is a no-op, so without
+        // this the bar would reappear wherever ImGui parked it and that
+        // position would then be saved over the good one. Re-assert the
+        // remembered position authoritatively for one frame; the user can
+        // still freely drag it afterwards.
+        if (inWorld && !_wasInWorld)
+            _barResetRequested = true;
+        _wasInWorld = inWorld;
+
         if (!inWorld)
             return;
 
@@ -161,6 +191,19 @@ internal static class RynthCoreShell
 
     private static void RenderControlBar(int frameCount)
     {
+        if (_externalResetPending)
+        {
+            // Recovered via /rc resetbar (chat) or the launcher button. The
+            // cfg file was already rewritten to 12,12 by RequestExternalReset;
+            // mark initialized so the load-from-cfg branch below can't restore
+            // the stale off-screen value, and force a hard reposition.
+            _externalResetPending = false;
+            _barPositionInitialized = true;
+            _barPosition = new Vector2(12f, 12f);
+            _lastSavedBarPosition = _barPosition;
+            _barResetRequested = true;
+        }
+
         if (!_barPositionInitialized)
         {
             _barPosition = LoadBarPosition();
@@ -364,6 +407,21 @@ internal static class RynthCoreShell
         SaveBarPosition();
     }
 
+    /// <summary>
+    /// External, thread-safe request to put the bar back at the top-left
+    /// corner. Safe to call from any thread (chat-command dispatch thread,
+    /// ChatFileDispatcher timer). The live in-memory move happens on the next
+    /// rendered frame via <see cref="_externalResetPending"/>; the persisted
+    /// cfg is rewritten immediately so a relaunch is clean too, even if the
+    /// bar is not currently rendering (e.g. not yet in-world).
+    /// </summary>
+    internal static void RequestExternalReset()
+    {
+        RynthLog.Info("RynthCoreShell: external bar-position reset requested.");
+        _externalResetPending = true;
+        WriteBarPosition(new Vector2(12f, 12f));
+    }
+
     private static Vector2 LoadBarPosition()
     {
         try
@@ -394,12 +452,20 @@ internal static class RynthCoreShell
 
     private static void SaveBarPosition()
     {
+        _lastBarSaveTick = Environment.TickCount64;
+        _lastSavedBarPosition = _barPosition;
+        WriteBarPosition(_barPosition);
+    }
+
+    private static void WriteBarPosition(Vector2 pos)
+    {
         try
         {
-            _lastBarSaveTick = Environment.TickCount64;
-            _lastSavedBarPosition = _barPosition;
-            File.WriteAllText(BarPositionPath,
-                $"{_barPosition.X.ToString(CultureInfo.InvariantCulture)},{_barPosition.Y.ToString(CultureInfo.InvariantCulture)}");
+            lock (BarCfgLock)
+            {
+                File.WriteAllText(BarPositionPath,
+                    $"{pos.X.ToString(CultureInfo.InvariantCulture)},{pos.Y.ToString(CultureInfo.InvariantCulture)}");
+            }
         }
         catch { }
     }

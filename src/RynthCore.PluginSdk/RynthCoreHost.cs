@@ -5,7 +5,7 @@ namespace RynthCore.PluginSdk;
 
 public readonly unsafe struct RynthCoreHost
 {
-    public const uint CurrentApiVersion = 41;
+    public const uint CurrentApiVersion = 42;
 
     private readonly RynthCoreApiNative _api;
 
@@ -81,6 +81,7 @@ public readonly unsafe struct RynthCoreHost
     public bool HasGetObjectSkill => _api.GetObjectSkillFn != IntPtr.Zero;
     public bool HasIsSpellKnown => _api.IsSpellKnownFn != IntPtr.Zero;
     public bool HasReadPlayerEnchantments => _api.ReadPlayerEnchantmentsFn != IntPtr.Zero;
+    public bool HasReadKnownSpells => _api.ReadKnownSpellsFn != IntPtr.Zero;
     public bool HasGetServerTime => _api.GetServerTimeFn != IntPtr.Zero;
     public bool HasReadObjectEnchantments => _api.ReadObjectEnchantmentsFn != IntPtr.Zero;
     public bool HasWorldToScreen => _api.WorldToScreenFn != IntPtr.Zero;
@@ -922,6 +923,28 @@ public readonly unsafe struct RynthCoreHost
         {
             Marshal.FreeHGlobal(spellBuf);
             Marshal.FreeHGlobal(expiryBuf);
+        }
+    }
+
+    public int ReadKnownSpells(uint[] spellIds, int maxCount)
+    {
+        if (_api.ReadKnownSpellsFn == IntPtr.Zero || spellIds == null || maxCount <= 0)
+            return -1;
+
+        IntPtr buf = Marshal.AllocHGlobal(maxCount * sizeof(uint));
+        try
+        {
+            int result = ((delegate* unmanaged[Cdecl]<uint*, int, int>)_api.ReadKnownSpellsFn)(
+                (uint*)buf, maxCount);
+            int count = Math.Max(0, Math.Min(result, Math.Min(maxCount, spellIds.Length)));
+            uint* sp = (uint*)buf;
+            for (int i = 0; i < count; i++)
+                spellIds[i] = sp[i];
+            return result;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buf);
         }
     }
 

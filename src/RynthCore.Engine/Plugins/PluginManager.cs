@@ -164,6 +164,7 @@ internal static class PluginManager
     private static GetObjectSkillCallbackDelegate? _getObjectSkillCallback;
     private static IsSpellKnownCallbackDelegate? _isSpellKnownCallback;
     private static ReadPlayerEnchantmentsCallbackDelegate? _readPlayerEnchantmentsCallback;
+    private static ReadKnownSpellsCallbackDelegate? _readKnownSpellsCallback;
     private static GetServerTimeCallbackDelegate? _getServerTimeCallback;
     private static ReadObjectEnchantmentsCallbackDelegate? _readObjectEnchantmentsCallback;
     private static WorldToScreenCallbackDelegate? _worldToScreenCallback;
@@ -2041,6 +2042,7 @@ internal static class PluginManager
         _getObjectSkillCallback ??= GetObjectSkillAction;
         _isSpellKnownCallback ??= IsSpellKnownAction;
         _readPlayerEnchantmentsCallback ??= ReadPlayerEnchantmentsAction;
+        _readKnownSpellsCallback ??= ReadKnownSpellsAction;
         _getServerTimeCallback ??= GetServerTimeAction;
         _readObjectEnchantmentsCallback ??= ReadObjectEnchantmentsAction;
         _worldToScreenCallback ??= D3D9.GameMatrixCapture.WorldToScreenCallback;
@@ -2131,6 +2133,7 @@ internal static class PluginManager
         _api.GetObjectSkillFn = Marshal.GetFunctionPointerForDelegate(_getObjectSkillCallback);
         _api.IsSpellKnownFn = Marshal.GetFunctionPointerForDelegate(_isSpellKnownCallback);
         _api.ReadPlayerEnchantmentsFn = Marshal.GetFunctionPointerForDelegate(_readPlayerEnchantmentsCallback);
+        _api.ReadKnownSpellsFn = Marshal.GetFunctionPointerForDelegate(_readKnownSpellsCallback);
         _api.GetServerTimeFn = Marshal.GetFunctionPointerForDelegate(_getServerTimeCallback);
         _api.ReadObjectEnchantmentsFn = Marshal.GetFunctionPointerForDelegate(_readObjectEnchantmentsCallback);
         _api.WorldToScreenFn = Marshal.GetFunctionPointerForDelegate(_worldToScreenCallback);
@@ -2449,6 +2452,11 @@ internal static class PluginManager
     private static unsafe int ReadPlayerEnchantmentsAction(uint* spellIds, double* expiryTimes, int maxCount)
     {
         return EnchantmentHooks.ReadPlayerEnchantments(spellIds, expiryTimes, maxCount);
+    }
+
+    private static unsafe int ReadKnownSpellsAction(uint* spellIds, int maxCount)
+    {
+        return ClientObjectHooks.CopyCachedKnownSpells(spellIds, maxCount);
     }
 
     private static unsafe int ReadObjectEnchantmentsAction(uint objectId, uint* spellIds, double* expiryTimes, int maxCount)

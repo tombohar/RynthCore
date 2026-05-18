@@ -262,6 +262,10 @@ internal static class EngineFrameController
             // without this it gets (0,0) → tier-1 casts and never buffs.
             // Throttled internally.
             Compatibility.ClientObjectHooks.PrefetchPlayerSkills();
+            // Same rationale + same main-thread guard: snapshot the spellbook
+            // so the off-thread pump can resolve tiers against spells the char
+            // actually knows (throttled internally).
+            Compatibility.ClientObjectHooks.PrefetchKnownSpells();
 
             // Cold-login object backfill on the SAME AC main thread as the
             // skill prefetch above: deliver objects already present at login

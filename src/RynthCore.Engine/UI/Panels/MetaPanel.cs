@@ -175,6 +175,26 @@ internal static class MetaPanel
         public bool ShowSaveInput;
         public HashSet<string> CollapsedStates = new();
         public HashSet<int> ExpandedRows = new();
+        public string LastSig = " first";   // content signature of the last Rebuild
+    }
+
+    // Cheap content signature — everything the list view shows EXCEPT the
+    // per-tick LastFiredMs (excluded so an idle/botting panel stops flashing;
+    // a structural change still triggers a rebuild).
+    private static string PayloadSig(Payload p)
+    {
+        var sb = new System.Text.StringBuilder(256);
+        sb.Append(p.EnableMeta ? '1' : '0').Append(p.MetaDebug ? '1' : '0')
+          .Append('|').Append(p.CurrentState).Append('|').Append(p.CurrentMetaPath)
+          .Append('|').Append(p.SourceText?.Length ?? 0)
+          .Append('|').Append(string.Join(",", p.Files.Select(f => f.Display)))
+          .Append('|').Append(string.Join(",", p.States));
+        foreach (var r in p.Rules)
+            sb.Append('#').Append(r.State).Append('~').Append(r.Condition).Append('~')
+              .Append(r.ConditionData).Append('~').Append(r.Action).Append('~')
+              .Append(r.ActionData).Append('~').Append(r.Children.Count).Append('~')
+              .Append(r.ActionChildren.Count);
+        return sb.ToString();
     }
 
     // ── Picker overlay ────────────────────────────────────────────────────────
@@ -309,9 +329,12 @@ internal static class MetaPanel
             if (picker.ActivePicker != null) return;
             if (ps.Mode == ViewMode.Editor) return; // don't clobber in-progress edits
             if (!TryFetch(out var fresh)) return;
-            ps.Data = fresh;
+            ps.Data = fresh;   // keep click-handlers on fresh data even if we skip the redraw
             if (ps.Mode == ViewMode.Source && string.IsNullOrEmpty(ps.SourceText))
                 ps.SourceText = fresh.SourceText;
+            string sig = PayloadSig(fresh);
+            if (sig == ps.LastSig) return;   // nothing visible changed → no rebuild → no flash
+            ps.LastSig = sig;
             Rebuild();
         };
         timer.Start();
