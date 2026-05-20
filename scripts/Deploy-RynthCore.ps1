@@ -61,7 +61,8 @@ if (-not $SkipPublish) {
     $env:DOTNET_CLI_HOME = Join-Path $repoRoot ".dotnet-home-deploy-clean"
     $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
 
-    dotnet publish $launcherProject -c Release -r win-x86
+    # --self-contained false is required: omitting it with the launcher's IncludeNativeLibrariesForSelfExtract=true produces a broken half-payload (apphost + coreclr.dll, no framework) that reports ".NET is not installed".
+    dotnet publish $launcherProject -c Release -r win-x86 --self-contained false
     dotnet publish $engineProject -c Release
     dotnet publish $loaderProject -c Release
     foreach ($plugin in $pluginProjects) {
