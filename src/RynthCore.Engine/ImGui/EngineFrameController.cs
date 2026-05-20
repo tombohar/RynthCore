@@ -266,6 +266,18 @@ internal static class EngineFrameController
             // so the off-thread pump can resolve tiers against spells the char
             // actually knows (throttled internally).
             Compatibility.ClientObjectHooks.PrefetchKnownSpells();
+            // Same main-thread guard + rationale: snapshot AC's real
+            // ObjectIsAttackable for every live object so the off-thread pump
+            // can tell NPC/vendor (attackable=false) from monster. Without it
+            // the pump got hardcoded true and the classifier promoted NPCs to
+            // attackable creatures → war magic cast at NPCs (throttled
+            // internally).
+            Compatibility.ClientObjectHooks.PrefetchAttackable();
+            // Same main-thread guard + rationale: snapshot object names and
+            // item types for every live object so the off-thread plugin pump
+            // can classify objects without walking AC's live CObjectMaint
+            // table (0x0067E779 READ-AV class; throttled internally at 3 s).
+            Compatibility.ClientObjectHooks.PrefetchObjectIdentity();
 
             // Cold-login object backfill on the SAME AC main thread as the
             // skill prefetch above: deliver objects already present at login

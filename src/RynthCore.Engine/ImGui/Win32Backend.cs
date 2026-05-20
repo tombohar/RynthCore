@@ -54,6 +54,16 @@ internal static unsafe class Win32Backend
     private const int VK_LWIN = 0x5B;
     private const int VK_RWIN = 0x5C;
     private const int VK_INSERT = 0x2D;
+    private const int VK_RETURN = 0x0D;
+    private const int VK_BACK   = 0x08;
+    private const int VK_ESCAPE = 0x1B;
+    private const int VK_LEFT   = 0x25;
+    private const int VK_UP     = 0x26;
+    private const int VK_RIGHT  = 0x27;
+    private const int VK_DOWN   = 0x28;
+    private const int VK_HOME   = 0x24;
+    private const int VK_END    = 0x23;
+    private const int VK_DELETE = 0x2E;
 
     // ─── Win32 P/Invoke ───────────────────────────────────────────────
     // On x86, SetWindowLongPtr doesn't exist — use SetWindowLong
@@ -185,6 +195,13 @@ internal static unsafe class Win32Backend
             return IntPtr.Zero;
         return CallWindowProcA(_originalWndProc, _gameHwnd, msg, wParam, lParam);
     }
+
+    /// <summary>Deactivates chat capture.  The game HWND retains focus throughout so no
+    /// Win32 focus transfer is needed.</summary>
+    public static void ReturnFocusToGame() => ChatCaptureActive = false;
+    /// <summary>Called by AvaloniaSubclassWndProc when WM_LBUTTONUP arrives via the
+    /// SetCapture route so _avPanelMouseDown doesn't get stuck true.</summary>
+    internal static void ClearPanelMouseDown() => _avPanelMouseDown = false;
     private static readonly bool[] _mouseButtons = new bool[5];
     private static readonly object _inputLock = new();
     private static readonly Queue<QueuedInputMessage> _pendingInput = new();
@@ -196,6 +213,35 @@ internal static unsafe class Win32Backend
     private static bool _focusInitialized;
     private static bool _insertWasDown;
     private static bool _avaloniaHasMouse;     // cursor is currently over the Avalonia panel
+    /// <summary>While true, WM_CHAR / special keys are consumed for the chat input TextBox
+    /// instead of passing to the game.  Focus stays on the game HWND.</summary>
+    public static volatile bool ChatCaptureActive;
+
+    // ── Chat input callbacks (set by RynthChatPanel) ─────────────────────
+    /// <summary>Fired when Enter in-game activates chat (UI thread dispatch optional).</summary>
+    public static Action? OnChatCaptureActivated;
+    /// <summary>Fired for each printable character (≥ 0x20) while capture is active.</summary>
+    public static Action<char>? OnChatChar;
+    /// <summary>Fired on VK_BACK while capture is active.</summary>
+    public static Action? OnChatBackspace;
+    /// <summary>Fired on VK_DELETE while capture is active.</summary>
+    public static Action? OnChatDelete;
+    /// <summary>Fired on VK_RETURN while capture is active (ChatCaptureActive already false).</summary>
+    public static Action? OnChatSend;
+    /// <summary>Fired on VK_ESCAPE while capture is active (ChatCaptureActive already false).</summary>
+    public static Action? OnChatCancel;
+    /// <summary>Fired on VK_LEFT while capture is active.</summary>
+    public static Action? OnChatLeft;
+    /// <summary>Fired on VK_RIGHT while capture is active.</summary>
+    public static Action? OnChatRight;
+    /// <summary>Fired on VK_HOME while capture is active.</summary>
+    public static Action? OnChatHome;
+    /// <summary>Fired on VK_END while capture is active.</summary>
+    public static Action? OnChatEnd;
+    /// <summary>Fired on VK_UP while capture is active (history previous).</summary>
+    public static Action? OnChatUp;
+    /// <summary>Fired on VK_DOWN while capture is active (history next).</summary>
+    public static Action? OnChatDown;
     private static int  _lastPanelClientX;     // last game-client pos over the panel (for wheel)
     private static int  _lastPanelClientY;
 
@@ -373,6 +419,45 @@ internal static unsafe class Win32Backend
         try
         {
             _wndProcLogCount++;
+
+            // ── Chat capture: consume all key input for the chat TextBox ────
+            // Game HWND keeps Win32 focus throughout; callbacks dispatch Text
+            // updates to the panel on Avalonia's UI thread — no Avalonia focus needed.
+            if (ChatCaptureActive && IsKeyMessage(msg))
+            {
+                if (msg == WM_CHAR)
+                {
+                    int ch = (int)wParam;
+                    if (ch >= 0x20)               // printable characters only
+                        OnChatChar?.Invoke((char)ch);
+                }
+                else if (msg == WM_KEYDOWN)
+                {
+                    int vk = (int)wParam;
+                    if      (vk == VK_RETURN)  { ChatCaptureActive = false; OnChatSend?.Invoke(); }
+                    else if (vk == VK_ESCAPE)  { ChatCaptureActive = false; OnChatCancel?.Invoke(); }
+                    else if (vk == VK_BACK)    { OnChatBackspace?.Invoke(); }
+                    else if (vk == VK_DELETE)  { OnChatDelete?.Invoke(); }
+                    else if (vk == VK_LEFT)    { OnChatLeft?.Invoke(); }
+                    else if (vk == VK_RIGHT)   { OnChatRight?.Invoke(); }
+                    else if (vk == VK_HOME)    { OnChatHome?.Invoke(); }
+                    else if (vk == VK_END)     { OnChatEnd?.Invoke(); }
+                    else if (vk == VK_UP)      { OnChatUp?.Invoke(); }
+                    else if (vk == VK_DOWN)    { OnChatDown?.Invoke(); }
+                }
+                return IntPtr.Zero;   // eat all key messages while chat is active
+            }
+
+            // ── Chat: Enter in-game activates the chat TextBox ───────────
+            if (msg == WM_KEYDOWN && (int)wParam == VK_RETURN && !ChatCaptureActive)
+            {
+                if (OnChatCaptureActivated != null)
+                {
+                    ChatCaptureActive = true;
+                    OnChatCaptureActivated.Invoke();
+                    return IntPtr.Zero;
+                }
+            }
 
             // ── Restore focus to game when Avalonia acquires it ───────────
             if (msg == WM_RYNTH_RESTORE_FOCUS)
@@ -599,6 +684,20 @@ internal static unsafe class Win32Backend
 
             _lastPanelClientX = overlayPoint.X;
             _lastPanelClientY = overlayPoint.Y;
+
+            // A docked press is starting (over a docked panel/bar). Assert no
+            // floating panel is still marked as the shared-HWND SetCapture
+            // coordinate owner: a stale FloatingPanelHost.PointerCapturingHost
+            // (left set when a floating WM_LBUTTONUP never reached
+            // AvaloniaSubclassWndProc — swallowed by the DockedPanelPointer-
+            // CaptureActive early-return, or a redock/close mid-press) would
+            // make this docked interaction's capture-routed move/release get
+            // remapped into the floating panel's off-bounds space — the docked
+            // click is eaten / needs a double-click. A WM_LBUTTONDOWN means the
+            // button was up before, so any prior floating press already ended;
+            // clearing here cannot truncate a live floating interaction.
+            if (msg == WM_LBUTTONDOWN)
+                FloatingPanelHost.PointerCapturingHost = null;
 
             if (AvaloniaOverlay.TryGetBarButtonTitleAt(overlayPoint.X, overlayPoint.Y, out string? barButtonTitle))
             {

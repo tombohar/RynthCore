@@ -21,13 +21,20 @@ $loaderProject = Join-Path $repoRoot "src\RynthCore.Loader\RynthCore.Loader.cspr
 # the rynthcore\Plugins\RynthCore.Plugin.RynthAi tree is a stub (~1 MB
 # published) that lacks Combat / Loot / Meta / Raycasting / LegacyUi.
 # Always source from the RynthSuite tree so the real ~8 MB plugin ships.
-$rynthAiSourceRoot = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthAi"
+$rynthAiSourceRoot   = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthAi"
+$rynthChatSourceRoot = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthChat"
 $pluginProjects = @(
     @{
         Project    = Join-Path $rynthAiSourceRoot "RynthCore.Plugin.RynthAi.csproj"
         Publish    = Join-Path $rynthAiSourceRoot "bin\Release\net10.0-windows\win-x86\publish"
         DllName    = "RynthCore.Plugin.RynthAi.dll"
         DestSubdir = "RynthAi"
+    },
+    @{
+        Project    = Join-Path $rynthChatSourceRoot "RynthCore.Plugin.RynthChat.csproj"
+        Publish    = Join-Path $rynthChatSourceRoot "bin\Release\net10.0-windows\win-x86\publish"
+        DllName    = "RynthCore.Plugin.RynthChat.dll"
+        DestSubdir = "RynthChat"
     }
 )
 
@@ -111,6 +118,17 @@ Copy-FilteredChildren -Source $enginePublish -Target $runtimeDir -ExcludeNames @
 # Loader DLL — this is what RynthCore.Injector loads into acclient.exe; the
 # Loader then maps RynthCore.Engine.dll and provides hot-reload support.
 Copy-Item -LiteralPath (Join-Path $loaderPublish "RynthCore.Loader.dll") -Destination (Join-Path $runtimeDir "RynthCore.Loader.dll") -Force
+
+# SEH trampoline — small native x86 MSVC DLL providing __try/__except wrappers
+# around dangerous AC API calls so object-teardown AVs are caught instead of
+# crashing acclient.exe. Built by native\SehTrampoline\Build-SehTrampoline.ps1.
+$sehTrampolineSrc = Join-Path $repoRoot "native\SehTrampoline\bin\RynthCore.SehTrampoline.dll"
+if (Test-Path -LiteralPath $sehTrampolineSrc) {
+    Copy-Item -LiteralPath $sehTrampolineSrc -Destination (Join-Path $runtimeDir "RynthCore.SehTrampoline.dll") -Force
+    Write-Host "SEH trampoline deployed to $runtimeDir"
+} else {
+    Write-Warning "RynthCore.SehTrampoline.dll not found at $sehTrampolineSrc — build it with native\SehTrampoline\Build-SehTrampoline.ps1"
+}
 
 Copy-Item -LiteralPath (Join-Path $launcherPublish "RynthCore.App.Avalonia.exe") -Destination (Join-Path $Destination "RynthCore.exe") -Force
 

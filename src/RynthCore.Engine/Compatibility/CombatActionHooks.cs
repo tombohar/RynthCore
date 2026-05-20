@@ -61,6 +61,8 @@ internal static class CombatActionHooks
     private static RequestIdDelegate? _requestId;
     private static CastSpellDelegate? _castSpell;
     private static CastSpellClientDelegate? _castSpellClient;
+    private static IntPtr _castSpellClientPtr;
+    private static int _sehAvLogCount;
     private static QueryHealthResponseDelegate? _queryHealthResponseDetour;
     private static QueryHealthResponseDelegate? _originalQueryHealthResponse;
     private static QueryHealthResponseDelegate? _identifyObjectDetour;
@@ -267,6 +269,7 @@ internal static class CombatActionHooks
                 string prologueHex = Convert.ToHexString(text, csTextOff, 16);
                 _castSpellClient = Marshal.GetDelegateForFunctionPointer<CastSpellClientDelegate>(
                     new IntPtr(ClientMagicSystemCastSpellVa));
+                _castSpellClientPtr = new IntPtr(ClientMagicSystemCastSpellVa);
                 RynthLog.Compat(
                     $"Compat: ClientMagicSystem::CastSpell bound at 0x{ClientMagicSystemCastSpellVa:X8} " +
                     $"(prologue {prologueHex}, plausible={plausiblePrologue})");
@@ -406,16 +409,23 @@ internal static class CombatActionHooks
     public static bool CastSpell(uint targetId, int spellId)
     {
         if (spellId <= 0) return false;
+        if (_castSpellClient == null) return false;
 
-        // Prefer ClientMagicSystem::CastSpell — initiates the full client-side
-        // cast sequence (animation, state, network). AC's CastSpell reads its
-        // "currently selected target" when `targetIsSelected=1`; if nothing
-        // is actually selected in the UI, AC dereferences null at offset 0x28
-        // inside the spell-target lookup (observed crash at 0x00416C86 when
-        // BuffManager called CastSpell(playerId, spellId) without first
-        // selecting the player). Defensively call SelectItem(targetId) here
-        // so AC's selection is in sync with what the caller intended,
-        // regardless of whether the plugin remembered to.
+        // Call ClientMagicSystem::CastSpell directly off the plugin pump thread.
+        // This is the proven-working casting path (buffs + combat resolve in
+        // chat). The earlier EndScene-marshalled variant (AcMainThreadQueue,
+        // drained from OnEndScene) was REVERTED 2026-05-19: EndScene fires AC's
+        // IncrementBusyCount but is not the context that drives the cast state
+        // machine to completion, so combat casts never produced a projectile /
+        // damage / "You cast" chat — busy leaked, AC's single cast slot jammed
+        // "Casting <spell>" client-wide, and even manual casting died. Do NOT
+        // re-introduce queue/EndScene marshalling for casts.
+        // The documented object-teardown AV (0x0055FA24 [null+0x40] /
+        // 0x00416C86 [null+0x28]) is contained per-callsite by the SEH
+        // trampoline below (__try/__except in RynthCore.SehTrampoline.dll),
+        // which is the correct fix for that AV. AC's CastSpell reads its
+        // "currently selected target" when targetIsSelected=1; SelectItem
+        // first so AC's selection matches the caller's intent.
         if (_castSpellClient != null)
         {
             try
@@ -430,6 +440,15 @@ internal static class CombatActionHooks
                 {
                     targetIsSelected = 0;
                 }
+
+                if (SehTrampoline.IsAvailable && _castSpellClientPtr != IntPtr.Zero)
+                {
+                    bool ok = SehTrampoline.CdeclVoidUintByte(_castSpellClientPtr, (uint)spellId, targetIsSelected);
+                    if (!ok && System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
+                        RynthLog.Compat($"[SEH] AV in CastSpell spell={spellId} target=0x{targetId:X8} — caught");
+                    return ok;
+                }
+
                 _castSpellClient((uint)spellId, targetIsSelected);
                 return true;
             }
@@ -444,17 +463,40 @@ internal static class CombatActionHooks
         // wrapper (_castSpell) resolves to the WRONG function on this
         // acclient.exe: CombatPrologue (83 EC 0C 53 56 57 E8) is shared by many
         // AC functions and FindPrologueBefore takes the FIRST match, which is
-        // not the cast wrapper. Calling it crashes AC inside its own code with
-        // a near-null write AV (observed 0x00416C86 [null+0x28] and
-        // 0x0055FA24 [null+0x40]). The 2026-05-14 "binaries are byte-identical
-        // so the pattern is fine" reasoning was wrong: identity makes the
-        // pattern consistently wrong on BOTH retail and ACE, not correct.
+        // not the cast wrapper, so calling it would crash AC. The 2026-05-14
+        // "binaries are byte-identical so the pattern is fine" reasoning was
+        // wrong: identity makes the pattern consistently wrong on BOTH retail
+        // and ACE, not correct.
+        // ⚠ 2026-05-18, DUMP-VERIFIED: the AVs at 0x00416C86 [null+0x28] and
+        // 0x0055FA24 [null+0x40] that older notes/comments blamed on this
+        // fallback are NOT cast-related. Resolved via acclient.map they are
+        // DBOCache::DestroyObj and CPlayerSystem::CalculateObjectRangeChecks →
+        // List<ObjectRangeInfo>::remove — AC OBJECT-TEARDOWN code tripping over
+        // a corrupted object/range list (async lifecycle corruption class, not
+        // spellcasting). Do NOT chase CastSpell for these. See
+        // rynthcore_castspell_fallback_pitfall.md / rynthcore_crash_investigation.md.
         // _castSpellClient (the verified ClientMagicSystem::CastSpell VA bound
         // in Probe) is the only safe path; if it is unavailable we refuse the
         // cast. BuffManager.CastSpellInner and CombatManager both handle a
         // false / no-op return without wedging (skip the spell, retry next
         // cycle), so refusing is strictly safer than crashing the client.
         return false;
+    }
+
+    // Called by AcMainThreadQueue.Drain on AC's main thread (EndScene path).
+    // The preceding queued SelectItem entry already set AC's selection, so
+    // cast with targetIsSelected=1. Defensive: never throw into the drain loop.
+    internal static void ExecuteQueuedCast(uint spellId)
+    {
+        if (_castSpellClient == null) return;
+        if (SehTrampoline.IsAvailable && _castSpellClientPtr != IntPtr.Zero)
+        {
+            bool ok = SehTrampoline.CdeclVoidUintByte(_castSpellClientPtr, spellId, 1);
+            if (!ok && System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
+                RynthLog.Compat($"[SEH] AV in CastSpell spell={spellId} — caught, cast skipped");
+            return;
+        }
+        try { _castSpellClient.Invoke(spellId, 1); } catch { }
     }
 
     public static int MapAttackHeight(int uiHeight)
@@ -477,6 +519,7 @@ internal static class CombatActionHooks
         _requestId = null;
         _castSpell = null;
         _castSpellClient = null;
+        _castSpellClientPtr = IntPtr.Zero;
         _queryHealthResponseDetour = null;
         _originalQueryHealthResponse = null;
         _identifyObjectDetour = null;

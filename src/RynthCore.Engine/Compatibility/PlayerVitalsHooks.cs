@@ -494,10 +494,12 @@ internal static class PlayerVitalsHooks
         // nested-pointer derefs inside InqAttribute2nd are safe. Catches
         // god-mode / enchantment-drop cases where the buffed effective max
         // changes without a server-pushed UpdateAttribute2nd(MaxHealth) event.
-        TryRefreshLiveMaxHealth();
+        TryRefreshLiveMaxVitals();
     }
 
-    private static void TryRefreshLiveMaxHealth()
+    // Called from every UpdateCache() invocation so buff/vitae changes that don't
+    // generate an explicit UpdateAttribute2nd packet are still picked up promptly.
+    private static void TryRefreshLiveMaxVitals()
     {
         if (_inqAttribute2ndUint == null) return;
         IntPtr qualities = KnownPlayerQualitiesPtr;
@@ -505,13 +507,17 @@ internal static class PlayerVitalsHooks
         if (!LoginLifecycleHooks.HasObservedLoginComplete) return;
         if (!ClientObjectHooks.IsReadablePointer(qualities)) return;
 
-        if (!TryInqUint(qualities, MaxHealthType, out uint live) || live == 0)
-            return;
+        TryInqUint(qualities, MaxHealthType,   out uint liveHp);
+        TryInqUint(qualities, MaxStaminaType,  out uint liveSt);
+        TryInqUint(qualities, MaxManaType,     out uint liveMn);
 
         lock (CacheLock)
         {
-            if (_snapshot.MaxHealth != live)
-                _snapshot = _snapshot with { MaxHealth = live };
+            PlayerVitalsSnapshot s = _snapshot;
+            if (liveHp != 0 && s.MaxHealth  != liveHp) s = s with { MaxHealth  = liveHp };
+            if (liveSt != 0 && s.MaxStamina != liveSt) s = s with { MaxStamina = liveSt };
+            if (liveMn != 0 && s.MaxMana    != liveMn) s = s with { MaxMana    = liveMn };
+            _snapshot = s;
         }
     }
 

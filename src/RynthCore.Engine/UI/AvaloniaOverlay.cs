@@ -157,6 +157,36 @@ internal static class AvaloniaOverlay
             try { snap[i].Window.SetClickThrough(active); } catch { }
         }
     }
+
+    // GetAsyncKeyState is already declared on this type (used by IsCtrlHeld).
+    private const int VK_LBUTTON = 0x01;
+    private static int _stuckClickThroughTicks;
+
+    /// <summary>
+    /// Self-healing watchdog, called ~1s from HeartbeatLogger (an engine-owned
+    /// thread independent of the input path). <see cref="DockedPanelPointerCaptureActive"/>
+    /// makes every non-gated floating panel WS_EX_TRANSPARENT so a docked
+    /// drag/resize isn't stolen by a floating window the cursor crosses — a
+    /// state that is only ever valid WHILE a docked drag holds the left mouse
+    /// button down. Several disarm paths can be missed (Avalonia capture lost,
+    /// panel torn down on redock, the release not routed — the chronic failure
+    /// mode of this subsystem), stranding every floating panel permanently
+    /// click-through: "can't interact at all, clicks go through to whatever's
+    /// underneath", with zero input ever reaching FloatingPanelHost. If the
+    /// flag is set while the physical left button is NOT down, no drag can be
+    /// in progress, so force it off. Cannot interrupt a real drag (a real drag
+    /// holds LBUTTON); the 2-tick confirm is pure belt-and-braces.
+    /// </summary>
+    internal static void WatchdogClearStuckClickThrough()
+    {
+        if (!DockedPanelPointerCaptureActive) { _stuckClickThroughTicks = 0; return; }
+        if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0) { _stuckClickThroughTicks = 0; return; }
+        if (++_stuckClickThroughTicks < 2) return;
+        _stuckClickThroughTicks = 0;
+        RynthLog.Info("AvaloniaOverlay watchdog: DockedPanelPointerCaptureActive was stuck true with the left mouse button up — forcing false (floating panels had been left click-through).");
+        SetDockedPanelPointerCaptureActive(false);
+    }
+
     internal static volatile int DragOffsetX;
     internal static volatile int DragOffsetY;
     internal static volatile bool DragCommitPending;
@@ -629,6 +659,9 @@ internal class RynthOverlayWindow : Window
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT lpPoint);
+    [DllImport("user32.dll")] private static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
 
     private const int  GWL_EXSTYLE      = -20;
     private const int  GWL_WNDPROC      = -4;
@@ -638,6 +671,8 @@ internal class RynthOverlayWindow : Window
     private const uint SWP_NOSIZE       = 0x0001;
     private const uint SWP_NOACTIVATE   = 0x0010;
     private const uint SWP_NOZORDER     = 0x0004;
+    private const uint WM_MOUSEMOVE     = 0x0200;
+    private const uint WM_LBUTTONUP    = 0x0202;
     private const uint WM_MOUSELEAVE    = 0x02A3;
     private const uint WM_NCMOUSELEAVE  = 0x02A2;
     private const uint WM_SETFOCUS      = 0x0007;
@@ -691,11 +726,49 @@ internal class RynthOverlayWindow : Window
         // reclaim it. PostMessage is non-blocking — it queues on the game
         // thread's message pump and WndProcHook handles it there with a
         // same-thread SetFocus call (no cross-thread wait, no click delay).
-        if (msg == WM_SETFOCUS)
+        if (msg == WM_SETFOCUS && !Win32Backend.ChatCaptureActive)
         {
             IntPtr gameHwnd = Win32Backend.GameHwnd;
             if (gameHwnd != IntPtr.Zero)
                 PostMessage(gameHwnd, Win32Backend.WM_RYNTH_RESTORE_FOCUS, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        // avHwnd is parked at screen (-10000,-10000). When Avalonia calls
+        // SetCapture(avHwnd) for a slider drag, Win32 delivers subsequent
+        // WM_MOUSEMOVE/WM_LBUTTONUP to avHwnd with lParam relative to that
+        // offscreen origin — coords offset by +10000 on each axis.
+        //
+        // For floating panels (PointerCapturingHost set by ForwardInput):
+        //   correct avX = OffBoundsCanvasX * scale + (cursorScreen.X - hostScreenLeft)
+        //   — mirrors the ForwardInput translation so Avalonia sees a consistent
+        //     coordinate space for both the press and subsequent moves.
+        // For docked panels (PointerCapturingHost null):
+        //   correct coord = game-client-relative (ScreenToClient(gameHwnd)).
+        if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONUP)
+        {
+            if (GetCursorPos(out POINT cur))
+            {
+                var captureHost = FloatingPanelHost.PointerCapturingHost;
+                if (captureHost != null)
+                {
+                    float scale = AvaloniaOverlay.InputScale > 0 ? AvaloniaOverlay.InputScale : 1f;
+                    int avX = (int)Math.Round(captureHost.OffBoundsCanvasX * scale) + (cur.X - captureHost.ScreenLeft);
+                    int avY = (int)Math.Round(captureHost.OffBoundsCanvasY * scale) + (cur.Y - captureHost.ScreenTop);
+                    lParam = new IntPtr(((avY & 0xFFFF) << 16) | (avX & 0xFFFF));
+                }
+                else
+                {
+                    POINT p = cur;
+                    IntPtr gameHwnd = Win32Backend.GameHwnd;
+                    if (gameHwnd != IntPtr.Zero && ScreenToClient(gameHwnd, ref p))
+                        lParam = new IntPtr(((p.Y & 0xFFFF) << 16) | (p.X & 0xFFFF));
+                }
+            }
+            if (msg == WM_LBUTTONUP)
+            {
+                FloatingPanelHost.PointerCapturingHost = null;
+                Win32Backend.ClearPanelMouseDown();
+            }
         }
 
         return CallWindowProcA(_avaloniaOriginalWndProc, hWnd, msg, wParam, lParam);
@@ -3056,6 +3129,10 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     public double OffBoundsCanvasY { get; }
     public int ScreenLeft => _layered.ScreenLeft;
     public int ScreenTop => _layered.ScreenTop;
+    /// <summary>Set by ForwardInput before PostMessage(WM_LBUTTONDOWN) so that
+    /// AvaloniaSubclassWndProc can translate SetCapture-routed WM_MOUSEMOVE back
+    /// to Avalonia off-bounds coordinates instead of game-client coordinates.</summary>
+    internal static volatile FloatingPanelHost? PointerCapturingHost;
     /// <summary>
     /// True for panels whose click-through is driven by their own settings
     /// (e.g. radar's Ctrl-gated mode). The eager docked-drag path skips them
@@ -3277,6 +3354,10 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     public void MoveScreen(int screenLeft, int screenTop) => _layered.Move(screenLeft, screenTop);
 
     private int _inputLogCount;
+    // Slider currently being dragged via the popped-out geometry path. The
+    // LayeredWindow holds OS capture for the whole press, so DOWN/MOVE/UP all
+    // arrive in ForwardInput; this tracks the target across the drag.
+    private Slider? _activeSlider;
 
     private void ForwardInput(uint msg, IntPtr wParam, IntPtr lParam, int layeredClientX, int layeredClientY)
     {
@@ -3361,6 +3442,7 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
             try
             {
                 Button? btn = FindDeepestButtonAt(PanelBorder, new Point(lx, ly));
+                RynthLog.Info($"FloatingPanelHost({Title}): LBUTTONDOWN logical=({lx:F1},{ly:F1}) btn={btn?.Content ?? "null"} enabled={btn?.IsEffectivelyEnabled} visible={btn?.IsEffectivelyVisible}.");
                 if (btn != null && btn.IsEffectivelyEnabled && btn.IsEffectivelyVisible)
                 {
                     RynthLog.Info($"FloatingPanelHost({Title}): button hit '{btn.Content}' at logical=({lx:F1},{ly:F1}).");
@@ -3402,6 +3484,51 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
             }
         }
 
+        // --- Slider drag for popped-out content -----------------------------
+        // Same rationale as the Button block above: the panel Border is parked
+        // off-bounds (canvas X ≈ 2500) so Avalonia's renderer hit-test rejects
+        // forwarded WMs and a Slider never sees them. Drive Slider.Value
+        // directly from cursor geometry instead. The LayeredWindow holds OS
+        // capture for the whole press, so DOWN starts the drag and MOVE/UP
+        // continue it. Placed before the DockedPanelPointerCaptureActive
+        // early-return below so an in-progress slider drag always completes.
+        {
+            const uint WM_MOUSEMOVE_S = 0x0200;
+            const uint WM_LBUTTONUP_S = 0x0202;
+            if (msg == WM_LBUTTONDOWN || (_activeSlider != null && (msg == WM_MOUSEMOVE_S || msg == WM_LBUTTONUP_S)))
+            {
+                float sScale = AvaloniaOverlay.InputScale > 0 ? AvaloniaOverlay.InputScale : 1f;
+                double splx = layeredClientX / sScale;
+                double sply = layeredClientY / sScale;
+                Slider? slider = msg == WM_LBUTTONDOWN
+                    ? FindDeepestSliderAt(PanelBorder, new Point(splx, sply))
+                    : _activeSlider;
+                if (slider != null && slider.IsEffectivelyEnabled && slider.IsEffectivelyVisible)
+                {
+                    if (msg == WM_LBUTTONDOWN) _activeSlider = slider;
+                    Slider captured = slider;
+                    double cx = splx, cy = sply;
+                    bool end = msg == WM_LBUTTONUP_S;
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        try { DriveSliderFromPanelPoint(captured, cx, cy); }
+                        catch (Exception ex) { RynthLog.Info($"FloatingPanelHost({Title}): slider drive threw {ex.GetType().Name}: {ex.Message}"); }
+                    });
+                    if (end) _activeSlider = null;
+                    return;
+                }
+                if (msg != WM_LBUTTONDOWN)
+                {
+                    // Active-slider MOVE/UP but the target vanished (panel
+                    // redocked/closed mid-drag): stop, don't forward.
+                    if (msg == WM_LBUTTONUP_S) _activeSlider = null;
+                    return;
+                }
+                // WM_LBUTTONDOWN not over a slider: fall through to the
+                // existing PostMessage path below.
+            }
+        }
+
         // Translate from layered-client (physical px) to Avalonia-client
         // (also physical px). The panel Border is parked at canvas LOGICAL
         // coord (OffBoundsCanvasX, OffBoundsCanvasY); multiply by inputScale
@@ -3438,6 +3565,11 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         }
 
         IntPtr packed = new IntPtr(((avY & 0xFFFF) << 16) | (avX & 0xFFFF));
+        // Track which host forwarded the LBUTTONDOWN so that
+        // AvaloniaSubclassWndProc can re-map SetCapture-routed WM_MOUSEMOVE
+        // back into the same off-bounds Avalonia coordinate space.
+        if (msg == 0x0201 /* WM_LBUTTONDOWN */)
+            PointerCapturingHost = this;
         PostMessage(avHwnd, msg, wParam, packed);
     }
 
@@ -3469,6 +3601,56 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
                 result = btn;
         }
         return result;
+    }
+
+    /// <summary>
+    /// Deepest <see cref="Slider"/> whose layout rect contains
+    /// <paramref name="pointInRoot"/>. Same off-bounds-safe geometry walk as
+    /// <see cref="FindDeepestButtonAt"/> (the renderer hit-test is unusable
+    /// for the parked Border).
+    /// </summary>
+    private static Slider? FindDeepestSliderAt(Visual root, Point pointInRoot)
+    {
+        Slider? result = null;
+        foreach (var child in root.GetVisualChildren())
+        {
+            if (!child.IsVisible) continue;
+            var bounds = child.Bounds;
+            if (!bounds.Contains(pointInRoot)) continue;
+
+            Point pInChild = new Point(pointInRoot.X - bounds.X, pointInRoot.Y - bounds.Y);
+            var deeper = FindDeepestSliderAt(child, pInChild);
+            if (deeper != null)
+                result = deeper;
+            else if (child is Slider sl)
+                result = sl;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Set <paramref name="s"/>'s Value from a point in PanelBorder-logical
+    /// space (the floating geometry frame). Linear map over the slider's
+    /// layout bounds — good enough for settings sliders; the thumb's
+    /// half-extent isn't compensated. Must run on the UI thread.
+    /// </summary>
+    private void DriveSliderFromPanelPoint(Slider s, double panelX, double panelY)
+    {
+        if (s.TranslatePoint(new Point(0, 0), PanelBorder) is not Point origin)
+            return;
+        double w = s.Bounds.Width;
+        double h = s.Bounds.Height;
+        double localX = panelX - origin.X;
+        double localY = panelY - origin.Y;
+        double frac = s.Orientation == Orientation.Vertical
+            ? (h <= 0 ? 0 : 1.0 - Math.Clamp(localY / h, 0, 1))
+            : (w <= 0 ? 0 : Math.Clamp(localX / w, 0, 1));
+        if (s.IsDirectionReversed)
+            frac = 1.0 - frac;
+        double v = s.Minimum + frac * (s.Maximum - s.Minimum);
+        if (s.IsSnapToTickEnabled && s.TickFrequency > 0)
+            v = s.Minimum + Math.Round((v - s.Minimum) / s.TickFrequency) * s.TickFrequency;
+        s.Value = Math.Clamp(v, s.Minimum, s.Maximum);
     }
 
     private void OnLayeredMoved(int screenX, int screenY)
@@ -3505,6 +3687,13 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        // If this host was the shared-HWND SetCapture coordinate owner, drop
+        // the reference so a torn-down / redocked panel can't keep docked
+        // input remapped into its (now gone) off-bounds region.
+        if (PointerCapturingHost == this)
+            PointerCapturingHost = null;
+        _activeSlider = null;
 
         _layered.OnInput = null;
         _layered.OnMoved = null;

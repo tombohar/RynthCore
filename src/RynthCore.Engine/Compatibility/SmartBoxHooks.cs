@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading;
+
 using RynthCore.Engine.Hooking;
 using RynthCore.Engine.Plugins;
 
@@ -16,7 +16,6 @@ internal static class SmartBoxHooks
     private const uint PlayerPositionUpdateOpcode = 0x0000F74B;
     private const uint VectorUpdateOpcode = 0x0000F74E;
     private const uint UpdateObjectOpcode = 0x0000F7DB;
-    private const uint GameEventOpcode = 0x0000F7B0;
 
     // ACSmartBox::DispatchSmartBoxEvent
     // 83 EC 08 53 8B 5C 24 10 8B 53 30 83 FA 04 8B 43 2C 56 8B F1 89 44 24 14 89 54 24 08 72 ?? 8B 08
@@ -126,16 +125,6 @@ internal static class SmartBoxHooks
         {
             TryQueueHealthUpdate(blob, info);
 
-            // Game events arrive as 0xF7B0 wrapper: [F7B0][playerId][seq][innerEventType][...]
-            // Check for IdentifyObject response (inner event 0xC9) after the original processes it.
-            if (info.Opcode == GameEventOpcode)
-                TryHandleGameEvent(blob, info);
-            else if (info.Opcode == 0xC9 && info.RawObjectId != 0)
-            {
-                WireParseIdentifyFromBlob(blob, info.BlobSize, wrapped: false);
-                TryCacheVitalsFromIdentify(info.RawObjectId);
-            }
-
             if (info.RawObjectId != 0 &&
                 (info.Opcode == PositionUpdateOpcode ||
                  info.Opcode == PlayerPositionUpdateOpcode ||
@@ -173,19 +162,6 @@ internal static class SmartBoxHooks
         catch { }
 
         uint result = pOriginal(thisPtr, blob);
-
-        // After the original handler processes 0xC9 (IdentifyObject response),
-        // the weenie's qualities are populated — read maxHealth and cache it.
-        try
-        {
-            if (info.Opcode == 0xC9 && info.RawObjectId != 0)
-            {
-                WireParseIdentifyFromBlob(blob, info.BlobSize, wrapped: false);
-                TryCacheVitalsFromIdentify(info.RawObjectId);
-            }
-        }
-        catch { }
-
         return result;
     }
 
@@ -250,96 +226,15 @@ internal static class SmartBoxHooks
         }
     }
 
-    private static int _identifyLogCount;
 
-    private static void TryHandleGameEvent(IntPtr blob, SmartBoxEventInfo info)
-    {
-        // 0xF7B0 game event layout: [0xF7B0(4)][playerId(4)][sequence(4)][innerEventType(4)][eventData...]
-        // Minimum size: 16 bytes for the header
-        if (blob == IntPtr.Zero || info.BlobSize < 16)
-            return;
 
-        try
-        {
-            IntPtr payloadPtr = Marshal.ReadIntPtr(IntPtr.Add(blob, NetBlobBufPtrOffset));
-            if (payloadPtr == IntPtr.Zero)
-                return;
-
-            uint innerEvent = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, 12)));
-
-            // 0xC9 = IdentifyObject response
-            // Layout after inner event type: [objectId(4)][flags(4)][success(4)][data...]
-            if (innerEvent == 0xC9 && info.BlobSize >= 20)
-            {
-                uint objectId = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, 16)));
-                if (objectId != 0)
-                {
-                    WireParseIdentifyFromBlob(blob, info.BlobSize, wrapped: true);
-                    TryCacheVitalsFromIdentify(objectId);
-                }
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    private static void TryCacheVitalsFromIdentify(uint objectId)
-    {
-        try
-        {
-            if (!ClientObjectHooks.TryGetWeenieObjectPtr(objectId, out IntPtr pWeenie) || pWeenie == IntPtr.Zero)
-                return;
-
-            // We're on the game thread (DispatchGameEvent), so InqAttribute2ndStruct is safe.
-            if (PlayerVitalsHooks.TryReadObjectMaxHealth(pWeenie, out uint maxHealth) && maxHealth > 0)
-            {
-                ObjectQualityCache.SetMaxHealth(pWeenie, maxHealth);
-
-                int count = Interlocked.Increment(ref _identifyLogCount);
-                if (count <= 12)
-                    RynthLog.Verbose($"Compat: identify 0xC9 obj=0x{objectId:X8} maxHealth={maxHealth}");
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    /// <summary>
-    /// Parses the 0xC9 IdentifyObject CreatureProfile straight from the packet
-    /// wire bytes (authoritative absolute health/maxHealth), as opposed to a
-    /// post-handler creature InqAttribute2nd read which is unreliable on ACE.
-    /// The CombatActionHooks parser expects [_][objectId][flags][success][sections];
-    /// the 0xF7B0 game-event wrapper prepends [F7B0][playerId][seq] (12 bytes).
-    /// </summary>
-    private static void WireParseIdentifyFromBlob(IntPtr blob, uint blobSize, bool wrapped)
-    {
-        if (blob == IntPtr.Zero)
-            return;
-        try
-        {
-            IntPtr payloadPtr = Marshal.ReadIntPtr(IntPtr.Add(blob, NetBlobBufPtrOffset));
-            if (payloadPtr == IntPtr.Zero)
-                return;
-
-            if (wrapped)
-            {
-                if (blobSize < 28)
-                    return;
-                CombatActionHooks.TryParseIdentifyResponse(IntPtr.Add(payloadPtr, 12), blobSize - 12);
-            }
-            else
-            {
-                if (blobSize < 16)
-                    return;
-                CombatActionHooks.TryParseIdentifyResponse(payloadPtr, blobSize);
-            }
-        }
-        catch
-        {
-        }
-    }
+    // WireParseIdentifyFromBlob / TryCacheVitalsFromIdentify removed 2026-05-18:
+    // calling CombatActionHooks.TryParseIdentifyResponse from an [UnmanagedCallersOnly]
+    // detour on AC's main thread triggers ObjectQualityCache dictionary growth
+    // (allocation) for each newly-identified mob → GC during the reverse-P/Invoke
+    // transition → RhpReversePInvokeAttachOrTrapThread2 STATUS_FAIL_FAST (silent
+    // process death, no dialog). Mob health display falls back to ratio (%) mode;
+    // absolute values can be restored via a pre-allocated pump-thread ring buffer.
 
     private readonly record struct SmartBoxEventInfo(uint Opcode, uint RawObjectId, uint BlobSize);
 }

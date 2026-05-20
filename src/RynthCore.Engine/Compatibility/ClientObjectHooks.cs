@@ -161,6 +161,40 @@ internal static class ClientObjectHooks
     private const int KnownSpellPrefetchThrottleMs = 2000;
     private const int SpellBookTableOffset = 0x6C;
 
+    // Attackable snapshot — see ObjectIsAttackable / PrefetchAttackable. The
+    // off-thread plugin pump can't call AC's combat system safely (cross-thread
+    // AV class), so the REAL ClientCombatSystem::ObjectIsAttackable bit is
+    // sampled on AC's main thread (EndScene path) and served from here. Rebuilt
+    // from scratch each prefetch so dead ids self-evict (mirrors the spellbook
+    // snapshot). Without this the pump got hardcoded true → NPCs/vendors were
+    // promoted to attackable creatures and the bot cast war magic at them.
+    private static readonly object _attackableCacheLock = new();
+    private static readonly Dictionary<uint, bool> _attackableCache = new();
+    private static DateTime _lastAttackablePrefetchUtc = DateTime.MinValue;
+    private static bool _loggedAttackableServe;
+    // 2026-05-18 DIAGNOSTIC: raised 1000→8000 to 8x-reduce this per-cycle
+    // full-CObjectMaint-table walk + per-object _getWeenieObject/ObjectIsAttackable
+    // calls, as empirical isolation of the object-teardown AV class
+    // (DBOCache::DestroyObj / List<ObjectRangeInfo>::remove — dump-verified, NOT
+    // cast). NPC protection is preserved (cache stays warm; entries refresh
+    // every 8s; the AttackWithMagic veto + WorldObjectCache still consult it).
+    // Trade-off while diagnosing: a brand-new mob may take up to ~8s to become
+    // attackable. If crash frequency drops materially with this, this walk is
+    // implicated → redesign incremental (compute-once-per-id + evict on delete);
+    // if unchanged, it's exonerated → move to the object create/delete plumbing.
+    private const int AttackablePrefetchThrottleMs = 8000;
+
+    // Main-thread object name/type snapshot — mirrors PrefetchAttackable.
+    // Off-thread classifier (WorldObjectCache) reads name/type from here
+    // instead of walking AC's live CObjectMaint table → avoids the
+    // 0x0067E779 READ-AV class (cross-thread object-graph access).
+    private static readonly object _objectIdentityCacheLock = new();
+    private static readonly Dictionary<uint, string> _objectNameCache = new();
+    private static readonly Dictionary<uint, uint> _objectTypeCache = new();
+    private static DateTime _lastObjectIdentityPrefetchUtc = DateTime.MinValue;
+    private static bool _loggedObjectIdentityServe;
+    private const int ObjectIdentityPrefetchThrottleMs = 3000;
+
     // CPhysicsObj.m_position offset (same as PlayerPhysicsHooks.PhysicsPositionOffset)
     private const int PhysicsPositionOffset = 0x48;
     private const int PositionObjCellIdOffset = 0x04;
@@ -418,6 +452,16 @@ internal static class ClientObjectHooks
     private static GetVitaeValueDelegate? _getVitaeValue;
     private static int _lookupLogCount;
 
+    // Raw native function pointers cached alongside the delegates above.
+    // Passed to SehTrampoline so the SEH-wrapped call goes directly to AC's
+    // native code — no managed round-trip through the delegate's reverse-stub.
+    private static IntPtr _getWeenieObjectPtr;
+    private static IntPtr _getCombatSystemPtr;
+    private static IntPtr _objectIsAttackablePtr;
+    private static IntPtr _inqTypePtr;
+    // AV log throttle — one message per crash site per session is enough.
+    private static int _sehAvLogCount;
+
     public static bool IsInitialized { get; private set; }
     public static string StatusMessage => _statusMessage;
 
@@ -483,9 +527,11 @@ internal static class ClientObjectHooks
         }
 
         _getWeenieObject = Marshal.GetDelegateForFunctionPointer<GetWeenieObjectDelegate>(getWeeniePtr);
+        _getWeenieObjectPtr = getWeeniePtr;
         _getObjectNameStatic = Marshal.GetDelegateForFunctionPointer<GetObjectNameStaticDelegate>(getNameStaticPtr);
         _getObjectNameInstance = Marshal.GetDelegateForFunctionPointer<GetObjectNameInstanceDelegate>(getNameInstancePtr);
         _inqType = Marshal.GetDelegateForFunctionPointer<InqTypeDelegate>(new IntPtr(ReferenceInqType));
+        _inqTypePtr = new IntPtr(ReferenceInqType);
         _inqInt   = Marshal.GetDelegateForFunctionPointer<InqIntDelegate>(new IntPtr(ReferenceInqInt));
         _inqInt64 = Marshal.GetDelegateForFunctionPointer<InqInt64Delegate>(new IntPtr(ReferenceInqInt64));
         _inqAttribute2ndBaseLevel = Marshal.GetDelegateForFunctionPointer<InqAttribute2ndBaseLevelDelegate>(new IntPtr(ReferenceInqAttribute2ndBaseLevel));
@@ -493,7 +539,9 @@ internal static class ClientObjectHooks
         _inqBool  = Marshal.GetDelegateForFunctionPointer<InqBoolDelegate>(new IntPtr(ReferenceInqBool));
         _inqString = Marshal.GetDelegateForFunctionPointer<InqStringDelegate>(new IntPtr(ReferenceInqString));
         _getCombatSystem = Marshal.GetDelegateForFunctionPointer<GetCombatSystemDelegate>(new IntPtr(ReferenceGetCombatSystem));
+        _getCombatSystemPtr = new IntPtr(ReferenceGetCombatSystem);
         _objectIsAttackable = Marshal.GetDelegateForFunctionPointer<ObjectIsAttackableDelegate>(new IntPtr(ReferenceObjectIsAttackable));
+        _objectIsAttackablePtr = new IntPtr(ReferenceObjectIsAttackable);
         _inqSkillLevel = Marshal.GetDelegateForFunctionPointer<InqSkillLevelDelegate>(new IntPtr(ReferenceInqSkillLevel));
         _inqSkillAdvancementClass = Marshal.GetDelegateForFunctionPointer<InqSkillAdvancementClassDelegate>(new IntPtr(ReferenceInqSkillAdvancementClass));
         _inqAttribute = Marshal.GetDelegateForFunctionPointer<InqAttributeDelegate>(new IntPtr(ReferenceInqAttribute));
@@ -880,7 +928,13 @@ internal static class ClientObjectHooks
 
                     int training = unchecked((int)node.Data.AdvancementClass);
                     int buffed = unchecked((int)(node.Data.InitialLevel + node.Data.LevelFromPracticePoints));
-                    if (_inqSkillLevel != null)
+                    // Guard: InqSkill reads CEnchantmentRegistry at [CACQualities+0x70].
+                    // If that pointer is null (early login, enchantments not yet received
+                    // from server), InqSkill AVs at acclient.exe+0x27E779 reading
+                    // [null+0xC]. [+0x64] was already IsReadablePointer-checked above so
+                    // the same page covers +0x70; no second VirtualQuery needed.
+                    if (_inqSkillLevel != null &&
+                        Marshal.ReadIntPtr(qualitiesPtr + 0x70) != IntPtr.Zero)
                     {
                         int retval = 0;
                         if (_inqSkillLevel(qualitiesPtr, node.Key, &retval, 0) != 0)
@@ -1400,6 +1454,17 @@ internal static class ClientObjectHooks
     public static bool TryGetItemType(uint objectId, out uint typeFlags)
     {
         typeFlags = 0;
+        // Off-thread: serve from the main-thread snapshot populated by PrefetchObjectIdentity().
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            lock (_objectIdentityCacheLock)
+            {
+                if (_objectTypeCache.TryGetValue(objectId, out typeFlags))
+                    return true;
+            }
+            typeFlags = 0;
+            return false;
+        }
         if (_inqType == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqType == null || _getWeenieObject == null)
@@ -1407,7 +1472,22 @@ internal static class ClientObjectHooks
         }
         try
         {
-            IntPtr weeniePtr = _getWeenieObject(objectId);
+            IntPtr weeniePtr;
+            if (SehTrampoline.IsAvailable)
+            {
+                weeniePtr = SehTrampoline.CdeclPtrUint(_getWeenieObjectPtr, objectId, out bool avW);
+                if (avW)
+                {
+                    if (System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
+                        RynthLog.Compat($"[SEH] AV in GetWeenieObject (TryGetItemType) for 0x{objectId:X8} — caught");
+                    return false;
+                }
+            }
+            else
+            {
+                weeniePtr = _getWeenieObject(objectId);
+            }
+
             if (weeniePtr == IntPtr.Zero)
                 return false;
 
@@ -1418,7 +1498,20 @@ internal static class ClientObjectHooks
             // PWD-direct fallback below.
             if (TryGetQualitiesPtr(weeniePtr, out _))
             {
-                typeFlags = _inqType(weeniePtr);
+                if (SehTrampoline.IsAvailable)
+                {
+                    typeFlags = SehTrampoline.ThiscallUintNoArg(_inqTypePtr, weeniePtr, out bool avT);
+                    if (avT)
+                    {
+                        if (System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
+                            RynthLog.Compat($"[SEH] AV in InqType for 0x{objectId:X8} — caught");
+                        return false;
+                    }
+                }
+                else
+                {
+                    typeFlags = _inqType(weeniePtr);
+                }
                 return true;
             }
 
@@ -1833,21 +1926,40 @@ internal static class ClientObjectHooks
     }
 
     /// <summary>
-    /// Calls ClientCombatSystem::ObjectIsAttackable — the same check the game uses
-    /// before queueing an attack. Returns true (assume attackable) if the system is unavailable.
+    /// Whether AC's combat system considers the object attackable — the same
+    /// check the game uses before queueing an attack (NPCs/vendors → false).
+    ///
+    /// The off-thread plugin pump can't call ClientCombatSystem::ObjectIsAttackable
+    /// directly (cross-thread AV class — P0-2 2026-05-17, same reason as the
+    /// qualities chokepoint). It used to return hardcoded TRUE off-thread, which
+    /// made the plugin classifier promote NPCs/vendors/signs to attackable
+    /// creatures → the bot cast war magic at NPCs. Now off-thread callers are
+    /// served a snapshot sampled on AC's main thread by PrefetchAttackable
+    /// (EndScene always-on path, same as PrefetchPlayerSkills/KnownSpells).
+    /// Unknown id off-thread → FALSE (fail safe: never report attackable for an
+    /// object whose real bit hasn't been confirmed on the main thread; a fresh
+    /// monster becomes attackable within one ~1s prefetch). Main-thread callers
+    /// still get the real value directly.
     /// </summary>
     public static bool ObjectIsAttackable(uint objectId)
     {
-        // P0-2 (2026-05-17): bypasses TryGetQualitiesPtr — calls
-        // _getWeenieObject + ClientCombatSystem::ObjectIsAttackable directly
-        // (AC walks its object table + qualities lattice). Same cross-thread
-        // AV class as the qualities chokepoint. Off the AC main thread, return
-        // the method's existing "I don't know → assume attackable" default
-        // WITHOUT entering AC, so combat targeting is unchanged but the client
-        // can't AV here.
         if (!MainThreadGuard.IsOnMainThread())
-            return true;
+        {
+            lock (_attackableCacheLock)
+                return _attackableCache.TryGetValue(objectId, out bool a) && a;
+        }
+        return ComputeAttackableOnMainThread(objectId);
+    }
 
+    /// <summary>
+    /// The real AC call. MUST run on AC's main thread (callers: the main-thread
+    /// branch of <see cref="ObjectIsAttackable"/> and <see cref="PrefetchAttackable"/>).
+    /// Defensive: any "can't determine" → true, so a live monster is never
+    /// wrongly skipped by a main-thread caller. The off-thread serve layer is
+    /// the one that fails safe to false.
+    /// </summary>
+    private static bool ComputeAttackableOnMainThread(uint objectId)
+    {
         if (_getCombatSystem == null || _objectIsAttackable == null || _getWeenieObject == null)
         {
             if (!Probe() || _getCombatSystem == null || _objectIsAttackable == null || _getWeenieObject == null)
@@ -1855,23 +1967,59 @@ internal static class ClientObjectHooks
         }
         try
         {
-            // Verify the object is still live in the client's object table before
-            // calling into the combat system — stale IDs cause access violations
-            // that bypass managed try/catch in NativeAOT.
-            IntPtr weeniePtr = _getWeenieObject(objectId);
+            IntPtr weeniePtr;
+            if (SehTrampoline.IsAvailable)
+            {
+                weeniePtr = SehTrampoline.CdeclPtrUint(_getWeenieObjectPtr, objectId, out bool avW);
+                if (avW)
+                {
+                    if (System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
+                        RynthLog.Compat($"[SEH] AV in GetWeenieObject for 0x{objectId:X8} — caught, skipping attackable");
+                    return true;
+                }
+            }
+            else
+            {
+                weeniePtr = _getWeenieObject(objectId);
+            }
+
             if (weeniePtr == IntPtr.Zero)
             {
-                // Weenie not in client table yet (post-login burst / fresh spawn).
-                // Can't safely call _objectIsAttackable without the weenie pointer,
-                // so default-true consistent with all other "I don't know" paths.
                 if (System.Threading.Interlocked.Increment(ref _weenieNullCount) <= 20)
                     RynthLog.Compat($"ObjectIsAttackable: weenie null for 0x{objectId:X8} (count {_weenieNullCount})");
                 return true;
             }
 
-            IntPtr combatSystem = _getCombatSystem();
+            IntPtr combatSystem;
+            if (SehTrampoline.IsAvailable)
+            {
+                combatSystem = SehTrampoline.CdeclPtrVoid(_getCombatSystemPtr, out bool avC);
+                if (avC)
+                {
+                    if (System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
+                        RynthLog.Compat($"[SEH] AV in GetCombatSystem — caught");
+                    return true;
+                }
+            }
+            else
+            {
+                combatSystem = _getCombatSystem();
+            }
+
             if (combatSystem == IntPtr.Zero)
                 return true;
+
+            if (SehTrampoline.IsAvailable)
+            {
+                byte att = SehTrampoline.ThiscallByteUint(_objectIsAttackablePtr, combatSystem, objectId, out bool avA);
+                if (avA)
+                {
+                    if (System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
+                        RynthLog.Compat($"[SEH] AV in ObjectIsAttackable for 0x{objectId:X8} — caught, defaulting true");
+                    return true;
+                }
+                return att != 0;
+            }
             return _objectIsAttackable(combatSystem, objectId) != 0;
         }
         catch
@@ -1880,9 +2028,118 @@ internal static class ClientObjectHooks
         }
     }
 
+    /// <summary>
+    /// Samples the REAL ClientCombatSystem::ObjectIsAttackable for every live
+    /// weenie on AC's main thread (EndScene always-on path) into a snapshot the
+    /// off-thread plugin pump reads via <see cref="ObjectIsAttackable"/>.
+    /// Mirrors PrefetchKnownSpells: main-thread-guarded, throttled, fully
+    /// defensive, rebuilt from scratch so dead ids self-evict. Without this the
+    /// pump can't tell an NPC (attackable=false) from a monster.
+    /// </summary>
+    public static void PrefetchAttackable()
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        if ((DateTime.UtcNow - _lastAttackablePrefetchUtc).TotalMilliseconds < AttackablePrefetchThrottleMs)
+            return;
+        _lastAttackablePrefetchUtc = DateTime.UtcNow;
+
+        try
+        {
+            var snapshot = new Dictionary<uint, bool>();
+            int n = CObjectMaintHooks.EnumerateLiveWeenieObjectIds(id =>
+            {
+                snapshot[id] = ComputeAttackableOnMainThread(id);
+            });
+            if (n <= 0)
+                return; // walk failed/empty — keep the last good snapshot
+
+            lock (_attackableCacheLock)
+            {
+                _attackableCache.Clear();
+                foreach (var kv in snapshot)
+                    _attackableCache[kv.Key] = kv.Value;
+            }
+
+            if (!_loggedAttackableServe)
+            {
+                _loggedAttackableServe = true;
+                int atkCount = 0;
+                foreach (var kv in snapshot)
+                    if (kv.Value) atkCount++;
+                RynthLog.Compat($"ClientObjectHooks: attackable snapshot warm — {snapshot.Count} live objects, {atkCount} attackable (served off-thread to the plugin pump).");
+            }
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"PrefetchAttackable exception: {ex.Message}");
+        }
+    }
+
+    public static void PrefetchObjectIdentity()
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        if ((DateTime.UtcNow - _lastObjectIdentityPrefetchUtc).TotalMilliseconds < ObjectIdentityPrefetchThrottleMs)
+            return;
+        _lastObjectIdentityPrefetchUtc = DateTime.UtcNow;
+
+        try
+        {
+            var nameSnap = new Dictionary<uint, string>();
+            var typeSnap = new Dictionary<uint, uint>();
+
+            int n = CObjectMaintHooks.EnumerateLiveWeenieObjectIds(id =>
+            {
+                if (TryGetObjectName(id, out string nm) && nm.Length > 0)
+                    nameSnap[id] = nm;
+                if (TryGetItemType(id, out uint typeFlags))
+                    typeSnap[id] = typeFlags;
+            });
+
+            if (n <= 0)
+                return; // walk failed/empty — keep the last good snapshot
+
+            lock (_objectIdentityCacheLock)
+            {
+                _objectNameCache.Clear();
+                foreach (var kv in nameSnap)
+                    _objectNameCache[kv.Key] = kv.Value;
+                _objectTypeCache.Clear();
+                foreach (var kv in typeSnap)
+                    _objectTypeCache[kv.Key] = kv.Value;
+            }
+
+            if (!_loggedObjectIdentityServe)
+            {
+                _loggedObjectIdentityServe = true;
+                RynthLog.Compat($"ClientObjectHooks: object identity snapshot warm — {nameSnap.Count} names, {typeSnap.Count} types (served off-thread to the plugin pump).");
+            }
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"PrefetchObjectIdentity exception: {ex.Message}");
+        }
+    }
+
     public static bool TryGetObjectName(uint objectId, out string name)
     {
         name = string.Empty;
+        // Off-thread: serve from the main-thread snapshot populated by PrefetchObjectIdentity().
+        // Never walk AC's live object table off-thread (0x0067E779 READ-AV class).
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            lock (_objectIdentityCacheLock)
+            {
+                if (_objectNameCache.TryGetValue(objectId, out var cached))
+                {
+                    name = cached;
+                    return true;
+                }
+            }
+            name = string.Empty;
+            return false;
+        }
 
         if (_getWeenieObject == null || _getObjectNameStatic == null || _getObjectNameInstance == null)
         {
@@ -2024,6 +2281,15 @@ internal static class ClientObjectHooks
             if (physicsObj == IntPtr.Zero)
                 return false;
 
+            // Guard: weeniePtr may have been freed between _getWeenieObject and here
+            // (TOCTOU — object deleted on main thread mid-tick). physicsObj would then
+            // be garbage (e.g. 0xC1085000) pointing to an unmapped page; the vtable
+            // read below would AV in NativeAOT, bypassing try/catch. IsReadablePointer
+            // catches the unmapped-page case; the vtable module check catches any
+            // garbage-but-mapped value.
+            if (!IsReadablePointer(physicsObj))
+                return false;
+
             IntPtr vtable = Marshal.ReadIntPtr(physicsObj);
             if (!SmartBoxLocator.IsPointerInModule(vtable))
                 return false;
@@ -2067,6 +2333,9 @@ internal static class ClientObjectHooks
         {
             IntPtr physicsObj = Marshal.ReadIntPtr(weeniePtr + _weeniePhysicsObjOffset);
             if (physicsObj == IntPtr.Zero)
+                return false;
+
+            if (!IsReadablePointer(physicsObj))
                 return false;
 
             IntPtr vtable = Marshal.ReadIntPtr(physicsObj);

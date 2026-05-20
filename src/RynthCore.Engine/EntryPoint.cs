@@ -400,6 +400,12 @@ public static class EntryPoint
                 return;
             }
 
+            // Non-fatal: if missing, dangerous AC API calls run without SEH protection.
+            if (!PreloadNativeDll(engineDir, "RynthCore.SehTrampoline.dll"))
+                RynthLog.Info("WARNING: RynthCore.SehTrampoline.dll not found — object-teardown AVs will not be caught.");
+            else
+                SehTrampoline.MarkAvailable();
+
             if (!ConfigureImGuiNativeLibrary(engineDir))
             {
                 RynthLog.Info("WARNING: cimgui runtime not found - ImGui will not be available.");
@@ -616,6 +622,7 @@ public static class EntryPoint
                     OverlayHost.RegisterPanel("Nav",      NavPanel.Create);
                     OverlayHost.RegisterPanel("Meta",     MetaPanel.Create);
                     OverlayHost.RegisterPanel("Radar", RadarPanel.Create);
+                    OverlayHost.RegisterPanel("Chat",  RynthChatPanel.Create);
                     AvaloniaOverlay.Start();
                 }
             }

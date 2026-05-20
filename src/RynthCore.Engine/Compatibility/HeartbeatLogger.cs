@@ -68,6 +68,12 @@ internal static class HeartbeatLogger
                 tick++;
                 try { RynthLog.Info($"hb #{tick}"); }
                 catch { /* never let the heartbeat itself bring anything down */ }
+                // Self-healing: clear a stuck floating-panel click-through
+                // (DockedPanelPointerCaptureActive whose disarm was lost ->
+                // every floating panel left WS_EX_TRANSPARENT). Runs here on
+                // purpose: independent of the input path that strands it.
+                try { RynthCore.Engine.UI.AvaloniaOverlay.WatchdogClearStuckClickThrough(); }
+                catch { /* never let the heartbeat itself bring anything down */ }
                 // Sleep in short slices so a stop signal is observed within <100ms,
                 // not up to a full IntervalMs after request.
                 int slept = 0;

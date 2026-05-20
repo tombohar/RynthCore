@@ -86,6 +86,7 @@ internal static class SettingsPanel
         public bool EnableAutocram { get; set; }
         public bool PeaceModeWhenIdle { get; set; }
         public bool StartMacroOnLogin { get; set; }
+        public bool PatrolOnLogin { get; set; }
         public bool EnableRaycasting { get; set; }
         public bool UseArcs { get; set; }
         public float BowArcVelocity { get; set; } = 25f;
@@ -504,6 +505,9 @@ internal static class SettingsPanel
         p.Children.Add(BoolRow("Start Macro On Login", state.Data.StartMacroOnLogin,
             v => { state.Data.StartMacroOnLogin = v; Push(state); },
             "Automatically starts the macro when RynthAi loads."));
+        p.Children.Add(BoolRow("Patrol On Login", state.Data.PatrolOnLogin,
+            v => { state.Data.PatrolOnLogin = v; Push(state); },
+            "Automatically starts dungeon patrol when RynthAi loads."));
         p.Children.Add(BoolRow("Enable Raycasting", state.Data.EnableRaycasting,
             v => { state.Data.EnableRaycasting = v; Push(state); }));
 

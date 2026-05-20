@@ -381,6 +381,20 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 // band routes WM_LBUTTONDOWN through to Avalonia normally.
                 if (cy >= 0 && cy < CaptionHeight && cx >= 0 && cx < Width - CaptionRightInset)
                     return (IntPtr)HTCAPTION;
+                // Transparent pixels: let clicks fall through to the AC window
+                // beneath so docked panels remain clickable when the floating
+                // window's bounding box overlaps their screen position.
+                // Snapshot field refs before the bounds check to avoid a race
+                // with EnsureDib reallocating on the Avalonia thread.
+                IntPtr bits = _dibBits;
+                int dw = _dibWidth;
+                int dh = _dibHeight;
+                if (bits != IntPtr.Zero && cx >= 0 && cy >= 0 && cx < dw && cy < dh)
+                {
+                    byte alpha = ((byte*)bits)[(cy * dw + cx) * 4 + 3];
+                    if (alpha == 0)
+                        return (IntPtr)HTTRANSPARENT;
+                }
                 return (IntPtr)HTCLIENT;
             }
 
