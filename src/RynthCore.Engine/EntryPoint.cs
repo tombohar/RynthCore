@@ -379,8 +379,37 @@ public static class EntryPoint
         }
     }
 
+    /// <summary>
+    /// Returns true if engine.json PluginPaths contains a path whose filename
+    /// matches <paramref name="dllFileName"/> (case-insensitive). Used by
+    /// InitWorker to gate plugin-paired Avalonia panel registrations
+    /// (RynthAi/RynthChat/RynthVision) on the user's launcher selection.
+    /// Filename match (not full-path) so users can keep the DLL anywhere.
+    /// </summary>
+    private static bool HasPluginDll(string dllFileName)
+    {
+        var paths = Plugins.EngineSettings.PluginPaths;
+        for (int i = 0; i < paths.Count; i++)
+        {
+            if (string.Equals(Path.GetFileName(paths[i]), dllFileName, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Wall-clock UTC time at which the current engine generation's InitWorker
+    /// thread started. Re-stamped on every hot-reload (each generation gets a
+    /// fresh InitWorker call), so reading "uptime = now - InitStartedUtc" gives
+    /// the current engine generation's lifetime — exactly what the RynthAi
+    /// footer wants to display alongside FPS. Default value (DateTime.MinValue)
+    /// means "not yet initialised" so panels can show "—" until first frame.
+    /// </summary>
+    internal static DateTime InitStartedUtc { get; private set; } = DateTime.MinValue;
+
     private static void InitWorker()
     {
+        InitStartedUtc = DateTime.UtcNow;
         try
         {
             RynthLog.Info($"InitWorker: thread started, _initCount={_initCount}, LogoutHooks.IsInstalled={LogoutLifecycleHooks.IsInstalled}, SmartBoxHooks.IsInstalled={SmartBoxHooks.IsInstalled}");
@@ -613,16 +642,37 @@ public static class EntryPoint
                 }
                 else
                 {
+                    // Engine-builtin panels (no plugin DLL pairing) — always register.
                     OverlayHost.RegisterPanel("Status",  StatusPanel.Create);
                     OverlayHost.RegisterPanel("Log",     LogPanel.Create);
-                    OverlayHost.RegisterPanel("RynthAi", RynthAiPanel.Create);
                     OverlayHost.RegisterPanel("Monsters", MonstersPanel.Create);
                     OverlayHost.RegisterPanel("Items",    ItemsPanel.Create);
                     OverlayHost.RegisterPanel("Settings", SettingsPanel.Create);
                     OverlayHost.RegisterPanel("Nav",      NavPanel.Create);
                     OverlayHost.RegisterPanel("Meta",     MetaPanel.Create);
                     OverlayHost.RegisterPanel("Radar", RadarPanel.Create);
-                    OverlayHost.RegisterPanel("Chat",  RynthChatPanel.Create);
+
+                    // Plugin-paired panels: register only if the matching plugin DLL is
+                    // listed in engine.json PluginPaths (controlled by the launcher Plugins
+                    // tab). The panel UI is engine-side per the Avalonia-overlay design
+                    // (plugin DLLs feed data via C exports) — unchecking a plugin in the
+                    // launcher must take its entire surface area out of process so the
+                    // diagnostic "is plugin X the off-thread caller?" question is testable.
+                    if (HasPluginDll("RynthCore.Plugin.RynthAi.dll"))
+                        OverlayHost.RegisterPanel("RynthAi", RynthAiPanel.Create);
+                    else
+                        RynthLog.Info("InitWorker: RynthAi panel skipped — DLL not in engine.json PluginPaths.");
+
+                    if (HasPluginDll("RynthCore.Plugin.RynthChat.dll"))
+                        OverlayHost.RegisterPanel("Chat", RynthChatPanel.Create);
+                    else
+                        RynthLog.Info("InitWorker: RynthChat panel skipped — DLL not in engine.json PluginPaths.");
+
+                    if (HasPluginDll("RynthCore.Plugin.RynthVision.dll"))
+                        OverlayHost.RegisterPanel("Vision", RynthVisionPanel.Create);
+                    else
+                        RynthLog.Info("InitWorker: RynthVision panel skipped — DLL not in engine.json PluginPaths.");
+
                     AvaloniaOverlay.Start();
                 }
             }

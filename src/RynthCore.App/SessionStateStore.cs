@@ -36,36 +36,28 @@ internal static class SessionStateStore
 
         record.ProcessId = processId;
         record.LastUpdatedAtUtc = DateTime.UtcNow;
-        File.WriteAllText(GetProcessPath(processId), BuildSessionJson(record), Encoding.UTF8);
+        // Explicit no-BOM UTF-8 — Encoding.UTF8 emits a BOM under NativeAOT which
+        // breaks JsonDocument.Parse on the launcher side.
+        File.WriteAllText(GetProcessPath(processId), BuildSessionJson(record), new System.Text.UTF8Encoding(false));
     }
 
     public static SessionStateRecord? TryReadForProcess(int processId)
     {
-        // KNOWN-DEFERRED: when this method's full body is reachable on a
-        // RynthCore-injected acclient.exe, the AC client AVs ~17s after
-        // SendLoginCompleteNotification fires. Stack overflow inside an
-        // alternating function-pair pattern at engine RVAs ~0x98DXXX /
-        // ~0xC31AXX. Bisected to TryWriteLoginState → TryReadForProcess →
-        // (likely) JsonDocument.Parse interaction with our DatFileShareHooks
-        // CreateFile detour, but exact mechanism not yet root-caused.
-        //
-        // Returning null here forces TryWriteLoginState to seed a fresh
-        // session record on every login complete. The launcher's stuck-
-        // client reaper reads from the newly written record, so no
-        // functional loss in production. The only thing we lose is
-        // restoring `LaunchStartedAtUtc` from a prior session record —
-        // which gets reseeded from Process.StartTime in TryWriteLoginState
-        // anyway when existingRecord is null.
-        return null;
-
-#pragma warning disable CS0162
         string path = GetProcessPath(processId);
         if (!File.Exists(path))
             return null;
 
         try
         {
-            using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(path));
+            byte[] bytes = File.ReadAllBytes(path);
+            // Strip UTF-8 BOM if present — the engine writes with Encoding.UTF8
+            // which emits a BOM (EF BB BF) under NativeAOT, and JsonDocument.Parse
+            // on a byte span rejects the BOM as an invalid JSON start character.
+            ReadOnlyMemory<byte> content = bytes;
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+                content = new ReadOnlyMemory<byte>(bytes, 3, bytes.Length - 3);
+
+            using JsonDocument document = JsonDocument.Parse(content);
             JsonElement root = document.RootElement;
 
             var record = new SessionStateRecord
@@ -91,7 +83,6 @@ internal static class SessionStateStore
         {
             return null;
         }
-#pragma warning restore CS0162
     }
 
     public static Dictionary<int, SessionStateRecord> ReadForActiveProcesses(IEnumerable<int> activeProcessIds)

@@ -32,6 +32,12 @@ internal sealed class AppSettings
     public int StuckClientTimeoutSeconds { get; set; } = 60;
     public List<string> EnabledPluginIds { get; set; } = [];
     public List<string> PluginDllPaths { get; set; } = [];
+
+    /// User-added plugin DLL paths whose checkboxes are currently unchecked.
+    /// The path stays in <see cref="PluginDllPaths"/> (so the row remains in
+    /// the UI), but is filtered out when syncing PluginPaths into engine.json.
+    /// Case-insensitive set semantics; comparisons must use OrdinalIgnoreCase.
+    public List<string> DisabledPluginDllPaths { get; set; } = [];
     public List<LaunchServerProfile> ServerProfiles { get; set; } = [];
     public List<LaunchAccountProfile> AccountProfiles { get; set; } = [];
 

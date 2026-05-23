@@ -75,7 +75,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
     private const int HTCAPTION     = 2;
     private const int HTBOTTOMRIGHT = 17;
     private const int HTTRANSPARENT = -1;
-    private const int MA_NOACTIVATE = 3;
+    private const int MA_NOACTIVATE = 2;
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);

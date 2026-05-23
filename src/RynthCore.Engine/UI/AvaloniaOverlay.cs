@@ -672,17 +672,23 @@ internal class RynthOverlayWindow : Window
     private const uint SWP_NOACTIVATE   = 0x0010;
     private const uint SWP_NOZORDER     = 0x0004;
     private const uint WM_MOUSEMOVE     = 0x0200;
+    private const uint WM_LBUTTONDOWN   = 0x0201;
     private const uint WM_LBUTTONUP    = 0x0202;
     private const uint WM_MOUSELEAVE    = 0x02A3;
     private const uint WM_NCMOUSELEAVE  = 0x02A2;
     private const uint WM_SETFOCUS      = 0x0007;
+    private const uint WM_KILLFOCUS     = 0x0008;
     private const uint WM_MOUSEACTIVATE = 0x0021;
-    private const int  MA_NOACTIVATE    = 3;
+    private const int  MA_NOACTIVATE    = 2;
 
     private delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     private static WndProcDelegate? _avaloniaSubclassDelegate;
     private static IntPtr _avaloniaOriginalWndProc;
     private static IntPtr _avaloniaSubclassedHwnd;
+    // True between WM_LBUTTONDOWN and WM_LBUTTONUP on avHwnd (panel click in flight).
+    // Used to defer WM_KILLFOCUS so Avalonia's pointer capture isn't cancelled mid-click.
+    private static volatile bool _avaloniaMouseButtonDown;
+    private static volatile bool _pendingAvaloniaKillFocus;
 
     /// <summary>
     /// Subclasses Avalonia's offscreen HWND to swallow WM_MOUSELEAVE /
@@ -728,9 +734,36 @@ internal class RynthOverlayWindow : Window
         // same-thread SetFocus call (no cross-thread wait, no click delay).
         if (msg == WM_SETFOCUS && !Win32Backend.ChatCaptureActive)
         {
+            RynthLog.Info("AvaloniaSubclass: WM_SETFOCUS (mouseDown=" + _avaloniaMouseButtonDown + ").");
             IntPtr gameHwnd = Win32Backend.GameHwnd;
             if (gameHwnd != IntPtr.Zero)
                 PostMessage(gameHwnd, Win32Backend.WM_RYNTH_RESTORE_FOCUS, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        // Track mouse-button state on avHwnd so WM_KILLFOCUS can be deferred.
+        // Self-heal: if stuck from a prior click whose LBUTTONUP never arrived,
+        // reset before the new press so _pendingAvaloniaKillFocus doesn't stale.
+        if (msg == WM_LBUTTONDOWN)
+        {
+            _pendingAvaloniaKillFocus = false;
+            _avaloniaMouseButtonDown  = true;
+            RynthLog.Info("AvaloniaSubclass: WM_LBUTTONDOWN.");
+        }
+
+        // Defer WM_KILLFOCUS while a panel click is in flight.
+        // Avalonia's WM_KILLFOCUS handler can release pointer capture and clear
+        // IsPressed, aborting the click before WM_LBUTTONUP arrives.  Suppress
+        // it here; deliver it after WM_LBUTTONUP so the full press→release
+        // cycle completes first and the button fires Click normally.
+        if (msg == WM_KILLFOCUS)
+        {
+            if (_avaloniaMouseButtonDown)
+            {
+                RynthLog.Info("AvaloniaSubclass: WM_KILLFOCUS deferred (click in flight).");
+                _pendingAvaloniaKillFocus = true;
+                return IntPtr.Zero;
+            }
+            RynthLog.Info("AvaloniaSubclass: WM_KILLFOCUS (no active click).");
         }
 
         // avHwnd is parked at screen (-10000,-10000). When Avalonia calls
@@ -766,8 +799,25 @@ internal class RynthOverlayWindow : Window
             }
             if (msg == WM_LBUTTONUP)
             {
+                _avaloniaMouseButtonDown = false;
                 FloatingPanelHost.PointerCapturingHost = null;
                 Win32Backend.ClearPanelMouseDown();
+                // Avalonia called Win32 SetCapture(avHwnd) after processing the
+                // forwarded WM_LBUTTONDOWN, so WM_LBUTTONUP arrives here instead
+                // of the game WndProc. The game path (Win32Backend line ~857)
+                // is never reached and DockedPanelPointerCaptureActive stays true,
+                // making every floating panel WS_EX_TRANSPARENT until the ~1s
+                // watchdog fires. Clear it here immediately.
+                AvaloniaOverlay.SetDockedPanelPointerCaptureActive(false);
+                RynthLog.Info("AvaloniaSubclass: WM_LBUTTONUP; pendingKillFocus=" + _pendingAvaloniaKillFocus + ".");
+                // Deliver the deferred WM_KILLFOCUS now that the click is done.
+                // Using PostMessage so Avalonia first processes WM_LBUTTONUP
+                // (fires Click) and only then sees the focus loss.
+                if (_pendingAvaloniaKillFocus)
+                {
+                    _pendingAvaloniaKillFocus = false;
+                    PostMessage(hWnd, WM_KILLFOCUS, IntPtr.Zero, IntPtr.Zero);
+                }
             }
         }
 
@@ -3358,6 +3408,7 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     // LayeredWindow holds OS capture for the whole press, so DOWN/MOVE/UP all
     // arrive in ForwardInput; this tracks the target across the drag.
     private Slider? _activeSlider;
+    private ScrollViewer? _activeScroll;
 
     private void ForwardInput(uint msg, IntPtr wParam, IntPtr lParam, int layeredClientX, int layeredClientY)
     {
@@ -3529,6 +3580,56 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
             }
         }
 
+        // --- Scrollbar drag for popped-out content --------------------------
+        // Same off-bounds rationale as Button/Slider: the parked Border's
+        // scrollbar never sees Avalonia's renderer hit-test, so a press on it
+        // does nothing. Detect a press on a *vertical* ScrollBar, then drive
+        // the owning ScrollViewer.Offset directly from cursor geometry. The
+        // LayeredWindow holds OS capture for the whole press, so DOWN starts
+        // the drag and MOVE/UP continue it. Placed before the
+        // DockedPanelPointerCaptureActive early-return so an in-progress drag
+        // always completes.
+        {
+            const uint WM_MOUSEMOVE_SB = 0x0200;
+            const uint WM_LBUTTONUP_SB = 0x0202;
+            if (msg == WM_LBUTTONDOWN || (_activeScroll != null && (msg == WM_MOUSEMOVE_SB || msg == WM_LBUTTONUP_SB)))
+            {
+                float sbScale = AvaloniaOverlay.InputScale > 0 ? AvaloniaOverlay.InputScale : 1f;
+                double sblx = layeredClientX / sbScale;
+                double sbly = layeredClientY / sbScale;
+                ScrollViewer? sv = _activeScroll;
+                if (msg == WM_LBUTTONDOWN)
+                {
+                    var bar = FindDeepestScrollBarAt(PanelBorder, new Point(sblx, sbly));
+                    sv = (bar != null && bar.Orientation == Orientation.Vertical)
+                        ? bar.FindAncestorOfType<ScrollViewer>()
+                        : null;
+                }
+                if (sv != null)
+                {
+                    if (msg == WM_LBUTTONDOWN) _activeScroll = sv;
+                    ScrollViewer captured = sv;
+                    double cy = sbly;
+                    bool end = msg == WM_LBUTTONUP_SB;
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        try { DriveScrollFromPanelPoint(captured, cy); }
+                        catch (Exception ex) { RynthLog.Info($"FloatingPanelHost({Title}): scroll drive threw {ex.GetType().Name}: {ex.Message}"); }
+                    });
+                    if (end) _activeScroll = null;
+                    return;
+                }
+                if (msg != WM_LBUTTONDOWN)
+                {
+                    // Active-scroll MOVE/UP but the target vanished (panel
+                    // redocked/closed mid-drag): stop, don't forward.
+                    if (msg == WM_LBUTTONUP_SB) _activeScroll = null;
+                    return;
+                }
+                // WM_LBUTTONDOWN not over a scrollbar: fall through.
+            }
+        }
+
         // Translate from layered-client (physical px) to Avalonia-client
         // (also physical px). The panel Border is parked at canvas LOGICAL
         // coord (OffBoundsCanvasX, OffBoundsCanvasY); multiply by inputScale
@@ -3653,6 +3754,48 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         s.Value = Math.Clamp(v, s.Minimum, s.Maximum);
     }
 
+    /// <summary>
+    /// Deepest vertical/horizontal <see cref="Avalonia.Controls.Primitives.ScrollBar"/>
+    /// whose layout rect contains <paramref name="pointInRoot"/>. Same off-bounds-safe
+    /// geometry walk as <see cref="FindDeepestButtonAt"/> — the renderer hit-test is
+    /// unusable for the parked Border.
+    /// </summary>
+    private static Avalonia.Controls.Primitives.ScrollBar? FindDeepestScrollBarAt(Visual root, Point pointInRoot)
+    {
+        Avalonia.Controls.Primitives.ScrollBar? result = null;
+        foreach (var child in root.GetVisualChildren())
+        {
+            if (!child.IsVisible) continue;
+            var bounds = child.Bounds;
+            if (!bounds.Contains(pointInRoot)) continue;
+
+            Point pInChild = new Point(pointInRoot.X - bounds.X, pointInRoot.Y - bounds.Y);
+            var deeper = FindDeepestScrollBarAt(child, pInChild);
+            if (deeper != null)
+                result = deeper;
+            else if (child is Avalonia.Controls.Primitives.ScrollBar sb)
+                result = sb;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Set <paramref name="sv"/>'s vertical offset from a cursor Y in PanelBorder-logical
+    /// space. Absolute map of the cursor over the viewer's height to the scrollable range
+    /// (mirrors <see cref="DriveSliderFromPanelPoint"/> — the thumb extent isn't
+    /// compensated, so the grab point snaps under the cursor). Must run on the UI thread.
+    /// </summary>
+    private void DriveScrollFromPanelPoint(ScrollViewer sv, double panelY)
+    {
+        double scrollable = sv.Extent.Height - sv.Viewport.Height;
+        if (scrollable <= 0) return;
+        if (sv.TranslatePoint(new Point(0, 0), PanelBorder) is not Point origin) return;
+        double h = sv.Bounds.Height;
+        if (h <= 0) return;
+        double frac = Math.Clamp((panelY - origin.Y) / h, 0, 1);
+        sv.Offset = new Vector(sv.Offset.X, frac * scrollable);
+    }
+
     private void OnLayeredMoved(int screenX, int screenY)
     {
         try { _owner.OnFloatingPanelMoved(Title, screenX, screenY); }
@@ -3694,6 +3837,7 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         if (PointerCapturingHost == this)
             PointerCapturingHost = null;
         _activeSlider = null;
+        _activeScroll = null;
 
         _layered.OnInput = null;
         _layered.OnMoved = null;

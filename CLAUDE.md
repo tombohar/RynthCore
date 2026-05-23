@@ -8,9 +8,9 @@ The plugin code (RynthAi etc.) lives in a sibling repo: **`C:\Projects\RynthSuit
 
 ## ⚠ Active Focus
 
-**RynthAi ImGui plugin** at `C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthAi\`.
+**RynthAi Avalonia panel** at `src/RynthCore.Engine/UI/Panels/RynthAiPanel.cs`. Registered in `EntryPoint.cs:InitWorker` and bridged to the RynthSuite plugin DLL via C exports (`RynthPluginGetSnapshotJson`, `RynthPluginToggleMacro`, etc.).
 
-Do **not** work on `src/RynthCore.Engine/UI/Panels/RynthAiPanel.cs` — that's the parked Avalonia version of RynthAi and its registration is commented out in `EntryPoint.cs`. All RynthAi work goes in the RynthSuite plugin which uses ImGui via `RynthCore.PluginCore`.
+The ImGui variant of RynthAi is **defunct** — not loaded at runtime. All in-AC UI is engine-side Avalonia panels. Do RynthAi UI work in the Avalonia panel file; the RynthSuite plugin DLL is the data/logic backend only.
 
 ---
 

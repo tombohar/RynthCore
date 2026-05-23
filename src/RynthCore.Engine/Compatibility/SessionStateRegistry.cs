@@ -75,7 +75,13 @@ internal static class SessionStateRegistry
 
         try
         {
-            SessionStateRecord? existingRecord = SessionStateStore.TryReadForProcess(Environment.ProcessId);
+            // Do not call TryReadForProcess here — JsonDocument.Parse inside
+            // it interacts with DatFileShareHooks.CreateFile in a way that
+            // causes a stack overflow (~17s after LoginComplete).  All fields
+            // it would have contributed are either read from the launch-context
+            // file below or reseeded from Process.StartTime, so the result was
+            // always null anyway once the workaround was in place.
+            SessionStateRecord? existingRecord = null;
             (string accountName, string serverName, string targetCharacter) = ReadLaunchContext();
 
             accountName = Coalesce(accountName, existingRecord?.AccountName);

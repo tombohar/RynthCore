@@ -67,6 +67,9 @@ internal partial class MainWindow : Window
     // applied, we switch to save-on-change mode so the user can freely move
     // the window without us snapping it back.
     private readonly HashSet<int> _windowPositionAppliedPids = [];
+    // Last observed window rect per PID — set on first post-login observation,
+    // used to detect an actual move before we commit anything to appsettings.
+    private readonly Dictionary<int, (int x, int y, int w, int h)> _baselineWindowRects = [];
     // Serializes prefs-swap launches so two accounts don't race on the live
     // UserPreferences.ini. Non-prefs launches don't acquire this and stay
     // parallel.
@@ -252,12 +255,21 @@ internal partial class MainWindow : Window
             PluginLoadoutPanel.Children.Add(BuildPluginCard(checkBox, plugin.Summary, null));
         }
 
+        var disabledSet = new HashSet<string>(
+            _settings.DisabledPluginDllPaths ?? new List<string>(),
+            StringComparer.OrdinalIgnoreCase);
+
         foreach (string dllPath in _pluginDllPaths)
         {
             string capturedPath = dllPath;
             string pluginName = Path.GetFileNameWithoutExtension(dllPath);
 
-            var checkBox = new CheckBox { Content = pluginName, IsChecked = true };
+            var checkBox = new CheckBox
+            {
+                Content = pluginName,
+                IsChecked = !disabledSet.Contains(capturedPath)
+            };
+            checkBox.IsCheckedChanged += (_, _) => OnUserPluginEnabledChanged(capturedPath, checkBox);
 
             PluginLoadoutPanel.Children.Add(BuildPluginCard(checkBox, capturedPath, () =>
             {
@@ -267,6 +279,19 @@ internal partial class MainWindow : Window
                     {
                         _pluginDllPaths.RemoveAt(j);
                         break;
+                    }
+                }
+                // Also forget any disabled-marker for this path so re-adding
+                // it later starts in the enabled state.
+                if (_settings.DisabledPluginDllPaths != null)
+                {
+                    for (int j = _settings.DisabledPluginDllPaths.Count - 1; j >= 0; j--)
+                    {
+                        if (string.Equals(_settings.DisabledPluginDllPaths[j], capturedPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _settings.DisabledPluginDllPaths.RemoveAt(j);
+                            break;
+                        }
                     }
                 }
                 SavePluginDllPaths();
@@ -1499,6 +1524,45 @@ internal partial class MainWindow : Window
         AppendActivity($"Runtime loadout updated: {plugin.Name} {(checkBox.IsChecked == true ? "enabled" : "disabled")}.");
     }
 
+    /// Handles checkbox toggle for a user-added plugin DLL row. Tracks the
+    /// path in <see cref="AppSettings.DisabledPluginDllPaths"/> when off so
+    /// the next sync writes a filtered PluginPaths array into engine.json
+    /// (the engine only loads paths it sees there). Persists immediately so
+    /// the next AC launch picks up the change without a save-as-you-go step.
+    private void OnUserPluginEnabledChanged(string dllPath, CheckBox checkBox)
+    {
+        _settings.DisabledPluginDllPaths ??= new List<string>();
+
+        bool enabled = checkBox.IsChecked == true;
+        bool alreadyDisabled = _settings.DisabledPluginDllPaths
+            .Any(p => string.Equals(p, dllPath, StringComparison.OrdinalIgnoreCase));
+
+        if (enabled && alreadyDisabled)
+        {
+            for (int i = _settings.DisabledPluginDllPaths.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(_settings.DisabledPluginDllPaths[i], dllPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    _settings.DisabledPluginDllPaths.RemoveAt(i);
+                    break;
+                }
+            }
+        }
+        else if (!enabled && !alreadyDisabled)
+        {
+            _settings.DisabledPluginDllPaths.Add(dllPath);
+        }
+        else
+        {
+            // No-op: state already matches checkbox.
+            return;
+        }
+
+        SaveSettings();
+        SyncPluginPathsToEngineSettings();
+        AppendActivity($"Runtime loadout updated: {Path.GetFileName(dllPath)} {(enabled ? "enabled" : "disabled")} (engine.json synced).");
+    }
+
     private void LoadPluginDllPaths()
     {
         _pluginDllPaths.Clear();
@@ -1554,7 +1618,13 @@ internal partial class MainWindow : Window
     {
         try
         {
-            EngineJsonStore.SetStringArray("PluginPaths", _pluginDllPaths);
+            var disabled = new HashSet<string>(
+                _settings.DisabledPluginDllPaths ?? new List<string>(),
+                StringComparer.OrdinalIgnoreCase);
+            List<string> enabledPaths = _pluginDllPaths
+                .Where(p => !disabled.Contains(p))
+                .ToList();
+            EngineJsonStore.SetStringArray("PluginPaths", enabledPaths);
         }
         catch (Exception ex)
         {
@@ -1762,6 +1832,8 @@ internal partial class MainWindow : Window
 
         _windowPositionAppliedPids.RemoveWhere(pid => !activePids.Contains(pid));
         _everLoggedInPids.RemoveWhere(pid => !activePids.Contains(pid));
+        foreach (int pid in _baselineWindowRects.Keys.Where(pid => !activePids.Contains(pid)).ToList())
+            _baselineWindowRects.Remove(pid);
 
         // Latch any PID that's currently reporting IsLoggedIn=true. Once
         // latched, the reaper will permanently exempt it — even if some race
@@ -2072,6 +2144,27 @@ internal partial class MainWindow : Window
     {
         Process[] targets = _injector.FindTargetProcesses();
         HashSet<int> activePids = targets.Select(process => process.Id).ToHashSet();
+
+        // Processes whose window is gone but whose OS process is still alive
+        // (slow native shutdown, crash dump collection, etc.) should not block
+        // relaunch for their account. Only applies to PIDs that completed at
+        // least one login — startup-phase clients keep blocking normally.
+        foreach (Process p in targets)
+        {
+            if (!_everLoggedInPids.Contains(p.Id))
+                continue;
+            try
+            {
+                p.Refresh();
+                if (p.MainWindowHandle == IntPtr.Zero)
+                {
+                    activePids.Remove(p.Id);
+                    LauncherDiag.Info($"GetActiveAccountKeys: PID {p.Id} window is gone (process still alive) — treating as departed for account-key purposes.");
+                }
+            }
+            catch { }
+        }
+
         LaunchContextStore.DeleteStaleProcessFiles(activePids);
         SessionStateStore.DeleteStaleProcessFiles(activePids);
 
@@ -2186,8 +2279,51 @@ internal partial class MainWindow : Window
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
     private const uint SWP_NOZORDER = 0x0004;
     private const uint SWP_NOACTIVATE = 0x0010;
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_LAYERED = 0x00080000;
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    /// Fallback for when Process.MainWindowHandle returns 0.
+    /// Enumerates all top-level windows and returns the handle of the largest
+    /// visible one owned by <paramref name="processId"/>.
+    private static IntPtr FindLargestVisibleWindowForProcess(int processId)
+    {
+        IntPtr best = IntPtr.Zero;
+        int bestArea = 0;
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsWindowVisible(hWnd))
+                return true;
+            // Skip layered windows (RynthAi panel etc.) — we only want the game window.
+            if ((GetWindowLong(hWnd, GWL_EXSTYLE) & WS_EX_LAYERED) != 0)
+                return true;
+            GetWindowThreadProcessId(hWnd, out uint pid);
+            if (pid != (uint)processId)
+                return true;
+            if (GetWindowRect(hWnd, out WinRect r))
+            {
+                int area = (r.Right - r.Left) * (r.Bottom - r.Top);
+                if (area > bestArea) { bestArea = area; best = hWnd; }
+            }
+            return true;
+        }, IntPtr.Zero);
+        return best;
+    }
 
     /// <summary>
     /// On the first tick after AC reaches graphics-ready for a tracked client,
@@ -2203,16 +2339,35 @@ internal partial class MainWindow : Window
         IReadOnlyDictionary<int, SessionStateRecord> activeSessions)
     {
         string? accountName = null;
+        string? serverName = null;
         if (activeSessions.TryGetValue(process.Id, out SessionStateRecord? s))
+        {
             accountName = s.AccountName;
+            serverName = s.ServerName;
+        }
         else if (activeContexts.TryGetValue(process.Id, out LaunchContextRecord? c))
+        {
             accountName = c.AccountName;
+            serverName = c.ServerName;
+        }
 
         if (string.IsNullOrWhiteSpace(accountName))
             return;
 
+        // Resolve the server profile ID from the server name so we can match
+        // account profiles precisely — two profiles can share an account name
+        // on different servers (e.g. "Drakkon" on ACEmulator vs Reefcull).
+        string? serverId = null;
+        if (!string.IsNullOrWhiteSpace(serverName))
+        {
+            serverId = _settings.ServerProfiles
+                .FirstOrDefault(sp => string.Equals(sp.Name, serverName, StringComparison.OrdinalIgnoreCase))
+                ?.Id;
+        }
+
         LaunchAccountProfile? profile = _settings.AccountProfiles.FirstOrDefault(a =>
-            string.Equals(a.AccountName, accountName, StringComparison.OrdinalIgnoreCase));
+            string.Equals(a.AccountName, accountName, StringComparison.OrdinalIgnoreCase)
+            && (serverId == null || string.Equals(a.ServerId, serverId, StringComparison.OrdinalIgnoreCase)));
         if (profile == null)
             return;
 
@@ -2226,8 +2381,14 @@ internal partial class MainWindow : Window
         {
             return;
         }
+        // Reject layered windows — the RynthAi floating panel is WS_EX_LAYERED and
+        // can win the MainWindowHandle race before the game window is ready.
+        // Fall back to EnumWindows, which also filters layered windows, to find
+        // the actual game window.
+        if (hwnd != IntPtr.Zero && (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) != 0)
+            hwnd = IntPtr.Zero;
         if (hwnd == IntPtr.Zero)
-            return;
+            hwnd = FindLargestVisibleWindowForProcess(process.Id);
 
         bool hasSaved = profile.WindowX.HasValue && profile.WindowY.HasValue
                         && profile.WindowWidth.HasValue && profile.WindowHeight.HasValue;
@@ -2245,6 +2406,13 @@ internal partial class MainWindow : Window
         if (!_windowPositionAppliedPids.Contains(process.Id))
         {
             _windowPositionAppliedPids.Add(process.Id);
+
+            if (hwnd == IntPtr.Zero)
+            {
+                LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}): hwnd=0 — cannot restore or capture.");
+                return;
+            }
+
             if (hasSaved)
             {
                 SetWindowPos(
@@ -2255,11 +2423,16 @@ internal partial class MainWindow : Window
                     profile.WindowWidth!.Value,
                     profile.WindowHeight!.Value,
                     SWP_NOZORDER | SWP_NOACTIVATE);
+                LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}): restored to ({profile.WindowX},{profile.WindowY},{profile.WindowWidth}x{profile.WindowHeight}).");
                 return;
             }
-            // No saved position — fall through to capture the current placement
-            // so we have something to restore next launch.
+            // No saved position — don't capture immediately. The window may still
+            // be at character-select/login size. Record the baseline on the next
+            // poll and only persist once the user actually moves or resizes it.
         }
+
+        if (hwnd == IntPtr.Zero)
+            return;
 
         if (!GetWindowRect(hwnd, out WinRect rect))
             return;
@@ -2269,27 +2442,52 @@ internal partial class MainWindow : Window
         int w = rect.Right - rect.Left;
         int h = rect.Bottom - rect.Top;
 
-        // AC sometimes reports tiny default-window placements before the real
-        // game window is up — ignore those so we don't blow away a real saved
-        // position with junk.
         if (w < 200 || h < 200)
             return;
 
-        const int Tolerance = 2;
-        bool changed = !hasSaved
-            || Math.Abs(profile.WindowX!.Value - x) > Tolerance
-            || Math.Abs(profile.WindowY!.Value - y) > Tolerance
-            || Math.Abs(profile.WindowWidth!.Value - w) > Tolerance
-            || Math.Abs(profile.WindowHeight!.Value - h) > Tolerance;
+        // Reject windows parked off-screen — AC places the window at (-10000,-10000)
+        // during startup before moving it into view. Multi-monitor setups can have
+        // negative coords, but never this negative.
+        if (x < -2000 || y < -2000)
+            return;
 
-        if (changed)
+        const int Tolerance = 2;
+
+        // On first observation with no saved position, record the current rect as
+        // baseline in memory without persisting. Only save once the window moves
+        // or resizes away from that baseline — that's user intent, not a transient.
+        if (!hasSaved)
         {
-            profile.WindowX = x;
-            profile.WindowY = y;
-            profile.WindowWidth = w;
-            profile.WindowHeight = h;
-            SaveSettings();
+            if (!_baselineWindowRects.TryGetValue(process.Id, out var baseline))
+            {
+                _baselineWindowRects[process.Id] = (x, y, w, h);
+                return; // wait for the user to move/resize before saving
+            }
+
+            bool movedFromBaseline = Math.Abs(baseline.x - x) > Tolerance
+                || Math.Abs(baseline.y - y) > Tolerance
+                || Math.Abs(baseline.w - w) > Tolerance
+                || Math.Abs(baseline.h - h) > Tolerance;
+            if (!movedFromBaseline)
+                return;
         }
+        else
+        {
+            bool changed = Math.Abs(profile.WindowX!.Value - x) > Tolerance
+                || Math.Abs(profile.WindowY!.Value - y) > Tolerance
+                || Math.Abs(profile.WindowWidth!.Value - w) > Tolerance
+                || Math.Abs(profile.WindowHeight!.Value - h) > Tolerance;
+            if (!changed)
+                return;
+        }
+
+        _baselineWindowRects[process.Id] = (x, y, w, h);
+        profile.WindowX = x;
+        profile.WindowY = y;
+        profile.WindowWidth = w;
+        profile.WindowHeight = h;
+        SaveSettings();
+        LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}): saved ({x},{y},{w}x{h}).");
     }
 
     /// <summary>

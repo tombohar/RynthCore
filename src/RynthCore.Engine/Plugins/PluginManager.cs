@@ -1031,6 +1031,7 @@ internal static class PluginManager
         Compatibility.ChatHooks.ResetCachedInstance();
         Compatibility.RadarHooks.ResetCachedInstance();
         Compatibility.PowerbarHooks.ResetCachedInstance();
+        Compatibility.ChatCallbackHooks.ResetOutgoingTarget();
 
         // Drop the cached PlayerDesc/CACQualities pointer so the next call into the
         // buffed-max inq function can't AV on a freed allocation. Re-seeded on the next
@@ -2254,6 +2255,7 @@ internal static class PluginManager
 
     private static int ChangeCombatMode(int combatMode)
     {
+        Compatibility.AcActionTrace.Record("ChangeCombatMode", (uint)combatMode);
         return ToAbiBool(ClientActionHooks.ChangeCombatMode(combatMode));
     }
 
@@ -2274,6 +2276,7 @@ internal static class PluginManager
 
     private static int CastSpellAction(uint targetId, int spellId)
     {
+        Compatibility.AcActionTrace.Record("CastSpell", targetId, (uint)spellId);
         return ToAbiBool(ClientActionHooks.CastSpell(targetId, spellId));
     }
 
@@ -2478,16 +2481,19 @@ internal static class PluginManager
 
     private static int MeleeAttack(uint targetId, int attackHeight, float powerLevel)
     {
+        Compatibility.AcActionTrace.Record("MeleeAttack", targetId, (uint)attackHeight);
         return ToAbiBool(ClientActionHooks.MeleeAttack(targetId, attackHeight, powerLevel));
     }
 
     private static int MissileAttack(uint targetId, int attackHeight, float accuracyLevel)
     {
+        Compatibility.AcActionTrace.Record("MissileAttack", targetId, (uint)attackHeight);
         return ToAbiBool(ClientActionHooks.MissileAttack(targetId, attackHeight, accuracyLevel));
     }
 
     private static int NativeAttackAction(int attackHeight, float power)
     {
+        Compatibility.AcActionTrace.Record("NativeAttack", 0, (uint)attackHeight);
         return ToAbiBool(ClientCombatHooks.NativeAttack(attackHeight, power));
     }
 
@@ -2611,8 +2617,42 @@ internal static class PluginManager
         ChatCallbackHooks.SetIncomingChatSuppression(enabled != 0);
     }
 
+    // ── SelectItem dedupe window ─────────────────────────────────────────
+    // Coalesces repeat-select spam (RynthAi historically issues 3-8 calls
+    // for the same target within 100-400 ms) into a single AC SetSelectedObject
+    // invocation. Diagnoses match the "too many switches" hypothesis: the
+    // gen1 cold-launch crash at 13 min ended in AV inside
+    // acclient.exe!PackableHashTable<ulong,Skill>::EmptyContents — AC teardown
+    // walking a Skill quality table whose entries were already freed by a
+    // back-to-back SelectItem that re-triggered teardown before the first
+    // finished. 150 ms is short enough that user-initiated target switches
+    // feel instant (well below the per-frame budget for either AC's 33 Hz or
+    // RynthAi's 10 Hz polling) and long enough to swallow the burst pattern.
+    // Per-target state (no global lock) — racy reads on x86 are acceptable
+    // because false-positives just delay one extra select by <150 ms.
+    private const int SelectItemDedupeMs = 150;
+    private static uint _lastSelectItemTarget;
+    private static long _lastSelectItemTicks;
+
     private static int SelectItem(uint objectId)
     {
+        long nowTicks = Environment.TickCount64;
+        uint prevTarget = _lastSelectItemTarget;
+        long prevTicks = System.Threading.Volatile.Read(ref _lastSelectItemTicks);
+
+        if (objectId == prevTarget && objectId != 0 && (nowTicks - prevTicks) < SelectItemDedupeMs)
+        {
+            // Suppress: same target seen within the window. Record under a
+            // distinct trace name so post-crash analysis shows the dedupe is
+            // actually firing in the wild. Return success because the prior
+            // call already established the selection AC needs.
+            Compatibility.AcActionTrace.Record("SelectItem-dedup", objectId);
+            return 1;
+        }
+
+        _lastSelectItemTarget = objectId;
+        System.Threading.Volatile.Write(ref _lastSelectItemTicks, nowTicks);
+        Compatibility.AcActionTrace.Record("SelectItem", objectId);
         return ToAbiBool(ClientHelperHooks.SelectItem(objectId));
     }
 
@@ -2666,6 +2706,7 @@ internal static class PluginManager
 
     private static int UseObject(uint objectId)
     {
+        Compatibility.AcActionTrace.Record("UseObject", objectId);
         return ToAbiBool(ClientHelperHooks.UseObject(objectId));
     }
 

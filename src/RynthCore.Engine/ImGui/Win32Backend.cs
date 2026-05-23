@@ -7,6 +7,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using ImGuiNET;
 using RynthCore.Engine.D3D9;
 using RynthCore.Engine.UI;
@@ -39,6 +40,11 @@ internal static unsafe class Win32Backend
     private const uint WM_SETCURSOR = 0x0020;
     private const uint WM_XBUTTONDOWN = 0x020B;
     private const uint WM_XBUTTONUP = 0x020C;
+    private const uint WM_CLOSE = 0x0010;
+
+    // Set on the first WM_CLOSE so we kick off the engine teardown exactly
+    // once even if AC reposts WM_CLOSE during its shutdown sequence.
+    private static int _wmCloseSeen;
 
     private const int GWL_WNDPROC = -4;
     private const uint GA_ROOT = 2;
@@ -64,6 +70,9 @@ internal static unsafe class Win32Backend
     private const int VK_HOME   = 0x24;
     private const int VK_END    = 0x23;
     private const int VK_DELETE = 0x2E;
+    // lParam bit 24: extended key flag. Set for numpad Enter, right-side Ctrl/Alt.
+    // Used to distinguish numpad Enter (extended) from the main keyboard Enter (not extended).
+    private static bool IsExtendedKey(IntPtr lParam) => ((int)(long)lParam & 0x01000000) != 0;
 
     // ─── Win32 P/Invoke ───────────────────────────────────────────────
     // On x86, SetWindowLongPtr doesn't exist — use SetWindowLong
@@ -216,6 +225,10 @@ internal static unsafe class Win32Backend
     /// <summary>While true, WM_CHAR / special keys are consumed for the chat input TextBox
     /// instead of passing to the game.  Focus stays on the game HWND.</summary>
     public static volatile bool ChatCaptureActive;
+    /// <summary>Set when we consume the VK_RETURN/VK_ESCAPE that ends chat capture, so the
+    /// trailing WM_CHAR ('\r') + WM_KEYUP of that same keystroke are eaten too and never
+    /// leak to the game (a lone '\r' can spuriously re-open AC's native chat bar).</summary>
+    private static bool _swallowEnterTail;
 
     // ── Chat input callbacks (set by RynthChatPanel) ─────────────────────
     /// <summary>Fired when Enter in-game activates chat (UI thread dispatch optional).</summary>
@@ -280,6 +293,7 @@ internal static unsafe class Win32Backend
         _wantCaptureMouse = false;
         _wantCaptureKeyboard = false;
         _insertWasDown = false;
+        _swallowEnterTail = false;
 
         // Subclass the window
         _wndProcDelegate = WndProcHook;
@@ -420,6 +434,30 @@ internal static unsafe class Win32Backend
         {
             _wndProcLogCount++;
 
+            // ── User clicked X / Alt+F4 on AC window — tear our overlay down NOW ──
+            // AC's own shutdown takes 20-30 s (network logout, save, etc.) before
+            // it finally calls ExitProcess and triggers ProcessExitHooks. During
+            // that gap EndScene keeps firing and the floating LayeredWindows
+            // (RynthAi panel etc.) stay visible on the OS desktop, which looks
+            // like the overlay is "stuck up" long after the close click. Running
+            // EngineLifecycle.Shutdown here uninstalls the EndScene hook and
+            // closes every floating panel immediately; the later ExitProcess
+            // detour is a no-op (interlocked guard inside Shutdown). Run on a
+            // background thread so the join on the Avalonia STA doesn't block
+            // AC's own message pump during its shutdown.
+            if (msg == WM_CLOSE && Interlocked.Exchange(ref _wmCloseSeen, 1) == 0)
+            {
+                RynthLog.UI("Win32Backend: WM_CLOSE on AC window — kicking engine shutdown so floating panels close immediately.");
+                new Thread(() =>
+                {
+                    try { EngineLifecycle.Shutdown(); }
+                    catch (Exception ex) { RynthLog.UI($"Win32Backend: WM_CLOSE shutdown threw {ex.GetType().Name}: {ex.Message}"); }
+                })
+                { Name = "RynthCore.WmCloseShutdown", IsBackground = true }.Start();
+                // Fall through to AC's original WndProc so AC starts its own
+                // shutdown sequence in parallel with ours.
+            }
+
             // ── Chat capture: consume all key input for the chat TextBox ────
             // Game HWND keeps Win32 focus throughout; callbacks dispatch Text
             // updates to the panel on Avalonia's UI thread — no Avalonia focus needed.
@@ -434,8 +472,8 @@ internal static unsafe class Win32Backend
                 else if (msg == WM_KEYDOWN)
                 {
                     int vk = (int)wParam;
-                    if      (vk == VK_RETURN)  { ChatCaptureActive = false; OnChatSend?.Invoke(); }
-                    else if (vk == VK_ESCAPE)  { ChatCaptureActive = false; OnChatCancel?.Invoke(); }
+                    if      (vk == VK_RETURN && !IsExtendedKey(lParam))  { ChatCaptureActive = false; _swallowEnterTail = true; PostMessage(_gameHwnd, WM_RYNTHCORE_CHAT, IntPtr.Zero, IntPtr.Zero); }
+                    else if (vk == VK_ESCAPE)  { ChatCaptureActive = false; _swallowEnterTail = true; OnChatCancel?.Invoke(); }
                     else if (vk == VK_BACK)    { OnChatBackspace?.Invoke(); }
                     else if (vk == VK_DELETE)  { OnChatDelete?.Invoke(); }
                     else if (vk == VK_LEFT)    { OnChatLeft?.Invoke(); }
@@ -448,8 +486,48 @@ internal static unsafe class Win32Backend
                 return IntPtr.Zero;   // eat all key messages while chat is active
             }
 
+            // ── Swallow the tail of the send/cancel keystroke ─────────────
+            // The block above ends chat capture on VK_RETURN/VK_ESCAPE but eats
+            // only the WM_KEYDOWN. The OS still delivers the matching WM_CHAR
+            // ('\r') and WM_KEYUP; with ChatCaptureActive now false they'd fall
+            // through to the game, and a lone '\r' can spuriously re-open AC's
+            // native chat bar (which then sits open, hidden by suppress, eating
+            // input until it resets — a multi-second dead window for chat).
+            if (_swallowEnterTail)
+            {
+                if (msg == WM_CHAR)
+                    return IntPtr.Zero;
+                if ((msg == WM_KEYUP || msg == WM_SYSKEYUP) &&
+                    ((int)wParam == VK_RETURN || (int)wParam == VK_ESCAPE) &&
+                    !IsExtendedKey(lParam))
+                {
+                    _swallowEnterTail = false;
+                    return IntPtr.Zero;
+                }
+                if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+                    _swallowEnterTail = false;   // a new keystroke began; stop guarding
+            }
+
+            // ── Deferred chat send ────────────────────────────────────────
+            // The send Enter (handled above) posts WM_RYNTHCORE_CHAT instead of
+            // dispatching inline. We fire OnChatSend here, on a *fresh* game-thread
+            // message dispatch — after the Enter's WM_CHAR/WM_KEYUP tail has been
+            // consumed and outside the original keystroke's WndProc frame. This
+            // matters because OnChatSend → RynthChatSendLine → ChatCommandDispatcher
+            // .SimulateChatInput drives CallWindowProcA back into AC's window proc;
+            // doing that reentrantly inside the Enter keystroke left AC's chat bar
+            // misaligned after the first send ("worked once, then stopped"). The
+            // dispatch must stay on the game thread (it owns the window), so a posted
+            // message — not a worker-thread tick — is the right deferral.
+            if (msg == WM_RYNTHCORE_CHAT)
+            {
+                OnChatSend?.Invoke();
+                return IntPtr.Zero;
+            }
+
             // ── Chat: Enter in-game activates the chat TextBox ───────────
-            if (msg == WM_KEYDOWN && (int)wParam == VK_RETURN && !ChatCaptureActive)
+            // Numpad Enter (extended key, lParam bit 24) is reserved for AC functions — never capture it.
+            if (msg == WM_KEYDOWN && (int)wParam == VK_RETURN && !IsExtendedKey(lParam) && !ChatCaptureActive)
             {
                 if (OnChatCaptureActivated != null)
                 {
@@ -606,6 +684,12 @@ internal static unsafe class Win32Backend
                 {
                     AvaloniaOverlay.ActivateBarButton(releasedButtonTitle!);
                 }
+
+                // Persist bar position on drag-end. All the live moves were
+                // applied via MoveBarByPhys; CommitDrag(0,0) saves the final
+                // canvas position without applying any additional delta.
+                if (_avIsDragging)
+                    AvaloniaOverlay.CommitDrag(0, 0);
 
                 AvaloniaOverlay.IsDragInProgress = false;
                 _avIsDragging = false;
@@ -978,7 +1062,10 @@ internal static unsafe class Win32Backend
 
     private static void LogAvaloniaPointerDebug(string phase, int clientX, int clientY, int overlayX, int overlayY, int? messageX = null, int? messageY = null)
     {
-        // Suppressed — these diagnostics are no longer needed for stable operation.
+        if (messageX.HasValue)
+            RynthLog.Info($"AvaloniaPtr [{phase}] client=({clientX},{clientY}) overlay=({overlayX},{overlayY}) msg=({messageX},{messageY}).");
+        else
+            RynthLog.Info($"AvaloniaPtr [{phase}] client=({clientX},{clientY}) overlay=({overlayX},{overlayY}).");
     }
 
     private static void AcquireAvaloniaNativeCapture()

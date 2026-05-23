@@ -626,6 +626,40 @@ internal static partial class RynthAiPanel
 
         dash.Children.Add(launcherGrid);
 
+        // ── Footer: live FPS + engine uptime ───────────────────────────────
+        // Two-cell row anchored to the bottom of the dashboard. FPS sourced
+        // from EndSceneHook.MeasuredFps (refreshed once/sec on the AC pump
+        // thread), uptime from EntryPoint.InitStartedUtc (re-stamped on every
+        // hot-reload generation so the value reflects the *current* gen's
+        // lifetime — useful for the ongoing heap-corruption diagnostic where
+        // each gen seems to die ~5 min in). Same muted palette as labels;
+        // hidden when the dashboard is minimised (matches launcherGrid).
+        var footerGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
+            Margin = new Thickness(0, 6, 0, 0)
+        };
+        var fpsText = new TextBlock
+        {
+            Text = "FPS —",
+            FontSize = 10,
+            Foreground = ColMute,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var uptimeText = new TextBlock
+        {
+            Text = "Up —",
+            FontSize = 10,
+            Foreground = ColMute,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Right
+        };
+        Grid.SetColumn(fpsText, 0);
+        Grid.SetColumn(uptimeText, 2);
+        footerGrid.Children.Add(fpsText);
+        footerGrid.Children.Add(uptimeText);
+        dash.Children.Add(footerGrid);
+
         // ── Picker overlay ─────────────────────────────────────────────────
         void ClosePicker()
         {
@@ -745,6 +779,7 @@ internal static partial class RynthAiPanel
             bool minimized = _avaloniaMinimized;
             headerGrid.IsVisible          = !minimized;
             launcherGrid.IsVisible        = !minimized;
+            footerGrid.IsVisible          = !minimized;
             minimizedMacroButton.IsVisible = minimized;
             // combatBorder stays visible in both modes — bug fix from prior
             // build that hid it and made the panel appear blank.
@@ -811,6 +846,22 @@ internal static partial class RynthAiPanel
             UpdateVitalRow(mnFill, mnText, "MN",
                 snap.PlayerMaxMana    != 0 ? snap.PlayerMana    : _cachedMn,
                 snap.PlayerMaxMana    != 0 ? snap.PlayerMaxMana    : _cachedMaxMn);
+
+            // Footer: FPS (refreshed once/sec by EndSceneHook) + engine
+            // gen uptime (re-stamped on every hot-reload). Cheap to recompute
+            // every 100 ms — string interpolation only, no native calls.
+            float liveFps = D3D9.EndSceneHook.MeasuredFps;
+            SetText(fpsText, liveFps > 0 ? $"FPS {liveFps:F0}" : "FPS —");
+
+            DateTime startedUtc = EntryPoint.InitStartedUtc;
+            if (startedUtc != DateTime.MinValue)
+            {
+                TimeSpan up = DateTime.UtcNow - startedUtc;
+                string upStr = up.TotalHours >= 1
+                    ? $"Up {(int)up.TotalHours}:{up.Minutes:D2}:{up.Seconds:D2}"
+                    : $"Up {up.Minutes}:{up.Seconds:D2}";
+                SetText(uptimeText, upStr);
+            }
         };
         timer.Start();
         RynthLog.Info("RynthAiPanel.Create: timer started, returning root");

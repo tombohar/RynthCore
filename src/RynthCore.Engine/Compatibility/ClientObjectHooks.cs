@@ -182,7 +182,12 @@ internal static class ClientObjectHooks
     // attackable. If crash frequency drops materially with this, this walk is
     // implicated → redesign incremental (compute-once-per-id + evict on delete);
     // if unchanged, it's exonerated → move to the object create/delete plumbing.
-    private const int AttackablePrefetchThrottleMs = 8000;
+    // 2026-05-21: dump-verified the crashing CObjectMaint walk is the OFF-THREAD
+    // _getWeenieObject in un-guarded position/property reads (pump thread 0x5698 @
+    // 0x67E779), NOT this main-thread prefetch walk — so the 8000ms diagnostic was
+    // throttling the wrong (already-safe) walk. Lowered to keep the off-thread
+    // snapshot fresh for swarm churn now that the pump is fully gated to it.
+    private const int AttackablePrefetchThrottleMs = 500;
 
     // Main-thread object name/type snapshot — mirrors PrefetchAttackable.
     // Off-thread classifier (WorldObjectCache) reads name/type from here
@@ -193,7 +198,56 @@ internal static class ClientObjectHooks
     private static readonly Dictionary<uint, uint> _objectTypeCache = new();
     private static DateTime _lastObjectIdentityPrefetchUtc = DateTime.MinValue;
     private static bool _loggedObjectIdentityServe;
-    private const int ObjectIdentityPrefetchThrottleMs = 3000;
+    private const int ObjectIdentityPrefetchThrottleMs = 500;
+
+    // Position snapshot — mirrors the attackable/identity snapshots, but sampled
+    // EVERY EndScene (no throttle) because positions change per-frame. The
+    // off-thread plugin pump reads position from here instead of resolving
+    // _getWeenieObject(id) live — that resolution is AC's CObjectMaint hash walk
+    // and is the dump-verified 0x0067E779 READ-AV when done off the main thread.
+    // MUST stay ZERO-ALLOC (reused dict via Clear()+re-add, cached enumerate
+    // delegate, struct values) so per-frame capture in the EndScene reverse-
+    // P/Invoke can't trigger a GC → NativeAOT fail-fast (the same hazard that
+    // moved TickAll off this thread; see EngineFrameController.OnEndScene).
+    private struct PosEntry { public uint Cell; public float X, Y, Z; }
+    private static readonly object _positionCacheLock = new();
+    private static readonly Dictionary<uint, PosEntry> _positionCache = new(512);
+    private static bool _loggedPositionServe;
+    private static readonly Action<uint> _capturePositionDelegate = CapturePositionForId;
+    private static DateTime _lastPositionPrefetchUtc = DateTime.MinValue;
+    // The per-frame full walk (CObjectMaint enumerate + per-object _getWeenieObject)
+    // on the RENDER thread at ~60Hz was ~30x the rate of the other prefetches
+    // (attackable/identity at 500ms) — far more render-thread load than necessary.
+    // 100ms (10Hz) keeps positions fresh for combat while bringing the render-
+    // thread cost in line with the other walks. (Positions are volatile, but AC's
+    // server position updates are coarser than 10Hz anyway.)
+    private const int PositionPrefetchThrottleMs = 100;
+
+    // Off-thread weenie-pointer cache (the COMPLETE gate for the 0x0067E779
+    // CObjectMaint READ-AV). The pump must NEVER call _getWeenieObject live; the
+    // main-thread position walk records every live id->weeniePtr into
+    // _weeniePtrBack, then publishes it to _weeniePtrFront via an atomic swap.
+    // GetWeenieObjectResolve serves _weeniePtrFront off-thread. Double-buffered
+    // so off-thread reads take only the brief swap lock and never block on the
+    // walk (the per-frame single-lock walk previously stalled the render thread).
+    private static readonly object _weeniePtrSwapLock = new();
+    private static Dictionary<uint, IntPtr> _weeniePtrFront = new(512);
+    private static Dictionary<uint, IntPtr> _weeniePtrBack = new(512);
+    // Diagnostic (temporary): periodic snapshot-size log + live-read probe of
+    // objects with a position but no cached name. Remove once the missing-
+    // monsters cause is pinned. _diagSampleBuf preallocated to stay low-alloc.
+    private static DateTime _lastSnapshotDiagUtc = DateTime.MinValue;
+    private const int SnapshotDiagThrottleMs = 10000;
+    private static readonly uint[] _diagSampleBuf = new uint[16];
+    // object_table id collection buffer for the table-comparison diagnostic.
+    private static readonly uint[] _diagObjTableIds = new uint[1024];
+    private static int _diagObjTableN;
+    private static readonly Action<uint> _diagObjTableVisit = DiagObjTableVisit;
+    private static void DiagObjTableVisit(uint id)
+    {
+        if (_diagObjTableN < _diagObjTableIds.Length)
+            _diagObjTableIds[_diagObjTableN++] = id;
+    }
 
     // CPhysicsObj.m_position offset (same as PlayerPhysicsHooks.PhysicsPositionOffset)
     private const int PhysicsPositionOffset = 0x48;
@@ -434,6 +488,10 @@ internal static class ClientObjectHooks
 
     private static string _statusMessage = "Not probed yet.";
     private static GetWeenieObjectDelegate? _getWeenieObject;
+    // Raw native resolver. _getWeenieObject (above) is a GATED wrapper
+    // (GetWeenieObjectResolve) that calls this only on AC's main thread; off the
+    // main thread it serves a cached pointer instead of walking AC's table.
+    private static GetWeenieObjectDelegate? _getWeenieObjectNative;
     private static GetObjectNameStaticDelegate? _getObjectNameStatic;
     private static GetObjectNameInstanceDelegate? _getObjectNameInstance;
     private static InqTypeDelegate? _inqType;
@@ -484,6 +542,7 @@ internal static class ClientObjectHooks
             if (_getWeenieObject != null || _getObjectNameStatic != null || _getObjectNameInstance != null)
             {
                 _getWeenieObject = null;
+                _getWeenieObjectNative = null;
                 _getObjectNameStatic = null;
                 _getObjectNameInstance = null;
                 _inqType = null;
@@ -526,7 +585,11 @@ internal static class ClientObjectHooks
             return false;
         }
 
-        _getWeenieObject = Marshal.GetDelegateForFunctionPointer<GetWeenieObjectDelegate>(getWeeniePtr);
+        _getWeenieObjectNative = Marshal.GetDelegateForFunctionPointer<GetWeenieObjectDelegate>(getWeeniePtr);
+        // _getWeenieObject is the GATED wrapper (see GetWeenieObjectResolve):
+        // native walk on AC's main thread (and cache the ptr), cached-ptr serve
+        // off-thread so the pump never walks CObjectMaint (0x0067E779 READ-AV).
+        _getWeenieObject = GetWeenieObjectResolve;
         _getWeenieObjectPtr = getWeeniePtr;
         _getObjectNameStatic = Marshal.GetDelegateForFunctionPointer<GetObjectNameStaticDelegate>(getNameStaticPtr);
         _getObjectNameInstance = Marshal.GetDelegateForFunctionPointer<GetObjectNameInstanceDelegate>(getNameInstancePtr);
@@ -2262,6 +2325,45 @@ internal static class ClientObjectHooks
         objCellId = 0;
         x = y = z = 0;
 
+        // Off-thread (plugin pump): serve from the main-thread position snapshot.
+        // NEVER resolve the object off-thread — TryGetWeenieObjectPtr →
+        // _getWeenieObject is AC's CObjectMaint hash walk and AVs cross-thread
+        // (dump-verified 0x0067E779 READ-AV). A miss (object not sampled yet, or
+        // already gone) returns false; the pump treats it as out-of-range this
+        // tick and re-checks next tick once PrefetchPositions samples it.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            lock (_positionCacheLock)
+            {
+                if (_positionCache.TryGetValue(objectId, out PosEntry p))
+                {
+                    objCellId = p.Cell;
+                    x = p.X; y = p.Y; z = p.Z;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        return ReadObjectPositionLive(objectId, out objCellId, out x, out y, out z);
+    }
+
+    /// <summary>
+    /// Live position read — resolves the weenie and walks CPhysicsObj. ONLY safe
+    /// on AC's main thread (resolves _getWeenieObject = CObjectMaint walk). Called
+    /// by the on-main-thread <see cref="TryGetObjectPosition"/> and by
+    /// <see cref="PrefetchPositions"/>.
+    /// </summary>
+    private static bool ReadObjectPositionLive(
+        uint objectId,
+        out uint objCellId,
+        out float x,
+        out float y,
+        out float z)
+    {
+        objCellId = 0;
+        x = y = z = 0;
+
         if (_weeniePhysicsObjOffset < 0)
         {
             ProbePhysObjOffset();
@@ -2306,6 +2408,160 @@ internal static class ClientObjectHooks
             LogLookup($"Compat: object position read failed for 0x{objectId:X8} - {ex.GetType().Name}: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// Samples every live object's position on AC's main thread (EndScene path)
+    /// into <see cref="_positionCache"/>, which the off-thread plugin pump reads
+    /// via <see cref="TryGetObjectPosition"/>. Sampled every frame (positions are
+    /// volatile) and ZERO-ALLOC: the dict is reused (Clear + re-add of struct
+    /// values) and the per-id callback is a cached delegate, so this never
+    /// allocates inside the EndScene reverse-P/Invoke (which would risk the
+    /// NativeAOT GC fail-fast that moved TickAll off this thread). The lock is
+    /// held across the walk to stay zero-alloc; the pump's per-id read contends
+    /// only briefly. Walk runs every frame, so a transient empty (walk failure)
+    /// self-heals next frame — no last-good retention needed (unlike the
+    /// throttled attackable/identity snapshots).
+    /// </summary>
+    public static void PrefetchPositions()
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        if ((DateTime.UtcNow - _lastPositionPrefetchUtc).TotalMilliseconds < PositionPrefetchThrottleMs)
+            return;
+        _lastPositionPrefetchUtc = DateTime.UtcNow;
+        if (_weeniePhysicsObjOffset < 0)
+        {
+            ProbePhysObjOffset();
+            if (_weeniePhysicsObjOffset < 0)
+                return;
+        }
+
+        try
+        {
+            lock (_positionCacheLock)
+            {
+                _positionCache.Clear();
+                _weeniePtrBack.Clear();
+                CObjectMaintHooks.EnumerateLiveWeenieObjectIds(_capturePositionDelegate);
+            }
+
+            // Publish the freshly-walked id->weeniePtr map to off-thread readers
+            // (GetWeenieObjectResolve). The swap is brief and is NOT held during
+            // the walk, so the pump's resolver reads never stall on the walk.
+            lock (_weeniePtrSwapLock)
+                (_weeniePtrFront, _weeniePtrBack) = (_weeniePtrBack, _weeniePtrFront);
+
+            if (!_loggedPositionServe && _positionCache.Count > 0)
+            {
+                _loggedPositionServe = true;
+                RynthLog.Compat($"ClientObjectHooks: position snapshot warm — {_positionCache.Count} live objects (served off-thread to the plugin pump).");
+            }
+
+            LogSnapshotDiagnostics();
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"PrefetchPositions exception: {ex.Message}");
+        }
+    }
+
+    // ── DIAGNOSTIC (logging only, temporary) ────────────────────────────────
+    // Runs on AC's main thread (called from PrefetchPositions). Every ~10s logs
+    // the CURRENT snapshot sizes, then probes a few objects that have a position
+    // but no cached name with a LIVE main-thread name/type read. Interpretation:
+    //   live read WORKS but cache empty  → snapshot POPULATION is broken
+    //   live read FAILS                  → AC genuinely lacks the object's data
+    private static void LogSnapshotDiagnostics()
+    {
+        if ((DateTime.UtcNow - _lastSnapshotDiagUtc).TotalMilliseconds < SnapshotDiagThrottleMs)
+            return;
+        _lastSnapshotDiagUtc = DateTime.UtcNow;
+        try
+        {
+            int posN, atkN, atkTrue = 0, nameN, typeN, ptrN;
+            lock (_positionCacheLock) posN = _positionCache.Count;
+            lock (_attackableCacheLock)
+            {
+                atkN = _attackableCache.Count;
+                foreach (bool v in _attackableCache.Values) if (v) atkTrue++;
+            }
+            lock (_objectIdentityCacheLock) { nameN = _objectNameCache.Count; typeN = _objectTypeCache.Count; }
+            lock (_weeniePtrSwapLock) ptrN = _weeniePtrFront.Count;
+            RynthLog.Compat($"[SnapshotDiag] pos={posN} attackable={atkN}({atkTrue} atk) names={nameN} types={typeN} ptr={ptrN}");
+
+            // Compare CObjectMaint's physics tables — object_table (+0x84) and
+            // null_object_table (+0x9C, objects with pending/null weenie) —
+            // against weenie_object_table (+0xB4) that our snapshots use.
+            // "only" = ids present in that table but NOT in the weenie ptr cache.
+            _diagObjTableN = 0;
+            int objN = CObjectMaintHooks.EnumerateTableIds(0x84, _diagObjTableVisit);
+            int objOnly = 0;
+            lock (_weeniePtrSwapLock)
+                for (int i = 0; i < _diagObjTableN; i++)
+                    if (!_weeniePtrFront.ContainsKey(_diagObjTableIds[i])) objOnly++;
+
+            _diagObjTableN = 0;
+            int nullN = CObjectMaintHooks.EnumerateTableIds(0x9C, _diagObjTableVisit);
+            int nullOnly = 0, sampleN = 0;
+            lock (_weeniePtrSwapLock)
+                for (int i = 0; i < _diagObjTableN; i++)
+                {
+                    uint id = _diagObjTableIds[i];
+                    if (_weeniePtrFront.ContainsKey(id)) continue;
+                    nullOnly++;
+                    if (sampleN < 3) _diagSampleBuf[sampleN++] = id;
+                }
+            RynthLog.Compat($"[SnapshotDiag] objectTable={objN}(only {objOnly}) nullTable={nullN}(only {nullOnly}) weenieTable={ptrN}");
+
+            // Probe a few null_object_table ids that aren't in the weenie cache —
+            // LIVE main-thread resolve + name/type. If they resolve + read, then
+            // null_object_table holds the missing monsters and we enumerate it.
+            for (int i = 0; i < sampleN; i++)
+            {
+                uint id = _diagSampleBuf[i];
+                IntPtr p = _getWeenieObjectNative != null ? _getWeenieObjectNative(id) : IntPtr.Zero;
+                bool gotName = TryGetObjectName(id, out _);
+                bool gotType = TryGetItemType(id, out uint tf);
+                RynthLog.Compat($"[SnapshotDiag] null-probe 0x{id:X8}: resolve={p != IntPtr.Zero} liveName={gotName} liveType={gotType}(0x{tf:X})");
+            }
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"[SnapshotDiag] exception: {ex.Message}");
+        }
+    }
+
+    // Cached delegate target for PrefetchPositions' enumerate. Runs on the main
+    // thread under _positionCacheLock; reads the live position and stores it.
+    // Method group is cached in _capturePositionDelegate so the enumerate call
+    // allocates no closure per frame.
+    private static void CapturePositionForId(uint id)
+    {
+        // Resolve natively here (we are on AC's main thread, so the CObjectMaint
+        // walk is safe) and stash the ptr so the off-thread pump can resolve it
+        // via GetWeenieObjectResolve without walking AC's table itself.
+        IntPtr weeniePtr = _getWeenieObjectNative != null ? _getWeenieObjectNative(id) : IntPtr.Zero;
+        if (weeniePtr != IntPtr.Zero)
+            _weeniePtrBack[id] = weeniePtr;
+        if (ReadObjectPositionLive(id, out uint cell, out float x, out float y, out float z))
+            _positionCache[id] = new PosEntry { Cell = cell, X = x, Y = y, Z = z };
+    }
+
+    /// <summary>
+    /// Gated replacement for the raw _getWeenieObject delegate. On AC's main
+    /// thread it resolves natively (the CObjectMaint walk is safe there). Off the
+    /// main thread (plugin pump) it serves the pointer cached by the main-thread
+    /// position walk and NEVER walks AC's object table — that walk is the
+    /// dump-verified 0x0067E779 READ-AV. A cache miss returns Zero so every
+    /// downstream read fails closed (false/default) instead of crashing.
+    /// </summary>
+    private static IntPtr GetWeenieObjectResolve(uint objectId)
+    {
+        if (MainThreadGuard.IsOnMainThread())
+            return _getWeenieObjectNative != null ? _getWeenieObjectNative(objectId) : IntPtr.Zero;
+        lock (_weeniePtrSwapLock)
+            return _weeniePtrFront.TryGetValue(objectId, out IntPtr p) ? p : IntPtr.Zero;
     }
 
     // CPhysicsObj::m_state offset — confirmed from Ghidra set_state disasm: MOV [ESI+0xa8], EAX

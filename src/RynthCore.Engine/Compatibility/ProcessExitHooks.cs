@@ -368,6 +368,12 @@ internal static class ProcessExitHooks
 
         try
         {
+            // Dump RynthCore->AC action trace BEFORE building the termination
+            // banner so the trace is in the log even if the banner build throws.
+            // Captures the last ~256 mutating calls — the "too many switches?"
+            // ring buffer for Class B AVs (AC UIElement faults, no RC stack).
+            AcActionTrace.DumpToLog();
+
             var sb = new StringBuilder();
             sb.AppendLine("==== PROCESS TERMINATION INTERCEPTED ====");
             sb.AppendLine($"  function:  kernel32!{func}");

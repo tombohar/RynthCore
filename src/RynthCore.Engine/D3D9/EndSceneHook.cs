@@ -25,6 +25,18 @@ internal static class EndSceneHook
     private static long _fpsCounterStart;
     private static int _fpsCounterFrames;
 
+    /// <summary>
+    /// Last measured EndScene frames-per-second, refreshed once per second.
+    /// Updated whether or not the FPS governor is enabled — UI panels (the
+    /// RynthAi footer) read this for a live frame-rate display. Volatile
+    /// because writes happen on the AC pump thread and reads happen on the
+    /// Avalonia dispatcher thread (10 Hz panel tick); double-word atomic on
+    /// x86 and we don't need a tear-free guarantee on this value.
+    /// </summary>
+    internal static volatile float MeasuredFps;
+    private static long _liveFpsCounterStart;
+    private static int _liveFpsCounterFrames;
+
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
@@ -311,6 +323,21 @@ internal static class EndSceneHook
         {
             if (_uiFrameCount < 30)
                 RynthLog.D3D9($"EndSceneHook: Frame {_frameCount} error: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+        }
+
+        // ── Always-on FPS measurement for UI footer ──────────────────
+        // Runs whether or not the governor is enabled so the RynthAi
+        // footer can show a live FPS even when the user hasn't capped.
+        // Cheap: one increment + a once-per-second division.
+        _liveFpsCounterFrames++;
+        long liveNow = Environment.TickCount64;
+        if (_liveFpsCounterStart == 0) _liveFpsCounterStart = liveNow;
+        long liveElapsed = liveNow - _liveFpsCounterStart;
+        if (liveElapsed >= 1000)
+        {
+            MeasuredFps = (float)(_liveFpsCounterFrames * 1000.0 / liveElapsed);
+            _liveFpsCounterFrames = 0;
+            _liveFpsCounterStart = liveNow;
         }
 
         // ── FPS Governor (matches proven NexSuite2 pattern) ─────────

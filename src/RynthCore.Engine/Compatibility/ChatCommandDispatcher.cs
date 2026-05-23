@@ -146,16 +146,16 @@ internal static unsafe class ChatCommandDispatcher
             if (StartsWithCmd(trimmed, "/a "))
                 return DispatchChannelBroadcast(1, trimmed.Substring(3));
 
-            // /f message (fellowship — use keyboard sim, no direct Event_*)
+            // /f message (fellowship — no direct Event_*; use the raw chat path)
             if (StartsWithCmd(trimmed, "/f "))
-                return SimulateChatInput(trimmed);
+                return DispatchRaw(trimmed);
 
             // Bare text → say
             if (!trimmed.StartsWith("/", StringComparison.Ordinal))
                 return DispatchSay(trimmed);
 
-            // Everything else → keyboard simulation fallback
-            return SimulateChatInput(trimmed);
+            // Everything else (arbitrary slash commands like /smite) → raw chat path
+            return DispatchRaw(trimmed);
         }
         catch (Exception ex)
         {
@@ -213,7 +213,7 @@ internal static unsafe class ChatCommandDispatcher
         int commaIdx = args.IndexOf(',');
         if (commaIdx < 1)
         {
-            return SimulateChatInput("/tell " + args);
+            return DispatchRaw("/tell " + args);
         }
 
         string targetName = args.Substring(0, commaIdx).Trim();
@@ -255,12 +255,27 @@ internal static unsafe class ChatCommandDispatcher
     }
 
     /// <summary>
+    /// Dispatches an arbitrary chat line. Prefers calling AC's outgoing-chat
+    /// function directly (deterministic and repeatable — no native chat-bar state to
+    /// corrupt); falls back to keystroke simulation only until the chat 'this' has
+    /// been captured (typically the very first send of a session, whose successful
+    /// submit seeds the capture for every send after it).
+    /// </summary>
+    private static bool DispatchRaw(string command)
+    {
+        if (ChatCallbackHooks.TryDispatchDirect(command))
+            return true;
+        return SimulateChatInput(command);
+    }
+
+    /// <summary>
     /// Simulates keyboard input to type and submit a chat command.
     /// Used as fallback for commands without a direct Event_* function.
     /// </summary>
     private static bool SimulateChatInput(string command)
     {
-        // Enter → opens chat input
+        // Enter → opens chat input. The WM_CHAR '\r' is required here to complete
+        // AC's chat-bar open transition.
         IntPtr enterDown = MakeKeyLParam(0x1C, false);
         IntPtr enterUp = MakeKeyLParam(0x1C, true);
         ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
@@ -271,9 +286,12 @@ internal static unsafe class ChatCommandDispatcher
         foreach (char c in command)
             ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr(c), IntPtr.Zero);
 
-        // Enter → submit
+        // Enter → submit. NO trailing WM_CHAR '\r' here: the WM_KEYDOWN submits and
+        // closes the bar; a '\r' arriving on the now-closed bar re-opens it (the
+        // "lone '\r'" behavior the chat-capture path also guards against), leaving the
+        // bar open so the NEXT command's open-Enter submits an empty bar instead and
+        // the command is lost — the "works once then stops" symptom.
         ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr('\r'), enterDown);
         ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYUP, new IntPtr(VK_RETURN), enterUp);
 
         return true;

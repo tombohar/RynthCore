@@ -69,6 +69,12 @@ internal static class RynthChatPanel
     private static double _chatFontSize    = 10.0;
     private static byte   _backgroundAlpha = 0xF2;
     private static bool   _autoScroll      = true;
+    // Runtime: true while the view is pinned to the newest line. Cleared when the
+    // user scrolls up so incoming lines stop yanking the view back to the tail.
+    private static bool   _stickToBottom   = true;
+    // Treat the view as "at the bottom" when within this many px of the end — absorbs
+    // ScrollToEnd landing a line short under deferred layout without dropping follow.
+    private const  double ScrollStickThresholdPx = 24.0;
 
     // ── Chat logging (Avalonia UI thread only) ────────────────────────────
     private static bool         _logEnabled;
@@ -78,7 +84,7 @@ internal static class RynthChatPanel
     // ── Channel definitions (must match ChatClassifier in plugin) ─────────
 
     private static readonly string[] Tabs =
-        { "All", "Chat", "Channels", "System", "Combat", "Other" };
+        { "All", "Chat", "Channels", "System", "Combat", "Rynth", "Other" };
 
     private static Color ChannelColor(string chan) => chan switch
     {
@@ -86,6 +92,7 @@ internal static class RynthChatPanel
         "Channels" => Color.FromArgb(0xFF, 0x7A, 0xB8, 0xF5),
         "System"   => Color.FromArgb(0xFF, 0x8C, 0xA6, 0xBF),
         "Combat"   => Color.FromArgb(0xFF, 0xD9, 0x33, 0x33),
+        "Rynth"    => Color.FromArgb(0xFF, 0xE6, 0xB4, 0x50),  // amber — distinct from the blue/grey channels
         _          => Color.FromArgb(0xFF, 0xAA, 0xAA, 0xAA),
     };
 
@@ -298,6 +305,11 @@ internal static class RynthChatPanel
         autoScrollCheck.IsCheckedChanged += (_, _) =>
         {
             _autoScroll = autoScrollCheck.IsChecked == true;
+            if (_autoScroll)
+            {
+                _stickToBottom = true;
+                scrollViewer.ScrollToEnd();
+            }
             SaveSettings();
         };
         gearBtn.Click += (_, _) => settingsOverlay.IsVisible = !settingsOverlay.IsVisible;
@@ -319,8 +331,12 @@ internal static class RynthChatPanel
                 if (filter.Length > 0 && !line.FormattedText.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
                 chatStack.Children.Add(MakeTextBlock(line));
             }
+            // A full rebuild (tab/filter/font change) re-pins to the newest line.
             if (autoScrollCheck.IsChecked == true)
+            {
+                _stickToBottom = true;
                 scrollViewer.ScrollToEnd();
+            }
         }
 
         void SelectTab(string tab)
@@ -343,11 +359,20 @@ internal static class RynthChatPanel
             string filter = _searchFilter;
             if (filter.Length > 0 && !line.FormattedText.Contains(filter, StringComparison.OrdinalIgnoreCase)) return;
             chatStack.Children.Add(MakeTextBlock(line));
-            // Trim visual list to 500 items.
-            while (chatStack.Children.Count > 500)
-                chatStack.Children.RemoveAt(0);
-            if (autoScrollCheck.IsChecked == true)
+            if (autoScrollCheck.IsChecked == true && _stickToBottom)
+            {
+                // Following the tail: trim backlog from the top and keep the newest line in view.
+                while (chatStack.Children.Count > 500)
+                    chatStack.Children.RemoveAt(0);
                 scrollViewer.ScrollToEnd();
+            }
+            else
+            {
+                // User scrolled up to read — don't yank the view or shift it by trimming
+                // from the top. Allow a bounded backlog; the next rebuild resyncs to 500.
+                while (chatStack.Children.Count > 1000)
+                    chatStack.Children.RemoveAt(0);
+            }
         }
 
         // ── Event wiring ───────────────────────────────────────────────
@@ -361,6 +386,16 @@ internal static class RynthChatPanel
         {
             _searchFilter = searchBox.Text ?? "";
             RebuildDisplay();
+        };
+
+        // Track whether the user is parked at the tail. Scrolling up clears the
+        // stick flag so AppendLine stops auto-scrolling; returning to the bottom
+        // re-arms it. This fires for both programmatic and user-driven scrolls —
+        // ScrollToEnd lands at the bottom, so following stays sticky.
+        scrollViewer.ScrollChanged += (_, _) =>
+        {
+            double maxOffset = scrollViewer.Extent.Height - scrollViewer.Viewport.Height;
+            _stickToBottom = maxOffset <= 0 || scrollViewer.Offset.Y >= maxOffset - ScrollStickThresholdPx;
         };
 
         // ── Chat input callbacks (all key handling in WndProcHook) ────────

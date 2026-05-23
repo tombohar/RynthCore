@@ -163,8 +163,9 @@ internal static class EngineLifecycle
         try
         {
             RynthLog.Info($"EngineLifecycle: -> {name}");
+            long t0 = Environment.TickCount64;
             action();
-            RynthLog.Info($"EngineLifecycle:    {name} ok");
+            RynthLog.Info($"EngineLifecycle:    {name} ok ({Environment.TickCount64 - t0} ms)");
         }
         catch (Exception ex)
         {

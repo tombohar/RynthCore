@@ -21,8 +21,9 @@ $loaderProject = Join-Path $repoRoot "src\RynthCore.Loader\RynthCore.Loader.cspr
 # the rynthcore\Plugins\RynthCore.Plugin.RynthAi tree is a stub (~1 MB
 # published) that lacks Combat / Loot / Meta / Raycasting / LegacyUi.
 # Always source from the RynthSuite tree so the real ~8 MB plugin ships.
-$rynthAiSourceRoot   = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthAi"
-$rynthChatSourceRoot = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthChat"
+$rynthAiSourceRoot     = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthAi"
+$rynthChatSourceRoot   = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthChat"
+$rynthVisionSourceRoot = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthVision"
 $pluginProjects = @(
     @{
         Project    = Join-Path $rynthAiSourceRoot "RynthCore.Plugin.RynthAi.csproj"
@@ -35,6 +36,15 @@ $pluginProjects = @(
         Publish    = Join-Path $rynthChatSourceRoot "bin\Release\net10.0-windows\win-x86\publish"
         DllName    = "RynthCore.Plugin.RynthChat.dll"
         DestSubdir = "RynthChat"
+    },
+    # RynthVision sets <PublishDir> to its deploy home, so publish lands
+    # directly in $PluginsDestination\RynthVision. The copy step below detects
+    # source == dest and skips the redundant self-copy.
+    @{
+        Project    = Join-Path $rynthVisionSourceRoot "RynthCore.Plugin.RynthVision.csproj"
+        Publish    = Join-Path $PluginsDestination "RynthVision"
+        DllName    = "RynthCore.Plugin.RynthVision.dll"
+        DestSubdir = "RynthVision"
     }
 )
 
@@ -147,8 +157,15 @@ foreach ($plugin in $pluginProjects) {
 
     # Only the DLL - leave any user data (LootProfiles\, imgui.ini, etc.)
     # in place by not touching anything else under $pluginTargetDir.
-    Copy-Item -LiteralPath $pluginSrc -Destination (Join-Path $pluginTargetDir $plugin.DllName) -Force
-    Write-Host "Plugin $($plugin.DllName) deployed to $pluginTargetDir"
+    $pluginDest = Join-Path $pluginTargetDir $plugin.DllName
+    if ([System.IO.Path]::GetFullPath($pluginSrc) -ieq [System.IO.Path]::GetFullPath($pluginDest)) {
+        # Plugin published straight into its deploy home (see RynthVision) -
+        # nothing to copy, the publish already put the DLL in place.
+        Write-Host "Plugin $($plugin.DllName) already in place at $pluginTargetDir; skipping copy."
+    } else {
+        Copy-Item -LiteralPath $pluginSrc -Destination $pluginDest -Force
+        Write-Host "Plugin $($plugin.DllName) deployed to $pluginTargetDir"
+    }
 }
 
 Get-ChildItem -Path $Destination -Recurse -Filter *.pdb -File | Remove-Item -Force

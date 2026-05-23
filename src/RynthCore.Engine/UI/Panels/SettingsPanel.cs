@@ -150,6 +150,9 @@ internal static class SettingsPanel
         public float NavResumeTurnAngle { get; set; } = 10f;
         public float NavDeadZone { get; set; } = 4f;
         public float NavSweepMult { get; set; } = 2.5f;
+        public float NavLookaheadYards { get; set; } = 4f;
+        public float NavTurnRateDegPerSec { get; set; } = 270f;
+        public float NavTier1TurnSpeed { get; set; } = 3f;
         public float PostPortalDelaySec { get; set; } = 4f;
         public float T2Speed { get; set; } = 1f;
         public float T2WalkWithinYd { get; set; } = 5f;
@@ -696,7 +699,7 @@ internal static class SettingsPanel
         p.Children.Add(SectionHeader("Movement Engine"));
         p.Children.Add(ComboRow("Mode", MovementModes, state.Data.MovementMode,
             v => { state.Data.MovementMode = v; Push(state); }, picker,
-            "Legacy: SetAutorun + TurnLeft/TurnRight\nTier 1: Direct CM_Movement server events\nTier 2: Client physics MoveToPosition"));
+            "Legacy: SetAutorun + smooth heading servo (TurnToHeading)\nTier 1: SetAutorun + CM_Movement turn commands (DoMovement)\nTier 2: Client physics MoveToPosition (not built yet — falls back to Legacy)"));
 
         p.Children.Add(Spacer());
         p.Children.Add(SectionHeader("Steering"));
@@ -712,6 +715,15 @@ internal static class SettingsPanel
         p.Children.Add(FloatRow("Sweep Detect Mult", state.Data.NavSweepMult, 0.5f, 10f, 0.1f,
             v => { state.Data.NavSweepMult = v; Push(state); },
             "Closest-approach detection radius multiplier."));
+        p.Children.Add(FloatRow("Lookahead (yd)", state.Data.NavLookaheadYards, 0f, 30f, 0.5f,
+            v => { state.Data.NavLookaheadYards = MathF.Max(0f, v); Push(state); },
+            "Within this distance of a waypoint, blend the aim point toward the next one to cut corners smoothly. 0 = off."));
+        p.Children.Add(FloatRow("Turn Rate (deg/s)", state.Data.NavTurnRateDegPerSec, 30f, 720f, 15f,
+            v => { state.Data.NavTurnRateDegPerSec = v; Push(state); },
+            "Legacy / Mode 0 heading-servo max turn speed. Ignored by Tier 1 and Tier 2."));
+        p.Children.Add(FloatRow("Tier1 Turn Speed", state.Data.NavTier1TurnSpeed, 0.5f, 15f, 0.5f,
+            v => { state.Data.NavTier1TurnSpeed = v; Push(state); },
+            "Tier 1 (CM_Movement) turn-command speed = magnitude of the client turn_speed. Higher = snappier turns. Only used in Tier 1 mode."));
         p.Children.Add(FloatRow("Post-Portal Delay (s)", state.Data.PostPortalDelaySec, 0f, 30f, 0.25f,
             v => { state.Data.PostPortalDelaySec = MathF.Max(0f, v); Push(state); },
             "Seconds to settle after any portal/recall teleport before nav resumes."));

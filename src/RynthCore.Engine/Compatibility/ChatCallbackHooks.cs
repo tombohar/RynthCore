@@ -73,6 +73,15 @@ internal static class ChatCallbackHooks
     private static int _incomingChatSuppressionEnabled;
     private static int _incomingCallCount;
 
+    // Captured live from the outgoing-chat detour so we can re-invoke AC's outgoing
+    // chat function DIRECTLY (deterministic) instead of simulating keystrokes into
+    // the native chat bar. Keystroke simulation depends on the bar's open/closed
+    // state, which the first simulated send corrupts — so the second send silently
+    // fails to submit ("works once, then stops"). Calling the function directly has
+    // no chat-bar state and is fully repeatable.
+    private static IntPtr _lastOutgoingThis;
+    private static uint _lastOutgoingSource = 8;
+
     public static bool IncomingInstalled { get; private set; }
     public static bool OutgoingInstalled { get; private set; }
     public static bool IsInstalled => (!EnableIncomingHook || IncomingInstalled) && (!EnableOutgoingHook || OutgoingInstalled);
@@ -333,6 +342,14 @@ internal static class ChatCallbackHooks
         {
             string? line = ReadWidePString(text);
 
+            // Capture the chat-manager 'this' + command source from the live submit
+            // so ChatCommandDispatcher can re-invoke this function directly later.
+            if (thisPtr != IntPtr.Zero)
+            {
+                _lastOutgoingThis   = thisPtr;
+                _lastOutgoingSource = commandSource;
+            }
+
             // RynthCore engine commands (/rc ...) — consume before plugins or
             // AC see the line so the user never broadcasts "/rc resetbar" and
             // a hidden overlay bar stays recoverable.
@@ -522,5 +539,97 @@ internal static class ChatCallbackHooks
     private static bool IsLikelyExternalHookOpcode(byte opcode)
     {
         return opcode is 0xE9 or 0xE8 or 0xEB or 0x68 or 0xFF;
+    }
+
+    /// <summary>True once a chat-manager 'this' has been captured from a live submit.</summary>
+    public static bool CanDispatchDirect =>
+        OutgoingInstalled && _originalOutgoingChat != null && _lastOutgoingThis != IntPtr.Zero;
+
+    /// <summary>
+    /// Dispatches a chat line by calling AC's outgoing-chat function directly — the
+    /// same path AC takes when you press Enter on the native chat bar, but with no
+    /// keystroke simulation and no chat-bar state, so it is repeatable. Uses the
+    /// 'this' + command source captured by <see cref="OutgoingChatDetour"/> from a
+    /// prior real submit. Returns false if the hook isn't installed or no 'this' has
+    /// been captured yet — the caller then falls back to keystroke simulation, whose
+    /// first successful send seeds the capture for all subsequent calls.
+    /// Plugin pre-dispatch / engine-command handling is the caller's responsibility
+    /// (already done in ChatCommandDispatcher.Dispatch), so this goes straight to AC.
+    /// </summary>
+    public static unsafe bool TryDispatchDirect(string? text)
+    {
+        if (!OutgoingInstalled || _originalOutgoingChat == null)
+            return false;
+
+        IntPtr self = _lastOutgoingThis;
+        if (self == IntPtr.Zero || string.IsNullOrWhiteSpace(text))
+            return false;
+
+        string line = text!.TrimEnd('\r', '\n');
+        if (line.Length == 0)
+            return false;
+        foreach (char c in line)
+            if (c < 0x20 && c != '\t')
+                return false; // never feed AC control chars
+
+        try
+        {
+            ushort[] chars = new ushort[line.Length + 1]; // +1 null terminator (wcslen)
+            for (int i = 0; i < line.Length; i++)
+                chars[i] = line[i];
+
+            var wide = OutgoingWidePString.Create(chars);
+            try
+            {
+                // 'wide' is a stack local (unmanaged struct) — its address is stable
+                // for the synchronous call, so no 'fixed' pin is needed (or allowed).
+                _originalOutgoingChat(self, (IntPtr)(&wide), _lastOutgoingSource);
+                return true;
+            }
+            finally { wide.Dispose(); }
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"OutgoingChat direct failed: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Clears the cached chat-manager 'this'. Called on logout: AC frees the object
+    /// during the world→charselect transition, so the stale pointer must not be
+    /// reused. It is re-captured from the next real submit after the next login.
+    /// </summary>
+    public static void ResetOutgoingTarget()
+    {
+        _lastOutgoingThis = IntPtr.Zero;
+    }
+
+    // Minimal duplicate of ClientHelperHooks.WidePString (AC1Legacy::PStringBase<wchar_t>).
+    // Duplicated deliberately so the actively-used WriteToChat path stays untouched.
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct OutgoingWidePString
+    {
+        private static readonly IntPtr NullWideBufferVa = new(0x00818340);
+        private static readonly delegate* unmanaged[Thiscall]<OutgoingWidePString*, ushort*, void> Ctor =
+            (delegate* unmanaged[Thiscall]<OutgoingWidePString*, ushort*, void>)0x00402730;
+        private static readonly delegate* unmanaged[Thiscall]<OutgoingWidePString*, void> Dtor =
+            (delegate* unmanaged[Thiscall]<OutgoingWidePString*, void>)0x004011B0;
+
+        public IntPtr CharBuffer;
+
+        public static OutgoingWidePString Create(ushort[] chars)
+        {
+            var value = new OutgoingWidePString { CharBuffer = Marshal.ReadIntPtr(NullWideBufferVa) };
+            fixed (ushort* pChars = chars)
+                Ctor(&value, pChars);
+            return value;
+        }
+
+        public void Dispose()
+        {
+            fixed (OutgoingWidePString* ptr = &this)
+                Dtor(ptr);
+        }
     }
 }

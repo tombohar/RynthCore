@@ -278,6 +278,12 @@ internal static class EngineFrameController
             // can classify objects without walking AC's live CObjectMaint
             // table (0x0067E779 READ-AV class; throttled internally at 3 s).
             Compatibility.ClientObjectHooks.PrefetchObjectIdentity();
+            // Same main-thread guard: snapshot every live object's POSITION so the
+            // off-thread plugin pump reads position from cache instead of resolving
+            // _getWeenieObject live — that resolution is AC's CObjectMaint walk and
+            // is the dump-verified 0x0067E779 READ-AV when done on the pump thread.
+            // Sampled every frame (positions are volatile), zero-alloc.
+            Compatibility.ClientObjectHooks.PrefetchPositions();
 
             // Cold-login object backfill on the SAME AC main thread as the
             // skill prefetch above: deliver objects already present at login
