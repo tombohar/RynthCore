@@ -1,0 +1,232 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:RynthCore.App.Avalonia"
+             x:Class="RynthCore.App.Avalonia.MemoryTabView">
+  <UserControl.Styles>
+    <Style Selector="TextBlock.metricCell">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Foreground" Value="#EAF0F4" />
+    </Style>
+    <Style Selector="TextBlock.metricHeader">
+      <Setter Property="FontSize" Value="11.5" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="#73828D" />
+      <Setter Property="Margin" Value="0,0,8,4" />
+    </Style>
+    <Style Selector="Button.zoom">
+      <Setter Property="Padding" Value="10,4" />
+      <Setter Property="FontSize" Value="11.5" />
+      <Setter Property="MinWidth" Value="62" />
+    </Style>
+    <Style Selector="Button.zoom.active">
+      <Setter Property="Background" Value="#1A2E38" />
+      <Setter Property="BorderBrush" Value="#26C1A6" />
+      <Setter Property="Foreground" Value="#26C1A6" />
+    </Style>
+  </UserControl.Styles>
+  <ScrollViewer>
+    <StackPanel Spacing="12" Margin="6">
+      <!-- Header controls: PID picker, refresh-rate, action buttons.
+           Avalonia 11.2.3 Grid doesn't expose RowSpacing/ColumnSpacing, so
+           each child carries its own margin. -->
+      <Border Background="#132028" CornerRadius="16" Padding="18">
+        <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto">
+          <TextBlock Grid.Row="0" Grid.Column="0"
+                     Text="acclient.exe PID"
+                     VerticalAlignment="Center"
+                     Foreground="#26C1A6"
+                     FontWeight="SemiBold"
+                     Margin="0,0,10,8" />
+          <ComboBox Grid.Row="0" Grid.Column="1"
+                    x:Name="PidComboBox"
+                    PlaceholderText="(no process)"
+                    HorizontalAlignment="Stretch"
+                    MinWidth="220"
+                    Margin="0,0,10,8" />
+          <TextBlock Grid.Row="0" Grid.Column="2"
+                     Text="Refresh"
+                     VerticalAlignment="Center"
+                     Foreground="#9AA8B3"
+                     Margin="0,0,6,8" />
+          <ComboBox Grid.Row="0" Grid.Column="3"
+                    x:Name="RefreshRateComboBox"
+                    MinWidth="80"
+                    Margin="0,0,10,8" />
+          <ToggleButton Grid.Row="0" Grid.Column="4"
+                        x:Name="PauseToggleButton"
+                        Content="Pause"
+                        Padding="12,6"
+                        FontSize="12"
+                        Margin="0,0,10,8" />
+          <Button Grid.Row="0" Grid.Column="5"
+                  x:Name="SnapshotNowButton"
+                  Content="Snapshot Now"
+                  Padding="12,6"
+                  FontSize="12"
+                  Margin="0,0,0,8" />
+
+          <!-- Row 2: process info -->
+          <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="6"
+                     x:Name="ProcessInfoText"
+                     Text="No process selected."
+                     Foreground="#EAF0F4"
+                     FontSize="12.5"
+                     Margin="0,0,0,8" />
+
+          <!-- Row 3: export + status -->
+          <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="4" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+            <Button x:Name="ExportCsvButton" Content="Export CSV" Padding="12,6" FontSize="12" />
+            <TextBlock x:Name="StatusBannerText"
+                       Text="Polling stopped."
+                       Foreground="#9AA8B3"
+                       VerticalAlignment="Center"
+                       TextWrapping="Wrap" />
+          </StackPanel>
+          <TextBlock Grid.Row="2" Grid.Column="4" Grid.ColumnSpan="2"
+                     x:Name="SampleCountText"
+                     Text="0 samples"
+                     Foreground="#9AA8B3"
+                     VerticalAlignment="Center"
+                     HorizontalAlignment="Right" />
+        </Grid>
+      </Border>
+
+      <!-- Warning banners: Virtual approaching x86 LAA 4 GB ceiling. -->
+      <Border x:Name="WarningBanner"
+              Background="#3A1F1F"
+              BorderBrush="#C75450"
+              BorderThickness="1"
+              CornerRadius="10"
+              Padding="12"
+              IsVisible="False">
+        <TextBlock x:Name="WarningBannerText"
+                   Text=""
+                   Foreground="#FFC9C5"
+                   FontWeight="SemiBold"
+                   TextWrapping="Wrap" />
+      </Border>
+
+      <!-- Process-exit banner. -->
+      <Border x:Name="ExitBanner"
+              Background="#2F2A1A"
+              BorderBrush="#D4A24C"
+              BorderThickness="1"
+              CornerRadius="10"
+              Padding="12"
+              IsVisible="False">
+        <TextBlock x:Name="ExitBannerText"
+                   Text=""
+                   Foreground="#F0DAB0"
+                   FontWeight="SemiBold"
+                   TextWrapping="Wrap" />
+      </Border>
+
+      <!-- Sparkline chart + zoom controls + legend. -->
+      <Border Background="#132028" CornerRadius="16" Padding="18">
+        <StackPanel Spacing="10">
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <TextBlock Grid.Column="0"
+                       Text="Memory chart"
+                       FontSize="16"
+                       FontWeight="SemiBold"
+                       Foreground="#26C1A6"
+                       VerticalAlignment="Center" />
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+              <TextBlock Text="Window:"
+                         Foreground="#9AA8B3"
+                         VerticalAlignment="Center"
+                         Margin="0,0,6,0" />
+              <Button x:Name="Zoom5MinButton"  Classes="zoom" Content="5 min" />
+              <Button x:Name="Zoom30MinButton" Classes="zoom" Content="30 min" />
+              <Button x:Name="Zoom1HrButton"   Classes="zoom" Content="1 hr" />
+              <Button x:Name="ZoomAllButton"   Classes="zoom" Content="All" />
+            </StackPanel>
+          </Grid>
+          <local:MemorySparkline x:Name="Sparkline" Height="260" />
+          <StackPanel x:Name="LegendPanel"
+                      Orientation="Horizontal"
+                      Spacing="14" />
+        </StackPanel>
+      </Border>
+
+      <!-- Metric grid: per-metric current/delta/rates/status. -->
+      <Border Background="#132028" CornerRadius="16" Padding="18">
+        <StackPanel Spacing="8">
+          <TextBlock Text="Metrics"
+                     FontSize="16"
+                     FontWeight="SemiBold"
+                     Foreground="#26C1A6" />
+          <!-- Header row (0) is declared here; BuildMetricRows() in code-behind
+               appends one Auto row per metric so children placed at Grid.Row
+               1..N have a valid row to land on. Without this header row, the
+               code-side adds N rows (indices 0..N-1) but the Nth metric is
+               assigned Grid.Row=N → collapses onto row N-1 → overlap bug. -->
+          <Grid x:Name="MetricGrid"
+                RowDefinitions="Auto"
+                ColumnDefinitions="120,Auto,110,140,140,160,Auto,Auto">
+            <!-- Header row -->
+            <TextBlock Grid.Row="0" Grid.Column="0" Classes="metricHeader" Text="Metric" />
+            <TextBlock Grid.Row="0" Grid.Column="1" Classes="metricHeader" Text="Current"      MinWidth="100" />
+            <TextBlock Grid.Row="0" Grid.Column="2" Classes="metricHeader" Text="Delta"        />
+            <TextBlock Grid.Row="0" Grid.Column="3" Classes="metricHeader" Text="Rate /min (all)" />
+            <TextBlock Grid.Row="0" Grid.Column="4" Classes="metricHeader" Text="Rate /hr (all)" />
+            <TextBlock Grid.Row="0" Grid.Column="5" Classes="metricHeader" Text="Recent /min (~75s)" />
+            <TextBlock Grid.Row="0" Grid.Column="6" Classes="metricHeader" Text="Status" />
+            <TextBlock Grid.Row="0" Grid.Column="7" Classes="metricHeader" Text="Show" />
+            <!-- Metric rows are added in code. -->
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <!-- Thresholds (collapsed by default). -->
+      <Expander Header="Configurable thresholds (status STABLE/GROWING boundary)"
+                FontSize="13"
+                IsExpanded="False"
+                Background="#132028"
+                Foreground="#26C1A6">
+        <Border Background="#132028" CornerRadius="10" Padding="14" Margin="0,8,0,0">
+          <Grid ColumnDefinitions="Auto,Auto,Auto" RowDefinitions="Auto,Auto">
+            <TextBlock Grid.Row="0" Grid.Column="0"
+                       Text="Memory STABLE boundary (MB/min)"
+                       VerticalAlignment="Center"
+                       Foreground="#EAF0F4"
+                       Margin="0,0,12,8" />
+            <NumericUpDown Grid.Row="0" Grid.Column="1"
+                           x:Name="MemoryThresholdBox"
+                           Minimum="0.0"
+                           Maximum="100.0"
+                           Increment="0.1"
+                           FormatString="0.00"
+                           Width="120"
+                           Margin="0,0,12,8" />
+            <TextBlock Grid.Row="0" Grid.Column="2"
+                       Text="Default 0.5. Below this magnitude reads STABLE."
+                       VerticalAlignment="Center"
+                       Foreground="#73828D"
+                       Margin="0,0,0,8" />
+
+            <TextBlock Grid.Row="1" Grid.Column="0"
+                       Text="Handles STABLE boundary (count/hour)"
+                       VerticalAlignment="Center"
+                       Foreground="#EAF0F4"
+                       Margin="0,0,12,0" />
+            <NumericUpDown Grid.Row="1" Grid.Column="1"
+                           x:Name="HandlesThresholdBox"
+                           Minimum="0"
+                           Maximum="100000"
+                           Increment="1"
+                           FormatString="0"
+                           Width="120"
+                           Margin="0,0,12,0" />
+            <TextBlock Grid.Row="1" Grid.Column="2"
+                       Text="Default 1. Below this rate reads STABLE."
+                       VerticalAlignment="Center"
+                       Foreground="#73828D" />
+          </Grid>
+        </Border>
+      </Expander>
+
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

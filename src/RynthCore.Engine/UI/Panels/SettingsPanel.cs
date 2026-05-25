@@ -548,22 +548,31 @@ internal static class SettingsPanel
 
     private static void BuildRechargeTab(PanelState state, StackPanel p, PickerState picker)
     {
-        p.Children.Add(SectionHeader("Self Vitals (%)"));
-        p.Children.Add(IntRow("Heal At",    state.Data.HealAt,   0, 100, 1, v => { state.Data.HealAt   = v; Push(state); }));
-        p.Children.Add(IntRow("Re-stam At", state.Data.RestamAt, 0, 100, 1, v => { state.Data.RestamAt = v; Push(state); }));
-        p.Children.Add(IntRow("Get Mana At", state.Data.GetManaAt, 0, 100, 1, v => { state.Data.GetManaAt = v; Push(state); }));
+        p.Children.Add(SectionHeader("In Combat — target within Monster Range (%)"));
+        p.Children.Add(IntRow("Heal At",    state.Data.HealAt,   0, 100, 1, v => { state.Data.HealAt   = v; Push(state); },
+            "While a target is within Monster Range, cast Heal Self when HP < this %."));
+        p.Children.Add(IntRow("Re-stam At", state.Data.RestamAt, 0, 100, 1, v => { state.Data.RestamAt = v; Push(state); },
+            "While a target is within Monster Range, cast Revitalize Self when Stamina < this %."));
+        p.Children.Add(IntRow("Get Mana At", state.Data.GetManaAt, 0, 100, 1, v => { state.Data.GetManaAt = v; Push(state); },
+            "While a target is within Monster Range, cast Stamina to Mana Self when Mana < this % (needs stam > 15%)."));
 
         p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Top-Off Vitals (%)"));
-        p.Children.Add(IntRow("Top HP",   state.Data.TopOffHP,   0, 100, 1, v => { state.Data.TopOffHP   = v; Push(state); }));
-        p.Children.Add(IntRow("Top Stam", state.Data.TopOffStam, 0, 100, 1, v => { state.Data.TopOffStam = v; Push(state); }));
-        p.Children.Add(IntRow("Top Mana", state.Data.TopOffMana, 0, 100, 1, v => { state.Data.TopOffMana = v; Push(state); }));
+        p.Children.Add(SectionHeader("Idle Top-Off — no targets in range (%)"));
+        p.Children.Add(IntRow("Top HP",   state.Data.TopOffHP,   0, 100, 1, v => { state.Data.TopOffHP   = v; Push(state); },
+            "When no targets are within Monster Range, heal up to this HP %. Usually set higher than Heal At."));
+        p.Children.Add(IntRow("Top Stam", state.Data.TopOffStam, 0, 100, 1, v => { state.Data.TopOffStam = v; Push(state); },
+            "When no targets are within Monster Range, re-stam up to this %."));
+        p.Children.Add(IntRow("Top Mana", state.Data.TopOffMana, 0, 100, 1, v => { state.Data.TopOffMana = v; Push(state); },
+            "When no targets are within Monster Range, recharge mana up to this %."));
 
         p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Helper Settings (%)"));
-        p.Children.Add(IntRow("Heal Others",    state.Data.HealOthersAt,    0, 100, 1, v => { state.Data.HealOthersAt   = v; Push(state); }));
-        p.Children.Add(IntRow("Re-stam Others", state.Data.RestamOthersAt,  0, 100, 1, v => { state.Data.RestamOthersAt = v; Push(state); }));
-        p.Children.Add(IntRow("Infuse Others",  state.Data.InfuseOthersAt,  0, 100, 1, v => { state.Data.InfuseOthersAt = v; Push(state); }));
+        p.Children.Add(SectionHeader("Helper Settings (%) — NOT WIRED YET"));
+        p.Children.Add(IntRow("Heal Others",    state.Data.HealOthersAt,    0, 100, 1, v => { state.Data.HealOthersAt   = v; Push(state); },
+            "Intended: cast Heal Other on a fellow when their HP < this %. Not implemented yet — slider is inert."));
+        p.Children.Add(IntRow("Re-stam Others", state.Data.RestamOthersAt,  0, 100, 1, v => { state.Data.RestamOthersAt = v; Push(state); },
+            "Intended: cast Revitalize Other on a fellow when their Stamina < this %. Not implemented yet — slider is inert."));
+        p.Children.Add(IntRow("Infuse Others",  state.Data.InfuseOthersAt,  0, 100, 1, v => { state.Data.InfuseOthersAt = v; Push(state); },
+            "Intended: cast Infuse Mana Other on a fellow when their Mana < this %. Not implemented yet — slider is inert."));
     }
 
     private static void BuildMeleeCombatTab(PanelState state, StackPanel p, PickerState picker)

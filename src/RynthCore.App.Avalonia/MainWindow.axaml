@@ -1,5 +1,6 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:RynthCore.App.Avalonia"
         x:Class="RynthCore.App.Avalonia.MainWindow"
         Width="1280"
         Height="860"
@@ -369,6 +370,10 @@
               </Border>
             </StackPanel>
           </ScrollViewer>
+        </TabItem>
+
+        <TabItem Header="Memory">
+          <local:MemoryTabView />
         </TabItem>
 
         <TabItem Header="Notes">

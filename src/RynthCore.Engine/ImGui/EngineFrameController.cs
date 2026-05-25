@@ -296,11 +296,24 @@ internal static class EngineFrameController
             try { Plugins.PluginManager.TrySeedLiveObjectsFromCObjectMaintOnce(); }
             catch (Exception ex) { RynthLog.Plugin($"CObjectMaint seed threw {ex.GetType().Name}: {ex.Message}"); }
 
-            // Install the SetRenderState hook that injects Nav3D rendering
-            // before the game's 2D UI pass (once, after DX9Backend is ready)
-            Nav3DRenderInjector.Install(pDevice);
-            bool nav3DAlreadyRendered = Nav3DRenderInjector.RenderedThisFrame;
-            Nav3DRenderInjector.ResetFrame();
+            // Nav3DRenderInjector fires mid-frame at the 3D→UI ZENABLE
+            // transition — that's the only pipeline position where markers
+            // can render BEHIND AC's UI (the UI pass draws after ZENABLE
+            // turns off, and the end-of-frame fallback is past it entirely).
+            //
+            // The injector accumulates state per-frame via DrawIndexedPrimitive
+            // callbacks during AC's draws (which fire before this EndScene),
+            // so by the time we check RenderedThisFrame here, its decision
+            // for the current frame is final. ResetFrame at the END of
+            // OnEndScene primes it for the next frame's accumulation.
+            //
+            // Historically the engine forced the end-of-frame fallback ONLY
+            // because the injector's hit-rate varied across motion, producing
+            // flicker when some frames painted at the 3D→UI boundary and
+            // others at end-of-frame. We accept that risk here: the user
+            // wants markers behind the UI, and a frame the injector misses
+            // simply doesn't render markers (less jarring than a Z-order flip).
+            bool nav3DAlreadyRendered = D3D9.Nav3DRenderInjector.RenderedThisFrame;
 
             // Publish the live device pointer for the off-render-thread plugin
             // pump (see PumpPluginFrame). The D3D9 device is a stable COM
@@ -325,9 +338,8 @@ internal static class EngineFrameController
             if (Plugins.EngineSettings.EnableImGuiBackend)
                 RunImGuiFrame(pDevice);
 
-            // Always render the Nav3D fallback after the ImGui block (which,
-            // when active, may have already drawn nav markers via its
-            // SetRenderState injection). _coreInitialized is enough — this
+            // Fallback render — only fires when the injector missed this
+            // frame's 3D→UI transition. _coreInitialized is enough — this
             // does not touch font / vertex buffer state.
             if (!nav3DAlreadyRendered)
                 DX9Backend.RenderNav3D(pDevice);
@@ -335,6 +347,15 @@ internal static class EngineFrameController
         catch (Exception ex)
         {
             RynthLog.Info($"EngineFrameController: frame {_frameCount} engine error: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            // Prime the injector for the next frame's DIP accumulation.
+            // Without this, _markersRenderedThisFrame latches true after
+            // the first 3D→UI transition in the session and the injector
+            // never fires again — every subsequent frame falls back to the
+            // end-of-frame draw (which paints over the UI).
+            D3D9.Nav3DRenderInjector.ResetFrame();
         }
     }
 

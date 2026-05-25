@@ -19,6 +19,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
+using Avalonia.Markup.Xaml.Styling;
 using Avalonia.Themes.Simple;
 using Avalonia.Styling;
 using Avalonia.Win32;
@@ -626,6 +627,30 @@ public class App : Application
     public override void Initialize()
     {
         Styles.Add(new SimpleTheme());
+
+        // AvaloniaEdit ships only a Fluent-flavoured ControlTheme. Its XAML
+        // references Fluent design tokens (ControlContentThemeFontSize,
+        // ContentControlThemeFontFamily, ToolTip* keys, SystemAccent* colors)
+        // that don't exist under SimpleTheme — without them
+        // SearchPanel.Install crashes with KeyNotFoundException the first
+        // time the editor's template applies. Pre-register the keys at
+        // Application scope so AvaloniaEdit's StaticResource lookups
+        // resolve. Values are picked to match the panel palette.
+        Resources["ControlContentThemeFontSize"]    = 12.0;
+        Resources["ContentControlThemeFontFamily"]  = new FontFamily("Cascadia Mono,Consolas,Segoe UI,monospace");
+        Resources["ToolTipBackground"]              = new SolidColorBrush(Color.FromRgb(0x14, 0x1F, 0x29));
+        Resources["ToolTipForeground"]              = new SolidColorBrush(Color.FromRgb(0xD9, 0xE6, 0xF2));
+        Resources["ToolTipBorderBrush"]             = new SolidColorBrush(Color.FromRgb(0x26, 0x40, 0x59));
+        Resources["ToolTipBorderThemeThickness"]    = new Thickness(1);
+        // Dynamic keys — used by selection/highlight overlays.
+        Resources["SystemChromeMediumColor"]        = Color.FromRgb(0x14, 0x1F, 0x29);
+        Resources["SystemBaseLowColor"]             = Color.FromRgb(0x26, 0x40, 0x59);
+        Resources["SystemAccentColor"]              = Color.FromRgb(0x26, 0xD9, 0xE6);
+
+        Styles.Add(new StyleInclude(new Uri("avares://AvaloniaEdit/"))
+        {
+            Source = new Uri("avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml"),
+        });
         RequestedThemeVariant = ThemeVariant.Dark;
     }
 
@@ -732,7 +757,14 @@ internal class RynthOverlayWindow : Window
         // reclaim it. PostMessage is non-blocking — it queues on the game
         // thread's message pump and WndProcHook handles it there with a
         // same-thread SetFocus call (no cross-thread wait, no click delay).
-        if (msg == WM_SETFOCUS && !Win32Backend.ChatCaptureActive)
+        //
+        // Exception: skip the reclaim while an Avalonia panel TextBox has
+        // keyboard focus (AvaloniaTextInputActive) — otherwise the user
+        // clicks a TextBox to type and focus is yanked back to the game
+        // ~50 ms later, before the first keystroke. ChatCaptureActive is
+        // the chat plugin's separate route (game keeps focus, WM_CHAR is
+        // tunnelled into chat callbacks) and remains exempt.
+        if (msg == WM_SETFOCUS && !Win32Backend.ChatCaptureActive && !Win32Backend.AvaloniaTextInputActive)
         {
             RynthLog.Info("AvaloniaSubclass: WM_SETFOCUS (mouseDown=" + _avaloniaMouseButtonDown + ").");
             IntPtr gameHwnd = Win32Backend.GameHwnd;
@@ -889,6 +921,28 @@ internal class RynthOverlayWindow : Window
     private Control? _radarSettingsPopup;
     private Border? _barBorder;
     private StackPanel? _barStack;
+    /// <summary>The popout/redock toggle button at the right end of the bar.
+    /// Glyph flips between "↗" while docked and "↙" while floating. Held so
+    /// we can update its content on mode transitions without rebuilding the
+    /// bar.</summary>
+    private Button? _barPopoutButton;
+    /// <summary>Wrapper Border that holds <see cref="_barBorder"/> in the
+    /// canvas at off-bounds coords while the bar is floating. Mirrors the
+    /// per-panel <c>renderWrapper</c> in <see cref="PopOutPanel"/>. Null when
+    /// docked.</summary>
+    private Border? _floatingBarRenderWrapper;
+    /// <summary>The floating layered window hosting the bar, or null when
+    /// docked. Separate from <see cref="_floatingPanels"/> so we don't have
+    /// to teach the per-panel dock/close/redock paths about the bar sentinel
+    /// at every branch — instead we route the two callbacks
+    /// (<c>OnFloatingPanelMoved</c>, <c>RequestRedock</c>) through a sentinel
+    /// title check at their entry.</summary>
+    private FloatingPanelHost? _floatingBar;
+    /// <summary>Sentinel title passed to <see cref="FloatingPanelHost"/> when
+    /// the bar is the panel being hosted. Distinct from any real panel title;
+    /// routed through bar-specific paths in <c>OnFloatingPanelMoved</c> and
+    /// <c>RequestRedock</c>.</summary>
+    private const string BarSentinel = "__rynthcore_bar__";
     private bool _captureDirty = true;
     private bool _captureQueued;
     private bool _awaitingCustomFrame;
@@ -1083,6 +1137,28 @@ internal class RynthOverlayWindow : Window
         // through to AC instead of being routed to Avalonia.
         _barButtons["__engine_reload__"] = reloadBtn;
 
+        // Popout / redock toggle. ↗ in docked mode hands the bar off to a
+        // FloatingPanelHost (its own top-level layered window outside AC).
+        // ↙ in floating mode redocks the bar into _desktopCanvas. The button
+        // sits inside the bar in both modes so the in-AC click path activates
+        // it while docked and FloatingPanelHost's input forwarding activates
+        // it while floating.
+        var popoutBtn = StyleBarButton(new Button
+        {
+            Content = "↗",
+            Foreground = Brushes.LightSkyBlue,
+            Margin = new Thickness(4, 0, 0, 0),
+        });
+        ToolTip.SetTip(popoutBtn, "Pop the bar out into its own floating window.");
+        popoutBtn.Click += (_, _) =>
+        {
+            if (_floatingBar != null) RedockBar();
+            else PopOutBar();
+        };
+        stack.Children.Add(popoutBtn);
+        _barButtons["__bar_popout__"] = popoutBtn;
+        _barPopoutButton = popoutBtn;
+
         _barBorder = new Border {
             Background = new SolidColorBrush(Color.Parse("#E60A0A14")), 
             CornerRadius = new CornerRadius(4), 
@@ -1122,6 +1198,20 @@ internal class RynthOverlayWindow : Window
     {
         try
         {
+            // Bar floating mode restores once AC's HWND is available. If we
+            // pop out before that, the FloatingPanelHost ctor takes its
+            // legacy code path (no marshal to game thread) and the layered
+            // window's WS_EX_NOACTIVATE hits the Win11 focus race —
+            // WM_LBUTTONDOWN gets silently dropped until the user "beats"
+            // the race by clicking repeatedly. The constructor flags this in
+            // its own comments. Poll briefly; give up after a few seconds so
+            // a never-ready GameHwnd (Decal coexistence?) doesn't leave the
+            // bar lost.
+            if (PanelStateStore.BarFloating && _floatingBar == null)
+            {
+                TryRestoreFloatingBar(attemptsRemaining: 30);
+            }
+
             // Floating panels become visible top-level OS windows the moment
             // they restore — popping up over the launcher / character-select
             // before the user is in-game looks broken and (per past reports)
@@ -1239,29 +1329,34 @@ internal class RynthOverlayWindow : Window
         }
         else
         {
-            bool isRynthAi = string.Equals(title, "RynthAi", StringComparison.OrdinalIgnoreCase);
+            bool isRynthAi  = string.Equals(title, "RynthAi",  StringComparison.OrdinalIgnoreCase);
             bool isMonsters = string.Equals(title, "Monsters", StringComparison.OrdinalIgnoreCase);
-            bool isRadar = string.Equals(title, "Radar", StringComparison.OrdinalIgnoreCase);
+            bool isRadar    = string.Equals(title, "Radar",    StringComparison.OrdinalIgnoreCase);
+            bool isTracker  = string.Equals(title, "Tracker",  StringComparison.OrdinalIgnoreCase);
             // Restore prior dimensions if we have them saved from a previous run/reload.
             bool hasSaved = PanelStateStore.TryGetPanel(title, out PanelStateStore.PanelEntry saved);
             // RynthAi mirrors the ImGui dashboard which is intentionally compact.
             // Radar is square-by-default — the gold rim and coord readout both
             // live inside the surface, so the panel hugs the radar edge-to-edge.
-            double defaultW = isRynthAi ? 296 : (isMonsters ? 1100 : (isRadar ? 320 : 400));
-            double defaultH = isRynthAi ? 332 : (isMonsters ? 540  : (isRadar ? 320 : 500));
+            // Tracker is a tiny floating HUD — small default, near-zero minimum so
+            // it can be shrunk to a sliver.
+            double defaultW = isRynthAi ? 296 : (isMonsters ? 1100 : (isRadar ? 320 : (isTracker ? 165 : 400)));
+            double defaultH = isRynthAi ? 332 : (isMonsters ? 540  : (isRadar ? 320 : (isTracker ? 190 : 500)));
             var windowFrame = new Border
             {
                 Width = hasSaved && saved.Width > 0 ? saved.Width : defaultW,
                 Height = hasSaved && saved.Height > 0 ? saved.Height : defaultH,
-                MinWidth = isRynthAi ? 280 : (isRadar ? 120 : 320),
-                MinHeight = isRynthAi ? 260 : (isRadar ? 120 : 240),
+                MinWidth  = isRynthAi ? 280 : (isRadar ? 120 : (isTracker ? 60  : 320)),
+                MinHeight = isRynthAi ? 260 : (isRadar ? 120 : (isTracker ? 20  : 240)),
                 // RynthAi panel matches the ImGui dashboard's WindowBg (0.04,
                 // 0.06, 0.08, 0.95) → #F20A0F14, with the ColBtnBord (0.15,
                 // 0.25, 0.35) → #264059 edge. Other panels keep the softer
-                // "floating glass" look.
+                // "floating glass" look. Tracker uses a transparent frame so the
+                // opacity slider can reach full transparency.
                 Background = new SolidColorBrush(
                     isRynthAi ? Color.FromArgb(0xF2, 0x0A, 0x0F, 0x14)
                   : isRadar   ? Colors.Transparent
+                  : isTracker ? Colors.Transparent
                   :             Color.Parse("#D212121C")),
                 BorderBrush = isRynthAi
                     ? new SolidColorBrush(Color.FromRgb(0x26, 0x40, 0x59))
@@ -2180,6 +2275,374 @@ internal class RynthOverlayWindow : Window
         return frame;
     }
 
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr hWnd, ref POINTI lpPoint);
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromPoint(POINTI pt, uint dwFlags);
+    [DllImport("user32.dll")]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+    private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINTI { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+    }
+
+    /// <summary>
+    /// Compute a safe (visible) screen position for the floating bar. If the
+    /// saved coords land at least partially on a monitor that contains them,
+    /// keep them. Otherwise fall back to the top-left of AC's client area, or
+    /// the top-left of the primary monitor's work area as a last resort.
+    /// Without this, a bar dragged off-screen on a previous session (or saved
+    /// from a different monitor layout) becomes invisible and recoverable only
+    /// by hand-editing panel_state.txt.
+    /// </summary>
+    private static (int Left, int Top) ClampFloatingBarPosition(int savedLeft, int savedTop, int barLogicalWidth, int barLogicalHeight)
+    {
+        IntPtr gameHwnd = ImGuiBackend.Win32Backend.GameHwnd;
+
+        // Build a candidate "fallback" position from AC's client area if
+        // available. ClientToScreen gives us a screen-space point we can
+        // anchor a sensible default to.
+        (int Left, int Top)? acFallback = null;
+        if (gameHwnd != IntPtr.Zero && GetClientRect(gameHwnd, out RECT acClient))
+        {
+            POINTI origin = new() { X = acClient.Left, Y = acClient.Top };
+            if (ClientToScreen(gameHwnd, ref origin))
+                acFallback = (origin.X + 12, origin.Y + 8);
+        }
+
+        // Test whether the saved point's top-left lies inside any monitor.
+        // MonitorFromPoint with MONITOR_DEFAULTTONEAREST always returns a
+        // handle; GetMonitorInfo then tells us if the point is actually
+        // inside that monitor's work area.
+        POINTI savedPt = new() { X = savedLeft, Y = savedTop };
+        IntPtr monitor = MonitorFromPoint(savedPt, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = new() { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (monitor != IntPtr.Zero && GetMonitorInfo(monitor, ref mi))
+        {
+            // Inset by a small margin so the bar can still be grabbed (a
+            // 1-pixel sliver isn't a useful drag target).
+            const int margin = 4;
+            int maxLeft = mi.rcWork.Right - barLogicalWidth - margin;
+            int maxTop = mi.rcWork.Bottom - barLogicalHeight - margin;
+            int minLeft = mi.rcWork.Left + margin;
+            int minTop = mi.rcWork.Top + margin;
+            bool fitsX = savedLeft >= minLeft && savedLeft <= maxLeft;
+            bool fitsY = savedTop >= minTop && savedTop <= maxTop;
+            if (fitsX && fitsY)
+                return (savedLeft, savedTop);
+
+            // Saved point is on (or nearest to) a real monitor but the bar
+            // would land partially off-screen. Clamp to the work-area bounds
+            // before falling back further.
+            int clampedLeft = Math.Clamp(savedLeft, minLeft, Math.Max(minLeft, maxLeft));
+            int clampedTop = Math.Clamp(savedTop, minTop, Math.Max(minTop, maxTop));
+
+            // If clamping produced something visibly different from saved
+            // *and* AC's fallback exists, prefer the AC fallback — it's a
+            // more predictable place for the user to find the bar than an
+            // arbitrary corner of a monitor.
+            if (acFallback is { } ac && (clampedLeft != savedLeft || clampedTop != savedTop))
+            {
+                RynthLog.Info($"ClampFloatingBarPosition: saved=({savedLeft},{savedTop}) clamped=({clampedLeft},{clampedTop}) — falling back to AC client at ({ac.Left},{ac.Top}).");
+                return ac;
+            }
+
+            RynthLog.Info($"ClampFloatingBarPosition: saved=({savedLeft},{savedTop}) → clamped=({clampedLeft},{clampedTop}) within monitor work area.");
+            return (clampedLeft, clampedTop);
+        }
+
+        // No monitor info — fall back hard.
+        if (acFallback is { } ac2)
+            return ac2;
+        return (200, 80);
+    }
+
+    /// <summary>
+    /// Polls for <see cref="ImGuiBackend.Win32Backend.GameHwnd"/> availability
+    /// and calls <see cref="PopOutBar"/> once it appears. Each retry runs at
+    /// <see cref="DispatcherPriority.Background"/> 200 ms later. After
+    /// <paramref name="attemptsRemaining"/> attempts we pop out anyway on
+    /// whatever path is available — the bar is recoverable via the ↗/↙ toggle
+    /// even if it gets the focus race, but a never-visible bar is much harder
+    /// to dig out of.
+    /// </summary>
+    private void TryRestoreFloatingBar(int attemptsRemaining)
+    {
+        if (_floatingBar != null) return;
+
+        if (ImGuiBackend.Win32Backend.GameHwnd != IntPtr.Zero || attemptsRemaining <= 0)
+        {
+            try { PopOutBar(); }
+            catch (Exception ex)
+            {
+                RynthLog.Info($"TryRestoreFloatingBar: PopOutBar threw {ex.GetType().Name}: {ex.Message}");
+            }
+            return;
+        }
+
+        int next = attemptsRemaining - 1;
+        var timer = new Avalonia.Threading.DispatcherTimer(TimeSpan.FromMilliseconds(200), DispatcherPriority.Background, (_, _) => { });
+        EventHandler? tick = null;
+        tick = (_, _) =>
+        {
+            timer.Stop();
+            timer.Tick -= tick!;
+            TryRestoreFloatingBar(next);
+        };
+        timer.Tick += tick;
+        timer.Start();
+    }
+
+    /// <summary>
+    /// Hand the bar off to its own top-level layered window. Mirrors
+    /// <see cref="PopOutPanel"/> in shape but skips all the per-panel
+    /// chrome/content-detach bookkeeping — the bar's content is the bar
+    /// itself, so we keep <see cref="_barBorder"/> intact and only re-parent
+    /// it through a render wrapper into the off-bounds canvas zone.
+    ///
+    /// Caption layout: the entire bar height is HTCAPTION so the user can
+    /// drag from any non-button row, with a generous right inset so every
+    /// bar button stays HTCLIENT (clickable). Inset must cover from the
+    /// first button's left edge to the right edge of the bar; we sample
+    /// that from live layout when the bar has been arranged, or fall back
+    /// to a conservative default if popout is requested before first layout.
+    /// </summary>
+    internal void PopOutBar()
+    {
+        if (_floatingBar != null)
+            return;
+        if (_barBorder == null || _barStack == null)
+        {
+            RynthLog.Info("PopOutBar: bailing — bar not built yet.");
+            return;
+        }
+
+        // Snapshot the live docked position so RedockBar can restore exactly
+        // where the user popped out from. Canvas.GetLeft can return NaN if
+        // the bar hasn't been positioned yet — defensive defaults match
+        // BuildRoot's initial 50,5.
+        double dockedLeft = GetCanvasLeft(_barBorder);
+        double dockedTop = GetCanvasTop(_barBorder);
+        if (double.IsNaN(dockedLeft)) dockedLeft = 50;
+        if (double.IsNaN(dockedTop)) dockedTop = 5;
+        try { PanelStateStore.SetBarPosition(dockedLeft, dockedTop); } catch { /* best-effort */ }
+
+        // Measure the bar so the layered window is sized correctly. Fall
+        // back to a reasonable default if layout hasn't run yet.
+        double logicalWidth = _barBorder.Bounds.Width > 0 ? _barBorder.Bounds.Width : _barBorder.DesiredSize.Width;
+        double logicalHeight = _barBorder.Bounds.Height > 0 ? _barBorder.Bounds.Height : _barBorder.DesiredSize.Height;
+        if (logicalWidth <= 0) logicalWidth = 400;
+        if (logicalHeight <= 0) logicalHeight = 28;
+
+        // Find the leftmost button's X within the bar — everything from
+        // there to the right edge is the HTCLIENT (clickable) zone. The
+        // remainder on the left is the drag handle (the "RC" label).
+        double firstButtonLeft = logicalWidth;
+        foreach (Button btn in _barButtons.Values)
+        {
+            Point? origin = btn.TranslatePoint(default, _barBorder);
+            if (origin is { } p && p.X < firstButtonLeft)
+                firstButtonLeft = p.X;
+        }
+        // Buffer of 4 logical px on either side so border antialiasing
+        // doesn't fall inside the inset (clicks at the very edge of the
+        // first button would otherwise start an OS drag).
+        double rightInsetLogical = Math.Max(logicalWidth - firstButtonLeft + 4, 40);
+
+        // Restore the last-known floating screen position, or pick a
+        // sensible default near AC's top-left for a first-time popout.
+        // Always run the saved position through ClampFloatingBarPosition so
+        // a previous session's off-screen drag (different monitor layout,
+        // bar dragged below the taskbar, etc.) doesn't leave the bar
+        // invisible.
+        var savedFloating = PanelStateStore.BarFloatingPosition;
+        int rawScreenLeft = savedFloating is { } sf ? (int)Math.Round(sf.Left) : 200;
+        int rawScreenTop = savedFloating is { } sf2 ? (int)Math.Round(sf2.Top) : 80;
+        (int screenLeft, int screenTop) = ClampFloatingBarPosition(
+            rawScreenLeft, rawScreenTop,
+            (int)Math.Ceiling(logicalWidth),
+            (int)Math.Ceiling(logicalHeight));
+
+        // Detach the bar from the docked canvas so we can re-parent it
+        // through the render wrapper. The bar's StackPanel/children stay
+        // intact; only the canvas attachment moves.
+        try { _desktopCanvas.Children.Remove(_barBorder); } catch (Exception ex)
+        {
+            RynthLog.Info($"PopOutBar: removing docked bar from canvas threw {ex.GetType().Name}: {ex.Message}");
+        }
+        OrphanControl(_barBorder);
+
+        var renderWrapper = new Border
+        {
+            Background = Brushes.Transparent,
+            Child = _barBorder
+        };
+        _floatingBarRenderWrapper = renderWrapper;
+
+        double offBoundsX = FloatingOffBoundsX;
+        double offBoundsY = _nextFloatingSlotIndex * FloatingOffBoundsSlotPitch;
+        _nextFloatingSlotIndex++;
+
+        Canvas.SetLeft(renderWrapper, offBoundsX);
+        Canvas.SetTop(renderWrapper, offBoundsY);
+        _desktopCanvas.Children.Add(renderWrapper);
+
+        float scale = AvaloniaOverlay.InputScale > 0 ? AvaloniaOverlay.InputScale : 1f;
+        int captionHeightPx = (int)Math.Round(logicalHeight * scale);
+        int captionRightInsetPx = (int)Math.Round(rightInsetLogical * scale);
+
+        FloatingPanelHost host;
+        try
+        {
+            host = new FloatingPanelHost(
+                owner: this,
+                title: BarSentinel,
+                rootControl: renderWrapper,
+                panelBorder: _barBorder,
+                // No separate content control — the bar IS its own chrome.
+                // Passing _barBorder as both `panelBorder` and `panelContent`
+                // is safe: RedockBar handles teardown itself (not via
+                // RedockPanel's content-detach path).
+                panelContent: _barBorder,
+                logicalWidth: logicalWidth,
+                logicalHeight: logicalHeight,
+                offBoundsCanvasX: offBoundsX,
+                offBoundsCanvasY: offBoundsY,
+                screenLeft: screenLeft,
+                screenTop: screenTop,
+                captionHeight: captionHeightPx,
+                captionRightInset: captionRightInsetPx,
+                // No native chrome buttons — redock happens via the bar's
+                // own ↗/↙ toggle button (which is in HTCLIENT space and
+                // routes through Avalonia like every other bar button).
+                closeButtonWidthPx: 0,
+                redockButtonWidthPx: 0,
+                clickThroughWhenCtrlReleased: false);
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Info($"PopOutBar: FloatingPanelHost ctor threw {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+            // Recovery: pull the bar back out of the floating wrapper and
+            // reattach it to the canvas so the user still has a working bar.
+            try { renderWrapper.Child = null; } catch { }
+            try { _desktopCanvas.Children.Remove(renderWrapper); } catch { }
+            _floatingBarRenderWrapper = null;
+            OrphanControl(_barBorder);
+            try { _desktopCanvas.Children.Add(_barBorder); } catch { }
+            Canvas.SetLeft(_barBorder, dockedLeft);
+            Canvas.SetTop(_barBorder, dockedTop);
+            return;
+        }
+
+        _floatingBar = host;
+        // Update the toggle button glyph + tooltip so the user can tell what
+        // a click will do in floating mode.
+        if (_barPopoutButton != null)
+        {
+            _barPopoutButton.Content = "↙";
+            ToolTip.SetTip(_barPopoutButton, "Redock the bar back into the game overlay.");
+        }
+
+        try { PanelStateStore.SetBarFloatingState(floating: true, screenLeft, screenTop); }
+        catch { /* best-effort */ }
+
+        RynthLog.Info($"PopOutBar: host created, HWND=0x{host.LayeredWindow.Hwnd.ToInt64():X}, screen=({screenLeft},{screenTop}), size={(int)logicalWidth}x{(int)logicalHeight}, captionH={captionHeightPx}, rightInset={captionRightInsetPx}, offBounds=({offBoundsX:0},{offBoundsY:0}).");
+        RefreshHitTestSnapshot();
+        RequestFrameRefresh();
+    }
+
+    /// <summary>
+    /// Re-attach the bar to the in-AC canvas. Tears down the floating
+    /// layered window and drops <see cref="_barBorder"/> back into
+    /// <see cref="_desktopCanvas"/> at its last docked position.
+    /// </summary>
+    internal void RedockBar()
+    {
+        if (_floatingBar == null)
+        {
+            RynthLog.Info("RedockBar: bailing — no floating bar.");
+            return;
+        }
+        if (_barBorder == null)
+        {
+            RynthLog.Info("RedockBar: bailing — _barBorder is null.");
+            return;
+        }
+
+        FloatingPanelHost host = _floatingBar;
+        Border? wrapper = _floatingBarRenderWrapper;
+
+        // Detach the bar from the floating wrapper. _barBorder's internal
+        // tree (StackPanel + buttons) stays intact.
+        try
+        {
+            if (wrapper != null && ReferenceEquals(wrapper.Child, _barBorder))
+                wrapper.Child = null;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Info($"RedockBar: wrapper detach threw {ex.GetType().Name}: {ex.Message}");
+        }
+        OrphanControl(_barBorder);
+
+        // Take the wrapper out of the canvas + dispose the layered window.
+        if (wrapper != null)
+        {
+            try { _desktopCanvas.Children.Remove(wrapper); } catch (Exception ex)
+            {
+                RynthLog.Info($"RedockBar: wrapper canvas-remove threw {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        _floatingBar = null;
+        _floatingBarRenderWrapper = null;
+
+        try { host.Dispose(); } catch (Exception ex)
+        {
+            RynthLog.Info($"RedockBar: host.Dispose threw {ex.GetType().Name}: {ex.Message}");
+        }
+
+        // Persist the last-known floating screen coords (so a re-popout lands
+        // back where the user last left it) and clear the floating flag.
+        try { PanelStateStore.SetBarFloatingState(floating: false, host.ScreenLeft, host.ScreenTop); }
+        catch { /* best-effort */ }
+
+        // Re-attach the bar to the canvas at its last docked position. Fall
+        // back to BuildRoot's defaults if the saved position is invalid.
+        var savedBar = PanelStateStore.BarPosition;
+        double dockedLeft = savedBar.HasValue ? savedBar.Value.Left : 50;
+        double dockedTop = savedBar.HasValue ? savedBar.Value.Top : 5;
+        try { _desktopCanvas.Children.Add(_barBorder); } catch (Exception ex)
+        {
+            RynthLog.Info($"RedockBar: re-add to canvas threw {ex.GetType().Name}: {ex.Message}");
+        }
+        Canvas.SetLeft(_barBorder, dockedLeft);
+        Canvas.SetTop(_barBorder, dockedTop);
+
+        // Restore the toggle button glyph + tooltip for docked mode.
+        if (_barPopoutButton != null)
+        {
+            _barPopoutButton.Content = "↗";
+            ToolTip.SetTip(_barPopoutButton, "Pop the bar out into its own floating window.");
+        }
+
+        RefreshHitTestSnapshot();
+        RequestFrameRefresh();
+        RynthLog.Info($"RedockBar: redocked to canvas at ({dockedLeft:0.#},{dockedTop:0.#}).");
+    }
+
     /// <summary>
     /// Re-attach a floating panel into the in-AC canvas. Detaches the
     /// content from the floating chrome, disposes the layered window, and
@@ -2278,24 +2741,26 @@ internal class RynthOverlayWindow : Window
         bool isMonsters = string.Equals(title, "Monsters", StringComparison.OrdinalIgnoreCase);
         bool isRadar    = string.Equals(title, "Radar",    StringComparison.OrdinalIgnoreCase);
         bool isRynthAi  = string.Equals(title, "RynthAi",  StringComparison.OrdinalIgnoreCase);
+        bool isTracker  = string.Equals(title, "Tracker",  StringComparison.OrdinalIgnoreCase);
         bool hasSaved = PanelStateStore.TryGetPanel(title, out PanelStateStore.PanelEntry saved);
-        double defaultW = isMonsters ? 1100 : (isRadar ? 320 : 400);
-        double defaultH = isMonsters ? 540 : (isRadar ? 320 : 500);
+        double defaultW = isMonsters ? 1100 : (isRadar ? 320 : (isTracker ? 165 : 400));
+        double defaultH = isMonsters ? 540  : (isRadar ? 320 : (isTracker ? 190 : 500));
         var windowFrame = new Border
         {
             Width = hasSaved && saved.Width > 0 ? saved.Width : defaultW,
             Height = hasSaved && saved.Height > 0 ? saved.Height : defaultH,
-            MinWidth = 320,
-            MinHeight = 240,
+            MinWidth  = isRadar ? 120 : (isTracker ? 60  : 320),
+            MinHeight = isRadar ? 120 : (isTracker ? 20  : 240),
             // Radar is chromeless when docked — no border, no rounded corners,
             // transparent background. The gold frame is rendered by the radar
             // surface itself. Mirrors the special-case in TogglePanel.
-            Background = isRadar
+            // Tracker uses transparent frame so the opacity slider can reach zero.
+            Background = (isRadar || isTracker)
                 ? Brushes.Transparent
                 : new SolidColorBrush(Color.Parse("#D212121C")),
             BorderBrush = Brushes.Teal,
-            BorderThickness = isRadar ? new Thickness(0) : new Thickness(1),
-            CornerRadius = new CornerRadius(isRadar ? 0 : 4),
+            BorderThickness = (isRadar || isTracker) ? new Thickness(0) : new Thickness(1),
+            CornerRadius = new CornerRadius((isRadar || isTracker) ? 0 : 4),
             ClipToBounds = true
         };
 
@@ -2552,10 +3017,19 @@ internal class RynthOverlayWindow : Window
     /// <summary>
     /// Called by FloatingPanelHost when its layered HWND finishes moving
     /// (HTCAPTION drag). Persists screen coords without disturbing docked
-    /// geometry.
+    /// geometry. The bar sentinel is routed to its own persistence path so
+    /// the saved screen coords land on the <c>bar=...</c> line in panel_state
+    /// instead of being mistaken for a panel.
     /// </summary>
     internal void OnFloatingPanelMoved(string title, int screenLeft, int screenTop)
     {
+        if (string.Equals(title, BarSentinel, StringComparison.Ordinal))
+        {
+            try { PanelStateStore.SetBarFloatingState(floating: true, screenLeft, screenTop); }
+            catch { /* persistence best-effort */ }
+            return;
+        }
+
         PersistFloatingPanelState(title, screenLeft, screenTop, floating: true, open: true);
     }
 
@@ -2579,9 +3053,16 @@ internal class RynthOverlayWindow : Window
     /// button region. Posts the actual RedockPanel call to the dispatcher
     /// so the WndProc returns first (and any in-flight Win32 capture state
     /// settles) before we mutate _floatingPanels and reattach to the canvas.
+    /// Bar sentinel routes to <see cref="RedockBar"/> instead.
     /// </summary>
     internal void RequestRedock(string title)
     {
+        if (string.Equals(title, BarSentinel, StringComparison.Ordinal))
+        {
+            Dispatcher.UIThread.Post(RedockBar, DispatcherPriority.Background);
+            return;
+        }
+
         Dispatcher.UIThread.Post(() => RedockPanel(title), DispatcherPriority.Background);
     }
 
@@ -2619,6 +3100,27 @@ internal class RynthOverlayWindow : Window
     /// </summary>
     internal void CloseAllFloatingPanels()
     {
+        // Tear down the floating bar first if one is active so the layered
+        // HWND is gone before we clear panel state. We DON'T flip BarFloating
+        // back to false — the user wants the bar restored in floating mode on
+        // next launch if that's how they left it.
+        if (_floatingBar != null)
+        {
+            FloatingPanelHost barHost = _floatingBar;
+            try
+            {
+                PanelStateStore.SetBarFloatingState(floating: true, barHost.ScreenLeft, barHost.ScreenTop);
+            }
+            catch { /* best-effort */ }
+            try { if (_floatingBarRenderWrapper != null) _desktopCanvas.Children.Remove(_floatingBarRenderWrapper); } catch { }
+            try { barHost.Dispose(); } catch (Exception ex)
+            {
+                RynthLog.UI($"CloseAllFloatingPanels(bar): dispose threw {ex.GetType().Name}: {ex.Message}");
+            }
+            _floatingBar = null;
+            _floatingBarRenderWrapper = null;
+        }
+
         if (_floatingPanels.Count == 0) return;
 
         var titles = _floatingPanels.Keys.ToArray();
@@ -3134,13 +3636,26 @@ internal class RynthOverlayWindow : Window
     /// </summary>
     internal void TickFloatingPanels()
     {
-        if (_floatingPanels.Count == 0) return;
-        foreach (FloatingPanelHost host in _floatingPanels.Values)
+        if (_floatingPanels.Count > 0)
         {
-            try { host.Tick(); }
+            foreach (FloatingPanelHost host in _floatingPanels.Values)
+            {
+                try { host.Tick(); }
+                catch (Exception ex)
+                {
+                    RynthLog.Info($"FloatingPanelHost.Tick({host.Title}) threw {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
+        // The floating bar lives outside _floatingPanels but needs the same
+        // per-frame capture-and-blit to push pixels to its layered HWND.
+        if (_floatingBar != null)
+        {
+            try { _floatingBar.Tick(); }
             catch (Exception ex)
             {
-                RynthLog.Info($"FloatingPanelHost.Tick({host.Title}) threw {ex.GetType().Name}: {ex.Message}");
+                RynthLog.Info($"FloatingPanelHost.Tick(bar) threw {ex.GetType().Name}: {ex.Message}");
             }
         }
     }
@@ -3242,31 +3757,62 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         // HWND yet (popout fired before ImGui init), pass IntPtr.Zero;
         // Tick will SetOwner once GameHwnd becomes available so the
         // window snaps above AC at next opportunity.
+        //
+        // The HWND must be created on AC's main thread so its WndProc
+        // dispatches there too. Without same-thread ownership, Win11's
+        // WS_EX_NOACTIVATE silently drops WM_LBUTTONDOWN in some focus
+        // states — clicks needed to be repeated until the user "beat" the
+        // focus race. Run-on-game-thread wraps the CreateWindowExW call;
+        // pixel updates / Show / Move are documented as safe cross-thread
+        // for the resulting HWND.
+        //
+        // Callbacks fire from the WndProc on the game thread; marshal back
+        // to UI thread so Avalonia state (PanelBorder visual tree, layout
+        // bounds, click handlers) stays single-threaded.
         IntPtr ownerHwnd = ImGuiBackend.Win32Backend.GameHwnd;
-        _layered = new LayeredWindow(pxW, pxH, screenLeft, screenTop, ownerHwnd)
+        if (ownerHwnd == IntPtr.Zero)
         {
-            CaptionHeight = captionHeight,
-            CaptionRightInset = captionRightInset,
-            // Each chrome button is 20×20 logical + ~4px margin = ~24
-            // logical = 30 physical at scale 1.25. Use 30 as a round
-            // value that covers the button hit area at common DPI.
-            // Radar uses 0 for close so its gear-button area doesn't fire
-            // OnCloseClicked; the user redocks or toggles the bar button.
-            CloseButtonWidthPx = closeButtonWidthPx,
-            RedockButtonWidthPx = redockButtonWidthPx,
-            OnInput = ForwardInput,
-            OnMoved = OnLayeredMoved,
-            OnResized = OnLayeredResized,
-            // Native click handling for the two chrome buttons — Avalonia's
-            // hit-test drops forwarded clicks at canvas X past AC client
-            // (the panel chrome lives at canvas X = FloatingOffBoundsX),
-            // so we resolve those buttons at the WndProc level instead.
-            OnRedockClicked = () => _owner.RequestRedock(title),
-            OnCloseClicked  = () => _owner.RequestCloseFloating(title)
-        };
-        if (ownerHwnd != IntPtr.Zero)
+            // No game HWND yet → no thread to marshal to; create on this
+            // thread (legacy path). Tick will adopt the owner once it's
+            // available. This window will hit the pre-existing focus race;
+            // late-init undocking is rare, so accept the regression there.
+            _layered = new LayeredWindow(pxW, pxH, screenLeft, screenTop, ownerHwnd);
+        }
+        else
+        {
+            _layered = ImGuiBackend.Win32Backend.RunOnGameThread(() =>
+                new LayeredWindow(pxW, pxH, screenLeft, screenTop, ownerHwnd));
             _ownerApplied = true;
-        _layered.Show();
+        }
+
+        _layered.CaptionHeight = captionHeight;
+        _layered.CaptionRightInset = captionRightInset;
+        // Each chrome button is 20×20 logical + ~4px margin = ~24
+        // logical = 30 physical at scale 1.25. Use 30 as a round
+        // value that covers the button hit area at common DPI.
+        // Radar uses 0 for close so its gear-button area doesn't fire
+        // OnCloseClicked; the user redocks or toggles the bar button.
+        _layered.CloseButtonWidthPx = closeButtonWidthPx;
+        _layered.RedockButtonWidthPx = redockButtonWidthPx;
+        _layered.OnInput = (uint msg, IntPtr wp, IntPtr lp, int cx, int cy) =>
+            Dispatcher.UIThread.Invoke(() => ForwardInput(msg, wp, lp, cx, cy));
+        _layered.OnMoved = (x, y) =>
+            Dispatcher.UIThread.Invoke(() => OnLayeredMoved(x, y));
+        _layered.OnResized = (w, h) =>
+            Dispatcher.UIThread.Invoke(() => OnLayeredResized(w, h));
+        // Native click handling for the two chrome buttons — Avalonia's
+        // hit-test drops forwarded clicks at canvas X past AC client
+        // (the panel chrome lives at canvas X = FloatingOffBoundsX),
+        // so we resolve those buttons at the WndProc level instead.
+        _layered.OnRedockClicked = () =>
+            Dispatcher.UIThread.Invoke(() => _owner.RequestRedock(title));
+        _layered.OnCloseClicked = () =>
+            Dispatcher.UIThread.Invoke(() => _owner.RequestCloseFloating(title));
+
+        if (ownerHwnd != IntPtr.Zero)
+            ImGuiBackend.Win32Backend.RunOnGameThread(() => _layered.Show());
+        else
+            _layered.Show();
         RynthLog.Info($"FloatingPanelHost({title}): LayeredWindow shown, HWND=0x{_layered.Hwnd.ToInt64():X}.");
     }
 
@@ -3503,10 +4049,12 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
                     // HWND whose WndProc we're currently inside) and that's
                     // undefined behavior if it runs synchronously here.
                     Button capturedBtn = btn;
+                    string capturedTitle = Title;
                     Dispatcher.UIThread.Post(() =>
                     {
                         try
                         {
+                            RynthLog.Info($"FloatingPanelHost({capturedTitle}): deferred Click firing for '{capturedBtn.Content}'.");
                             // ToggleButton (CheckBox, RadioButton, ToggleButton)
                             // implements toggle inside its OnClick override —
                             // raising ClickEvent directly skips OnClick, so
@@ -3523,7 +4071,7 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
                         }
                         catch (Exception ex)
                         {
-                            RynthLog.Info($"FloatingPanelHost({Title}): deferred Click raise threw {ex.GetType().Name}: {ex.Message}");
+                            RynthLog.Info($"FloatingPanelHost({capturedTitle}): deferred Click raise threw {ex.GetType().Name}: {ex.Message}");
                         }
                     });
                     return;
@@ -3651,13 +4199,12 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         int avX = (int)Math.Round(OffBoundsCanvasX * scale) + layeredClientX;
         int avY = (int)Math.Round(OffBoundsCanvasY * scale) + layeredClientY;
 
-        bool isRadar = string.Equals(Title, "Radar", StringComparison.OrdinalIgnoreCase);
-        // Always log LBUTTONDOWN/UP for radar so the snapshot diagnostics
-        // aren't hidden by the _inputLogCount limit. Other messages (mostly
-        // moves) still respect the limit to avoid flooding the log.
-        if (isRadar && (msg == 0x0201 || msg == 0x0202))
+        // Always log LBUTTONDOWN/UP — the click-routing diag needs every press,
+        // not just the first 8 of any session. Other messages (mostly moves)
+        // still respect the count limit to avoid flooding the log.
+        if (msg == 0x0201 || msg == 0x0202)
         {
-            RynthLog.Info($"FloatingPanelHost({Title}): ForwardInput msg=0x{msg:X4} layered=({layeredClientX},{layeredClientY}) -> avalonia=({avX},{avY}).");
+            RynthLog.Info($"FloatingPanelHost({Title}): fall-through ForwardInput msg=0x{msg:X4} layered=({layeredClientX},{layeredClientY}) -> avalonia=({avX},{avY}).");
         }
         else if (_inputLogCount < 8)
         {

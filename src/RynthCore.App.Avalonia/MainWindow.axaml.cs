@@ -49,6 +49,16 @@ internal partial class MainWindow : Window
     // to and when we launched it. Used by the auto-relaunch circuit breaker
     // to distinguish "exited normally after a long session" from "quick exit".
     private readonly Dictionary<int, (string AccountKey, DateTime LaunchedAtUtc)> _launchedPidInfo = [];
+
+    // Process handles whose Exited event we've subscribed to. Held in a field
+    // so the GC doesn't collect them mid-session (Exited only fires on a live
+    // Process object). Disposed when the PID is removed from _launchedPidInfo
+    // in DetectQuickExits. Kernel signals Exited the instant the process truly
+    // exits (post-WER if any), so the launcher reacts within milliseconds of
+    // close instead of waiting up to 2 s for the next _sessionTimer poll. The
+    // poll still runs as a redundant safety net for any PID we missed (e.g.
+    // GetProcessById race during very fast launch-and-die).
+    private readonly Dictionary<int, Process> _exitWatchers = [];
     /// PIDs we have observed as logged-in at least once. Once a PID is in this
     /// set, the stuck-client reaper will never touch it. This is the safety
     /// net against any session-state race that could spuriously flip a
@@ -1209,6 +1219,7 @@ internal partial class MainWindow : Window
                 {
                     _launchedSessionPids.Add(trackedPid);
                     _launchedPidInfo[trackedPid] = (accountKey, DateTime.UtcNow);
+                    RegisterPidExitWatch(trackedPid);
                 }
 
                 AppendActivity(result.ProcessId is int pid
@@ -1287,6 +1298,7 @@ internal partial class MainWindow : Window
                 {
                     _launchedSessionPids.Add(trackedPid);
                     _launchedPidInfo[trackedPid] = (accountKey, DateTime.UtcNow);
+                    RegisterPidExitWatch(trackedPid);
                 }
 
                 AppendActivity(result.ProcessId is int pid
@@ -1370,6 +1382,7 @@ internal partial class MainWindow : Window
             {
                 _launchedSessionPids.Add(proc.Id);
                 _launchedPidInfo[proc.Id] = (BuildAccountKey(launchContext.AccountName), DateTime.UtcNow);
+                RegisterPidExitWatch(proc.Id);
                 LaunchContextStore.WriteForProcess(proc.Id, launchContext);
                 WritePendingSessionState(proc.Id, launchContext);
                 LauncherDiag.Info($"LaunchOneNoInject Process.Start ok pid={proc.Id}");
@@ -2225,6 +2238,49 @@ internal partial class MainWindow : Window
     /// auto-relaunch circuit breaker. Long-lived sessions that exit normally
     /// (user closed the window after playing) are silently dropped.
     /// </summary>
+    /// <summary>
+    /// Subscribe to <see cref="Process.Exited"/> for a launched PID so the
+    /// launcher snaps to attention the instant the kernel signals the process
+    /// handle — no need to wait for the next 2 s session-poll tick. Combined
+    /// with the existing poll, the effective close-detection latency drops
+    /// from "up to 2 s + WER duration" to "WER duration + scheduler hop".
+    ///
+    /// Idempotent: safe to call twice for the same PID (no-op on the second).
+    /// Tolerant of GetProcessById failing (race window where the process
+    /// already vanished before we got here — the existing poll catches it).
+    /// </summary>
+    private void RegisterPidExitWatch(int pid)
+    {
+        if (_exitWatchers.ContainsKey(pid))
+            return;
+        try
+        {
+            Process proc = Process.GetProcessById(pid);
+            proc.EnableRaisingEvents = true;
+            proc.Exited += (_, _) =>
+            {
+                // Fires on a thread-pool thread when the kernel signals the
+                // process handle. Marshal to the Avalonia UI thread because
+                // RefreshSessionState mutates UI-bound state (status text,
+                // session list ItemsSource).
+                try { Dispatcher.UIThread.Post(RefreshSessionState); }
+                catch { /* dispatcher tearing down at app exit — ignore */ }
+            };
+            _exitWatchers[pid] = proc;
+
+            // Race-window check: if the process already exited between
+            // launch and our subscribe, the event won't fire. Snap once.
+            if (proc.HasExited)
+                Dispatcher.UIThread.Post(RefreshSessionState);
+        }
+        catch (Exception ex)
+        {
+            // Could be ArgumentException (no such PID) or Win32Exception
+            // (access denied). Either way: the 2 s poll covers it.
+            LauncherDiag.Info($"RegisterPidExitWatch: GetProcessById({pid}) failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     private void DetectQuickExits(HashSet<int> activePids)
     {
         if (_launchedPidInfo.Count == 0)
@@ -2259,7 +2315,16 @@ internal partial class MainWindow : Window
         if (toRemove != null)
         {
             foreach (int pid in toRemove)
+            {
                 _launchedPidInfo.Remove(pid);
+                // Drop the exit-watcher Process handle so the OS can reclaim
+                // the kernel object. Exited already fired (or never will),
+                // so we no longer need to hold the handle alive.
+                if (_exitWatchers.Remove(pid, out Process? watcher))
+                {
+                    try { watcher.Dispose(); } catch { }
+                }
+            }
             LauncherDiag.Info($"DetectQuickExits: removed {toRemove.Count} _launchedPidInfo entries; remaining={_launchedPidInfo.Count}.");
         }
     }

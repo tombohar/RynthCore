@@ -390,10 +390,13 @@ internal static class RynthChatPanel
 
         // Track whether the user is parked at the tail. Scrolling up clears the
         // stick flag so AppendLine stops auto-scrolling; returning to the bottom
-        // re-arms it. This fires for both programmatic and user-driven scrolls —
-        // ScrollToEnd lands at the bottom, so following stays sticky.
-        scrollViewer.ScrollChanged += (_, _) =>
+        // re-arms it. Only react to genuine offset changes — extent-only changes
+        // fire when a new line is appended (extent grows before our queued
+        // ScrollToEnd lands) and would wrongly unstick mid-stream, breaking the
+        // initial scroll-to-bottom on the first scrollback burst at startup.
+        scrollViewer.ScrollChanged += (_, e) =>
         {
+            if (e.OffsetDelta.Y == 0) return;
             double maxOffset = scrollViewer.Extent.Height - scrollViewer.Viewport.Height;
             _stickToBottom = maxOffset <= 0 || scrollViewer.Offset.Y >= maxOffset - ScrollStickThresholdPx;
         };
@@ -584,10 +587,10 @@ internal static class RynthChatPanel
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    private static TextBlock MakeTextBlock(ChatDisplayLine line)
+    private static SelectableTextBlock MakeTextBlock(ChatDisplayLine line)
     {
         string prefix = line.Sender != null ? $"{line.Timestamp} {line.Sender}: " : $"{line.Timestamp} ";
-        return new TextBlock
+        return new SelectableTextBlock
         {
             Text         = prefix + line.Text,
             FontSize     = _chatFontSize,

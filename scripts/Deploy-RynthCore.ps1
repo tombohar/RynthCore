@@ -1,7 +1,14 @@
 param(
     [string]$Destination = "C:\Games\RynthCore",
     [string]$PluginsDestination = "C:\Games\RynthSuite",
-    [switch]$SkipPublish
+    [switch]$SkipPublish,
+    # When set, skip both the launcher publish AND the launcher payload copy
+    # to $Destination root. Use this for engine-only / plugin-only iteration
+    # while the launcher (RynthCore.exe) is running — without it, the launcher's
+    # held Avalonia.Base.dll causes a Copy-Item lock failure that wipes the
+    # Runtime\ folder. Engine still publishes/deploys to Runtime\ and plugins
+    # still deploy under $PluginsDestination.
+    [switch]$SkipLauncher
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +52,12 @@ $pluginProjects = @(
         Publish    = Join-Path $PluginsDestination "RynthVision"
         DllName    = "RynthCore.Plugin.RynthVision.dll"
         DestSubdir = "RynthVision"
+    },
+    @{
+        Project    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthTracker\RynthCore.Plugin.RynthTracker.csproj"
+        Publish    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthTracker\bin\Release\net10.0-windows\win-x86\publish"
+        DllName    = "RynthCore.Plugin.RynthTracker.dll"
+        DestSubdir = "RynthTracker"
     }
 )
 
@@ -71,8 +84,10 @@ if (-not $SkipPublish) {
     $env:DOTNET_CLI_HOME = Join-Path $repoRoot ".dotnet-home-deploy-clean"
     $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
 
-    # --self-contained false is required: omitting it with the launcher's IncludeNativeLibrariesForSelfExtract=true produces a broken half-payload (apphost + coreclr.dll, no framework) that reports ".NET is not installed".
-    dotnet publish $launcherProject -c Release -r win-x86 --self-contained false
+    if (-not $SkipLauncher) {
+        # --self-contained false is required: omitting it with the launcher's IncludeNativeLibrariesForSelfExtract=true produces a broken half-payload (apphost + coreclr.dll, no framework) that reports ".NET is not installed".
+        dotnet publish $launcherProject -c Release -r win-x86 --self-contained false
+    }
     dotnet publish $engineProject -c Release
     dotnet publish $loaderProject -c Release
     foreach ($plugin in $pluginProjects) {
@@ -105,10 +120,12 @@ $rootCleanup = @(
     "RynthCore.exe.pre-avalonia-redeploy-20260331.bak"
 )
 
-foreach ($name in $rootCleanup) {
-    $target = Join-Path $Destination $name
-    if (Test-Path -LiteralPath $target) {
-        Remove-Item -LiteralPath $target -Recurse -Force
+if (-not $SkipLauncher) {
+    foreach ($name in $rootCleanup) {
+        $target = Join-Path $Destination $name
+        if (Test-Path -LiteralPath $target) {
+            Remove-Item -LiteralPath $target -Recurse -Force
+        }
     }
 }
 
@@ -119,8 +136,10 @@ if (Test-Path -LiteralPath $runtimeDir) {
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
-# Launcher payload to root, except the bootstrapper exe (renamed below).
-Copy-FilteredChildren -Source $launcherPublish -Target $Destination -ExcludeNames @("RynthCore.App.Avalonia.exe") -ExcludeExtensions @(".pdb")
+if (-not $SkipLauncher) {
+    # Launcher payload to root, except the bootstrapper exe (renamed below).
+    Copy-FilteredChildren -Source $launcherPublish -Target $Destination -ExcludeNames @("RynthCore.App.Avalonia.exe") -ExcludeExtensions @(".pdb")
+}
 
 # Engine payload to Runtime\. Skip the bundled Plugins\ subfolder - plugins
 # are deployed separately to $PluginsDestination so they have a single home.
@@ -141,7 +160,9 @@ if (Test-Path -LiteralPath $sehTrampolineSrc) {
     Write-Warning "RynthCore.SehTrampoline.dll not found at $sehTrampolineSrc - build it with native\SehTrampoline\Build-SehTrampoline.ps1"
 }
 
-Copy-Item -LiteralPath (Join-Path $launcherPublish "RynthCore.App.Avalonia.exe") -Destination (Join-Path $Destination "RynthCore.exe") -Force
+if (-not $SkipLauncher) {
+    Copy-Item -LiteralPath (Join-Path $launcherPublish "RynthCore.App.Avalonia.exe") -Destination (Join-Path $Destination "RynthCore.exe") -Force
+}
 
 foreach ($plugin in $pluginProjects) {
     $pluginSrc = Join-Path $plugin.Publish $plugin.DllName
@@ -170,5 +191,7 @@ foreach ($plugin in $pluginProjects) {
 
 Get-ChildItem -Path $Destination -Recurse -Filter *.pdb -File | Remove-Item -Force
 
-Write-Host "Launcher deployed to $Destination"
+if (-not $SkipLauncher) {
+    Write-Host "Launcher deployed to $Destination"
+}
 Write-Host "Engine runtime deployed to $runtimeDir"

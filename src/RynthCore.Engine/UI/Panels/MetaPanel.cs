@@ -543,7 +543,21 @@ internal static class MetaPanel
                 // Condition text (col 4)
                 string condName = rule.Condition >= 0 && rule.Condition < ConditionNames.Length
                     ? ConditionNames[rule.Condition] : $"Cond({rule.Condition})";
-                string condText = string.IsNullOrEmpty(rule.ConditionData) ? condName : $"{condName}: {rule.ConditionData}";
+                string condText;
+                if (IsCompositeCondition(rule.Condition) && rule.Children.Count > 0)
+                {
+                    var first = rule.Children[0];
+                    string fn = first.Condition >= 0 && first.Condition < ConditionNames.Length
+                        ? ConditionNames[first.Condition] : $"Cond({first.Condition})";
+                    string ft = string.IsNullOrEmpty(first.ConditionData) ? fn : $"{fn}: {first.ConditionData}";
+                    condText = rule.Children.Count > 1
+                        ? $"{condName}: {ft}  (+{rule.Children.Count - 1})"
+                        : $"{condName}: {ft}";
+                }
+                else
+                {
+                    condText = string.IsNullOrEmpty(rule.ConditionData) ? condName : $"{condName}: {rule.ConditionData}";
+                }
                 var condLabel = new TextBlock
                 {
                     Text = condText, Foreground = firing ? ColRed : ColTextDim,
@@ -556,7 +570,21 @@ internal static class MetaPanel
                 // Action text (col 5)
                 string actName = rule.Action >= 0 && rule.Action < ActionNames.Length
                     ? ActionNames[rule.Action] : $"Act({rule.Action})";
-                string actText = string.IsNullOrEmpty(rule.ActionData) ? actName : $"{actName}: {rule.ActionData}";
+                string actText;
+                if (IsAllAction(rule.Action) && rule.ActionChildren.Count > 0)
+                {
+                    var first = rule.ActionChildren[0];
+                    string fn = first.Action >= 0 && first.Action < ActionNames.Length
+                        ? ActionNames[first.Action] : $"Act({first.Action})";
+                    string ft = string.IsNullOrEmpty(first.ActionData) ? fn : $"{fn}: {first.ActionData}";
+                    actText = rule.ActionChildren.Count > 1
+                        ? $"{actName}: {ft}  (+{rule.ActionChildren.Count - 1})"
+                        : $"{actName}: {ft}";
+                }
+                else
+                {
+                    actText = string.IsNullOrEmpty(rule.ActionData) ? actName : $"{actName}: {rule.ActionData}";
+                }
                 var actLabel = new TextBlock
                 {
                     Text = actText, Foreground = firing ? ColAmber : ColMute,
@@ -1044,17 +1072,12 @@ internal static class MetaPanel
             });
         }
 
-        var sourceBox = new TextBox
-        {
-            Text = ps.SourceText,
-            Background = ColPanelBg, Foreground = ColTextDim,
-            BorderBrush = ColBtnBord, BorderThickness = new Thickness(1),
-            AcceptsReturn = true, FontSize = 10, FontFamily = new FontFamily("Cascadia Mono,Consolas,monospace"),
-            MinHeight = 300, Padding = new Thickness(4),
-            TextWrapping = TextWrapping.NoWrap,
-        };
-        sourceBox.TextChanged += (_, _) => ps.SourceText = sourceBox.Text ?? string.Empty;
-        content.Children.Add(sourceBox);
+        var sourceEditor = MetaSourceEditor.Create(
+            getText:        () => ps.SourceText,
+            onTextChanged:  t  => ps.SourceText = t ?? string.Empty,
+            getStates:      () => ps.Data.States,
+            getNavs:        () => CombineNavs(ps.Data.NavFiles, ps.Data.EmbeddedNavKeys));
+        content.Children.Add(sourceEditor);
 
         var btnRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 4, 0, 0) };
 
@@ -1170,6 +1193,16 @@ internal static class MetaPanel
         BorderBrush = ColBtnBord, BorderThickness = new Thickness(1),
         FontSize = 10, Height = 22, Padding = new Thickness(4, 1),
     };
+
+    private static IReadOnlyList<string> CombineNavs(List<string> nav1, List<string> nav2)
+    {
+        if ((nav1?.Count ?? 0) == 0) return nav2 ?? (IReadOnlyList<string>)Array.Empty<string>();
+        if ((nav2?.Count ?? 0) == 0) return nav1!;
+        var combined = new List<string>(nav1!.Count + nav2!.Count);
+        combined.AddRange(nav1);
+        foreach (var n in nav2) if (!combined.Contains(n)) combined.Add(n);
+        return combined;
+    }
 
     private static MetaRuleDto CloneRule(MetaRuleDto src)
     {

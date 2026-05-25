@@ -5,7 +5,7 @@ namespace RynthCore.PluginSdk;
 
 public readonly unsafe struct RynthCoreHost
 {
-    public const uint CurrentApiVersion = 42;
+    public const uint CurrentApiVersion = 61;
 
     private readonly RynthCoreApiNative _api;
 
@@ -87,6 +87,8 @@ public readonly unsafe struct RynthCoreHost
     public bool HasWorldToScreen => _api.WorldToScreenFn != IntPtr.Zero;
     public bool HasGetViewportSize => _api.GetViewportSizeFn != IntPtr.Zero;
     public bool HasNav3D => _api.Nav3DClearFn != IntPtr.Zero && _api.Nav3DAddRingFn != IntPtr.Zero && _api.Nav3DAddLineFn != IntPtr.Zero;
+    public bool HasNav3DTriangle => _api.Nav3DAddTriangleFn != IntPtr.Zero;
+    public bool HasNav3DRingHeight => _api.Nav3DAddRingExFn != IntPtr.Zero;
     public bool HasInvokeChatParser => _api.InvokeChatParserFn != IntPtr.Zero;
     public bool HasGetObjectDoubleProperty => _api.GetObjectDoublePropertyFn != IntPtr.Zero;
     public bool HasGetObjectQuadProperty => _api.GetObjectQuadPropertyFn != IntPtr.Zero;
@@ -1053,12 +1055,44 @@ public readonly unsafe struct RynthCoreHost
             wx, wy, wz, radius, thickness, colorArgb);
     }
 
+    /// <summary>
+    /// Same as Nav3DAddRing but with explicit wall height in world units. On
+    /// older engines (API &lt; 61) where this isn't available, falls back to
+    /// Nav3DAddRing — the user still gets the ring at the legacy 0.5 m height.
+    /// </summary>
+    public void Nav3DAddRingEx(float wx, float wy, float wz, float radius, float thickness, float height, uint colorArgb)
+    {
+        if (_api.Nav3DAddRingExFn != IntPtr.Zero)
+        {
+            ((delegate* unmanaged[Cdecl]<float, float, float, float, float, float, uint, void>)_api.Nav3DAddRingExFn)(
+                wx, wy, wz, radius, thickness, height, colorArgb);
+            return;
+        }
+        Nav3DAddRing(wx, wy, wz, radius, thickness, colorArgb);
+    }
+
     public void Nav3DAddLine(float x1, float y1, float z1, float x2, float y2, float z2, float thickness, uint colorArgb)
     {
         if (_api.Nav3DAddLineFn == IntPtr.Zero)
             return;
         ((delegate* unmanaged[Cdecl]<float, float, float, float, float, float, float, uint, void>)_api.Nav3DAddLineFn)(
             x1, y1, z1, x2, y2, z2, thickness, colorArgb);
+    }
+
+    /// <summary>
+    /// Submits a filled 3D triangle in world coordinates (D3D: X=EW, Y=height,
+    /// Z=NS). Use for terrain-conforming overlays — passing the actual mesh
+    /// vertices makes the face hug the slope exactly. ARGB colour.
+    /// </summary>
+    public void Nav3DAddTriangle(float x1, float y1, float z1,
+                                 float x2, float y2, float z2,
+                                 float x3, float y3, float z3,
+                                 uint colorArgb)
+    {
+        if (_api.Nav3DAddTriangleFn == IntPtr.Zero)
+            return;
+        ((delegate* unmanaged[Cdecl]<float, float, float, float, float, float, float, float, float, uint, void>)_api.Nav3DAddTriangleFn)(
+            x1, y1, z1, x2, y2, z2, x3, y3, z3, colorArgb);
     }
 
     // ─── Chat parser ────────────────────────────────────────────────────────

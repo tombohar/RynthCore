@@ -1030,6 +1030,24 @@ internal static unsafe class DX9Backend
     private static bool _navTrigReady;
     private static int _nav3DLogCount;
 
+    // Persistent heap buffer for batched triangle rendering. Filled once per
+    // RenderNav3D call with every Nav3D triangle, then drawn in one
+    // DrawPrimitiveUP — avoids the 4000+ draw-call cost of doing one call per
+    // triangle (the cost showed up as motion-related flicker at high radii).
+    // Grown on demand; never freed until process exit.
+    private static IntPtr _navTriBatch;
+    private static int _navTriBatchCapacityVerts;
+
+    private static void EnsureNavTriBatch(int neededVerts)
+    {
+        if (neededVerts <= _navTriBatchCapacityVerts) return;
+        int newCap = _navTriBatchCapacityVerts == 0 ? 1024 : _navTriBatchCapacityVerts;
+        while (newCap < neededVerts) newCap *= 2;
+        if (_navTriBatch != IntPtr.Zero) Marshal.FreeHGlobal(_navTriBatch);
+        _navTriBatch = Marshal.AllocHGlobal(newCap * sizeof(NavVertex));
+        _navTriBatchCapacityVerts = newCap;
+    }
+
     private static void EnsureNavTrig()
     {
         if (_navTrigReady) return;
@@ -1049,7 +1067,7 @@ internal static unsafe class DX9Backend
         // core init flag so this path runs even when EnableImGuiBackend=false.
         if (!_coreInitialized || pDevice == IntPtr.Zero) return;
         if (!D3D9.GameMatrixCapture.HasCapturedFrame) return;
-        if (D3D9.Nav3DRenderer.RingCount == 0 && D3D9.Nav3DRenderer.LineCount == 0) return;
+        if (D3D9.Nav3DRenderer.RingCount == 0 && D3D9.Nav3DRenderer.LineCount == 0 && D3D9.Nav3DRenderer.TriangleCount == 0) return;
 
         EnsureNavTrig();
 
@@ -1140,7 +1158,31 @@ internal static unsafe class DX9Backend
             _setTransform!(pDevice, D3DTS_VIEW, &viewMat);
             _setTransform!(pDevice, D3DTS_PROJECTION, &projMat);
 
-            // Draw lines first (behind rings)
+            // Draw triangles first (terrain-conforming faces, sit beneath
+            // everything else). All triangles are packed into one heap-backed
+            // vertex buffer and submitted in a single DrawPrimitiveUP — at
+            // high slope-radius settings we can have 4000+ triangles per
+            // frame, and one DP-UP per triangle was visibly frame-dropping.
+            int triCount = D3D9.Nav3DRenderer.TriangleCount;
+            if (triCount > 0)
+            {
+                EnsureNavTriBatch(triCount * 3);
+                NavVertex* batch = (NavVertex*)_navTriBatch;
+                for (int i = 0; i < triCount; i++)
+                {
+                    D3D9.Nav3DRenderer.GetTriangle(i,
+                        out float x1, out float y1, out float z1,
+                        out float x2, out float y2, out float z2,
+                        out float x3, out float y3, out float z3, out uint color);
+                    int b = i * 3;
+                    batch[b    ].X = x1; batch[b    ].Y = y1; batch[b    ].Z = z1; batch[b    ].Col = color;
+                    batch[b + 1].X = x2; batch[b + 1].Y = y2; batch[b + 1].Z = z2; batch[b + 1].Col = color;
+                    batch[b + 2].X = x3; batch[b + 2].Y = y3; batch[b + 2].Z = z3; batch[b + 2].Col = color;
+                }
+                _drawPrimUP!(pDevice, D3DPT_TRIANGLELIST, (uint)triCount, (IntPtr)batch, (uint)sizeof(NavVertex));
+            }
+
+            // Draw lines (extruded XZ-plane quads — for edges/strips)
             for (int i = 0; i < D3D9.Nav3DRenderer.LineCount; i++)
             {
                 D3D9.Nav3DRenderer.GetLine(i, out float x1, out float y1, out float z1,
@@ -1152,8 +1194,8 @@ internal static unsafe class DX9Backend
             for (int i = 0; i < D3D9.Nav3DRenderer.RingCount; i++)
             {
                 D3D9.Nav3DRenderer.GetRing(i, out float x, out float y, out float z,
-                    out float radius, out float thick, out uint color);
-                DrawNavRing(pDevice, x, y, z, radius, thick, color);
+                    out float radius, out float thick, out float height, out uint color);
+                DrawNavRing(pDevice, x, y, z, radius, thick, height, color);
             }
 
             if (_nav3DLogCount == 0)
@@ -1205,19 +1247,20 @@ internal static unsafe class DX9Backend
         }
     }
 
-    private const float NavCylinderHeight = 0.5f; // world units tall
-
     private static void DrawNavRing(IntPtr pDevice, float cx, float cy, float cz,
-        float radius, float thickness, uint color)
+        float radius, float thickness, float height, uint color)
     {
-        // Outer cylinder wall: triangle strip alternating top/bottom vertices
+        // Outer cylinder wall: triangle strip alternating top/bottom vertices.
+        // Wall height comes from the per-ring Height field (set via the Ex
+        // submission) so thickness and height tune independently — a thin
+        // but tall ring is what makes the radar range visible at a glance.
         int wallVertCount = (NavRingSegments + 1) * 2;
         NavVertex* wallVerts = stackalloc NavVertex[wallVertCount];
 
         // Fade top edge to transparent for a nicer look
         uint colorTop = (color & 0x00FFFFFF) | 0x10000000; // ~6% alpha at top
         float yBottom = cy;
-        float yTop = cy + NavCylinderHeight;
+        float yTop = cy + MathF.Max(height, 0.1f);
 
         for (int i = 0; i <= NavRingSegments; i++)
         {
@@ -1297,5 +1340,21 @@ internal static unsafe class DX9Backend
         wall[2].X = x2; wall[2].Y = y2 + NavLineHeight; wall[2].Z = z2; wall[2].Col = colorTop;
         wall[3].X = x2; wall[3].Y = y2;                  wall[3].Z = z2; wall[3].Col = color;
         _drawPrimUP!(pDevice, D3DPT_TRIANGLESTRIP, 2, (IntPtr)wall, (uint)sizeof(NavVertex));
+    }
+
+    // Filled 3D triangle in world space — vertices passed straight through to
+    // the device. Cull mode is already NONE in RenderNav3D so the triangle
+    // shows from either face winding, which spares the plugin from having to
+    // produce CCW vertex order.
+    private static void DrawNavTriangle(IntPtr pDevice,
+        float x1, float y1, float z1,
+        float x2, float y2, float z2,
+        float x3, float y3, float z3, uint color)
+    {
+        NavVertex* verts = stackalloc NavVertex[3];
+        verts[0].X = x1; verts[0].Y = y1; verts[0].Z = z1; verts[0].Col = color;
+        verts[1].X = x2; verts[1].Y = y2; verts[1].Z = z2; verts[1].Col = color;
+        verts[2].X = x3; verts[2].Y = y3; verts[2].Z = z3; verts[2].Col = color;
+        _drawPrimUP!(pDevice, D3DPT_TRIANGLELIST, 1, (IntPtr)verts, (uint)sizeof(NavVertex));
     }
 }

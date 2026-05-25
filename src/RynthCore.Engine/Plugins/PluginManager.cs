@@ -172,6 +172,8 @@ internal static class PluginManager
     private static Nav3DClearCallbackDelegate? _nav3DClearCallback;
     private static Nav3DAddRingCallbackDelegate? _nav3DAddRingCallback;
     private static Nav3DAddLineCallbackDelegate? _nav3DAddLineCallback;
+    private static Nav3DAddTriangleCallbackDelegate? _nav3DAddTriangleCallback;
+    private static Nav3DAddRingExCallbackDelegate? _nav3DAddRingExCallback;
     private static InvokeChatParserCallbackDelegate? _invokeChatParserCallback;
     private static GetObjectDoublePropertyCallbackDelegate? _getObjectDoublePropertyCallback;
     private static GetObjectQuadPropertyCallbackDelegate? _getObjectQuadPropertyCallback;
@@ -849,6 +851,19 @@ internal static class PluginManager
         // never throws. Plugins read it via the GetCastBusyState host pull.
         CastGate.Sample();
 
+        // Clear the Nav3D submission buffer once per tick so plugins always
+        // submit into a fresh frame. Previously each plugin was expected to
+        // call Host.Nav3DClear() itself, which broke if two plugins both used
+        // Nav3D — whichever ticked last clobbered the other's submissions, and
+        // a Nav3D-only plugin with no clear caller would fill the 512-line
+        // buffer and freeze stale geometry in the world.
+        //
+        // The renderer is double-buffered: ClearFrame resets the PENDING
+        // buffer, plugins fill it, and CommitFrame at the end of this method
+        // atomically swaps it into "ready" so the render thread sees a
+        // complete frame instead of mid-tick partial state.
+        D3D9.Nav3DRenderer.ClearFrame();
+
         for (int i = 0; i < _plugins.Count; i++)
         {
             var plugin = _plugins[i];
@@ -865,6 +880,9 @@ internal static class PluginManager
                 RynthLog.Plugin($"PluginManager: {plugin.DisplayName} Tick threw {ex.GetType().Name}: {ex.Message} - disabled.");
             }
         }
+
+        // Atomically publish this tick's Nav3D submissions to the render thread.
+        D3D9.Nav3DRenderer.CommitFrame();
     }
 
     public static void RenderAll()
@@ -2051,6 +2069,8 @@ internal static class PluginManager
         _nav3DClearCallback ??= D3D9.Nav3DRenderer.Nav3DClearCallback;
         _nav3DAddRingCallback ??= D3D9.Nav3DRenderer.Nav3DAddRingCallback;
         _nav3DAddLineCallback ??= D3D9.Nav3DRenderer.Nav3DAddLineCallback;
+        _nav3DAddTriangleCallback ??= D3D9.Nav3DRenderer.Nav3DAddTriangleCallback;
+        _nav3DAddRingExCallback ??= D3D9.Nav3DRenderer.Nav3DAddRingExCallback;
         _invokeChatParserCallback ??= InvokeChatParser;
         _getObjectDoublePropertyCallback ??= GetObjectDoublePropertyAction;
         _getObjectQuadPropertyCallback ??= GetObjectQuadPropertyAction;
@@ -2142,6 +2162,8 @@ internal static class PluginManager
         _api.Nav3DClearFn = Marshal.GetFunctionPointerForDelegate(_nav3DClearCallback);
         _api.Nav3DAddRingFn = Marshal.GetFunctionPointerForDelegate(_nav3DAddRingCallback);
         _api.Nav3DAddLineFn = Marshal.GetFunctionPointerForDelegate(_nav3DAddLineCallback);
+        _api.Nav3DAddTriangleFn = Marshal.GetFunctionPointerForDelegate(_nav3DAddTriangleCallback);
+        _api.Nav3DAddRingExFn = Marshal.GetFunctionPointerForDelegate(_nav3DAddRingExCallback);
         _api.InvokeChatParserFn = Marshal.GetFunctionPointerForDelegate(_invokeChatParserCallback);
         _api.GetObjectDoublePropertyFn = Marshal.GetFunctionPointerForDelegate(_getObjectDoublePropertyCallback);
         _api.GetObjectQuadPropertyFn = Marshal.GetFunctionPointerForDelegate(_getObjectQuadPropertyCallback);

@@ -6,14 +6,14 @@
 //  for the sake of ~30 lines of state.
 //
 //  File format:
-//    bar=<left>,<top>
+//    bar=<left>,<top>[,<docked|floating>,<floatingLeft>,<floatingTop>]
 //    panel.<title>=<open|closed>,<left>,<top>,<width>,<height>
 //                  [,<docked|floating>,<screenLeft>,<screenTop>]
 //
-//  The trailing three columns were added when panels gained the ability to
-//  detach into their own top-level Avalonia windows. Files that pre-date the
-//  feature still parse — the floating mode just defaults to docked and the
-//  screen coords default to 0.
+//  The trailing three columns on each row were added when panels (and later
+//  the bar itself) gained the ability to detach into their own top-level
+//  layered windows. Files that pre-date the feature still parse — the floating
+//  mode just defaults to docked and the screen coords default to 0.
 //
 //  Stored under %LocalAppData%\RynthCore\panel_state.txt — survives reloads
 //  and out-of-game (the Runtime dir might be wiped during deploy).
@@ -41,6 +41,8 @@ internal static class PanelStateStore
     private static readonly object Sync = new();
     private static readonly Dictionary<string, PanelEntry> Panels = new(StringComparer.OrdinalIgnoreCase);
     private static (double Left, double Top)? _barPosition;
+    private static bool _barFloating;
+    private static (double Left, double Top)? _barFloatingPosition;
     private static bool _loaded;
 
     private static string FilePath
@@ -55,6 +57,24 @@ internal static class PanelStateStore
     public static (double Left, double Top)? BarPosition
     {
         get { lock (Sync) { Load(); return _barPosition; } }
+    }
+
+    /// <summary>
+    /// True if the bar should restore in its own top-level floating layered
+    /// window (instead of inside the in-AC overlay canvas).
+    /// </summary>
+    public static bool BarFloating
+    {
+        get { lock (Sync) { Load(); return _barFloating; } }
+    }
+
+    /// <summary>
+    /// Last-known screen coords of the floating bar. Null if the bar has never
+    /// been popped out yet (the popout path falls back to a sensible default).
+    /// </summary>
+    public static (double Left, double Top)? BarFloatingPosition
+    {
+        get { lock (Sync) { Load(); return _barFloatingPosition; } }
     }
 
     public static bool TryGetPanel(string title, out PanelEntry entry)
@@ -83,6 +103,23 @@ internal static class PanelStateStore
         {
             Load();
             _barPosition = (left, top);
+            Save();
+        }
+    }
+
+    /// <summary>
+    /// Persist the floating-mode flag and last-known screen coords. Called
+    /// from PopOutBar / RedockBar and from the FloatingPanelHost move callback
+    /// while the bar is floating. Leaves the docked <c>BarPosition</c>
+    /// untouched so a redock returns to the user's last docked location.
+    /// </summary>
+    public static void SetBarFloatingState(bool floating, double floatingLeft, double floatingTop)
+    {
+        lock (Sync)
+        {
+            Load();
+            _barFloating = floating;
+            _barFloatingPosition = (floatingLeft, floatingTop);
             Save();
         }
     }
@@ -133,8 +170,21 @@ internal static class PanelStateStore
 
                 if (string.Equals(key, "bar", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (TryParseDoubles(value, 2, out double[] vals))
-                        _barPosition = (vals[0], vals[1]);
+                    // 2 = legacy (left, top)
+                    // 5 = current (left, top, docked|floating, floatingLeft, floatingTop)
+                    string[] barParts = value.Split(',');
+                    if (barParts.Length == 2 && TryParseDoubles(value, 2, out double[] legacyVals))
+                    {
+                        _barPosition = (legacyVals[0], legacyVals[1]);
+                    }
+                    else if (barParts.Length == 5 &&
+                             TryParseDoubles(string.Join(',', barParts, 0, 2), 2, out double[] dockedVals) &&
+                             TryParseDoubles(string.Join(',', barParts, 3, 2), 2, out double[] floatingVals))
+                    {
+                        _barPosition = (dockedVals[0], dockedVals[1]);
+                        _barFloating = string.Equals(barParts[2].Trim(), "floating", StringComparison.OrdinalIgnoreCase);
+                        _barFloatingPosition = (floatingVals[0], floatingVals[1]);
+                    }
                 }
                 else if (key.StartsWith("panel.", StringComparison.OrdinalIgnoreCase))
                 {
@@ -183,7 +233,20 @@ internal static class PanelStateStore
             using var sw = new StreamWriter(path, append: false);
             sw.WriteLine("# RynthCore Avalonia panel state — auto-generated, hand-edits OK.");
             if (_barPosition is { } bar)
-                sw.WriteLine(FormattableString.Invariant($"bar={bar.Left:0.##},{bar.Top:0.##}"));
+            {
+                // Always emit the extended form if we have any floating state to
+                // remember; legacy 2-column form only when no popout has happened.
+                if (_barFloating || _barFloatingPosition is not null)
+                {
+                    (double fl, double ft) = _barFloatingPosition ?? (0, 0);
+                    sw.WriteLine(FormattableString.Invariant(
+                        $"bar={bar.Left:0.##},{bar.Top:0.##},{(_barFloating ? "floating" : "docked")},{fl:0.##},{ft:0.##}"));
+                }
+                else
+                {
+                    sw.WriteLine(FormattableString.Invariant($"bar={bar.Left:0.##},{bar.Top:0.##}"));
+                }
+            }
 
             foreach (var kv in Panels)
             {

@@ -56,6 +56,13 @@ internal sealed unsafe class LayeredWindow : IDisposable
     private const uint WM_DESTROY      = 0x0002;
     private const uint WM_MOVE         = 0x0003;
     private const uint WM_SIZE         = 0x0005;
+    private const uint WM_SETFOCUS     = 0x0007;
+    // Custom message handled by Win32Backend.WndProcHook (game thread) to
+    // SetFocus back to the AC client window. Kept in sync with
+    // Win32Backend.WM_RYNTH_RESTORE_FOCUS — value, not a shared reference,
+    // because LayeredWindow lives in UI/ and avoids depending on the ImGui
+    // subsystem.
+    private const uint WM_RYNTH_RESTORE_FOCUS = 0x8001;
     private const uint WM_ENTERSIZEMOVE = 0x0231;
     private const uint WM_EXITSIZEMOVE  = 0x0232;
     private const uint WM_NCHITTEST    = 0x0084;
@@ -75,7 +82,8 @@ internal sealed unsafe class LayeredWindow : IDisposable
     private const int HTCAPTION     = 2;
     private const int HTBOTTOMRIGHT = 17;
     private const int HTTRANSPARENT = -1;
-    private const int MA_NOACTIVATE = 2;
+    private const int MA_NOACTIVATE = 3;
+    private const int MA_NOACTIVATEANDEAT = 4;
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
@@ -177,6 +185,10 @@ internal sealed unsafe class LayeredWindow : IDisposable
     [DllImport("user32.dll")] private static extern bool   BringWindowToTop(IntPtr hWnd);
     private const uint GW_OWNER = 4;
     [DllImport("user32.dll")] private static extern bool   ReleaseCapture();
+    [DllImport("user32.dll")] private static extern bool   PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool   AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+    [DllImport("user32.dll")] private static extern uint   GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
 
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateDIBSection(IntPtr hDC, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr ppvBits, IntPtr hSection, uint dwOffset);
@@ -232,6 +244,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
     // ─── Static WndProc dispatch ───────────────────────────────────────────
     private static readonly object _instancesLock = new();
     private static readonly Dictionary<IntPtr, LayeredWindow> _instances = new();
+    private static int _hittestDiagCount;
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static IntPtr StaticWndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -360,6 +373,8 @@ internal sealed unsafe class LayeredWindow : IDisposable
             _instances[hwnd] = this;
 
         EnsureDib(Width, Height);
+
+        RynthCore.Engine.RynthLog.Info($"LayeredWindow: created HWND=0x{hwnd.ToInt64():X} on thread=0x{GetCurrentThreadId():X}.");
     }
 
     private IntPtr OnMessage(uint msg, IntPtr wParam, IntPtr lParam)
@@ -393,15 +408,50 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 {
                     byte alpha = ((byte*)bits)[(cy * dw + cx) * 4 + 3];
                     if (alpha == 0)
+                    {
+                        if (_hittestDiagCount < 30)
+                        {
+                            _hittestDiagCount++;
+                            RynthCore.Engine.RynthLog.Info($"LayeredWindow(0x{Hwnd.ToInt64():X}): WM_NCHITTEST HTTRANSPARENT at layered=({cx},{cy}) alpha=0.");
+                        }
                         return (IntPtr)HTTRANSPARENT;
+                    }
                 }
                 return (IntPtr)HTCLIENT;
             }
+
+            case WM_SETFOCUS:
+                // Despite WS_EX_NOACTIVATE + MA_NOACTIVATE, Win32 still hands
+                // keyboard focus to this HWND on click (NOACTIVATE blocks
+                // activation/foreground but not always focus, especially
+                // same-thread). Bounce it back to the owner (game) immediately
+                // so the panel feels like an extension of AC: clicks work but
+                // never steal keyboard input. PostMessage is async — the
+                // current MOUSEACTIVATE → SETFOCUS → LBUTTONDOWN dispatch
+                // chain still completes synchronously first (and was the cause
+                // of dropped clicks earlier — fixed by the MA_NOACTIVATE
+                // constant correction), then the queued reclaim runs and
+                // returns focus to AC.
+                {
+                    IntPtr setFocusOwner = GetWindow(Hwnd, GW_OWNER);
+                    if (setFocusOwner != IntPtr.Zero)
+                        PostMessage(setFocusOwner, WM_RYNTH_RESTORE_FOCUS, IntPtr.Zero, IntPtr.Zero);
+                }
+                break;
 
             case WM_MOUSEACTIVATE:
                 // Don't activate the layered window on click — preserves AC's
                 // foreground/focus. WS_EX_NOACTIVATE makes this redundant on
                 // most paths but doesn't cover every code path Win32 takes.
+                //
+                // The MA_NOACTIVATE constant value MUST be 3 (per WinUser.h):
+                // historical code here had it defined as 2, which is actually
+                // MA_ACTIVATEANDEAT — that activated the window AND discarded
+                // the mouse message, which is exactly what produced the
+                // "double-click required, focus stolen" behavior on undocked
+                // panels (first click activates+eaten, only second click —
+                // after window is already active so MOUSEACTIVATE doesn't
+                // re-fire — delivers WM_LBUTTONDOWN normally).
                 //
                 // Side effect of returning MA_NOACTIVATE: when both AC and
                 // RynthAi are buried behind another app, clicking RynthAi
@@ -473,6 +523,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
             {
                 int cx = (short)((long)lParam & 0xFFFF);
                 int cy = (short)(((long)lParam >> 16) & 0xFFFF);
+                RynthCore.Engine.RynthLog.Info($"LayeredWindow(0x{Hwnd.ToInt64():X}): WM_LBUTTONDOWN at layered=({cx},{cy}).");
 
                 // Native chrome-button detection: floating panels live at
                 // canvas coords past the off-screen Avalonia Window's
@@ -830,7 +881,31 @@ internal sealed unsafe class LayeredWindow : IDisposable
         {
             lock (_instancesLock)
                 _instances.Remove(hwnd);
-            DestroyWindow(hwnd);
+
+            // DestroyWindow MUST run on the thread that owns the HWND — Win32
+            // silently no-ops it otherwise. The HWND was created on the game
+            // thread (see FloatingPanelHost ctor's RunOnGameThread wrap), so
+            // marshal the teardown there too. Without this, redocking left
+            // the original floating window visible but orphaned ("frozen
+            // duplicate"). RunOnGameThread inlines if we're already on the
+            // game thread, so this is safe for any caller.
+            try
+            {
+                RynthCore.Engine.ImGuiBackend.Win32Backend.RunOnGameThread(() =>
+                {
+                    bool destroyed = DestroyWindow(hwnd);
+                    int err = destroyed ? 0 : System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                    RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: DestroyWindow(0x{hwnd.ToInt64():X}) = {destroyed} err={err} on thread=0x{GetCurrentThreadId():X}.");
+                });
+            }
+            catch (Exception ex)
+            {
+                RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: cross-thread DestroyWindow threw {ex.GetType().Name}: {ex.Message}. Falling back to inline call on thread=0x{GetCurrentThreadId():X}.");
+                // Best-effort fallback if RunOnGameThread isn't available
+                // (e.g. early shutdown after Win32Backend already torn down).
+                bool destroyed = DestroyWindow(hwnd);
+                RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: fallback DestroyWindow(0x{hwnd.ToInt64():X}) = {destroyed}.");
+            }
         }
 
         DisposeDib();

@@ -54,6 +54,13 @@ internal static unsafe class Win32Backend
     /// Handled here (game thread) so SetFocus is always same-thread — no cross-thread wait.</summary>
     public const uint WM_RYNTH_RESTORE_FOCUS = 0x8001;
 
+    /// <summary>Sent by RunOnGameThread to execute a queued Action on the game's
+    /// main thread (where AC's WndProc dispatches). Used to create top-level HWNDs
+    /// like floating panels' LayeredWindow on AC's thread instead of Avalonia's UI
+    /// thread, so WS_EX_NOACTIVATE + mouse delivery work as documented (cross-thread
+    /// HWNDs drop WM_LBUTTONDOWN on Win11 in some focus states).</summary>
+    public const uint WM_RYNTH_RUN_ACTION = 0x8002;
+
     private const int VK_CONTROL = 0x11;
     private const int VK_SHIFT = 0x10;
     private const int VK_MENU = 0x12;  // Alt
@@ -117,6 +124,12 @@ internal static unsafe class Win32Backend
     private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
     private static extern IntPtr SetFocus(IntPtr hWnd);
 
     [DllImport("user32.dll")]
@@ -124,6 +137,22 @@ internal static unsafe class Win32Backend
 
     [DllImport("user32.dll")]
     private static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassNameW(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+
+    private static string DescribeHwnd(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return "null";
+        var cls = new System.Text.StringBuilder(128);
+        var txt = new System.Text.StringBuilder(128);
+        GetClassNameW(hwnd, cls, cls.Capacity);
+        GetWindowTextW(hwnd, txt, txt.Capacity);
+        return $"class='{cls}' title='{txt}'";
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
@@ -205,6 +234,57 @@ internal static unsafe class Win32Backend
         return CallWindowProcA(_originalWndProc, _gameHwnd, msg, wParam, lParam);
     }
 
+    private static readonly object _gameThreadLock = new();
+    private static volatile Action? _pendingGameThreadAction;
+
+    /// <summary>
+    /// Runs <paramref name="action"/> synchronously on AC's main thread (the one
+    /// that dispatches the hooked game WndProc), and returns its result. Used so
+    /// HWNDs that must dispatch input on the game thread — most notably the
+    /// floating-panel LayeredWindows — can be created from any thread (e.g.
+    /// Avalonia's UI thread) without ending up cross-thread to AC. Without
+    /// same-thread ownership, Win11's WS_EX_NOACTIVATE silently drops
+    /// WM_LBUTTONDOWN in some focus states (the docked panels work because they
+    /// already live on the game thread via the EndScene-driven path).
+    ///
+    /// Implementation: a single shared action slot serialized by a lock; the
+    /// action is delivered via SendMessage(WM_RYNTH_RUN_ACTION) which blocks
+    /// until the game thread's WndProc has handled it. Game-thread callers
+    /// bypass the marshal and invoke inline.
+    /// </summary>
+    public static T RunOnGameThread<T>(Func<T> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (_gameHwnd == IntPtr.Zero)
+            throw new InvalidOperationException("RunOnGameThread called before Win32Backend.Init.");
+
+        GetWindowThreadProcessId(_gameHwnd, out uint gameThreadId);
+        if (gameThreadId == GetCurrentThreadId())
+            return action();
+
+        lock (_gameThreadLock)
+        {
+            T result = default!;
+            Exception? caught = null;
+            _pendingGameThreadAction = () =>
+            {
+                try { result = action(); }
+                catch (Exception ex) { caught = ex; }
+            };
+            SendMessage(_gameHwnd, WM_RYNTH_RUN_ACTION, IntPtr.Zero, IntPtr.Zero);
+            _pendingGameThreadAction = null;
+            if (caught != null)
+                throw caught;
+            return result;
+        }
+    }
+
+    /// <summary>Void overload of <see cref="RunOnGameThread{T}"/>.</summary>
+    public static void RunOnGameThread(Action action)
+    {
+        RunOnGameThread<bool>(() => { action(); return true; });
+    }
+
     /// <summary>Deactivates chat capture.  The game HWND retains focus throughout so no
     /// Win32 focus transfer is needed.</summary>
     public static void ReturnFocusToGame() => ChatCaptureActive = false;
@@ -225,6 +305,17 @@ internal static unsafe class Win32Backend
     /// <summary>While true, WM_CHAR / special keys are consumed for the chat input TextBox
     /// instead of passing to the game.  Focus stays on the game HWND.</summary>
     public static volatile bool ChatCaptureActive;
+
+    /// <summary>While true, an Avalonia panel TextBox currently has keyboard focus and
+    /// the WM_SETFOCUS hijack in <see cref="UI.AvaloniaOverlay"/>'s subclass WndProc
+    /// must NOT immediately PostMessage focus back to the game window — doing so
+    /// yanks focus off the TextBox ~50 ms after the user clicks it, making it
+    /// impossible to type. Set true on Avalonia TextBox.GotFocus, false on
+    /// LostFocus. (ChatCaptureActive uses a completely different pipeline:
+    /// the game HWND keeps focus and WM_CHAR is routed to the chat callbacks,
+    /// so it doesn't help for normal panels that genuinely need Avalonia focus.)</summary>
+    public static volatile bool AvaloniaTextInputActive;
+
     /// <summary>Set when we consume the VK_RETURN/VK_ESCAPE that ends chat capture, so the
     /// trailing WM_CHAR ('\r') + WM_KEYUP of that same keystroke are eaten too and never
     /// leak to the game (a lone '\r' can spuriously re-open AC's native chat bar).</summary>
@@ -434,6 +525,22 @@ internal static unsafe class Win32Backend
         {
             _wndProcLogCount++;
 
+            // ── Game-thread executor: run a queued Action on this thread ──
+            // Sent by RunOnGameThread via SendMessage (synchronous, blocks the
+            // caller until this returns). Keep this near the top — must dispatch
+            // before any chat / focus / mouse paths so callers waiting on a
+            // CreateWindowExW etc. aren't stuck behind unrelated input handling.
+            if (msg == WM_RYNTH_RUN_ACTION)
+            {
+                Action? a = _pendingGameThreadAction;
+                if (a != null)
+                {
+                    try { a(); }
+                    catch (Exception ex) { RynthLog.Info($"Win32Backend: WM_RYNTH_RUN_ACTION threw {ex.GetType().Name}: {ex.Message}"); }
+                }
+                return IntPtr.Zero;
+            }
+
             // ── User clicked X / Alt+F4 on AC window — tear our overlay down NOW ──
             // AC's own shutdown takes 20-30 s (network logout, save, etc.) before
             // it finally calls ExitProcess and triggers ProcessExitHooks. During
@@ -540,9 +647,17 @@ internal static unsafe class Win32Backend
             // ── Restore focus to game when Avalonia acquires it ───────────
             if (msg == WM_RYNTH_RESTORE_FOCUS)
             {
-                SetFocus(_gameHwnd);
+                IntPtr prev = SetFocus(_gameHwnd);
+                IntPtr fg   = GetForegroundWindow();
+                RynthLog.Info($"Win32Backend: WM_RYNTH_RESTORE_FOCUS → SetFocus(gameHwnd) prev=0x{prev.ToInt64():X} fg=0x{fg.ToInt64():X} game=0x{_gameHwnd.ToInt64():X}.");
                 return IntPtr.Zero;
             }
+
+            // ── Diag: game-window focus transitions (driven by clicks on Avalonia panels) ──
+            if (msg == WM_SETFOCUS)
+                RynthLog.Info($"Win32Backend: game WM_SETFOCUS (from hwnd=0x{wParam.ToInt64():X} {DescribeHwnd(wParam)}).");
+            else if (msg == WM_KILLFOCUS)
+                RynthLog.Info($"Win32Backend: game WM_KILLFOCUS (to hwnd=0x{wParam.ToInt64():X} {DescribeHwnd(wParam)}).");
 
             // ── Avalonia panel hit-test & input forwarding ────────────────
             if (IsMouseMessage(msg))
@@ -551,9 +666,14 @@ internal static unsafe class Win32Backend
                 if (handled)
                     return IntPtr.Zero;
             }
-            else if (IsKeyMessage(msg) && _avaloniaHasMouse)
+            else if (IsKeyMessage(msg) && AvaloniaTextInputActive)
             {
-                // Keyboard goes to Avalonia only while the cursor is over the panel.
+                // Keys go to Avalonia only when a TextBox actually holds keyboard focus.
+                // Gating on mouse-hover instead was wrong: a held game key whose KEYUP
+                // landed while the cursor was over a panel got swallowed, leaving AC's
+                // edge-driven input state latched (character kept moving until the user
+                // tapped again with the mouse elsewhere).
+                //
                 // CRITICAL: forward only WM_KEYDOWN/WM_KEYUP (and SYS variants). Do NOT
                 // forward WM_CHAR — Avalonia's own message pump calls TranslateMessage on
                 // the WM_KEYDOWN we just posted and synthesises its own WM_CHAR. If we
@@ -573,7 +693,7 @@ internal static unsafe class Win32Backend
             // ─────────────────────────────────────────────────────────────
 
             // Only enqueue if we did NOT already forward to Avalonia above.
-            // (When _avaloniaHasMouse is true and a key fires, we returned early.)
+            // (When AvaloniaTextInputActive is true and a key fires, we returned early.)
             if (IsMouseMessage(msg) || IsKeyMessage(msg) || IsFocusMessage(msg))
                 EnqueueInput(msg, wParam, lParam);
 

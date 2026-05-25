@@ -621,6 +621,11 @@ internal static class ClientObjectHooks
     public static bool TryIsSpellKnown(uint objectId, uint spellId, out bool known)
     {
         known = false;
+        // Off-thread: refuse — _isSpellKnown is an AC native call that walks
+        // qualities, racing with main-thread object teardown
+        // (Class A AV in TFile2IDTable::~TFile2IDTable).
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_isSpellKnown == null || _getWeenieObject == null)
         {
             if (!Probe() || _isSpellKnown == null || _getWeenieObject == null)
@@ -651,6 +656,9 @@ internal static class ClientObjectHooks
     public static bool TryGetVitae(uint playerId, out float value)
     {
         value = 1.0f;
+        // Off-thread: refuse — _getVitaeValue is an AC native call (Class A guard).
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_getVitaeValue == null || _getWeenieObject == null)
         {
             if (!Probe() || _getVitaeValue == null || _getWeenieObject == null)
@@ -1154,6 +1162,9 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectSkillLevel(uint objectId, uint skillStype, int raw, out int level)
     {
         level = 0;
+        // Off-thread: refuse — _inqSkillLevel is an AC native call (Class A guard).
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_inqSkillLevel == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqSkillLevel == null || _getWeenieObject == null)
@@ -1180,6 +1191,9 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectAttribute(uint objectId, uint stype, int raw, out uint value)
     {
         value = 0;
+        // Off-thread: refuse — _inqAttribute is an AC native call (Class A guard).
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_inqAttribute == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqAttribute == null || _getWeenieObject == null)
@@ -1673,6 +1687,10 @@ internal static class ClientObjectHooks
         }
 
         // Fall through to CBaseQualities::InqInt for stypes not in PWD.
+        // Off-thread: refuse the native fallback — racing with main-thread
+        // qualities teardown produces the Class A 0x67E779 AV.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_inqInt == null)
         {
             if (!Probe() || _inqInt == null)
@@ -1751,6 +1769,9 @@ internal static class ClientObjectHooks
             catch { return false; }
         }
 
+        // Off-thread: refuse the InqFloat native fallback (Class A guard).
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_inqFloat == null)
         {
             if (!Probe() || _inqFloat == null)
@@ -1790,6 +1811,9 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectQuadProperty(uint objectId, uint stype, out long value)
     {
         value = 0;
+        // Off-thread: refuse — _inqInt64 is an AC native call (Class A guard).
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_inqInt64 == null)
         {
             if (!Probe() || _inqInt64 == null)
@@ -1831,6 +1855,9 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectAttribute2ndBaseLevel(uint objectId, uint stype, out uint value)
     {
         value = 0;
+        // Off-thread: refuse — _inqAttribute2ndBaseLevel is an AC native call (Class A guard).
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_inqAttribute2ndBaseLevel == null)
         {
             if (!Probe() || _inqAttribute2ndBaseLevel == null)
@@ -1872,6 +1899,16 @@ internal static class ClientObjectHooks
         if (AppraisalHooks.TryGetCachedBoolProperty(objectId, stype, out value))
             return true;
 
+        // Off-thread: refuse — _inqBool is an AC native call (Class A guard).
+        // PropertyUpdateHooks cache fallback also gated below — only the
+        // safe network-cache lookup is allowed off-thread there.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            // Allow the network-property cache to serve off-thread (pure dict read).
+            if (PropertyUpdateHooks.TryGetCachedBoolProperty(objectId, stype, out value))
+                return true;
+            return false;
+        }
         if (_inqBool == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqBool == null || _getWeenieObject == null)
@@ -1924,6 +1961,9 @@ internal static class ClientObjectHooks
         if (AppraisalHooks.TryGetCachedStringProperty(objectId, stype, out value))
             return true;
 
+        // Off-thread: refuse — _inqString is an AC native call (Class A guard).
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_inqString == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqString == null || _getWeenieObject == null)

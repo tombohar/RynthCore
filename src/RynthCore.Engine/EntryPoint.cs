@@ -673,6 +673,11 @@ public static class EntryPoint
                     else
                         RynthLog.Info("InitWorker: RynthVision panel skipped — DLL not in engine.json PluginPaths.");
 
+                    if (HasPluginDll("RynthCore.Plugin.RynthTracker.dll"))
+                        OverlayHost.RegisterPanel("Tracker", RynthTrackerPanel.Create);
+                    else
+                        RynthLog.Info("InitWorker: RynthTracker panel skipped — DLL not in engine.json PluginPaths.");
+
                     AvaloniaOverlay.Start();
                 }
             }
@@ -827,7 +832,11 @@ public static class EntryPoint
     }
 
     private static int _normalPumpStarted;
-    private static readonly TimeSpan NormalPluginPumpInterval = TimeSpan.FromMilliseconds(33);
+    // 16 ms ≈ 60 Hz. Matches typical AC render rate so per-tick re-submitted
+    // Nav3D markers (slope/water overlays) refresh in step with frames; at
+    // 30 Hz the markers visibly "stepped" forward every other frame during
+    // player/camera motion (the cell set shifted at half render rate).
+    private static readonly TimeSpan NormalPluginPumpInterval = TimeSpan.FromMilliseconds(16);
 
     /// <summary>
     /// Starts the normal-mode (D3D9-hooked) plugin pump on a dedicated managed

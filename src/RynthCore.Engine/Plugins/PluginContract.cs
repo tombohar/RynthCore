@@ -517,6 +517,26 @@ internal struct RynthCoreAPI
     /// spellbook snapshot. Returns count written, or -1 if unavailable (cold
     /// snapshot / not logged in). Requires API v59+.</summary>
     public IntPtr ReadKnownSpellsFn;
+
+    /// <summary>Function pointer:
+    /// void Nav3DAddTriangle(float x1, float y1, float z1,
+    ///                       float x2, float y2, float z2,
+    ///                       float x3, float y3, float z3,
+    ///                       uint colorArgb)
+    /// Submits a filled 3D triangle in world coordinates. Coordinates are D3D:
+    /// X=EW, Y=height, Z=NS. Use this instead of three Nav3DAddLine calls when
+    /// you want a face that conforms exactly to a terrain triangle (slope
+    /// passability overlay). Requires API v60+.</summary>
+    public IntPtr Nav3DAddTriangleFn;
+
+    /// <summary>Function pointer:
+    /// void Nav3DAddRingEx(float wx, float wy, float wz, float radius,
+    ///                     float thickness, float height, uint colorArgb)
+    /// Same as Nav3DAddRing but with an explicit cylinder-wall height in
+    /// world units. Use when you want a tall but thin ring (radar range
+    /// marker) without coupling visual thickness to wall height. Requires
+    /// API v61+.</summary>
+    public IntPtr Nav3DAddRingExFn;
 }
 
 
@@ -524,7 +544,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 59;
+    public const uint Current = 61;
 }
 
 internal static class ClientActionHookFlags
@@ -841,6 +861,12 @@ internal delegate void Nav3DAddRingCallbackDelegate(float wx, float wy, float wz
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void Nav3DAddLineCallbackDelegate(float x1, float y1, float z1, float x2, float y2, float z2, float thickness, uint colorArgb);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void Nav3DAddTriangleCallbackDelegate(float x1, float y1, float z1, float x2, float y2, float z2, float x3, float y3, float z3, uint colorArgb);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void Nav3DAddRingExCallbackDelegate(float wx, float wy, float wz, float radius, float thickness, float height, uint colorArgb);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int InvokeChatParserCallbackDelegate(IntPtr textUtf16);

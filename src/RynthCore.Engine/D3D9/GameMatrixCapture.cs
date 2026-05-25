@@ -51,10 +51,19 @@ internal static unsafe class GameMatrixCapture
     private static readonly float[] _viewProj = new float[16];
     private static bool _hasValidViewProj;
 
-    // Camera frame from SmartBox memory (same layout as UB Camera.cs)
+    // Camera frame from SmartBox memory.
+    // AC's Position struct: PackObj.vfptr (4) + objcell_id (4) + Frame (...).
+    // Frame is qw,qx,qy,qz (16) + m_fl2gv[9] (36) + m_fOrigin (12) = 64 bytes.
+    // So at Position start (+0x08 from SmartBox):
+    //   +0x00  PackObj.vfptr        (4)
+    //   +0x04  objcell_id           (4)  ← real viewer cellId
+    //   +0x08  Frame.qw,qx,qy,qz    (16)
+    //   +0x18  Frame.m_fl2gv[9]     (36)  ← cached 3x3 rotation matrix
+    //   +0x3C  Frame.m_fOrigin      (12)  ← camera position (x, y, z)
     private const int CameraFrameOffset = 0x08;
-    private const int CamRotOffset = 0x18;  // 3x3 rotation matrix
-    private const int CamPosOffset = 0x3C;  // position (x, y, z)
+    private const int CamCellIdOffset = 0x04;  // viewer cellId (skips PackObj.vfptr)
+    private const int CamRotOffset    = 0x18;
+    private const int CamPosOffset    = 0x3C;
 
     // Diagnostics
     private static int _framesSinceLog;
@@ -164,6 +173,85 @@ internal static unsafe class GameMatrixCapture
 
         if (cx == 0f && cy == 0f && cz == 0f)
             return;
+
+        // The camera's pose is stored landblock-local: as the camera orbits
+        // across a landblock boundary, AC re-anchors the viewer to the new
+        // landblock and (cx, cy) jumps to that landblock's frame. Plugins
+        // submitting Nav3D markers around the player are in the PLAYER's
+        // landblock frame, so we shift the camera back into that frame here.
+        // Without this, every marker visually leaps 192 m when the camera
+        // crosses a landblock boundary even though the player hasn't moved.
+        //
+        // Guards: the viewer cellId can briefly hold uninitialized / mid-
+        // teleport junk (e.g. landblock 0x0001 while the world isn't loaded)
+        // that gives a multi-thousand-meter "delta" and produces a wildly
+        // wrong view matrix. Only apply the shift when both landblocks look
+        // like real outdoor world landblocks AND the delta is within ±4
+        // landblocks (no legitimate camera frustum reaches further).
+        float rawCx = cx, rawCy = cy;
+        bool shiftApplied = false;
+        int dXBlocks = 0, dYBlocks = 0;
+        uint viewerLbForLog = 0, playerLbForLog = 0;
+        bool guardBlocked = false;
+        string guardReason = "";
+
+        uint viewerCellId = unchecked((uint)Marshal.ReadInt32(camFrame + CamCellIdOffset));
+        uint viewerLandblock = viewerCellId >> 16;
+        viewerLbForLog = viewerLandblock;
+
+        // Prefer the landblock the plugin tick LOCKED IN when it submitted
+        // its Nav3D geometry (see Nav3DRenderer.ClearFrame). If we use the
+        // CURRENT player landblock instead, render and triangles disagree
+        // for the frames between the player crossing a boundary and the next
+        // plugin tick re-submitting — geometry jumps to the adjacent
+        // landblock for ~1 s and snaps back. Fall back to current player
+        // landblock when no submission frame is published (zero).
+        uint submissionLandblock = Nav3DRenderer.ReadyPlayerLandblock;
+        bool havePose;
+        uint playerCellId;
+        if (submissionLandblock != 0)
+        {
+            havePose = true;
+            playerCellId = submissionLandblock << 16;
+        }
+        else
+        {
+            havePose = PlayerPhysicsHooks.TryGetPlayerPose(out playerCellId, out _, out _, out _,
+                out _, out _, out _, out _);
+        }
+        if (viewerLandblock != 0 && havePose && (playerCellId >> 16) != 0)
+        {
+            uint playerLandblock = playerCellId >> 16;
+            playerLbForLog = playerLandblock;
+            int viewerLbX = (int)((viewerLandblock >> 8) & 0xFF);
+            int viewerLbY = (int)(viewerLandblock & 0xFF);
+            int playerLbX = (int)((playerLandblock >> 8) & 0xFF);
+            int playerLbY = (int)(playerLandblock & 0xFF);
+            dXBlocks = viewerLbX - playerLbX;
+            dYBlocks = viewerLbY - playerLbY;
+            if (Math.Abs(dXBlocks) <= 4 && Math.Abs(dYBlocks) <= 4 &&
+                viewerLbX != 0 && viewerLbY != 0)
+            {
+                cx += dXBlocks * 192f; // EW shift back into player-landblock frame
+                cy += dYBlocks * 192f; // NS
+                shiftApplied = (dXBlocks != 0 || dYBlocks != 0);
+            }
+            else
+            {
+                guardBlocked = (dXBlocks != 0 || dYBlocks != 0);
+                guardReason = $"dx={dXBlocks},dy={dYBlocks},vLbX={viewerLbX},vLbY={viewerLbY}";
+            }
+        }
+
+        // Log when a non-zero shift fires (camera crossed a landblock) or when
+        // the guard blocked one. Helps catch "paintings move with camera"
+        // without spamming when player and viewer landblocks agree.
+        if (shiftApplied || guardBlocked)
+        {
+            RynthLog.D3D9($"GameMatrixCapture: viewer lb=0x{viewerLbForLog:X4} player lb=0x{playerLbForLog:X4} " +
+                          $"d=({dXBlocks},{dYBlocks}) raw=({rawCx:F1},{rawCy:F1}) adj=({cx:F1},{cy:F1}) " +
+                          $"{(shiftApplied ? "SHIFTED" : "GUARD-BLOCKED " + guardReason)}");
+        }
 
         // View matrix rotation block (D3D Y-up, with AC Y/Z swap).
         // AC camera rows: row1=Right, row2=Forward, row3=Up

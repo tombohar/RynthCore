@@ -109,4 +109,6 @@ public struct RynthCoreApiNative
     public IntPtr SetPowerbarSuppressedFn;
     public IntPtr GetCastBusyStateFn;
     public IntPtr ReadKnownSpellsFn;
+    public IntPtr Nav3DAddTriangleFn;
+    public IntPtr Nav3DAddRingExFn;
 }
