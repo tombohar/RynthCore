@@ -1,87 +1,219 @@
+using System;
 using System.Threading;
 
 namespace RynthCore.Engine.Compatibility;
 
-// SPSC ring buffer: the plugin pump thread enqueues, AC's main thread drains.
-// Fixed allocation at startup — zero heap allocation per enqueue/drain (so it
-// is safe to drain from the EndScene reverse-P/Invoke; it does NOT reintroduce
-// the GC-in-detour fail-fast class). Prevents the near-null WRITE AVs from
-// calling AC state-mutating functions off the game thread (SelectItem /
-// ClientMagicSystem::CastSpell from the pump → documented 0x0055FA24
-// [null+0x40] / 0x00416C86 [null+0x28], minutes into a cast-heavy session).
+// Marshals off-thread bot ACTIONS onto AC's main (game) thread.
+//
+// AC is single-threaded and non-reentrant. The plugin pump (and chat-command /
+// UI threads) run OFF AC's main thread; when they invoke AC state-mutating
+// functions directly — combat-mode flips, melee/missile attacks, movement,
+// object use — they race AC's own per-tick bookkeeping and corrupt its
+// object / range lists. AC then access-violates LATER on its own thread during
+// routine teardown / range recompute: the dump-verified object-teardown class
+// 0x0055FA24 (List<ObjectRangeInfo>::remove via CPlayerSystem::CalculateObjectRangeChecks)
+// and 0x00416C86 (DBOCache::DestroyObj). The per-callsite SEH trampoline only
+// CONTAINS an AV that fires inside OUR call — it cannot stop AC tripping over
+// corruption we left behind. The only real fix is to not mutate off-thread:
+// enqueue here, execute on the main thread.
+//
+// Drained from the always-on EngineFrameController.OnEndScene tick (AC's main
+// thread; ~22-33 Hz; fires regardless of EnableImGuiBackend / idle / combat).
+//
+// Multi-producer-safe: Enqueue takes a short lock (it runs on engine-owned
+// threads, never inside an AC detour, so a lock is fine). Drain is the single
+// consumer (the main thread) and is lock-free + zero-alloc, so it never blocks
+// inside the reverse-P/Invoke detour and never reintroduces the GC-in-detour
+// fail-fast class.
+//
+// The drain re-invokes the EXISTING public action methods. Each of those
+// methods self-gates on MainThreadGuard.IsOnMainThread(): off-thread it
+// enqueues here; on the main thread (i.e. when called from Drain, or from any
+// legitimately main-thread caller) it executes the AC call directly. So there
+// is no separate "Direct" body to keep in sync, and no risk of an enqueue loop.
+//
+// CASTS: routed via the separate cast slot below (EnqueueCast / DrainCasts),
+// drained from AC's GAME-LOGIC tick (Client::UseTime, via GameTickHooks) — NOT
+// EndScene. EndScene is the render phase and does not drive AC's cast state machine
+// to completion (proven dead-end, reverted 2026-05-19); UseTime is where AC processes
+// player actions, so the cast completes there. SelectItem is paired inside
+// CombatActionHooks.CastSpell's main-thread path, so it stays ordered with the cast.
 internal static class AcMainThreadQueue
 {
-    private enum ActionKind : byte { SelectItem, CastSpell }
+    internal enum ActionKind : byte
+    {
+        ChangeCombatMode,
+        MeleeAttack,
+        MissileAttack,
+        DoMovement,
+        StopMovement,
+        Jump,
+        UseObject,
+    }
 
-    private readonly struct Entry(ActionKind kind, uint a)
+    // Three payload slots cover every routed action. Floats are carried as
+    // their IEEE bit pattern in a uint slot (BitConverter round-trip).
+    private readonly struct Entry(AcMainThreadQueue.ActionKind kind, uint a, uint b, uint c)
     {
         public readonly ActionKind Kind = kind;
-        public readonly uint A = a; // SelectItem=objectId | CastSpell=spellId
+        public readonly uint A = a;
+        public readonly uint B = b;
+        public readonly uint C = c;
     }
 
-    private const int Capacity = 64; // must be power of 2
+    private const int Capacity = 256; // power of two
     private const int Mask = Capacity - 1;
     private static readonly Entry[] _slots = new Entry[Capacity];
-    // Monotonic. Only the pump thread writes _tail; only the main thread writes _head.
+    private static readonly object _producerLock = new();
+
+    // Monotonic counters. Producers advance _tail under _producerLock; the sole
+    // consumer (main thread) advances _head.
     private static int _head;
     private static int _tail;
+    private static long _dropped;
 
-    // Called from the pump thread: queue a SelectItem + CastSpell pair
-    // atomically. targetId=0 skips the SelectItem.
-    // Returns true if enqueued; false if a cast is already outstanding or the
-    // queue is full. The caller (CombatActionHooks.CastSpell) MUST return this
-    // bool to the plugin: on false the plugin retries next tick instead of
-    // setting _pendingSpellId and waiting for chat that won't be sent until the
-    // queued entry drains.
-    public static bool EnqueueCast(uint targetId, uint spellId)
+    public static long DroppedCount => Interlocked.Read(ref _dropped);
+
+    private static bool Enqueue(ActionKind kind, uint a, uint b, uint c)
     {
-        int tail = _tail;               // only the pump thread writes _tail
-        int head = Volatile.Read(ref _head);
-        // Single-outstanding: if anything is still queued, refuse so the caller
-        // returns false and the plugin retries next tick. With the EndScene
-        // drain (~22-33Hz) the queue empties within ~1 frame, so this clears
-        // promptly — it only throttles, never wedges.
-        if (tail != head) return false;
-        int needed = targetId != 0 ? 2 : 1;
-        if (tail - head + needed > Capacity)
-            return false; // full — drop the cast rather than risk an off-thread AC write
+        lock (_producerLock)
+        {
+            int tail = _tail;
+            int head = Volatile.Read(ref _head);
+            if (tail - head >= Capacity)
+            {
+                // Full. Drop rather than block or fall back to an off-thread AC
+                // mutation — a dropped movement/attack tick self-corrects on the
+                // next bot tick; an off-thread mutation can crash the client.
+                Interlocked.Increment(ref _dropped);
+                return false;
+            }
 
-        if (targetId != 0)
-        {
-            _slots[tail & Mask] = new Entry(ActionKind.SelectItem, targetId);
-            _slots[(tail + 1) & Mask] = new Entry(ActionKind.CastSpell, spellId);
-            Volatile.Write(ref _tail, tail + 2);
-        }
-        else
-        {
-            _slots[tail & Mask] = new Entry(ActionKind.CastSpell, spellId);
+            _slots[tail & Mask] = new Entry(kind, a, b, c);
             Volatile.Write(ref _tail, tail + 1);
+            return true;
         }
-        return true;
     }
 
-    // Called on AC's main thread from the ALWAYS-ON EndScene path
-    // (EngineFrameController.OnEndScene) — fires every frame regardless of
-    // idle / combat / EnableImGuiBackend (~22-33Hz in the user's env). It is
-    // deliberately NOT drained from DispatchGameEventDetour: that detour is
-    // server-packet-driven and effectively silent while the bot stands idle
-    // self-buffing, which strands every queued cast forever and bricks casting
-    // (a documented dead-end — do not move the drain there). No heap allocation.
+    // ── Typed enqueue helpers (called by the public action methods when they
+    //    detect they're running off AC's main thread) ───────────────────────
+    public static bool EnqueueChangeCombatMode(int mode) =>
+        Enqueue(ActionKind.ChangeCombatMode, unchecked((uint)mode), 0, 0);
+
+    public static bool EnqueueMeleeAttack(uint targetId, int attackHeight, float powerLevel) =>
+        Enqueue(ActionKind.MeleeAttack, targetId, unchecked((uint)attackHeight),
+                BitConverter.SingleToUInt32Bits(powerLevel));
+
+    public static bool EnqueueMissileAttack(uint targetId, int attackHeight, float accuracyLevel) =>
+        Enqueue(ActionKind.MissileAttack, targetId, unchecked((uint)attackHeight),
+                BitConverter.SingleToUInt32Bits(accuracyLevel));
+
+    public static bool EnqueueDoMovement(uint motion, float speed, int holdKey) =>
+        Enqueue(ActionKind.DoMovement, motion, unchecked((uint)holdKey),
+                BitConverter.SingleToUInt32Bits(speed));
+
+    public static bool EnqueueStopMovement(uint motion, int holdKey) =>
+        Enqueue(ActionKind.StopMovement, motion, unchecked((uint)holdKey), 0);
+
+    public static bool EnqueueJump(float extent) =>
+        Enqueue(ActionKind.Jump, BitConverter.SingleToUInt32Bits(extent), 0, 0);
+
+    public static bool EnqueueUseObject(uint objectId) =>
+        Enqueue(ActionKind.UseObject, objectId, 0, 0);
+
+    // Single-consumer drain on AC's main thread (EngineFrameController.OnEndScene).
+    // Re-invokes the public action methods; on the main thread they execute the
+    // real AC call directly (their IsOnMainThread gate is satisfied here).
     public static void Drain()
     {
-        int head = _head;               // only the main thread writes _head
+        int head = _head;                       // only the main thread writes _head
         int tail = Volatile.Read(ref _tail);
         while (head != tail)
         {
             Entry e = _slots[head & Mask];
             Volatile.Write(ref _head, ++head);
 
-            if (e.Kind == ActionKind.SelectItem)
-                ClientHelperHooks.SelectItem(e.A);
-            else
-                CombatActionHooks.ExecuteQueuedCast(e.A);
+            try
+            {
+                switch (e.Kind)
+                {
+                    case ActionKind.ChangeCombatMode:
+                        CombatActionHooks.ChangeCombatMode(unchecked((int)e.A));
+                        break;
+                    case ActionKind.MeleeAttack:
+                        CombatActionHooks.MeleeAttack(e.A, unchecked((int)e.B),
+                            BitConverter.UInt32BitsToSingle(e.C));
+                        break;
+                    case ActionKind.MissileAttack:
+                        CombatActionHooks.MissileAttack(e.A, unchecked((int)e.B),
+                            BitConverter.UInt32BitsToSingle(e.C));
+                        break;
+                    case ActionKind.DoMovement:
+                        MovementActionHooks.DoMovement(e.A,
+                            BitConverter.UInt32BitsToSingle(e.C), unchecked((int)e.B));
+                        break;
+                    case ActionKind.StopMovement:
+                        MovementActionHooks.StopMovement(e.A, unchecked((int)e.B));
+                        break;
+                    case ActionKind.Jump:
+                        MovementActionHooks.JumpNonAutonomous(BitConverter.UInt32BitsToSingle(e.A));
+                        break;
+                    case ActionKind.UseObject:
+                        ClientHelperHooks.UseObject(e.A);
+                        break;
+                }
+            }
+            catch
+            {
+                // One action must never break the drain loop. (AC-side AVs are
+                // not managed exceptions and won't be caught here — but these
+                // now run on the correct thread, which is the whole point.)
+            }
 
             tail = Volatile.Read(ref _tail);
         }
+    }
+
+    // ── Cast slot (SelectItem + CastSpell pair) ─────────────────────────────────
+    // Drained at AC's GAME-LOGIC tick (Client::UseTime via GameTickHooks), NOT the
+    // EndScene render tick. Single-outstanding: EnqueueCast returns false while a cast
+    // is pending so the off-thread caller (BuffManager / CombatManager) retries next
+    // tick — they already handle a false return without wedging. At ~frame-rate drain
+    // the slot clears within ~1 frame. This is the LAST off-thread AC mutator to be
+    // marshalled, closing the off-thread object-graph corruption class at its source.
+    private static int _castPending;
+    private static uint _castTargetId;
+    private static uint _castSpellId;
+    private static readonly object _castLock = new();
+
+    // Pump-thread enqueue. Returns false (caller retries next tick) if a cast is
+    // already pending.
+    public static bool EnqueueCast(uint targetId, uint spellId)
+    {
+        lock (_castLock)
+        {
+            if (_castPending != 0) return false;
+            _castTargetId = targetId;
+            _castSpellId = spellId;
+            _castPending = 1;
+            return true;
+        }
+    }
+
+    // Drained on AC's MAIN thread from the Client::UseTime detour (game-logic tick).
+    // Re-invokes CombatActionHooks.CastSpell, which on the main thread executes the
+    // cast directly (SelectItem + ClientMagicSystem::CastSpell via the SEH trampoline).
+    public static void DrainCasts()
+    {
+        if (Volatile.Read(ref _castPending) == 0) return;   // alloc-free fast path
+        uint target, spell;
+        lock (_castLock)
+        {
+            if (_castPending == 0) return;
+            target = _castTargetId;
+            spell = _castSpellId;
+            _castPending = 0;
+        }
+        CombatActionHooks.CastSpell(target, unchecked((int)spell));
     }
 }

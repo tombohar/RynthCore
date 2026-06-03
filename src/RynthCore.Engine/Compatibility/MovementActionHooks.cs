@@ -151,6 +151,9 @@ internal static class MovementActionHooks
 
     public static bool DoMovement(uint motion, float speed = 1.0f, int holdKey = HoldKeyRun)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueDoMovement(motion, speed, holdKey);
+
         int n = System.Threading.Interlocked.Increment(ref _doMovementCalls);
         if (_doMovement == null)
         {
@@ -176,6 +179,9 @@ internal static class MovementActionHooks
 
     public static bool StopMovement(uint motion, int holdKey = HoldKeyRun)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueStopMovement(motion, holdKey);
+
         int n = System.Threading.Interlocked.Increment(ref _stopMovementCalls);
         if (_stopMovement == null)
         {
@@ -201,6 +207,9 @@ internal static class MovementActionHooks
 
     public static bool JumpNonAutonomous(float extent)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueJump(extent);
+
         if (_jumpNonAutonomous == null)
             return false;
 

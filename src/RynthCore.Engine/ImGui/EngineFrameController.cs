@@ -253,6 +253,15 @@ internal static class EngineFrameController
             // of what InitImGui needs and is safe to run without ImGui state.
             DX9Backend.InitCore(pDevice);
 
+            // Install the DrawIndexedPrimitive hook that injects Nav3D markers at
+            // the 3D→UI ZENABLE transition so they render BEHIND AC's UI. Idempotent
+            // (installs once); placed here because its Detour reads the device
+            // delegates InitCore (above) just cached. WITHOUT THIS the injector never
+            // accumulates, RenderedThisFrame stays false on every frame, and the
+            // end-of-frame fallback below paints markers OVER the UI. This call was
+            // dropped in the v0.19 Nav3D double-buffer refactor — restored here.
+            D3D9.Nav3DRenderInjector.Install(pDevice);
+
             // Capture the game's View/Projection matrices before ImGui touches them
             GameMatrixCapture.CaptureFrame(pDevice);
 
@@ -295,6 +304,16 @@ internal static class EngineFrameController
             // anchor (D3D9 hook, not string-resolved like SmartBox).
             try { Plugins.PluginManager.TrySeedLiveObjectsFromCObjectMaintOnce(); }
             catch (Exception ex) { RynthLog.Plugin($"CObjectMaint seed threw {ex.GetType().Name}: {ex.Message}"); }
+
+            // P1: drain off-thread bot actions (UseObject / ChangeCombatMode / melee /
+            // missile / movement / jump) here on AC's MAIN thread. The pump enqueues
+            // them instead of calling AC directly, so AC mutates its single-threaded
+            // object/animation (CSequence) state on the same thread that updates it —
+            // closing the off-thread-mutation corruption class (the CSequence::
+            // update_internal AV captured 2026-06-03, the 0x0055FA24 range-list AV, etc).
+            // CastSpell is deliberately NOT routed here (stays off-thread + SEH).
+            try { Compatibility.AcMainThreadQueue.Drain(); }
+            catch (Exception ex) { RynthLog.Plugin($"AcMainThreadQueue.Drain threw {ex.GetType().Name}: {ex.Message}"); }
 
             // Nav3DRenderInjector fires mid-frame at the 3D→UI ZENABLE
             // transition — that's the only pipeline position where markers

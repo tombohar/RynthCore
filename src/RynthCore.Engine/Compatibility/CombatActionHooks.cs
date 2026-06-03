@@ -62,6 +62,16 @@ internal static class CombatActionHooks
     private static CastSpellDelegate? _castSpell;
     private static CastSpellClientDelegate? _castSpellClient;
     private static IntPtr _castSpellClientPtr;
+
+    // RC2-proven explicit-target cast (no SelectItem / global selection). VAs verified
+    // against acclient.map. GetMagicSystem returns the ClientMagicSystem singleton ('this');
+    // FreeHandsAndCastSpell(this, spellId, targetId) takes the target as an EXPLICIT arg, so
+    // it never reads AC's selected-object global ([singleton+0xF4]) the way CastSpell(...,1)
+    // @ 0x00568DE0 does — which is why it survives being marshalled onto AC's game tick.
+    private const int GetMagicSystemVa = 0x00567C00;          // void*  __cdecl   GetMagicSystem()
+    private const int FreeHandsAndCastSpellVa = 0x00567C90;   // void   __thiscall FreeHandsAndCastSpell(this, uint spellId, uint targetId)
+    private static IntPtr _getMagicSystemPtr;
+    private static IntPtr _freeHandsCastPtr;
     private static int _sehAvLogCount;
     private static QueryHealthResponseDelegate? _queryHealthResponseDetour;
     private static QueryHealthResponseDelegate? _originalQueryHealthResponse;
@@ -284,6 +294,33 @@ internal static class CombatActionHooks
                     $"out of range (inModule={csInModule}, inText={csInTextWindow}) — unavailable.");
             }
 
+            // Explicit-target cast pair (RC2-proven): GetMagicSystem @ 0x00567C00 +
+            // FreeHandsAndCastSpell @ 0x00567C90. Same byte-identical-retail VA rule as
+            // CastSpell above — validated in-module here, invoked via the SEH trampoline on
+            // the main thread. Replaces the SelectItem + CastSpell(targetIsSelected=1) two-step
+            // for TARGETED casts (the global-selection read that didn't survive the tick).
+            int gmsTextOff = GetMagicSystemVa - textSection.TextBaseVa;
+            int fhcTextOff = FreeHandsAndCastSpellVa - textSection.TextBaseVa;
+            bool gmsOk = GetMagicSystemVa >= csModStart && GetMagicSystemVa < csModEnd &&
+                         gmsTextOff >= 0 && gmsTextOff + 16 <= text.Length;
+            bool fhcOk = FreeHandsAndCastSpellVa >= csModStart && FreeHandsAndCastSpellVa < csModEnd &&
+                         fhcTextOff >= 0 && fhcTextOff + 16 <= text.Length;
+            if (gmsOk && fhcOk)
+            {
+                _getMagicSystemPtr = new IntPtr(GetMagicSystemVa);
+                _freeHandsCastPtr = new IntPtr(FreeHandsAndCastSpellVa);
+                RynthLog.Compat(
+                    $"Compat: explicit-target cast bound — GetMagicSystem=0x{GetMagicSystemVa:X8} " +
+                    $"(prologue {Convert.ToHexString(text, gmsTextOff, 8)}), FreeHandsAndCastSpell=0x{FreeHandsAndCastSpellVa:X8} " +
+                    $"(prologue {Convert.ToHexString(text, fhcTextOff, 8)}).");
+            }
+            else
+            {
+                RynthLog.Compat(
+                    $"Compat: explicit-target cast VAs out of range (gms={gmsOk}, fhc={fhcOk}) — " +
+                    "targeted casts fail closed.");
+            }
+
             InstallQueryHealthResponseHook();
             // InstallInnerDispatcherHook intentionally disabled 2026-05-14.
             // Its anchor-then-scan-backward heuristic (find CALL to
@@ -318,6 +355,9 @@ internal static class CombatActionHooks
 
     public static bool MeleeAttack(uint targetId, int attackHeight, float powerLevel)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueMeleeAttack(targetId, attackHeight, powerLevel);
+
         if (_meleeAttack == null)
             return false;
 
@@ -333,6 +373,9 @@ internal static class CombatActionHooks
 
     public static bool MissileAttack(uint targetId, int attackHeight, float accuracyLevel)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueMissileAttack(targetId, attackHeight, accuracyLevel);
+
         if (_missileAttack == null)
             return false;
 
@@ -348,6 +391,14 @@ internal static class CombatActionHooks
 
     public static bool ChangeCombatMode(int combatMode)
     {
+        // P1 marshalling: off-thread mutators run on AC's main thread (via the
+        // OnEndScene drain) so AC mutates its single-threaded object/animation
+        // (CSequence) state on the thread that updates it — eliminating the
+        // off-thread-mutation corruption class (e.g. the CSequence::update_internal
+        // AV). On the main thread (incl. the drain) this executes directly.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueChangeCombatMode(combatMode);
+
         if (_changeCombatMode == null)
             return false;
 
@@ -411,6 +462,25 @@ internal static class CombatActionHooks
         if (spellId <= 0) return false;
         if (_castSpellClient == null) return false;
 
+        // P2 cast marshalling — drain-BEFORE-tick variant (2026-06-03, attempt 2).
+        // Off the main thread, enqueue the cast; GameTickHooks drains it on AC's
+        // game-logic tick (Client::UseTime) BEFORE _originalUseTime runs, so AC's SAME
+        // tick processes the freshly-set selection + cast (mimics AC's natural
+        // input -> UseTime flow). Attempt 1 (drain AFTER the tick) landed self-buffs but
+        // NOT targeted casts: SelectItem + cast initiated at the END of tick N weren't
+        // processed until tick N+1, by which point the selection was clobbered (target
+        // held hp=50/50, zero damage).
+        //
+        // Off-thread casting is NOT a safe fallback: it races AC's cast/UI state and
+        // AVs UNCAUGHT (0xC0000005 WRITE in UIElement::GetAttribute_Bool, off the main
+        // thread, tid != main) — it killed a 37-min P1 soak. So the cast MUST run on the
+        // main thread; the only open question is landing a targeted cast from the tick,
+        // which the drain-before order is intended to fix. On the main thread (the
+        // UseTime drain, or any main-thread caller) this falls through to the direct
+        // cast below.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueCast(targetId, (uint)spellId);
+
         // Call ClientMagicSystem::CastSpell directly off the plugin pump thread.
         // This is the proven-working casting path (buffs + combat resolve in
         // chat). The earlier EndScene-marshalled variant (AcMainThreadQueue,
@@ -430,26 +500,43 @@ internal static class CombatActionHooks
         {
             try
             {
-                byte targetIsSelected;
+                // TARGETED cast (targetId != 0): explicit-target path — RC2-proven, NO
+                // SelectItem. GetMagicSystem() -> FreeHandsAndCastSpell(mgr, spellId, targetId).
+                // The old SelectItem + CastSpell(targetIsSelected=1) two-step relied on AC's
+                // global selection ([magicSysSingleton+0xF4], read inside 0x00568DE0) surviving
+                // the marshal onto AC's tick — it didn't (targets held hp=50/50, zero damage).
+                // FreeHandsAndCastSpell takes the target as an explicit arg and auto-readies the
+                // wand, so there is nothing to clobber.
                 if (targetId != 0)
                 {
-                    ClientHelperHooks.SelectItem(targetId);
-                    targetIsSelected = 1;
-                }
-                else
-                {
-                    targetIsSelected = 0;
+                    if (SehTrampoline.IsAvailable && _freeHandsCastPtr != IntPtr.Zero && _getMagicSystemPtr != IntPtr.Zero)
+                    {
+                        IntPtr mgr = SehTrampoline.CdeclPtrVoid(_getMagicSystemPtr, out bool avMgr);
+                        if (avMgr || mgr == IntPtr.Zero)
+                        {
+                            if (System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
+                                RynthLog.Compat($"[SEH] GetMagicSystem null/AV — targeted cast skipped spell={spellId} target=0x{targetId:X8}");
+                            return false;
+                        }
+                        bool okCast = SehTrampoline.FreeHandsCast(_freeHandsCastPtr, mgr, (uint)spellId, targetId);
+                        if (!okCast && System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
+                            RynthLog.Compat($"[SEH] AV in FreeHandsAndCastSpell spell={spellId} target=0x{targetId:X8} — caught");
+                        return okCast;
+                    }
+                    return false;   // trampoline / VAs unavailable — fail closed (never the off-thread SelectItem two-step)
                 }
 
+                // SELF cast (targetId == 0): the proven CastSpell(spellId, targetIsSelected=0)
+                // path — no selection dependency; lands buffs reliably.
                 if (SehTrampoline.IsAvailable && _castSpellClientPtr != IntPtr.Zero)
                 {
-                    bool ok = SehTrampoline.CdeclVoidUintByte(_castSpellClientPtr, (uint)spellId, targetIsSelected);
+                    bool ok = SehTrampoline.CdeclVoidUintByte(_castSpellClientPtr, (uint)spellId, 0);
                     if (!ok && System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
-                        RynthLog.Compat($"[SEH] AV in CastSpell spell={spellId} target=0x{targetId:X8} — caught");
+                        RynthLog.Compat($"[SEH] AV in self-CastSpell spell={spellId} — caught");
                     return ok;
                 }
 
-                _castSpellClient((uint)spellId, targetIsSelected);
+                _castSpellClient((uint)spellId, 0);
                 return true;
             }
             catch
@@ -520,6 +607,8 @@ internal static class CombatActionHooks
         _castSpell = null;
         _castSpellClient = null;
         _castSpellClientPtr = IntPtr.Zero;
+        _getMagicSystemPtr = IntPtr.Zero;
+        _freeHandsCastPtr = IntPtr.Zero;
         _queryHealthResponseDetour = null;
         _originalQueryHealthResponse = null;
         _identifyObjectDetour = null;

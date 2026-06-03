@@ -143,6 +143,15 @@ internal static class EnchantmentHooks
     /// </summary>
     private static unsafe int ReadEnchantmentsFromQualities(IntPtr qualPtr, uint* spellIds, double* expiryTimes, int maxCount)
     {
+        // While AC is inside a DB object-cache teardown (DbCacheTeardownHooks sets this
+        // on AC's main thread for the duration of DestroyObjectCaches — which fires at
+        // world-load, zone change, logout, AND final close), refuse to walk the
+        // CEnchantmentRegistry linked lists: AC is concurrently freeing those nodes, and
+        // an off-thread (plugin-pump) walk over a half-freed node is the recurring
+        // 0x00416C86 (DBOCache::DestroyObj, [null+0x28]) AV.
+        if (DbCacheTeardownHooks.TeardownActive)
+            return -1;
+
         IntPtr regAddr = qualPtr + QualitiesRegistryOffset;
         if (!SmartBoxLocator.IsMemoryReadable(regAddr, 4))
             return -1;

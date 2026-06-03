@@ -212,6 +212,13 @@ internal static class ClientHelperHooks
 
     public static bool UseObject(uint objectId)
     {
+        // P1 marshalling: looting's open-corpse / pick-up use-action runs on AC's
+        // main thread (via the OnEndScene drain), not off the pump thread. Off-thread
+        // UseObject mutated AC's animation sequence (CSequence) and corrupted it ->
+        // the CSequence::update_internal AV captured after looting was enabled.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueUseObject(objectId);
+
         if (_useObject == null || !IsValidObjectId(objectId))
             return false;
 

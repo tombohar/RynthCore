@@ -433,7 +433,16 @@ public static class EntryPoint
             if (!PreloadNativeDll(engineDir, "RynthCore.SehTrampoline.dll"))
                 RynthLog.Info("WARNING: RynthCore.SehTrampoline.dll not found — object-teardown AVs will not be caught.");
             else
+            {
                 SehTrampoline.MarkAvailable();
+                // Native VEH crash logger (lives in the trampoline DLL — pure native, no
+                // reverse-P/Invoke, so it can't re-trigger a NativeAOT fail-fast like the
+                // removed managed CrashLogger VEH did). Captures the faulting context +
+                // a module-resolved stack sweep for the AV (0xC0000005) / fail-fast
+                // (0xC0000602) classes that bypass managed handlers, into a dedicated
+                // native-crash.log so the next crash self-reports instead of going dark.
+                SehTrampoline.InstallCrashLogger(System.IO.Path.Combine(LogPaths.LogDirectory, "native-crash.log"));
+            }
 
             if (!ConfigureImGuiNativeLibrary(engineDir))
             {
@@ -500,6 +509,35 @@ public static class EntryPoint
             Step("time-sync hook", TimeSyncHooks.Initialize);
             Step("create-object hooks", CreateObjectHooks.Initialize);
             Step("delete-object hooks", DeleteObjectHooks.Initialize);
+            // DB-cache teardown guard — hooks DBCache::DestroyObjectCaches entry so we
+            // quiesce the off-thread plugin pump + drop the cached qualities ptr on AC's
+            // MAIN thread, BEFORE AC frees its DB objects on client close. Fix for the
+            // every-close 0x00416C86 (DBOCache::DestroyObj) AV that the ExitProcess /
+            // WM_CLOSE quiesce is too late to prevent. Port of RynthCore2's
+            // DestroyObjectCachesDetour (RynthSuite2 f8a291e).
+            Step("db-cache teardown hook", DbCacheTeardownHooks.Initialize);
+            // Game-logic tick hook (Client::UseTime) — drains the marshalled CAST queue
+            // on AC's MAIN thread BEFORE _originalUseTime runs (drain-before variant,
+            // 2026-06-03 attempt 2), so the SAME tick processes the selection + cast.
+            // Re-enabled after the P1 soak: the off-thread cast races AC and AVs uncaught
+            // (0xC0000005 WRITE in UIElement::GetAttribute_Bool, off the main thread).
+            // See CombatActionHooks.CastSpell + GameTickHooks.UseTimeDetour for rationale.
+            Step("game-tick cast drain hook", GameTickHooks.Initialize);
+            // 2026-05-25 — TextParserGuardHooks DISABLED pending investigation.
+            // The first deploy of this hook (12:12 build) was followed by a
+            // pid 20852 crash within 7s of launch — kernel32+0x1EB0B AV WRITE
+            // to 0xF08BD6EF (heap-poison address). Previous engine without this
+            // hook ran ≥30min before AV. Revert to confirm; if reverted engine
+            // is stable, the hook (or its MinHook installation) is the cause.
+            // File remains in place as dead code for re-investigation.
+            //
+            // RE-ENABLED 2026-06-03 as a PURE NATIVE detour. The 7s crash above was the
+            // MANAGED detour incurring a NativeAOT reverse-P/Invoke per parsed tag on
+            // AC's main thread. The detour body now lives in RynthCore.SehTrampoline.dll
+            // (RC_TagParserGuard — no managed transition), so that failure mode is gone.
+            // Fixes the text-parser singleton race captured 2026-06-03 (0xC0000005 at
+            // acclient.exe+0x27D3DA, [null+0xC]). Self-gates on the SEH trampoline.
+            Step("text-parser guard hook", TextParserGuardHooks.Initialize);
             Step("update-object hooks", UpdateObjectServerDispatchHooks.Initialize);
             Step("vector-update hooks", VectorUpdateServerDispatchHooks.Initialize);
             Step("update-object-inventory hooks", UpdateObjectInventoryHooks.Initialize);
@@ -932,6 +970,20 @@ public static class EntryPoint
         if (!exited)
             RynthLog.Plugin($"DecalCoexistence: tick pump did NOT exit within {timeoutMs}ms.");
         return exited;
+    }
+
+    /// <summary>
+    /// Non-blocking request for the headless plugin pump (NormalPluginPump /
+    /// DecalCoexistence) to stop. Sets the same flag as <see cref="StopTickPumpAndJoin"/>
+    /// but does NOT wait/join — safe to call from AC's main thread inside a detour
+    /// (e.g. DbCacheTeardownHooks at DestroyObjectCaches entry) where joining a managed
+    /// pump thread could stall AC's close or deadlock. The pump checks the flag once per
+    /// iteration and parks; the heavier join still happens later via
+    /// EngineLifecycle.Shutdown -> StopTickPumpAndJoin.
+    /// </summary>
+    internal static void RequestTickPumpStop()
+    {
+        Interlocked.Exchange(ref _tickPumpStopRequested, 1);
     }
 
     private static void RunInitStep(string name, Action action)
