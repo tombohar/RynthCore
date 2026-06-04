@@ -1887,6 +1887,15 @@ internal partial class MainWindow : Window
         MaybeQueueAutoLaunch(activeContexts, activeSessions);
         MaybeAutoInjectExternalClients(targets, activePids, activeContexts, activeSessions);
         MaybeKillStuckClients(targets, activeContexts, activeSessions);
+
+        // Dispose this tick's Process handles. FindTargetProcesses() allocates fresh
+        // System.Diagnostics.Process objects (each holds a native OS handle); on the 2s
+        // session timer (~thousands of ticks/session) the undisposed handles + finalizable
+        // objects accumulate, the UI thread degrades, and the launcher must be restarted
+        // (root cause of the ~2.5h unresponsiveness, 2026-06-03). Every sub-call above
+        // consumed this array synchronously — UpdateLaunchTargetStatuses received it (no
+        // second allocation) — so it is safe to release the handles here.
+        foreach (Process p in targets) p.Dispose();
     }
 
     /// <summary>
@@ -2843,6 +2852,9 @@ internal partial class MainWindow : Window
         IReadOnlyDictionary<int, LaunchContextRecord>? activeContexts = null,
         IReadOnlyDictionary<int, SessionStateRecord>? activeSessions = null)
     {
+        // Dispose the Process[] only if WE allocated it here (standalone call). When
+        // called from RefreshSessionState the array is passed in and that caller owns it.
+        bool ownTargets = targets is null;
         targets ??= _injector.FindTargetProcesses();
         HashSet<int> activePids = targets.Select(process => process.Id).ToHashSet();
 
@@ -2863,6 +2875,9 @@ internal partial class MainWindow : Window
             statusText.Text = status.text;
             statusText.Foreground = Brush.Parse(status.color);
         }
+
+        if (ownTargets)
+            foreach (Process p in targets) p.Dispose();
     }
 
     private (string text, string color) BuildLaunchTargetStatus(
