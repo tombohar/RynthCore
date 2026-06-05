@@ -49,16 +49,27 @@ internal static class AcMainThreadQueue
         StopMovement,
         Jump,
         UseObject,
+        // Item mutators marshalled 2026-06-05 (off-thread UseObjectOn/MoveItem/stack ops
+        // raced AC's per-tick object graph -> null-deref AVs in Client::UseTime, e.g.
+        // acclient+0xF24E0; same off-thread class as the P1 UseObject fix).
+        UseObjectOn,
+        UseEquippedItem,
+        MoveItemExternal,
+        MoveItemInternal,
+        SplitStackInternal,
+        MergeStackInternal,
     }
 
-    // Three payload slots cover every routed action. Floats are carried as
-    // their IEEE bit pattern in a uint slot (BitConverter round-trip).
-    private readonly struct Entry(AcMainThreadQueue.ActionKind kind, uint a, uint b, uint c)
+    // Four payload slots cover every routed action (the 4th was added for
+    // MoveItemInternal/SplitStackInternal: id, container, slot, amount). Floats are
+    // carried as their IEEE bit pattern in a uint slot (BitConverter round-trip).
+    private readonly struct Entry(AcMainThreadQueue.ActionKind kind, uint a, uint b, uint c, uint d)
     {
         public readonly ActionKind Kind = kind;
         public readonly uint A = a;
         public readonly uint B = b;
         public readonly uint C = c;
+        public readonly uint D = d;
     }
 
     private const int Capacity = 256; // power of two
@@ -74,7 +85,7 @@ internal static class AcMainThreadQueue
 
     public static long DroppedCount => Interlocked.Read(ref _dropped);
 
-    private static bool Enqueue(ActionKind kind, uint a, uint b, uint c)
+    private static bool Enqueue(ActionKind kind, uint a, uint b, uint c, uint d = 0)
     {
         lock (_producerLock)
         {
@@ -89,7 +100,7 @@ internal static class AcMainThreadQueue
                 return false;
             }
 
-            _slots[tail & Mask] = new Entry(kind, a, b, c);
+            _slots[tail & Mask] = new Entry(kind, a, b, c, d);
             Volatile.Write(ref _tail, tail + 1);
             return true;
         }
@@ -120,6 +131,24 @@ internal static class AcMainThreadQueue
 
     public static bool EnqueueUseObject(uint objectId) =>
         Enqueue(ActionKind.UseObject, objectId, 0, 0);
+
+    public static bool EnqueueUseObjectOn(uint sourceObjectId, uint targetObjectId) =>
+        Enqueue(ActionKind.UseObjectOn, sourceObjectId, targetObjectId, 0);
+
+    public static bool EnqueueUseEquippedItem(uint sourceObjectId, uint targetObjectId) =>
+        Enqueue(ActionKind.UseEquippedItem, sourceObjectId, targetObjectId, 0);
+
+    public static bool EnqueueMoveItemExternal(uint objectId, uint targetContainerId, int amount) =>
+        Enqueue(ActionKind.MoveItemExternal, objectId, targetContainerId, unchecked((uint)amount));
+
+    public static bool EnqueueMoveItemInternal(uint objectId, uint targetContainerId, int slot, int amount) =>
+        Enqueue(ActionKind.MoveItemInternal, objectId, targetContainerId, unchecked((uint)slot), unchecked((uint)amount));
+
+    public static bool EnqueueSplitStackInternal(uint objectId, uint targetContainerId, int slot, int amount) =>
+        Enqueue(ActionKind.SplitStackInternal, objectId, targetContainerId, unchecked((uint)slot), unchecked((uint)amount));
+
+    public static bool EnqueueMergeStackInternal(uint sourceObjectId, uint targetObjectId) =>
+        Enqueue(ActionKind.MergeStackInternal, sourceObjectId, targetObjectId, 0);
 
     // Single-consumer drain on AC's main thread (EngineFrameController.OnEndScene).
     // Re-invokes the public action methods; on the main thread they execute the
@@ -160,6 +189,24 @@ internal static class AcMainThreadQueue
                         break;
                     case ActionKind.UseObject:
                         ClientHelperHooks.UseObject(e.A);
+                        break;
+                    case ActionKind.UseObjectOn:
+                        ClientHelperHooks.UseObjectOn(e.A, e.B);
+                        break;
+                    case ActionKind.UseEquippedItem:
+                        ClientHelperHooks.UseEquippedItem(e.A, e.B);
+                        break;
+                    case ActionKind.MoveItemExternal:
+                        ClientHelperHooks.MoveItemExternal(e.A, e.B, unchecked((int)e.C));
+                        break;
+                    case ActionKind.MoveItemInternal:
+                        ClientHelperHooks.MoveItemInternal(e.A, e.B, unchecked((int)e.C), unchecked((int)e.D));
+                        break;
+                    case ActionKind.SplitStackInternal:
+                        ClientHelperHooks.SplitStackInternal(e.A, e.B, unchecked((int)e.C), unchecked((int)e.D));
+                        break;
+                    case ActionKind.MergeStackInternal:
+                        ClientHelperHooks.MergeStackInternal(e.A, e.B);
                         break;
                 }
             }

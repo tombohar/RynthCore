@@ -30,13 +30,20 @@ namespace RynthCore.Engine.Compatibility;
 /// </summary>
 internal static class GameTickHooks
 {
-    private const int UseTimeVa = 0x00411FA0;   // Client::UseTime(void) — thiscall
+    private const int UseTimeVa = 0x00411FA0;   // Client::UseTime — thiscall, returns bool in AL
 
+    // Client::UseTime returns a bool (AL): AC's main loop drives it as
+    //   do { } while ( UseTime() != 0 );
+    // so the return value MUST be propagated. A void delegate discards AC's AL
+    // and the loop then reads whatever the managed epilogue left in EAX — when
+    // that is nonzero the loop never exits and the client hard-freezes (main
+    // thread spins in UseTime pumping messages but never rendering; bot threads
+    // keep running). Dump-confirmed root cause, 2026-06-05.
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
-    private delegate void ThisCallVoidDelegate(IntPtr thisPtr);
+    private delegate int ThisCallBoolDelegate(IntPtr thisPtr);
 
-    private static ThisCallVoidDelegate? _originalUseTime;
-    private static ThisCallVoidDelegate? _useTimeDetour;
+    private static ThisCallBoolDelegate? _originalUseTime;
+    private static ThisCallBoolDelegate? _useTimeDetour;
     private static IntPtr _targetAddress;
     private static int _installed;
 
@@ -76,7 +83,7 @@ internal static class GameTickHooks
             _targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
             _useTimeDetour = UseTimeDetour;
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_useTimeDetour);
-            _originalUseTime = Marshal.GetDelegateForFunctionPointer<ThisCallVoidDelegate>(
+            _originalUseTime = Marshal.GetDelegateForFunctionPointer<ThisCallBoolDelegate>(
                 MinHook.HookCreate(_targetAddress, detourPtr));
             Thread.MemoryBarrier();
             MinHook.Enable(_targetAddress);
@@ -93,7 +100,7 @@ internal static class GameTickHooks
         }
     }
 
-    private static void UseTimeDetour(IntPtr thisPtr)
+    private static int UseTimeDetour(IntPtr thisPtr)
     {
         // Drain any queued cast BEFORE AC's game-logic tick: SelectItem sets AC's
         // selection and the cast initiates, then THIS SAME UseTime call processes it to
@@ -103,7 +110,8 @@ internal static class GameTickHooks
         // pending. Must never throw into AC's native frame.
         try { AcMainThreadQueue.DrainCasts(); }
         catch { }
-        try { _originalUseTime!(thisPtr); }
-        catch { }
+        // MUST return Client::UseTime's own bool — AC loops do/while on it.
+        try { return _originalUseTime!(thisPtr); }
+        catch { return 0; }
     }
 }

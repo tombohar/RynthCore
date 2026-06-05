@@ -22,7 +22,7 @@ namespace RynthCore.Engine;
 
 public static class EntryPoint
 {
-    internal const string BuildStamp = "2026-03-30-v54-patternscan";
+    internal const string BuildStamp = "2026-06-05-usetime-retval-fix";
     private const int MaxRecentLogLines = 256;
     private static int _initialized;
     /// <summary>Init counter the loader passes in lpParam. 1 = cold start,
@@ -99,6 +99,10 @@ public static class EntryPoint
             RynthLog.Info("================================================================");
 
             CrashLogger.Install();
+
+            // Diagnostic: catch the "client frozen, bot keeps running" hangs by
+            // logging AC's main-thread native stack when its EndScene beat stalls.
+            MainThreadHangWatchdog.Start();
 
             // MultiClientHooks.Initialize installs MinHook detours synchronously
             // here, BEFORE InitWorker spawns and runs the main PreloadNativeDll
@@ -715,6 +719,11 @@ public static class EntryPoint
                         OverlayHost.RegisterPanel("Tracker", RynthTrackerPanel.Create);
                     else
                         RynthLog.Info("InitWorker: RynthTracker panel skipped — DLL not in engine.json PluginPaths.");
+
+                    if (HasPluginDll("RynthCore.Plugin.RynthNav.dll"))
+                        OverlayHost.RegisterPanel("RynthNav", RynthNavPanel.Create);
+                    else
+                        RynthLog.Info("InitWorker: RynthNav panel skipped — DLL not in engine.json PluginPaths.");
 
                     AvaloniaOverlay.Start();
                 }

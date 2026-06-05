@@ -209,6 +209,10 @@ internal static class EndSceneHook
 
     private static int EndSceneDetour(IntPtr pDevice)
     {
+        // Liveness beacon for MainThreadHangWatchdog — this detour runs on AC's
+        // main/render thread every frame (even with the ImGui backend disabled),
+        // so a stalled beat means the main thread is wedged. Must never throw.
+        try { MainThreadHangWatchdog.MainThreadBeat(); } catch { }
         try
         {
             if (!_offscreenFilterDisabled && !DX9Backend.IsRenderingToBackBuffer(pDevice))

@@ -704,11 +704,16 @@ internal class RynthOverlayWindow : Window
     private const uint WM_SETFOCUS      = 0x0007;
     private const uint WM_KILLFOCUS     = 0x0008;
     private const uint WM_MOUSEACTIVATE = 0x0021;
+    private const uint WM_CLOSE          = 0x0010;
     private const int  MA_NOACTIVATE    = 2;
 
     private delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     private static WndProcDelegate? _avaloniaSubclassDelegate;
     private static IntPtr _avaloniaOriginalWndProc;
+    // Fires once when the user closes the AC window in ImGui-less / Decal
+    // coexistence mode (where this subclass — not Win32Backend's — owns the
+    // game WndProc). See the WM_CLOSE branch in AvaloniaSubclassWndProc.
+    private static int _avaloniaWmCloseSeen;
     private static IntPtr _avaloniaSubclassedHwnd;
     // True between WM_LBUTTONDOWN and WM_LBUTTONUP on avHwnd (panel click in flight).
     // Used to defer WM_KILLFOCUS so Avalonia's pointer capture isn't cancelled mid-click.
@@ -744,6 +749,24 @@ internal class RynthOverlayWindow : Window
     /// </summary>
     private static IntPtr AvaloniaSubclassWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
+        // ── User clicked X / Alt+F4 on AC window — quiesce the off-thread plugin
+        // pump BEFORE AC tears down its objects ────────────────────────────────
+        // In ImGui-less / Decal-coexistence mode THIS subclass owns the game
+        // WndProc (Win32Backend's WM_CLOSE handler is never installed). If the
+        // ~63 Hz NormalPluginPump keeps firing Move/SetAutoRun/object-reads into
+        // acclient while AC frees those objects, the two collide and the process
+        // deadlocks BEFORE it ever reaches ExitProcess (so ProcessExitHooks'
+        // orderly shutdown never runs) — the client freezes on close.
+        // Stopping the pump here (bounded ~2 s join, same flag the clean
+        // ExitProcess path uses) closes that gap; the rest of teardown still
+        // runs later via the ExitProcess detour. Fall through to AC's WndProc.
+        if (msg == WM_CLOSE && System.Threading.Interlocked.Exchange(ref _avaloniaWmCloseSeen, 1) == 0)
+        {
+            RynthLog.UI("AvaloniaSubclass: WM_CLOSE on AC window — stopping plugin tick pump before AC teardown.");
+            try { EntryPoint.StopTickPumpAndJoin(); }
+            catch (Exception ex) { RynthLog.UI($"AvaloniaSubclass: WM_CLOSE pump-stop threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+
         if (msg == WM_MOUSELEAVE || msg == WM_NCMOUSELEAVE)
             return IntPtr.Zero;
 

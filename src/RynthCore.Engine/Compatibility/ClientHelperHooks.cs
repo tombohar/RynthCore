@@ -239,6 +239,12 @@ internal static class ClientHelperHooks
 
     public static bool UseObjectOn(uint sourceObjectId, uint targetObjectId)
     {
+        // Marshal onto AC's main thread (off-thread use-on-target mutates AC's
+        // object/animation graph and corrupts it — see UseObject). Drain re-invokes
+        // this on the main thread, where the gate is satisfied and it runs directly.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueUseObjectOn(sourceObjectId, targetObjectId);
+
         if (_useWithTargetEvent == null || !IsValidObjectId(sourceObjectId) || !IsValidObjectId(targetObjectId))
             return false;
 
@@ -257,6 +263,9 @@ internal static class ClientHelperHooks
 
     public static bool UseEquippedItem(uint sourceObjectId, uint targetObjectId)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueUseEquippedItem(sourceObjectId, targetObjectId);
+
         if (_useEquippedItem == null || !IsValidObjectId(sourceObjectId) || !IsValidObjectId(targetObjectId))
             return false;
 
@@ -277,6 +286,11 @@ internal static class ClientHelperHooks
 
     public static bool MoveItemExternal(uint objectId, uint targetContainerId, int amount)
     {
+        // Marshal onto AC's main thread — off-thread item moves race AC's per-tick
+        // object/container bookkeeping (the looting null-deref AV class).
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueMoveItemExternal(objectId, targetContainerId, amount);
+
         if (_moveItemExternal == null || !IsValidObjectId(objectId) || !IsValidContainerId(targetContainerId) || amount < 0)
             return false;
 
@@ -295,6 +309,9 @@ internal static class ClientHelperHooks
 
     public static bool MoveItemInternal(uint objectId, uint targetContainerId, int slot, int amount)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueMoveItemInternal(objectId, targetContainerId, slot, amount);
+
         if (_moveItemInternal == null) return false;
         if (!IsValidObjectId(objectId)) return false;
         if (!IsValidContainerId(targetContainerId)) return false;
@@ -334,6 +351,9 @@ internal static class ClientHelperHooks
     /// </summary>
     public static bool SplitStackInternal(uint objectId, uint targetContainerId, int slot, int amount)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueSplitStackInternal(objectId, targetContainerId, slot, amount);
+
         if (_moveItemInternal == null) return false;
         if (!IsValidObjectId(objectId)) return false;
         if (!IsValidContainerId(targetContainerId)) return false;
@@ -372,6 +392,9 @@ internal static class ClientHelperHooks
     /// </summary>
     public static bool MergeStackInternal(uint sourceObjectId, uint targetObjectId)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueMergeStackInternal(sourceObjectId, targetObjectId);
+
         if (_eventStackableMerge == null) return false;
         if (!IsValidObjectId(sourceObjectId)) return false;
         if (!IsValidObjectId(targetObjectId)) return false;

@@ -285,7 +285,27 @@ internal static class CrashLogger
     /// FPO-optimized native code (cimgui, acclient) where return addresses
     /// still sit on the stack but EBP is repurposed.
     /// </summary>
-    private static void DumpContext(IntPtr ctx)
+    /// <summary>
+    /// Reused by MainThreadHangWatchdog: format a captured x86 CONTEXT* (from
+    /// GetThreadContext on a suspended thread) as a register dump + stack walk.
+    /// </summary>
+    internal static void DumpExternalContext(IntPtr ctx, string tag) => DumpContext(ctx, tag);
+
+    private static void DumpContext(IntPtr ctx) => DumpContext(ctx, "CRASH");
+
+    /// <summary>module+RVA for a code address, or &lt;unknown&gt; — used by the
+    /// hang watchdog for cheap per-sample eip summaries.</summary>
+    internal static string ResolveCodeAddr(IntPtr addr)
+    {
+        try
+        {
+            string m = ResolveModule(addr, out IntPtr b);
+            return b != IntPtr.Zero ? $"{ShortModule(m)}+0x{addr.ToInt64() - b.ToInt64():X}" : "<unknown>";
+        }
+        catch { return "<err>"; }
+    }
+
+    private static void DumpContext(IntPtr ctx, string tag)
     {
         if (ctx == IntPtr.Zero) return;
 
@@ -308,9 +328,9 @@ internal static class CrashLogger
         }
 
         RynthLog.Info(
-            $"CRASH regs: eip=0x{eip:X8} eax=0x{eax:X8} ebx=0x{ebx:X8} ecx=0x{ecx:X8} " +
+            $"{tag} regs: eip=0x{eip:X8} eax=0x{eax:X8} ebx=0x{ebx:X8} ecx=0x{ecx:X8} " +
             $"edx=0x{edx:X8} esi=0x{esi:X8} edi=0x{edi:X8}");
-        RynthLog.Info($"CRASH regs: ebp=0x{ebp:X8} esp=0x{esp:X8}");
+        RynthLog.Info($"{tag} regs: ebp=0x{ebp:X8} esp=0x{esp:X8}");
 
         WalkEbpFrames((IntPtr)ebp);
         SweepStack((IntPtr)esp);
