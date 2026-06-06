@@ -17,7 +17,7 @@ Only FUNCTION (.text) VAs belong here. Data/global addresses (.data/.rdata singl
 RecvFrom slot, s_NullBuffer, selection globals) are Phase B — string/vtable discovery, not
 .text pattern scan.
 """
-import sys, struct
+import sys, struct, re, os, glob
 
 DEFAULT_TEXT_RVA = 0x1000
 MAX_TEXT_BYTES = 0x400000
@@ -252,12 +252,95 @@ def process(text_b, text_base, group):
         print(f"        {cs(pat)}")
     return ok, bad
 
+# ── CHECK mode: verify the patterns ACTUALLY EMBEDDED in the engine source still resolve
+# uniquely + correctly against a given acclient.exe. Catches binary drift AND transcription
+# typos before deploy. Exits non-zero on any failure (usable as a CI / pre-deploy gate).
+def _compat_dir():
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "src", "RynthCore.Engine", "Compatibility")
+
+def parse_engine_patterns():
+    srcs = {}
+    for f in glob.glob(os.path.join(_compat_dir(), "*.cs")):
+        with open(f, "r", encoding="utf-8") as fh:
+            srcs[f] = fh.read()
+    consts = {}
+    for s in srcs.values():
+        for m in re.finditer(r'const\s+u?int\s+(\w+)\s*=\s*[^;]*?0x([0-9A-Fa-f]+)', s):
+            consts[m.group(1)] = int(m.group(2), 16)
+    patterns = {}
+    for s in srcs.values():
+        for m in re.finditer(r'byte\?\[\]\s+(\w+)\s*=\s*\[(.*?)\]\s*;', s, re.DOTALL):
+            pat, ok = [], True
+            for t in m.group(2).split(','):
+                t = t.strip()
+                if not t:
+                    continue
+                if t == 'null':
+                    pat.append(None)
+                elif re.fullmatch(r'0x[0-9A-Fa-f]+', t):
+                    pat.append(int(t, 16))
+                else:
+                    ok = False; break
+            if ok and pat:
+                patterns[m.group(1)] = pat
+    def resolve_va(tail):
+        for name, val in consts.items():
+            if re.search(r'\b' + re.escape(name) + r'\b', tail):
+                return val
+        m = re.search(r'0x([0-9A-Fa-f]+)', tail)
+        return int(m.group(1), 16) if m else None
+    items = []
+    seen = set()
+    def add(kind, name, patvar, va, off, fn):
+        key = (name, patvar, fn)
+        if patvar in patterns and va is not None and key not in seen:
+            seen.add(key)
+            items.append({'kind': kind, 'name': name, 'pattern': patterns[patvar], 'va': va, 'off': off, 'file': fn})
+    for f, s in srcs.items():
+        fn = os.path.basename(f)
+        for m in re.finditer(r'ResolveData(?:Va)?\(\s*(?:\w+,\s*)?"([^"]+)",\s*(\w+)\s*,\s*(\d+)\s*,\s*([^;]+?)[;\n]', s):
+            add('data', m.group(1), m.group(2), resolve_va(m.group(4)), int(m.group(3)), fn)
+        for m in re.finditer(r'(?:HookResolver\.Resolve|Bind(?:Resolved)?<[^>]+>|ResolveAddr)\(\s*\w+,\s*"([^"]+)",\s*(\w+)\s*,\s*([^;]+?)[;\n]', s):
+            add('fn', m.group(1), m.group(2), resolve_va(m.group(3)), 0, fn)
+        for m in re.finditer(r'Resolve(?:Va|FnVa)\(\s*"([^"]+)",\s*(\w+)\s*,\s*([^;]+?)[;\n]', s):
+            add('fn', m.group(1), m.group(2), resolve_va(m.group(3)), 0, fn)
+    return items
+
+def process_check(text_b, text_base):
+    items = parse_engine_patterns()
+    print(f"Verifying {len(items)} embedded engine patterns against this acclient.exe...\n")
+    fails = 0
+    for it in sorted(items, key=lambda i: (i['file'], i['name'])):
+        ms = matches(text_b, it['pattern'], limit=16)
+        if it['kind'] == 'fn':
+            ok = (it['va'] - text_base) in set(ms)
+            why = "" if ok else ("pattern NOT FOUND" if not ms else f"matches {len(ms)} site(s), none at VA")
+        else:
+            if len(ms) == 1 and ms[0] + it['off'] + 4 <= len(text_b):
+                operand = struct.unpack_from('<I', text_b, ms[0] + it['off'])[0]
+                ok = operand == (it['va'] & 0xFFFFFFFF)
+                why = "" if ok else f"operand 0x{operand:08X} != expected 0x{it['va']:08X}"
+            else:
+                ok = False; why = f"{len(ms)} matches (data-xref needs exactly 1)"
+        if not ok:
+            fails += 1
+            print(f"[FAIL] {it['file']:30} {it['name']:38} VA=0x{it['va']:08X}  {why}")
+    print("=" * 60)
+    if fails == 0:
+        print(f"PASS - all {len(items)} embedded patterns unique & correct on this acclient.exe.")
+        return 0
+    print(f"FAIL - {fails}/{len(items)} embedded patterns did NOT verify. Re-cut with pe_pattern.py ALL/DATA, fix the source, rebuild.")
+    return 1
+
 def main():
     if len(sys.argv) < 2:
-        raise SystemExit("usage: pe_pattern.py <acclient.exe> [group|ALL]")
+        raise SystemExit("usage: pe_pattern.py <acclient.exe> [group|ALL|DATA|CHECK]")
     text_b, text_base = read_window(sys.argv[1])
     sel = sys.argv[2] if len(sys.argv) > 2 else "ALL"
     print(f"window base VA = 0x{text_base:08X}, window size = {len(text_b)} bytes\n")
+    if sel.upper() == "CHECK":
+        sys.exit(process_check(text_b, text_base))
     if sel.upper() == "DATA":
         process_data(text_b); return
     groups = list(GROUPS) if sel.upper() == "ALL" else [sel]
