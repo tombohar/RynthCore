@@ -184,9 +184,25 @@ internal static class CObjectMaintHooks
         return count;
     }
 
+    // Phase B: resolve s_pcInstance's address by code-xref ("mov ecx,[s_pcInstance]" =
+    // 8B 0D <addr>), operand at offset 2; the VA stays as fallback. Resolved lazily once.
+    private static readonly byte?[] PatXrefInstancePP = [ 0x8B, 0x0D, null, null, null, null, 0x55, 0xE8 ];
+    private static int _instancePPAddr;
+
+    private static int InstancePPAddr()
+    {
+        if (_instancePPAddr == 0)
+        {
+            _instancePPAddr = S_PC_INSTANCE_VA;
+            if (AcClientModule.TryReadTextSection(out AcClientTextSection text))
+                _instancePPAddr = HookResolver.ResolveData(text, "CObjectMaint.s_pcInstance", PatXrefInstancePP, 2, S_PC_INSTANCE_VA).Address.ToInt32();
+        }
+        return _instancePPAddr;
+    }
+
     private static IntPtr ReadMaintainer()
     {
-        IntPtr instancePP = new IntPtr(S_PC_INSTANCE_VA);
+        IntPtr instancePP = new IntPtr(InstancePPAddr());
         if (!SmartBoxLocator.IsMemoryReadable(instancePP, 4))
             return IntPtr.Zero;
         IntPtr maintainer = Marshal.ReadIntPtr(instancePP);

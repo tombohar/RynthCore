@@ -11,13 +11,18 @@ internal static class SelectedTargetHooks
     private const int SetSelectedObjectVa = 0x0058D110;
     private const int SelectedIdVa = 0x00871E54;
 
+    // Phase B: resolve s_selected_id's address by code-xref (ret; mov eax,[s_selected_id] =
+    // C3 A1 <addr>), operand at offset 2; the VA stays as fallback. Resolved in Initialize.
+    private static readonly byte?[] PatXrefSelectedId = [ 0xC3, 0xA1, null, null, null, null, 0x89, 0x87 ];
+    private static int _selectedIdAddr = SelectedIdVa;
+
     /// <summary>
     /// Reads the AC client's currently-selected target id directly from the
     /// global. Used by PluginManager.DispatchLoginCompleteToLoadedPlugins to
     /// re-seed plugins with the live target after a deferred init (events
     /// fired before <c>_initialized=true</c> are dropped by the queue gate).
     /// </summary>
-    public static uint ReadCurrentSelectedId() => ReadUInt32(SelectedIdVa);
+    public static uint ReadCurrentSelectedId() => ReadUInt32(_selectedIdAddr);
     private static readonly byte[] SetSelectedObjectSignature =
     [
         0x8B, 0x4C, 0x24, 0x08, 0x85, 0xC9, 0xA1, 0x54,
@@ -56,6 +61,8 @@ internal static class SelectedTargetHooks
             return;
         }
 
+        _selectedIdAddr = HookResolver.ResolveData(textSection, "SelectedTarget.s_selected_id", PatXrefSelectedId, 2, SelectedIdVa).Address.ToInt32();
+
         try
         {
             _targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
@@ -79,7 +86,7 @@ internal static class SelectedTargetHooks
 
     private static void SetSelectedObjectDetour(uint selectedId, int reselect)
     {
-        uint previousTargetId = ReadUInt32(SelectedIdVa);
+        uint previousTargetId = ReadUInt32(_selectedIdAddr);
 
         try
         {
@@ -91,7 +98,7 @@ internal static class SelectedTargetHooks
             throw;
         }
 
-        uint currentTargetId = ReadUInt32(SelectedIdVa);
+        uint currentTargetId = ReadUInt32(_selectedIdAddr);
         if (currentTargetId == previousTargetId)
             return;
 

@@ -32,6 +32,15 @@ internal static unsafe class ChatCommandDispatcher
         HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
         return (void*)(r.Success ? r.Address : new IntPtr(fallbackVa));
     }
+
+    // Phase B: PStringBase<char>::s_NullBuffer (0x008EF11C) via code-xref (3B 3D <addr>), offset 2.
+    private static readonly byte?[] PatXrefPStringNullBuffer = [ 0x3B, 0x3D, null, null, null, null, 0x74, 0xF1 ];
+    private static IntPtr ResolveDataVa(string name, byte?[] pattern, int operandOffset, int fallbackVa)
+    {
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
+            return new IntPtr(fallbackVa);
+        return HookResolver.ResolveData(text, name, pattern, operandOffset, fallbackVa).Address;
+    }
     // CM_Communication::Event_* — all cdecl, all using AC1Legacy::PStringBase<char>
     private static readonly delegate* unmanaged[Cdecl]<LegacyPString*, byte> FnEventTalk =
         (delegate* unmanaged[Cdecl]<LegacyPString*, byte>)ResolveVa("ChatCmd.Event_Talk", PatEventTalk, 0x006A53E0);
@@ -73,7 +82,7 @@ internal static unsafe class ChatCommandDispatcher
     {
         public IntPtr Buffer;
 
-        private static readonly IntPtr NullBufferVa = new(0x008EF11C);
+        private static readonly IntPtr NullBufferVa = ResolveDataVa("ChatCmd.PStringChar_NullBuffer", PatXrefPStringNullBuffer, 2, 0x008EF11C);
         private static readonly delegate* unmanaged[Thiscall]<LegacyPString*, byte*, void> Ctor =
             (delegate* unmanaged[Thiscall]<LegacyPString*, byte*, void>)ResolveVa("ChatCmd.PStringBaseC_ctor", PatPStringBaseCtor, 0x0048C3E0);
         private static readonly delegate* unmanaged[Thiscall]<LegacyPString*, void> ClearFn =

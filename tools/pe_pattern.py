@@ -177,6 +177,64 @@ def best_pattern(text_b, text_base, va, off):
             return mode, pat
     return None, None
 
+# DATA/global addresses (.data/.rdata) — resolved by code-xref: find a unique .text site
+# that references the address as an absolute operand, wildcard the 4 operand bytes, and read
+# the address back from the matched operand at runtime. Robust if the global moves.
+GROUPS_DATA = [
+    ("CPlayerSystem", 0x0087119C), ("ClientUISystem", 0x00871354),
+    ("CommunicationSystem", 0x00870BE4), ("s_pCombatSystem", 0x0087166C),
+    ("CObjectMaint_s_pcInstance", 0x00842ADC), ("UIFlow", 0x0083E72C),
+    ("s_selected_id", 0x00871E54), ("s_previous_selected_id", 0x00871E58),
+    ("split_amount", 0x0081D7EC), ("total_stack", 0x0081D7F0),
+    ("PStringChar_s_NullBuffer", 0x008EF11C), ("PStringWide_s_NullBuffer", 0x00818340),
+    ("RecvFrom_slot", 0x007935AC),
+]
+
+def _find_all(text_b, needle, limit=80):
+    out, start = [], 0
+    while True:
+        i = text_b.find(needle, start)
+        if i < 0: break
+        out.append(i); start = i + 1
+        if len(out) > limit: break
+    return out
+
+def data_xref(text_b, va):
+    """Unique .text code site referencing data VA as an absolute operand.
+    Returns (pattern with the 4 operand bytes wildcarded, operand_offset) or None."""
+    needle = struct.pack("<I", va & 0xFFFFFFFF)
+    best = None
+    for idx in _find_all(text_b, needle):
+        for lead in (2, 1, 3, 5, 8, 12):
+            if idx - lead < 0: continue
+            done = False
+            for tail in range(0, 26, 2):
+                pat = list(text_b[idx - lead:idx]) + [None] * 4 + list(text_b[idx + 4:idx + 4 + tail])
+                ms = matches(text_b, pat)
+                if len(ms) == 1:
+                    if struct.unpack_from("<I", text_b, ms[0] + lead)[0] == (va & 0xFFFFFFFF):
+                        if best is None or len(pat) < best[0]:
+                            best = (len(pat), pat, lead)
+                    done = True
+                    break
+            if done: break
+    return (best[1], best[2]) if best else None
+
+def process_data(text_b):
+    print("=== DATA (.data/.rdata globals via code-xref) ===")
+    ok = bad = 0
+    for name, va in GROUPS_DATA:
+        res = data_xref(text_b, va)
+        if res is None:
+            bad += 1
+            print(f"[!! ] {name:28} 0x{va:08X}  no unique code-xref found"); continue
+        pat, off = res
+        ok += 1
+        print(f"[OK ] {name:28} 0x{va:08X}  operandOffset={off} len={len(pat)}")
+        print(f"        {cs(pat)}")
+    print(f"\nData xrefs found: {ok}/{ok + bad}")
+    return ok, bad
+
 def process(text_b, text_base, group):
     print(f"=== {group} ===")
     ok = bad = 0
@@ -200,6 +258,8 @@ def main():
     text_b, text_base = read_window(sys.argv[1])
     sel = sys.argv[2] if len(sys.argv) > 2 else "ALL"
     print(f"window base VA = 0x{text_base:08X}, window size = {len(text_b)} bytes\n")
+    if sel.upper() == "DATA":
+        process_data(text_b); return
     groups = list(GROUPS) if sel.upper() == "ALL" else [sel]
     tok = tbad = 0
     for g in groups:

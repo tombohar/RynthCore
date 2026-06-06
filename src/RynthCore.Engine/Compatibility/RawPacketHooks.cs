@@ -20,6 +20,10 @@ internal static class RawPacketHooks
 {
     private const int RecvFromPtrAddr = unchecked((int)0x007935AC);
 
+    // Phase B: resolve the RecvFrom fn-ptr slot's address by code-xref ("call [slot]" =
+    // FF 15 <addr>), operand at offset 2; the VA stays as fallback.
+    private static readonly byte?[] PatXrefRecvFromSlot = [ 0xFF, 0x15, null, null, null, null, 0x8B, 0xF0, 0x85, 0xF6, 0x7E, 0x67 ];
+
     private static IntPtr _originalRecvFromPtr;
 
     public static bool IsInstalled { get; private set; }
@@ -28,12 +32,16 @@ internal static class RawPacketHooks
     {
         if (IsInstalled) return;
 
+        int slotAddr = RecvFromPtrAddr;
+        if (AcClientModule.TryReadTextSection(out AcClientTextSection text))
+            slotAddr = HookResolver.ResolveData(text, "RawPacket.RecvFromSlot", PatXrefRecvFromSlot, 2, RecvFromPtrAddr).Address.ToInt32();
+
         unsafe
         {
-            IntPtr fnPtrAddr = new IntPtr(RecvFromPtrAddr);
+            IntPtr fnPtrAddr = new IntPtr(slotAddr);
             if (!SmartBoxLocator.IsMemoryReadable(fnPtrAddr, 4))
             {
-                RynthLog.Compat("RawPacket: RecvFrom pointer address 0x007935AC not readable — skipping.");
+                RynthLog.Compat($"RawPacket: RecvFrom pointer address 0x{slotAddr:X8} not readable — skipping.");
                 return;
             }
 

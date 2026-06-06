@@ -74,6 +74,12 @@ internal static class ClientCombatHooks
     private static readonly byte?[] PatAutoTarget = [ 0x83, 0xEC, 0x18, 0x53, 0x56, 0x57, 0x8D, 0x44, 0x24, 0x10 ];
     private static readonly byte?[] PatSendAttackHeightChanged = [ 0xE8, null, null, null, null, 0x8B, 0x10, 0x68, 0xFC ];
 
+    // Phase B (1a-data): s_pCombatSystem global (0x0087166C) resolved by code-xref — the unique
+    // "mov [s_pCombatSystem],esi" site (89 35 <addr>); read the address from the operand at
+    // offset 2. The VA stays as the logged fallback.
+    private static readonly byte?[] PatXrefCombatSystemPtr = [ 0x89, 0x35, null, null, null, null, 0x8B, 0x06 ];
+    private static IntPtr _combatSystemPtrAddr = new(CombatSystemPtrVa);
+
     private static T? Bind<T>(AcClientTextSection text, string name, byte?[] pattern, int fallbackVa) where T : Delegate
     {
         HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
@@ -100,6 +106,8 @@ internal static class ClientCombatHooks
                 return false;
             }
 
+            _combatSystemPtrAddr = HookResolver.ResolveData(text, "ClientCombat.s_pCombatSystem", PatXrefCombatSystemPtr, 2, CombatSystemPtrVa).Address;
+
             _getCombatSystem = Bind<GetCombatSystemDelegate>(text, "ClientCombat.GetCombatSystem", PatGetCombatSystem, GetCombatSystemVa);
             _setAttackHeight = Bind<SetRequestedAttackHeightDelegate>(text, "ClientCombat.SetRequestedAttackHeight", PatSetRequestedAttackHeight, SetRequestedAttackHeightVa);
             _startAttackRequest = Bind<StartAttackRequestDelegate>(text, "ClientCombat.StartAttackRequest", PatStartAttackRequest, StartAttackRequestVa);
@@ -110,7 +118,7 @@ internal static class ClientCombatHooks
 
             // Verify the combat system singleton is accessible
             IntPtr cs = _getCombatSystem?.Invoke() ?? IntPtr.Zero;
-            IntPtr globalPtr = Marshal.ReadIntPtr(new IntPtr(CombatSystemPtrVa));
+            IntPtr globalPtr = Marshal.ReadIntPtr(_combatSystemPtrAddr);
             RynthLog.Verbose($"Compat: ClientCombat GetCombatSystem()=0x{cs:X8}, global=0x{globalPtr:X8}");
             if (cs == IntPtr.Zero && globalPtr == IntPtr.Zero)
             {
@@ -165,7 +173,7 @@ internal static class ClientCombatHooks
             IntPtr cs = _getCombatSystem();
             if (cs == IntPtr.Zero)
             {
-                IntPtr globalPtr = Marshal.ReadIntPtr(new IntPtr(CombatSystemPtrVa));
+                IntPtr globalPtr = Marshal.ReadIntPtr(_combatSystemPtrAddr);
                 if (globalPtr == IntPtr.Zero) return false;
                 cs = globalPtr;
             }

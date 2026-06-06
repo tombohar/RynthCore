@@ -595,6 +595,11 @@ internal static class ClientObjectHooks
     private static IntPtr _getNumContainedItemsPtr;
     private static IntPtr _getNumContainedContainersPtr;
 
+    // Phase B: PStringBase<char>::s_NullBuffer (0x008EF11C) resolved by code-xref
+    // (cmp edi,[s_NullBuffer] = 3B 3D <addr>), operand at offset 2; VA stays fallback.
+    private static readonly byte?[] PatXrefPStringNullBuffer = [ 0x3B, 0x3D, null, null, null, null, 0x74, 0xF1 ];
+    private static IntPtr _pStringNullBufferAddr = new(PStringBaseNullBuffer);
+
     private static IntPtr ResolveAddr(AcClientTextSection text, string name, byte?[] pattern, int fallbackVa)
     {
         HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
@@ -657,6 +662,7 @@ internal static class ClientObjectHooks
         _getVitaeValue = BindResolved<GetVitaeValueDelegate>(text, "ClientObject.GetVitaeValue", PatGetVitaeValue, ReferenceGetVitaeValue, out _);
         _getNumContainedItemsPtr = ResolveAddr(text, "ClientObject.GetNumContainedItems", PatGetNumContainedItems, ReferenceGetNumContainedItems);
         _getNumContainedContainersPtr = ResolveAddr(text, "ClientObject.GetNumContainedContainers", PatGetNumContainedContainers, ReferenceGetNumContainedContainers);
+        _pStringNullBufferAddr = HookResolver.ResolveData(text, "ClientObject.PStringChar_NullBuffer", PatXrefPStringNullBuffer, 2, PStringBaseNullBuffer).Address;
         RynthLog.Verbose(
             $"Compat: client object hooks ready - getWeenie=0x{getWeeniePtr.ToInt32():X8}, getNameStatic=0x{getNameStaticPtr.ToInt32():X8}, getNameInstance=0x{getNameInstancePtr.ToInt32():X8}");
         return true;
@@ -2032,7 +2038,7 @@ internal static class ClientObjectHooks
             // Read s_NullBuffer to properly initialize PStringBase<char>.
             // PStringBase<char> is 4 bytes: { PSRefBuffer<char>* m_buffer }.
             // InqString calls operator= which Release()s the old m_buffer — crashes if zero.
-            IntPtr nullBufferAddr = new IntPtr(PStringBaseNullBuffer);
+            IntPtr nullBufferAddr = _pStringNullBufferAddr;
             if (!IsReadablePointer(nullBufferAddr))
                 return false;
             IntPtr nullBuffer = Marshal.ReadIntPtr(nullBufferAddr);

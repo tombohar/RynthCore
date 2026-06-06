@@ -125,4 +125,49 @@ internal static class HookResolver
             return new ResolveResult(IntPtr.Zero, ResolveSource.Failed, $"exception:{ex.GetType().Name}");
         }
     }
+
+    /// <summary>
+    /// Resolve a DATA/global address (.data/.rdata — singleton ptr, selection id, string
+    /// null-buffer, fn-ptr slot, …) by CODE-XREF: pattern-scan .text for a unique instruction
+    /// that references the address as an absolute operand (the 4 operand bytes wildcarded in
+    /// <paramref name="codePattern"/>), then read the address back from that operand at
+    /// <paramref name="operandOffset"/>. Robust if the global relocates across builds.
+    ///
+    /// Unlike function resolution this does NOT fail closed: the data VA is read/written by the
+    /// caller, which assumes it always has one, so a miss falls back to the hardcoded VA (== old
+    /// behavior) with a loud log rather than returning Zero.
+    /// </summary>
+    public static ResolveResult ResolveData(
+        AcClientTextSection text, string name, byte?[] codePattern, int operandOffset, int fallbackVa)
+    {
+        try
+        {
+            int first = PatternScanner.FindPattern(text.Bytes, codePattern);
+            if (first >= 0 && first + operandOffset + 4 <= text.Bytes.Length)
+            {
+                int next = PatternScanner.FindPatternInRegion(text.Bytes, codePattern, first + 1, text.Bytes.Length);
+                if (next < 0)
+                {
+                    int operand = BitConverter.ToInt32(text.Bytes, first + operandOffset);
+                    RynthLog.Info(
+                        $"HookResolver[{name}]: RESOLVED via data-xref @ 0x{operand:X8} " +
+                        $"(fallbackVa=0x{fallbackVa:X8}, delta={(operand - fallbackVa):+#;-#;0}).");
+                    return new ResolveResult(new IntPtr(operand), ResolveSource.PatternScan, "data-xref");
+                }
+                RynthLog.Compat(
+                    $"HookResolver[{name}]: data-xref matched MULTIPLE .text sites — falling back to hardcoded VA 0x{fallbackVa:X8} (RISKY).");
+            }
+            else
+            {
+                RynthLog.Compat(
+                    $"HookResolver[{name}]: data-xref pattern not found — falling back to hardcoded VA 0x{fallbackVa:X8} (RISKY).");
+            }
+            return new ResolveResult(new IntPtr(fallbackVa), ResolveSource.FallbackVa, "data-fallback");
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"HookResolver[{name}]: data-xref exception {ex.GetType().Name}: {ex.Message} — fallback VA 0x{fallbackVa:X8}.");
+            return new ResolveResult(new IntPtr(fallbackVa), ResolveSource.FallbackVa, "data-fallback-exc");
+        }
+    }
 }

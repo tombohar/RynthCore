@@ -607,14 +607,31 @@ internal static class ChatCallbackHooks
 
     // Minimal duplicate of ClientHelperHooks.WidePString (AC1Legacy::PStringBase<wchar_t>).
     // Duplicated deliberately so the actively-used WriteToChat path stays untouched.
+    // Phase B / 1a-dup: resolve the PStringBase<wchar_t> ctor/dtor (fn VAs) by pattern and the
+    // s_NullBuffer (data VA) by code-xref. These were duplicate raw VAs left by 1a's per-file pass.
+    private static readonly byte?[] PatWidePStringCtor = [ 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0x85, 0xFF, 0x8B, 0xF1, 0x74, 0x2C ];
+    private static readonly byte?[] PatWidePStringDtor = [ 0x56, 0x8B, 0x31, 0x83, 0xEE, 0x14, 0x8D, 0x46 ];
+    private static readonly byte?[] PatXrefWideNullBuffer = [ 0x3B, 0x05, null, null, null, null, 0x74, 0xE7 ];
+    private static unsafe void* ResolveFnVa(string name, byte?[] pattern, int fallbackVa)
+    {
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text)) return (void*)fallbackVa;
+        HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
+        return (void*)(r.Success ? r.Address : new IntPtr(fallbackVa));
+    }
+    private static IntPtr ResolveDataVa(string name, byte?[] pattern, int operandOffset, int fallbackVa)
+    {
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text)) return new IntPtr(fallbackVa);
+        return HookResolver.ResolveData(text, name, pattern, operandOffset, fallbackVa).Address;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private unsafe struct OutgoingWidePString
     {
-        private static readonly IntPtr NullWideBufferVa = new(0x00818340);
+        private static readonly IntPtr NullWideBufferVa = ResolveDataVa("ChatCallback.PStringW_NullBuffer", PatXrefWideNullBuffer, 2, 0x00818340);
         private static readonly delegate* unmanaged[Thiscall]<OutgoingWidePString*, ushort*, void> Ctor =
-            (delegate* unmanaged[Thiscall]<OutgoingWidePString*, ushort*, void>)0x00402730;
+            (delegate* unmanaged[Thiscall]<OutgoingWidePString*, ushort*, void>)ResolveFnVa("ChatCallback.PStringW_ctor", PatWidePStringCtor, 0x00402730);
         private static readonly delegate* unmanaged[Thiscall]<OutgoingWidePString*, void> Dtor =
-            (delegate* unmanaged[Thiscall]<OutgoingWidePString*, void>)0x004011B0;
+            (delegate* unmanaged[Thiscall]<OutgoingWidePString*, void>)ResolveFnVa("ChatCallback.PStringW_dtor", PatWidePStringDtor, 0x004011B0);
 
         public IntPtr CharBuffer;
 

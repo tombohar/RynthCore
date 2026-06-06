@@ -38,6 +38,11 @@ internal static class CombatModeHooks
     private const uint CombatSystemPtrVa = 0x0087166C;
     private const int CombatModeOffset = 28;
 
+    // Phase B: resolve s_pCombatSystem's address by code-xref ("mov [s_pCombatSystem],esi" =
+    // 89 35 <addr>), operand at offset 2; the VA stays as fallback. Resolved in Initialize.
+    private static readonly byte?[] PatXrefCombatSystemPtr = [ 0x89, 0x35, null, null, null, null, 0x8B, 0x06 ];
+    private static uint _combatSystemPtrAddr = CombatSystemPtrVa;
+
     public static bool IsInstalled { get; private set; }
     public static string StatusMessage => _statusMessage;
 
@@ -45,7 +50,7 @@ internal static class CombatModeHooks
     {
         try
         {
-            IntPtr combatSystem = *(IntPtr*)CombatSystemPtrVa;
+            IntPtr combatSystem = *(IntPtr*)_combatSystemPtrAddr;
             if (combatSystem == IntPtr.Zero)
                 return CombatActionHooks.CombatModeNonCombat;
             int raw = *(int*)(combatSystem + CombatModeOffset);
@@ -75,6 +80,8 @@ internal static class CombatModeHooks
             _statusMessage = $"Resolve failed ({resolved.Detail}).";
             return;
         }
+
+        _combatSystemPtrAddr = (uint)HookResolver.ResolveData(textSection, "CombatMode.s_pCombatSystem", PatXrefCombatSystemPtr, 2, (int)CombatSystemPtrVa).Address.ToInt32();
 
         try
         {

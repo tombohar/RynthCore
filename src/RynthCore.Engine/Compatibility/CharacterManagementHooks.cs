@@ -8,6 +8,12 @@ internal static class CharacterManagementHooks
 {
     private const int UIFlowInstanceVa = 0x0083E72C;
     private const int PlayerSystemVa = 0x0087119C;
+
+    // Phase B: resolve the two data globals by code-xref (operand at offset 2); VAs stay fallback.
+    private static readonly byte?[] PatXrefUIFlow = [ 0x51, 0xA1, null, null, null, null, 0x8B, 0x4C ];
+    private static readonly byte?[] PatXrefCPlayerSystem = [ 0xC7, 0x05, null, null, null, null, 0x00, 0x00, 0x00, 0x00, 0x83, 0xC6 ];
+    private static int _uiFlowAddr = UIFlowInstanceVa;
+    private static int _playerSystemAddr = PlayerSystemVa;
     private const int UIFlowCurModeOffset = 0x8C;
     private const int UIFlowDataOffset = 0x98;
     private const int UIPersistantDataCharacterSetOffset = 0x04;
@@ -242,6 +248,8 @@ internal static class CharacterManagementHooks
                 _characterSetGetIdentity = Bind<CharacterSetGetIdentityDelegate>(text, "CharMgmt.CharacterSetGetIdentity", PatCharacterSetGetIdentity, CharacterSetGetIdentityVa);
                 _characterSetGetName = Bind<CharacterSetGetNameDelegate>(text, "CharMgmt.CharacterSetGetName", PatCharacterSetGetName, CharacterSetGetNameVa);
                 _characterSetGetGid = Bind<CharacterSetGetGidDelegate>(text, "CharMgmt.CharacterSetGetGid", PatCharacterSetGetGid, CharacterSetGetGidVa);
+                _uiFlowAddr = HookResolver.ResolveData(text, "CharMgmt.UIFlow", PatXrefUIFlow, 2, UIFlowInstanceVa).Address.ToInt32();
+                _playerSystemAddr = HookResolver.ResolveData(text, "CharMgmt.CPlayerSystem", PatXrefCPlayerSystem, 2, PlayerSystemVa).Address.ToInt32();
 
                 _bound = _uiFlowGetPersistantData != null && _getPlayerSystem != null && _logOnCharacter != null
                          && _characterSetGetIdentity != null && _characterSetGetName != null && _characterSetGetGid != null;
@@ -266,7 +274,7 @@ internal static class CharacterManagementHooks
     {
         try
         {
-            return Marshal.ReadIntPtr(new IntPtr(UIFlowInstanceVa));
+            return Marshal.ReadIntPtr(new IntPtr(_uiFlowAddr));
         }
         catch
         {
@@ -322,7 +330,7 @@ internal static class CharacterManagementHooks
 
         try
         {
-            return Marshal.ReadIntPtr(new IntPtr(PlayerSystemVa));
+            return Marshal.ReadIntPtr(new IntPtr(_playerSystemAddr));
         }
         catch
         {

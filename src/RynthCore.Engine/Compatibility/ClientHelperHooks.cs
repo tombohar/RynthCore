@@ -173,6 +173,32 @@ internal static class ClientHelperHooks
         return r.Success ? Marshal.GetDelegateForFunctionPointer<T>(r.Address) : null;
     }
 
+    // Phase B: data globals resolved by code-xref (operand at offset 2); the VA consts above
+    // stay as fallbacks. The 7 read/write globals resolve in Probe (cached int); the WidePString
+    // null-buffer resolves at struct static-init via ResolveDataVa.
+    private static readonly byte?[] PatXrefSelectedId = [ 0xC3, 0xA1, null, null, null, null, 0x89, 0x87 ];
+    private static readonly byte?[] PatXrefPrevSelectedId = [ 0x89, 0x3D, null, null, null, null, 0x74, 0x06 ];
+    private static readonly byte?[] PatXrefUiSystem = [ 0x8B, 0x0D, null, null, null, null, 0x53, 0x6A ];
+    private static readonly byte?[] PatXrefSplitAmount = [ 0x00, 0xA1, null, null, null, null, 0x57, 0x50 ];
+    private static readonly byte?[] PatXrefTotalStack = [ 0x10, 0xA1, null, null, null, null, 0x3B, 0xD8 ];
+    private static readonly byte?[] PatXrefPlayerSystem = [ 0xC7, 0x05, null, null, null, null, 0x00, 0x00, 0x00, 0x00, 0x83, 0xC6 ];
+    private static readonly byte?[] PatXrefCommunicationSystem = [ 0x08, 0xA1, null, null, null, null, 0x56, 0xBE ];
+    private static readonly byte?[] PatXrefWideNullBuffer = [ 0x3B, 0x05, null, null, null, null, 0x74, 0xE7 ];
+    private static int _selectedIdAddr = SelectedIdVa;
+    private static int _prevSelectedIdAddr = PreviousSelectedIdVa;
+    private static int _uiSystemAddr = UiSystemVa;
+    private static int _splitAmountAddr = SplitAmountVa;
+    private static int _totalStackAddr = TotalStackVa;
+    private static int _playerSystemAddr = PlayerSystemVa;
+    private static int _commSystemAddr = CommunicationSystemVa;
+
+    private static IntPtr ResolveDataVa(string name, byte?[] pattern, int operandOffset, int fallbackVa)
+    {
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
+            return new IntPtr(fallbackVa);
+        return HookResolver.ResolveData(text, name, pattern, operandOffset, fallbackVa).Address;
+    }
+
     public static bool Probe()
     {
         try
@@ -199,6 +225,13 @@ internal static class ClientHelperHooks
             _sendNoticeOpenSalvagePanel = Bind<SendNoticeOpenSalvagePanelDelegate>(text, "ClientHelper.SendNotice_OpenSalvagePanel", PatSendNoticeOpenSalvagePanel, SendNoticeOpenSalvagePanelVa);
             _gmSalvageUIAddNewItem = Bind<GmSalvageUIAddNewItemDelegate>(text, "ClientHelper.gmSalvageUI_AddNewItem", PatGmSalvageUIAddNewItem, GmSalvageUIAddNewItemVa);
             _gmSalvageUISalvage = Bind<GmSalvageUISalvageDelegate>(text, "ClientHelper.gmSalvageUI_Salvage", PatGmSalvageUISalvage, GmSalvageUISalvageVa);
+            _selectedIdAddr = HookResolver.ResolveData(text, "ClientHelper.s_selected_id", PatXrefSelectedId, 2, SelectedIdVa).Address.ToInt32();
+            _prevSelectedIdAddr = HookResolver.ResolveData(text, "ClientHelper.s_previous_selected_id", PatXrefPrevSelectedId, 2, PreviousSelectedIdVa).Address.ToInt32();
+            _uiSystemAddr = HookResolver.ResolveData(text, "ClientHelper.ClientUISystem", PatXrefUiSystem, 2, UiSystemVa).Address.ToInt32();
+            _splitAmountAddr = HookResolver.ResolveData(text, "ClientHelper.split_amount", PatXrefSplitAmount, 2, SplitAmountVa).Address.ToInt32();
+            _totalStackAddr = HookResolver.ResolveData(text, "ClientHelper.total_stack", PatXrefTotalStack, 2, TotalStackVa).Address.ToInt32();
+            _playerSystemAddr = HookResolver.ResolveData(text, "ClientHelper.CPlayerSystem", PatXrefPlayerSystem, 2, PlayerSystemVa).Address.ToInt32();
+            _commSystemAddr = HookResolver.ResolveData(text, "ClientHelper.CommunicationSystem", PatXrefCommunicationSystem, 2, CommunicationSystemVa).Address.ToInt32();
             _initialized = true;
             _statusMessage = "Ready.";
             RynthLog.Verbose("Compat: helper hooks ready - validated select/state/chat helpers plus mapped interaction and inventory helpers.");
@@ -236,12 +269,12 @@ internal static class ClientHelperHooks
 
     public static uint GetSelectedItemId()
     {
-        return ReadUInt32(SelectedIdVa);
+        return ReadUInt32(_selectedIdAddr);
     }
 
     public static uint GetPreviousSelectedItemId()
     {
-        return ReadUInt32(PreviousSelectedIdVa);
+        return ReadUInt32(_prevSelectedIdAddr);
     }
 
     public static bool UseObject(uint objectId)
@@ -258,7 +291,7 @@ internal static class ClientHelperHooks
 
         try
         {
-            IntPtr uiSystem = ReadPointer(UiSystemVa);
+            IntPtr uiSystem = ReadPointer(_uiSystemAddr);
             if (uiSystem == IntPtr.Zero)
                 return false;
 
@@ -399,8 +432,8 @@ internal static class ClientHelperHooks
             // Force split_amount < total_stack so FUN_00588f70 takes the split
             // path. The actual values aren't sent on the wire — FUN_00588f70
             // only uses them to pick which sub-function to dispatch to.
-            Marshal.WriteInt32(new IntPtr(SplitAmountVa), amount);
-            Marshal.WriteInt32(new IntPtr(TotalStackVa), amount + 1);
+            Marshal.WriteInt32(new IntPtr(_splitAmountAddr), amount);
+            Marshal.WriteInt32(new IntPtr(_totalStackAddr), amount + 1);
 
             _moveItemInternal(IntPtr.Zero, objectId, targetContainerId, slot, amount);
             return true;
@@ -485,7 +518,7 @@ internal static class ClientHelperHooks
 
         try
         {
-            IntPtr playerSystem = ReadPointer(PlayerSystemVa);
+            IntPtr playerSystem = ReadPointer(_playerSystemAddr);
             if (playerSystem == IntPtr.Zero)
                 return false;
 
@@ -596,7 +629,7 @@ internal static class ClientHelperHooks
 
         try
         {
-            IntPtr communicationSystem = ReadPointer(CommunicationSystemVa);
+            IntPtr communicationSystem = ReadPointer(_commSystemAddr);
             if (communicationSystem == IntPtr.Zero)
                 return false;
 
@@ -812,7 +845,7 @@ internal static class ClientHelperHooks
     [StructLayout(LayoutKind.Sequential)]
     private unsafe struct WidePString
     {
-        private static readonly IntPtr NullWideBufferVa = new(0x00818340);
+        private static readonly IntPtr NullWideBufferVa = ResolveDataVa("ClientHelper.PStringWide_NullBuffer", PatXrefWideNullBuffer, 2, 0x00818340);
         private static readonly delegate* unmanaged[Thiscall]<WidePString*, ushort*, void> Ctor = (delegate* unmanaged[Thiscall]<WidePString*, ushort*, void>)ResolveFnPtr("ClientHelper.PStringBaseW_ctor", PatWidePStringCtor, 0x00402730);
         private static readonly delegate* unmanaged[Thiscall]<WidePString*, void> Dtor = (delegate* unmanaged[Thiscall]<WidePString*, void>)ResolveFnPtr("ClientHelper.PStringBaseW_dtor", PatWidePStringDtor, 0x004011B0);
 
