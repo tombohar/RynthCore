@@ -62,6 +62,24 @@ internal static class ClientCombatHooks
     private static AutoTargetDelegate? _autoTarget;
     private static SendAttackHeightChangedDelegate? _sendAttackHeightChanged;
 
+    // ── Pattern-resolved binding (1a hardening, 2026-06-05) ─────────────
+    // The *Va consts above are now FALLBACKs. These signatures (verified unique + landing
+    // exactly at the VA offline against this client via tools/pe_pattern.py) are the source
+    // of truth, so binding survives AC-patch / ACE-rebuild drift. null = wildcard (rel32).
+    private static readonly byte?[] PatGetCombatSystem = [ 0xA1, 0x6C, 0x16, 0x87, 0x00, 0xC3, 0x90, 0x90 ];
+    private static readonly byte?[] PatSetRequestedAttackHeight = [ 0x8B, 0x51, 0x24, 0x8B, 0x44, 0x24, 0x04, 0x3B ];
+    private static readonly byte?[] PatStartAttackRequest = [ 0x51, 0x56, 0x8B, 0xF1, 0xE8, null, null, null, null, 0x8A ];
+    private static readonly byte?[] PatEndAttackRequest = [ 0x51, 0x56, 0x8B, 0xF1, 0x8A, 0x46, 0x3E, 0x84, 0xC0, 0x0F ];
+    private static readonly byte?[] PatPlayerInReadyPosition = [ 0xA1, 0x58, 0xDA, 0x83, 0x00, 0x83, 0xEC, 0x18 ];
+    private static readonly byte?[] PatAutoTarget = [ 0x83, 0xEC, 0x18, 0x53, 0x56, 0x57, 0x8D, 0x44, 0x24, 0x10 ];
+    private static readonly byte?[] PatSendAttackHeightChanged = [ 0xE8, null, null, null, null, 0x8B, 0x10, 0x68, 0xFC ];
+
+    private static T? Bind<T>(AcClientTextSection text, string name, byte?[] pattern, int fallbackVa) where T : Delegate
+    {
+        HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
+        return r.Success ? Marshal.GetDelegateForFunctionPointer<T>(r.Address) : null;
+    }
+
     private static bool _initialized;
     private static string _statusMessage = "Not probed yet.";
 
@@ -75,16 +93,23 @@ internal static class ClientCombatHooks
     {
         try
         {
-            _getCombatSystem = Marshal.GetDelegateForFunctionPointer<GetCombatSystemDelegate>(new IntPtr(GetCombatSystemVa));
-            _setAttackHeight = Marshal.GetDelegateForFunctionPointer<SetRequestedAttackHeightDelegate>(new IntPtr(SetRequestedAttackHeightVa));
-            _startAttackRequest = Marshal.GetDelegateForFunctionPointer<StartAttackRequestDelegate>(new IntPtr(StartAttackRequestVa));
-            _endAttackRequest = Marshal.GetDelegateForFunctionPointer<EndAttackRequestDelegate>(new IntPtr(EndAttackRequestVa));
-            _playerInReadyPosition = Marshal.GetDelegateForFunctionPointer<PlayerInReadyPositionDelegate>(new IntPtr(PlayerInReadyPositionVa));
-            _autoTarget = Marshal.GetDelegateForFunctionPointer<AutoTargetDelegate>(new IntPtr(AutoTargetVa));
-            _sendAttackHeightChanged = Marshal.GetDelegateForFunctionPointer<SendAttackHeightChangedDelegate>(new IntPtr(SendAttackHeightChangedVa));
+            if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
+            {
+                _statusMessage = "acclient .text not readable for pattern resolve.";
+                RynthLog.Compat($"Compat: ClientCombat probe failed - {_statusMessage}");
+                return false;
+            }
+
+            _getCombatSystem = Bind<GetCombatSystemDelegate>(text, "ClientCombat.GetCombatSystem", PatGetCombatSystem, GetCombatSystemVa);
+            _setAttackHeight = Bind<SetRequestedAttackHeightDelegate>(text, "ClientCombat.SetRequestedAttackHeight", PatSetRequestedAttackHeight, SetRequestedAttackHeightVa);
+            _startAttackRequest = Bind<StartAttackRequestDelegate>(text, "ClientCombat.StartAttackRequest", PatStartAttackRequest, StartAttackRequestVa);
+            _endAttackRequest = Bind<EndAttackRequestDelegate>(text, "ClientCombat.EndAttackRequest", PatEndAttackRequest, EndAttackRequestVa);
+            _playerInReadyPosition = Bind<PlayerInReadyPositionDelegate>(text, "ClientCombat.PlayerInReadyPosition", PatPlayerInReadyPosition, PlayerInReadyPositionVa);
+            _autoTarget = Bind<AutoTargetDelegate>(text, "ClientCombat.AutoTarget", PatAutoTarget, AutoTargetVa);
+            _sendAttackHeightChanged = Bind<SendAttackHeightChangedDelegate>(text, "ClientCombat.SendAttackHeightChanged", PatSendAttackHeightChanged, SendAttackHeightChangedVa);
 
             // Verify the combat system singleton is accessible
-            IntPtr cs = _getCombatSystem();
+            IntPtr cs = _getCombatSystem?.Invoke() ?? IntPtr.Zero;
             IntPtr globalPtr = Marshal.ReadIntPtr(new IntPtr(CombatSystemPtrVa));
             RynthLog.Verbose($"Compat: ClientCombat GetCombatSystem()=0x{cs:X8}, global=0x{globalPtr:X8}");
             if (cs == IntPtr.Zero && globalPtr == IntPtr.Zero)

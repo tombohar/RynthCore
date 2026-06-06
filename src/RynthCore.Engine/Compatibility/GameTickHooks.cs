@@ -47,6 +47,10 @@ internal static class GameTickHooks
     private static IntPtr _targetAddress;
     private static int _installed;
 
+    // Verified unique + lands exactly at UseTimeVa offline (tools/pe_pattern.py).
+    // Replaces the prior warn-only prologue check; null = wildcard (rel32 call operand).
+    private static readonly byte?[] UseTimePattern = [ 0x56, 0x8B, 0xF1, 0xE8, null, null, null, null, 0xE8, null, null, null, null, 0x84, 0xC0, 0x74 ];
+
     public static bool IsInstalled => Volatile.Read(ref _installed) != 0;
 
     public static void Initialize()
@@ -61,26 +65,17 @@ internal static class GameTickHooks
             return;
         }
 
-        int funcOff = UseTimeVa - textSection.TextBaseVa;
-        if (funcOff < 0 || funcOff + 16 > textSection.Bytes.Length)
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(textSection, "GameTick.UseTime", UseTimePattern, UseTimeVa);
+        if (!resolved.Success)
         {
             Volatile.Write(ref _installed, 0);
-            RynthLog.Compat($"GameTickHooks: Client::UseTime VA 0x{UseTimeVa:X8} out of .text range — not installed.");
+            RynthLog.Compat($"GameTickHooks: Client::UseTime unresolved (VA 0x{UseTimeVa:X8}) — cast marshalling NOT installed.");
             return;
         }
 
-        // Plausibility check (warn-only, like CastSpell): byte-identical binary + ASLR
-        // off, so the map VA is valid; log the prologue for post-hoc verification.
-        byte b0 = textSection.Bytes[funcOff];
-        byte b1 = textSection.Bytes[funcOff + 1];
-        bool plausible = b0 == 0x55 || b0 == 0x53 || b0 == 0x56 || b0 == 0x57 ||
-                         b0 == 0x6A || b0 == 0x68 || b0 == 0xA1 || b0 == 0x8B ||
-                         (b0 == 0x83 && b1 == 0xEC) || (b0 == 0x81 && b1 == 0xEC);
-        string prologue = Convert.ToHexString(textSection.Bytes, funcOff, 16);
-
         try
         {
-            _targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
+            _targetAddress = resolved.Address;
             _useTimeDetour = UseTimeDetour;
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_useTimeDetour);
             _originalUseTime = Marshal.GetDelegateForFunctionPointer<ThisCallBoolDelegate>(
@@ -88,10 +83,7 @@ internal static class GameTickHooks
             Thread.MemoryBarrier();
             MinHook.Enable(_targetAddress);
             Volatile.Write(ref _installed, 1);
-            RynthLog.Compat($"GameTickHooks: Client::UseTime hooked @ 0x{_targetAddress.ToInt32():X8} " +
-                            $"(prologue {prologue}, plausible={plausible}) — cast drain on game-logic tick.");
-            if (!plausible)
-                RynthLog.Compat("GameTickHooks: WARNING Client::UseTime prologue atypical — verify the VA before trusting cast marshalling.");
+            RynthLog.Compat($"GameTickHooks: Client::UseTime hooked @ 0x{_targetAddress.ToInt32():X8} ({resolved.Detail}) — cast drain on game-logic tick.");
         }
         catch (Exception ex)
         {

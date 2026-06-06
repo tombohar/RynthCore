@@ -25,6 +25,9 @@ namespace RynthCore.Engine.Compatibility;
 internal static class TimeSyncHooks
 {
     private const int HandleTimeSynchVa = 0x005448F0;
+
+    // Verified unique + lands exactly at HandleTimeSynchVa offline (tools/pe_pattern.py).
+    private static readonly byte?[] HandleTimeSynchPattern = [ 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x83, 0xEC, 0x10, 0x8B ];
     private const int TimeSyncHeaderMTimeOffset = 24;
 
     private static IntPtr _originalHandleTimeSynch;
@@ -55,10 +58,15 @@ internal static class TimeSyncHooks
         if (_initialized)
             return;
 
-        var ptr = new IntPtr(HandleTimeSynchVa);
-        if (!SmartBoxLocator.IsPointerInModule(ptr))
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
         {
-            RynthLog.Compat($"Compat: time-sync hook pointer looks invalid (0x{HandleTimeSynchVa:X8})");
+            RynthLog.Compat("Compat: time-sync hook - acclient .text not readable.");
+            return;
+        }
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(text, "TimeSync.HandleTimeSynch", HandleTimeSynchPattern, HandleTimeSynchVa);
+        if (!resolved.Success)
+        {
+            RynthLog.Compat($"Compat: time-sync hook unresolved (0x{HandleTimeSynchVa:X8})");
             return;
         }
 
@@ -67,11 +75,11 @@ internal static class TimeSyncHooks
             unsafe
             {
                 delegate* unmanaged[Thiscall]<IntPtr, IntPtr, IntPtr, void> detour = &HandleTimeSynchDetour;
-                MinHook.Hook(ptr, (IntPtr)detour, out _originalHandleTimeSynch);
+                MinHook.Hook(resolved.Address, (IntPtr)detour, out _originalHandleTimeSynch);
             }
 
             _initialized = true;
-            RynthLog.Verbose($"Compat: time-sync hook ready - HandleTimeSynch=0x{HandleTimeSynchVa:X8}");
+            RynthLog.Verbose($"Compat: time-sync hook ready - HandleTimeSynch=0x{resolved.Address.ToInt32():X8} ({resolved.Detail})");
         }
         catch (Exception ex)
         {

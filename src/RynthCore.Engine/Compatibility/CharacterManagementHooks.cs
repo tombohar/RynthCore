@@ -51,6 +51,24 @@ internal static class CharacterManagementHooks
     private static CharacterSetGetNameDelegate? _characterSetGetName;
     private static CharacterSetGetGidDelegate? _characterSetGetGid;
 
+    // ── Pattern-resolved binding (1a hardening, 2026-06-05) ─────────────
+    // The *Va consts above are FALLBACKs; these signatures (verified unique + landing exactly
+    // at the VA offline via tools/pe_pattern.py) are the source of truth, surviving AC-patch /
+    // ACE-rebuild drift. GetName/GetGid are sibling accessors differing only in a trailing
+    // field offset (0x08 vs 0x04) — pinned literally to stay unique.
+    private static readonly byte?[] PatUIFlowGetPersistantData = [ 0x8B, 0x81, 0x98, 0x00, 0x00, 0x00, 0xC3, 0x90 ];
+    private static readonly byte?[] PatGetPlayerSystem = [ 0xA1, 0x9C, 0x11, 0x87, 0x00, 0xC3, 0x90, 0x90 ];
+    private static readonly byte?[] PatLogOnCharacter = [ 0x56, 0x8B, 0xF1, 0x8A, 0x86, 0x10, 0x02, 0x00 ];
+    private static readonly byte?[] PatCharacterSetGetIdentity = [ 0x8B, 0x44, 0x24, 0x04, 0x3B, 0x41, 0x14, 0x73, 0x0F ];
+    private static readonly byte?[] PatCharacterSetGetName = [ 0x8B, 0x44, 0x24, 0x04, 0x3B, 0x41, 0x14, 0x73, 0x13, 0x8B, 0x49, 0x0C, 0xC1, 0xE0, 0x04, 0x03, 0xC1, 0x8B, 0x48, 0x04, 0x85, 0xC9, 0x74, 0x04, 0x85, 0xC0, 0x75, 0x05, 0x33, 0xC0, 0xC2, 0x04, 0x00, 0x8B, 0x40, 0x08 ];
+    private static readonly byte?[] PatCharacterSetGetGid = [ 0x8B, 0x44, 0x24, 0x04, 0x3B, 0x41, 0x14, 0x73, 0x13, 0x8B, 0x49, 0x0C, 0xC1, 0xE0, 0x04, 0x03, 0xC1, 0x8B, 0x48, 0x04, 0x85, 0xC9, 0x74, 0x04, 0x85, 0xC0, 0x75, 0x05, 0x33, 0xC0, 0xC2, 0x04, 0x00, 0x8B, 0x40, 0x04 ];
+
+    private static T? Bind<T>(AcClientTextSection text, string name, byte?[] pattern, int fallbackVa) where T : Delegate
+    {
+        HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
+        return r.Success ? Marshal.GetDelegateForFunctionPointer<T>(r.Address) : null;
+    }
+
     public static string StatusMessage => _statusMessage;
 
     public static bool TryGetCurrentMode(out int mode)
@@ -210,15 +228,28 @@ internal static class CharacterManagementHooks
             _bindAttempted = true;
             try
             {
-                _uiFlowGetPersistantData = Marshal.GetDelegateForFunctionPointer<UIFlowGetPersistantDataDelegate>(new IntPtr(UIFlowGetPersistantDataVa));
-                _getPlayerSystem = Marshal.GetDelegateForFunctionPointer<GetPlayerSystemDelegate>(new IntPtr(GetPlayerSystemVa));
-                _logOnCharacter = Marshal.GetDelegateForFunctionPointer<LogOnCharacterDelegate>(new IntPtr(LogOnCharacterVa));
-                _characterSetGetIdentity = Marshal.GetDelegateForFunctionPointer<CharacterSetGetIdentityDelegate>(new IntPtr(CharacterSetGetIdentityVa));
-                _characterSetGetName = Marshal.GetDelegateForFunctionPointer<CharacterSetGetNameDelegate>(new IntPtr(CharacterSetGetNameVa));
-                _characterSetGetGid = Marshal.GetDelegateForFunctionPointer<CharacterSetGetGidDelegate>(new IntPtr(CharacterSetGetGidVa));
-                _bound = true;
-                _statusMessage = "Bound.";
-                RynthLog.Verbose("CharacterManagement: Bound UIFlow and direct LogOnCharacter entry points.");
+                if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
+                {
+                    _bound = false;
+                    _statusMessage = "acclient .text not readable for pattern resolve.";
+                    RynthLog.Compat($"CharacterManagement: bind failed - {_statusMessage}");
+                    return _bound;
+                }
+
+                _uiFlowGetPersistantData = Bind<UIFlowGetPersistantDataDelegate>(text, "CharMgmt.UIFlowGetPersistantData", PatUIFlowGetPersistantData, UIFlowGetPersistantDataVa);
+                _getPlayerSystem = Bind<GetPlayerSystemDelegate>(text, "CharMgmt.GetPlayerSystem", PatGetPlayerSystem, GetPlayerSystemVa);
+                _logOnCharacter = Bind<LogOnCharacterDelegate>(text, "CharMgmt.LogOnCharacter", PatLogOnCharacter, LogOnCharacterVa);
+                _characterSetGetIdentity = Bind<CharacterSetGetIdentityDelegate>(text, "CharMgmt.CharacterSetGetIdentity", PatCharacterSetGetIdentity, CharacterSetGetIdentityVa);
+                _characterSetGetName = Bind<CharacterSetGetNameDelegate>(text, "CharMgmt.CharacterSetGetName", PatCharacterSetGetName, CharacterSetGetNameVa);
+                _characterSetGetGid = Bind<CharacterSetGetGidDelegate>(text, "CharMgmt.CharacterSetGetGid", PatCharacterSetGetGid, CharacterSetGetGidVa);
+
+                _bound = _uiFlowGetPersistantData != null && _getPlayerSystem != null && _logOnCharacter != null
+                         && _characterSetGetIdentity != null && _characterSetGetName != null && _characterSetGetGid != null;
+                _statusMessage = _bound ? "Bound." : "One or more character-management addresses failed to resolve.";
+                if (_bound)
+                    RynthLog.Verbose("CharacterManagement: Bound UIFlow and direct LogOnCharacter entry points.");
+                else
+                    RynthLog.Compat($"CharacterManagement: bind incomplete - {_statusMessage}");
             }
             catch (Exception ex)
             {

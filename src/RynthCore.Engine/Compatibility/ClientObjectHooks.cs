@@ -566,14 +566,62 @@ internal static class ClientObjectHooks
         return ready;
     }
 
+    // --- Pattern-resolved binding (1a hardening; re-applied 2026-06-06 after an early
+    // copy was lost in a git checkout/commit during the crash fix) -----------------
+    // Each Reference* VA above is now only a FALLBACK. HookResolver pattern-scans the live
+    // acclient .text for these signatures (verified UNIQUE + landing exactly at the fallback
+    // VA offline via tools/pe_pattern.py, over the same 4 MB window AcClientModule reads),
+    // so binding survives AC-patch / ACE-rebuild drift. null = wildcard (rel32 operand).
+    private static readonly byte?[] PatGetWeenieObject = [ 0x8B, 0x0D, 0xDC, 0x2A, 0x84, 0x00, 0x85, 0xC9, 0x74, 0x0B, 0x8B, 0x44, 0x24, 0x04, 0x50, 0xE8, null, null, null, null, 0xC3, 0x33, 0xC0, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x8B, 0x0D ];
+    private static readonly byte?[] PatGetNumContainedItems = [ 0x8B, 0x41, 0x50, 0x85, 0xC0, 0x74, 0x04, 0x8B, 0x40, 0x1C ];
+    private static readonly byte?[] PatGetNumContainedContainers = [ 0x8B, 0x41, 0x50, 0x85, 0xC0, 0x74, 0x04, 0x8B, 0x40, 0x34 ];
+    private static readonly byte?[] PatGetObjectNameStatic = [ 0x8B, 0x44, 0x24, 0x0C, 0x85, 0xC0, 0x8B, 0x44, 0x24, 0x04, 0x74 ];
+    private static readonly byte?[] PatGetObjectNameInstance = [ 0x83, 0xEC, 0x0C, 0x8B, 0x44, 0x24, 0x14, 0x85 ];
+    private static readonly byte?[] PatInqType = [ 0x8B, 0x81, 0xD0, 0x00, 0x00, 0x00, 0xC3, 0x90 ];
+    private static readonly byte?[] PatInqInt = [ 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x08, 0x85, 0xC9, 0x74, 0x0E ];
+    private static readonly byte?[] PatInqFloat = [ 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x14, 0x85, 0xC9, 0x74, 0x0E ];
+    private static readonly byte?[] PatInqInt64 = [ 0x8B, 0x49, 0x0C, 0x85, 0xC9, 0x74, 0x0E, 0x8D ];
+    private static readonly byte?[] PatInqAttribute2ndBaseLevel = [ 0x51, 0x53, 0x55, 0x57, 0x8B, 0x7C, 0x24, 0x14 ];
+    private static readonly byte?[] PatInqBool = [ 0x8B, 0x49, 0x10, 0x85, 0xC9, 0x74, 0x0E, 0x8D ];
+    private static readonly byte?[] PatInqString = [ 0x8B, 0x49, 0x18, 0x85, 0xC9, 0x57, 0x74, 0x10 ];
+    private static readonly byte?[] PatGetCombatSystem = [ 0xA1, 0x6C, 0x16, 0x87, 0x00, 0xC3, 0x90, 0x90 ];
+    private static readonly byte?[] PatObjectIsAttackable = [ 0x8B, 0x4C, 0x24, 0x04, 0x85, 0xC9, 0x74, 0x17 ];
+    private static readonly byte?[] PatIsSpellKnown = [ 0x8B, 0x49, 0x6C, 0x85, 0xC9, 0x74, 0x05, 0xE9, null, null, null, null, 0x33, 0xC0, 0xC2, 0x04, 0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x8B, 0x49 ];
+    private static readonly byte?[] PatInqSkillLevel = [ 0x8B, 0x44, 0x24, 0x0C, 0x83, 0xEC, 0x0C, 0x53, 0x55, 0x8B ];
+    private static readonly byte?[] PatInqSkillAdvancementClass = [ 0x8B, 0x49, 0x64, 0x85, 0xC9, 0x74, 0x0E, 0x8D, 0x44, 0x24, 0x04, 0x50, 0xE8, null, null, null, null, 0x85, 0xC0, 0x75, 0x05, 0x33, 0xC0, 0xC2, 0x08, 0x00, 0x8B, 0x48 ];
+    private static readonly byte?[] PatInqAttribute = [ 0x53, 0x8B, 0xD9, 0x8B, 0x4B, 0x60, 0x85, 0xC9 ];
+    private static readonly byte?[] PatGetVitaeValue = [ 0x8B, 0x49, 0x70, 0x85, 0xC9, 0x75, 0x07, 0xD9 ];
+
+    private static IntPtr _getNumContainedItemsPtr;
+    private static IntPtr _getNumContainedContainersPtr;
+
+    private static IntPtr ResolveAddr(AcClientTextSection text, string name, byte?[] pattern, int fallbackVa)
+    {
+        HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
+        return r.Success ? r.Address : IntPtr.Zero;
+    }
+
+    private static T? BindResolved<T>(AcClientTextSection text, string name, byte?[] pattern, int fallbackVa, out IntPtr resolvedPtr) where T : Delegate
+    {
+        resolvedPtr = ResolveAddr(text, name, pattern, fallbackVa);
+        return resolvedPtr == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<T>(resolvedPtr);
+    }
+
     private static bool BindDelegates()
     {
         if (_getWeenieObject != null && _getObjectNameStatic != null && _getObjectNameInstance != null)
             return true;
 
-        IntPtr getWeeniePtr = new(ReferenceGetWeenieObject);
-        IntPtr getNameStaticPtr = new(ReferenceGetObjectNameStatic);
-        IntPtr getNameInstancePtr = new(ReferenceGetObjectNameInstance);
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
+        {
+            _statusMessage = "ClientObject: acclient.exe .text not readable for pattern resolve.";
+            RynthLog.Compat($"Compat: client object bind failed - {_statusMessage}");
+            return false;
+        }
+
+        IntPtr getWeeniePtr = ResolveAddr(text, "ClientObject.GetWeenieObject", PatGetWeenieObject, ReferenceGetWeenieObject);
+        IntPtr getNameStaticPtr = ResolveAddr(text, "ClientObject.GetObjectNameStatic", PatGetObjectNameStatic, ReferenceGetObjectNameStatic);
+        IntPtr getNameInstancePtr = ResolveAddr(text, "ClientObject.GetObjectNameInstance", PatGetObjectNameInstance, ReferenceGetObjectNameInstance);
         
         if (!SmartBoxLocator.IsPointerInModule(getWeeniePtr) ||
             !SmartBoxLocator.IsPointerInModule(getNameStaticPtr) ||
@@ -593,23 +641,22 @@ internal static class ClientObjectHooks
         _getWeenieObjectPtr = getWeeniePtr;
         _getObjectNameStatic = Marshal.GetDelegateForFunctionPointer<GetObjectNameStaticDelegate>(getNameStaticPtr);
         _getObjectNameInstance = Marshal.GetDelegateForFunctionPointer<GetObjectNameInstanceDelegate>(getNameInstancePtr);
-        _inqType = Marshal.GetDelegateForFunctionPointer<InqTypeDelegate>(new IntPtr(ReferenceInqType));
-        _inqTypePtr = new IntPtr(ReferenceInqType);
-        _inqInt   = Marshal.GetDelegateForFunctionPointer<InqIntDelegate>(new IntPtr(ReferenceInqInt));
-        _inqInt64 = Marshal.GetDelegateForFunctionPointer<InqInt64Delegate>(new IntPtr(ReferenceInqInt64));
-        _inqAttribute2ndBaseLevel = Marshal.GetDelegateForFunctionPointer<InqAttribute2ndBaseLevelDelegate>(new IntPtr(ReferenceInqAttribute2ndBaseLevel));
-        _inqFloat = Marshal.GetDelegateForFunctionPointer<InqFloatDelegate>(new IntPtr(ReferenceInqFloat));
-        _inqBool  = Marshal.GetDelegateForFunctionPointer<InqBoolDelegate>(new IntPtr(ReferenceInqBool));
-        _inqString = Marshal.GetDelegateForFunctionPointer<InqStringDelegate>(new IntPtr(ReferenceInqString));
-        _getCombatSystem = Marshal.GetDelegateForFunctionPointer<GetCombatSystemDelegate>(new IntPtr(ReferenceGetCombatSystem));
-        _getCombatSystemPtr = new IntPtr(ReferenceGetCombatSystem);
-        _objectIsAttackable = Marshal.GetDelegateForFunctionPointer<ObjectIsAttackableDelegate>(new IntPtr(ReferenceObjectIsAttackable));
-        _objectIsAttackablePtr = new IntPtr(ReferenceObjectIsAttackable);
-        _inqSkillLevel = Marshal.GetDelegateForFunctionPointer<InqSkillLevelDelegate>(new IntPtr(ReferenceInqSkillLevel));
-        _inqSkillAdvancementClass = Marshal.GetDelegateForFunctionPointer<InqSkillAdvancementClassDelegate>(new IntPtr(ReferenceInqSkillAdvancementClass));
-        _inqAttribute = Marshal.GetDelegateForFunctionPointer<InqAttributeDelegate>(new IntPtr(ReferenceInqAttribute));
-        _isSpellKnown = Marshal.GetDelegateForFunctionPointer<IsSpellKnownDelegate>(new IntPtr(ReferenceIsSpellKnown));
-        _getVitaeValue = Marshal.GetDelegateForFunctionPointer<GetVitaeValueDelegate>(new IntPtr(ReferenceGetVitaeValue));
+        _inqType = BindResolved<InqTypeDelegate>(text, "ClientObject.InqType", PatInqType, ReferenceInqType, out _inqTypePtr);
+        _inqInt = BindResolved<InqIntDelegate>(text, "ClientObject.InqInt", PatInqInt, ReferenceInqInt, out _);
+        _inqInt64 = BindResolved<InqInt64Delegate>(text, "ClientObject.InqInt64", PatInqInt64, ReferenceInqInt64, out _);
+        _inqAttribute2ndBaseLevel = BindResolved<InqAttribute2ndBaseLevelDelegate>(text, "ClientObject.InqAttribute2nd", PatInqAttribute2ndBaseLevel, ReferenceInqAttribute2ndBaseLevel, out _);
+        _inqFloat = BindResolved<InqFloatDelegate>(text, "ClientObject.InqFloat", PatInqFloat, ReferenceInqFloat, out _);
+        _inqBool = BindResolved<InqBoolDelegate>(text, "ClientObject.InqBool", PatInqBool, ReferenceInqBool, out _);
+        _inqString = BindResolved<InqStringDelegate>(text, "ClientObject.InqString", PatInqString, ReferenceInqString, out _);
+        _getCombatSystem = BindResolved<GetCombatSystemDelegate>(text, "ClientObject.GetCombatSystem", PatGetCombatSystem, ReferenceGetCombatSystem, out _getCombatSystemPtr);
+        _objectIsAttackable = BindResolved<ObjectIsAttackableDelegate>(text, "ClientObject.ObjectIsAttackable", PatObjectIsAttackable, ReferenceObjectIsAttackable, out _objectIsAttackablePtr);
+        _inqSkillLevel = BindResolved<InqSkillLevelDelegate>(text, "ClientObject.InqSkillLevel", PatInqSkillLevel, ReferenceInqSkillLevel, out _);
+        _inqSkillAdvancementClass = BindResolved<InqSkillAdvancementClassDelegate>(text, "ClientObject.InqSkillAdvancementClass", PatInqSkillAdvancementClass, ReferenceInqSkillAdvancementClass, out _);
+        _inqAttribute = BindResolved<InqAttributeDelegate>(text, "ClientObject.InqAttribute", PatInqAttribute, ReferenceInqAttribute, out _);
+        _isSpellKnown = BindResolved<IsSpellKnownDelegate>(text, "ClientObject.IsSpellKnown", PatIsSpellKnown, ReferenceIsSpellKnown, out _);
+        _getVitaeValue = BindResolved<GetVitaeValueDelegate>(text, "ClientObject.GetVitaeValue", PatGetVitaeValue, ReferenceGetVitaeValue, out _);
+        _getNumContainedItemsPtr = ResolveAddr(text, "ClientObject.GetNumContainedItems", PatGetNumContainedItems, ReferenceGetNumContainedItems);
+        _getNumContainedContainersPtr = ResolveAddr(text, "ClientObject.GetNumContainedContainers", PatGetNumContainedContainers, ReferenceGetNumContainedContainers);
         RynthLog.Verbose(
             $"Compat: client object hooks ready - getWeenie=0x{getWeeniePtr.ToInt32():X8}, getNameStatic=0x{getNameStaticPtr.ToInt32():X8}, getNameInstance=0x{getNameInstancePtr.ToInt32():X8}");
         return true;
@@ -2779,7 +2826,8 @@ internal static class ClientObjectHooks
 
         unsafe
         {
-            return ((delegate* unmanaged[Thiscall]<IntPtr, int>)new IntPtr(ReferenceGetNumContainedItems))(weeniePtr);
+            IntPtr fn = _getNumContainedItemsPtr != IntPtr.Zero ? _getNumContainedItemsPtr : new IntPtr(ReferenceGetNumContainedItems);
+            return ((delegate* unmanaged[Thiscall]<IntPtr, int>)fn)(weeniePtr);
         }
     }
 
@@ -2806,7 +2854,8 @@ internal static class ClientObjectHooks
 
         unsafe
         {
-            return ((delegate* unmanaged[Thiscall]<IntPtr, int>)new IntPtr(ReferenceGetNumContainedContainers))(weeniePtr);
+            IntPtr fn = _getNumContainedContainersPtr != IntPtr.Zero ? _getNumContainedContainersPtr : new IntPtr(ReferenceGetNumContainedContainers);
+            return ((delegate* unmanaged[Thiscall]<IntPtr, int>)fn)(weeniePtr);
         }
     }
 

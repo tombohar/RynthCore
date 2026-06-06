@@ -143,6 +143,26 @@ internal static class PlayerVitalsHooks
     private const int SendNoticePlayerDescReceivedVa = 0x0047A200;
     private const int MaxUpdateLogs = 18;
 
+    // ── Pattern-resolved binding (1a hardening, 2026-06-05) ─────────────
+    // *Va consts above are FALLBACKs; signatures verified unique + landing at the VA offline
+    // (tools/pe_pattern.py). The 4 Update*Attribute2nd thunks are near-identical templates
+    // differing only in their call target, so they use LITERAL patterns (trailing byte pins
+    // the rel32 low byte to stay unique); the rest are wildcarded (null = rel32 operand).
+    private static readonly byte?[] PatUpdateAttribute2nd = [ 0x8B, 0x44, 0x24, 0x10, 0x8B, 0x54, 0x24, 0x08, 0x50, 0x8B, 0x44, 0x24, 0x08, 0x52, 0x8B, 0x54, 0x24, 0x14, 0x50, 0x52, 0xE8, 0xA7 ];
+    private static readonly byte?[] PatUpdateAttribute2ndLevel = [ 0x8B, 0x44, 0x24, 0x10, 0x8B, 0x54, 0x24, 0x08, 0x50, 0x8B, 0x44, 0x24, 0x08, 0x52, 0x8B, 0x54, 0x24, 0x14, 0x50, 0x52, 0xE8, 0x07, 0xF1 ];
+    private static readonly byte?[] PatPrivateUpdateAttribute2nd = [ 0xA1, 0x58, 0xDA, 0x83, 0x00, 0x85, 0xC0, 0x74, 0x08, 0x8B, 0x80, 0xF4, 0x00, 0x00, 0x00, 0xEB, 0x02, 0x33, 0xC0, 0x8B, 0x54, 0x24, 0x0C, 0x52, 0x8B, 0x54, 0x24, 0x0C, 0x50, 0x8B, 0x44, 0x24, 0x0C, 0x50, 0x52, 0xE8, 0x78 ];
+    private static readonly byte?[] PatPrivateUpdateAttribute2ndLevel = [ 0xA1, 0x58, 0xDA, 0x83, 0x00, 0x85, 0xC0, 0x74, 0x08, 0x8B, 0x80, 0xF4, 0x00, 0x00, 0x00, 0xEB, 0x02, 0x33, 0xC0, 0x8B, 0x54, 0x24, 0x0C, 0x52, 0x8B, 0x54, 0x24, 0x0C, 0x50, 0x8B, 0x44, 0x24, 0x0C, 0x50, 0x52, 0xE8, 0xC8 ];
+    private static readonly byte?[] PatOnStatUpdatedInt = [ 0x8B, 0x44, 0x24, 0x04, 0x48, 0x3D, 0x97, 0x00 ];
+    private static readonly byte?[] PatInqAttribute2ndStruct = [ 0x8B, 0x49, 0x60, 0x85, 0xC9, 0x74, 0x13, 0x8B, 0x44, 0x24, 0x08, 0x8B, 0x54, 0x24, 0x04, 0x50, 0x52, 0xE8, null, null, null, null, 0x85, 0xC0, 0x75, 0x05, 0x33, 0xC0, 0xC2, 0x08, 0x00, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC2, 0x08, 0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x68 ];
+    private static readonly byte?[] PatSendNoticePlayerDescReceived = [ 0xE8, null, null, null, null, 0x8B, 0x10, 0x68, 0xF0 ];
+    private static readonly byte?[] PatInqAttribute2ndUint = [ 0x51, 0x53, 0x55, 0x57, 0x8B, 0x7C, 0x24, 0x14 ];
+
+    private static IntPtr Resolve(AcClientTextSection text, string name, byte?[] pattern, int fallbackVa)
+    {
+        HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
+        return r.Success ? r.Address : IntPtr.Zero;
+    }
+
     private const uint MaxHealthType = 1;
     private const uint HealthType = 2;
     private const uint MaxStaminaType = 3;
@@ -171,7 +191,7 @@ internal static class PlayerVitalsHooks
         if (IsInstalled)
             return;
 
-        if (!AcClientModule.TryReadTextSection(out _))
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
         {
             _statusMessage = "acclient.exe not available.";
             return;
@@ -179,24 +199,20 @@ internal static class PlayerVitalsHooks
 
         try
         {
-            IntPtr updateAttributePtr = new(UpdateAttribute2ndVa);
-            IntPtr updatePtr = new(UpdateAttribute2ndLevelVa);
-            IntPtr privateUpdateAttributePtr = new(PrivateUpdateAttribute2ndVa);
-            IntPtr privateUpdatePtr = new(PrivateUpdateAttribute2ndLevelVa);
-            IntPtr onStatUpdatedIntPtr = new(OnStatUpdatedIntVa);
-            IntPtr inqAttribute2ndStructPtr = new(InqAttribute2ndStructVa);
-            IntPtr sendNoticePlayerDescReceivedPtr = new(SendNoticePlayerDescReceivedVa);
+            IntPtr updateAttributePtr = Resolve(text, "PlayerVitals.UpdateAttribute2nd", PatUpdateAttribute2nd, UpdateAttribute2ndVa);
+            IntPtr updatePtr = Resolve(text, "PlayerVitals.UpdateAttribute2ndLevel", PatUpdateAttribute2ndLevel, UpdateAttribute2ndLevelVa);
+            IntPtr privateUpdateAttributePtr = Resolve(text, "PlayerVitals.PrivateUpdateAttribute2nd", PatPrivateUpdateAttribute2nd, PrivateUpdateAttribute2ndVa);
+            IntPtr privateUpdatePtr = Resolve(text, "PlayerVitals.PrivateUpdateAttribute2ndLevel", PatPrivateUpdateAttribute2ndLevel, PrivateUpdateAttribute2ndLevelVa);
+            IntPtr onStatUpdatedIntPtr = Resolve(text, "PlayerVitals.OnStatUpdatedInt", PatOnStatUpdatedInt, OnStatUpdatedIntVa);
+            IntPtr inqAttribute2ndStructPtr = Resolve(text, "PlayerVitals.InqAttribute2nd_struct", PatInqAttribute2ndStruct, InqAttribute2ndStructVa);
+            IntPtr sendNoticePlayerDescReceivedPtr = Resolve(text, "PlayerVitals.SendNotice_PlayerDescReceived", PatSendNoticePlayerDescReceived, SendNoticePlayerDescReceivedVa);
 
-            if (!SmartBoxLocator.IsPointerInModule(updateAttributePtr) ||
-                !SmartBoxLocator.IsPointerInModule(updatePtr) ||
-                !SmartBoxLocator.IsPointerInModule(privateUpdateAttributePtr) ||
-                !SmartBoxLocator.IsPointerInModule(privateUpdatePtr) ||
-                !SmartBoxLocator.IsPointerInModule(onStatUpdatedIntPtr) ||
-                !SmartBoxLocator.IsPointerInModule(inqAttribute2ndStructPtr) ||
-                !SmartBoxLocator.IsPointerInModule(sendNoticePlayerDescReceivedPtr))
+            if (updateAttributePtr == IntPtr.Zero || updatePtr == IntPtr.Zero ||
+                privateUpdateAttributePtr == IntPtr.Zero || privateUpdatePtr == IntPtr.Zero ||
+                onStatUpdatedIntPtr == IntPtr.Zero || inqAttribute2ndStructPtr == IntPtr.Zero ||
+                sendNoticePlayerDescReceivedPtr == IntPtr.Zero)
             {
-                _statusMessage =
-                    $"Attribute2nd handlers look invalid (update=0x{updateAttributePtr.ToInt32():X8}, level=0x{updatePtr.ToInt32():X8}, private=0x{privateUpdateAttributePtr.ToInt32():X8}, privateLevel=0x{privateUpdatePtr.ToInt32():X8}, stat=0x{onStatUpdatedIntPtr.ToInt32():X8}, inq2nd=0x{inqAttribute2ndStructPtr.ToInt32():X8}, playerDesc=0x{sendNoticePlayerDescReceivedPtr.ToInt32():X8}).";
+                _statusMessage = "One or more Attribute2nd handlers failed to resolve (pattern + fallback VA both missed).";
                 RynthLog.Compat($"Compat: player vitals hooks failed - {_statusMessage}");
                 return;
             }
@@ -206,8 +222,8 @@ internal static class PlayerVitalsHooks
             // Buffed-uint overload — used by hot-reload re-seed and any path
             // that needs the same number AC's vital bars render. The struct
             // overload returns base values; this one returns buffed.
-            IntPtr inqAttribute2ndUintPtr = new(InqAttribute2ndUintVa);
-            if (SmartBoxLocator.IsPointerInModule(inqAttribute2ndUintPtr))
+            IntPtr inqAttribute2ndUintPtr = Resolve(text, "PlayerVitals.InqAttribute2nd_uint", PatInqAttribute2ndUint, InqAttribute2ndUintVa);
+            if (inqAttribute2ndUintPtr != IntPtr.Zero)
                 _inqAttribute2ndUint = Marshal.GetDelegateForFunctionPointer<InqAttribute2ndUintDelegate>(inqAttribute2ndUintPtr);
 
             unsafe

@@ -11,6 +11,17 @@ internal static class CombatActionHooks
 {
     private const int QueryHealthResponseVa = 0x006AA900;
 
+    // ── Pattern-resolved binding (1a hardening, 2026-06-06) ─────────────
+    // The cast/tick VAs were previously bound by raw VA + in-module/warn-only-prologue checks.
+    // These signatures (verified unique + landing exactly at the VA offline via
+    // tools/pe_pattern.py) are now the source of truth; the VA stays as logged fallback.
+    // GetMagicSystem/FreeHandsAndCastSpell are invoked via the SEH trampoline on AC's main
+    // thread — resolving by pattern changes only how the address is found, not the call path.
+    private static readonly byte?[] QueryHealthResponsePattern = [ 0x8B, 0x44, 0x24, 0x04, 0x85, 0xC0, 0x74, 0x18, 0x8B, 0x48, 0x50 ];
+    private static readonly byte?[] CastSpellClientPattern = [ 0x81, 0xEC, 0x48, 0x01, 0x00, 0x00, 0x53, 0x56 ];
+    private static readonly byte?[] GetMagicSystemPattern = [ 0xA1, 0x4C, 0x14, 0x87, 0x00, 0xC3, 0x90, 0x90 ];
+    private static readonly byte?[] FreeHandsAndCastSpellPattern = [ 0xA1, 0x58, 0xDA, 0x83, 0x00, 0x8B, 0x88, 0xB8, 0x00, 0x00, 0x00, 0x8B, 0x11, 0xFF, 0x92, 0xC0, 0x00, 0x00, 0x00, 0x8B, 0x44 ];
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate bool TargetedMeleeAttackDelegate(uint targetId, int attackHeight, float powerLevel);
 
@@ -253,71 +264,36 @@ internal static class CombatActionHooks
             // 0x0055FA24 [null+0x40]). acclient.exe is byte-identical to retail
             // (only PE-header metadata differs) so this retail VA is valid here;
             // it is validated live below per the no-blind-decompile-RVA rule.
-            int csModStart = textSection.ModuleBase.ToInt32();
-            int csModEnd = csModStart + textSection.ImageSize;
-            int csTextOff = ClientMagicSystemCastSpellVa - textSection.TextBaseVa;
-            bool csInModule = ClientMagicSystemCastSpellVa >= csModStart &&
-                              ClientMagicSystemCastSpellVa < csModEnd;
-            bool csInTextWindow = csTextOff >= 0 && csTextOff + 16 <= text.Length;
-            if (csInModule && csInTextWindow)
+            HookResolver.ResolveResult csRes = HookResolver.Resolve(textSection, "CombatAction.CastSpellClient", CastSpellClientPattern, ClientMagicSystemCastSpellVa);
+            if (csRes.Success)
             {
-                // Liveness evidence (CLAUDE.md: validate decompile RVAs against
-                // the live binary; don't blindly trust a copy-pasted address).
-                // Warn-only — never block the bind on the heuristic, or an
-                // atypical-but-real prologue would re-break casting exactly the
-                // way the SmartBoxLocator order bug did.
-                byte b0 = text[csTextOff];
-                bool plausiblePrologue =
-                    b0 == 0x55 ||                                  // push ebp
-                    b0 == 0x53 || b0 == 0x56 || b0 == 0x57 ||      // push ebx/esi/edi
-                    b0 == 0x6A || b0 == 0x68 ||                    // push imm
-                    b0 == 0xA1 || b0 == 0xB8 || b0 == 0xE9 ||      // mov eax,[m] / mov eax,imm / jmp thunk
-                    (b0 == 0x83 && text[csTextOff + 1] == 0xEC) || // sub esp, imm8
-                    (b0 == 0x81 && text[csTextOff + 1] == 0xEC) || // sub esp, imm32
-                    (b0 == 0x8B && text[csTextOff + 1] == 0xFF) || // mov edi,edi (hotpatch pad)
-                    (b0 == 0x8B && text[csTextOff + 1] == 0x44);   // mov eax,[esp+x] (frameless leaf)
-                string prologueHex = Convert.ToHexString(text, csTextOff, 16);
-                _castSpellClient = Marshal.GetDelegateForFunctionPointer<CastSpellClientDelegate>(
-                    new IntPtr(ClientMagicSystemCastSpellVa));
-                _castSpellClientPtr = new IntPtr(ClientMagicSystemCastSpellVa);
-                RynthLog.Compat(
-                    $"Compat: ClientMagicSystem::CastSpell bound at 0x{ClientMagicSystemCastSpellVa:X8} " +
-                    $"(prologue {prologueHex}, plausible={plausiblePrologue})");
-                if (!plausiblePrologue)
-                    RynthLog.Compat("Compat: WARNING ClientMagicSystem::CastSpell prologue is atypical — " +
-                                    "verify the VA against this acclient.exe build before trusting casts.");
+                _castSpellClient = Marshal.GetDelegateForFunctionPointer<CastSpellClientDelegate>(csRes.Address);
+                _castSpellClientPtr = csRes.Address;
+                RynthLog.Compat($"Compat: ClientMagicSystem::CastSpell bound at 0x{csRes.Address.ToInt32():X8} ({csRes.Detail})");
             }
             else
             {
-                RynthLog.Compat(
-                    $"Compat: ClientMagicSystem::CastSpell VA 0x{ClientMagicSystemCastSpellVa:X8} " +
-                    $"out of range (inModule={csInModule}, inText={csInTextWindow}) — unavailable.");
+                RynthLog.Compat($"Compat: ClientMagicSystem::CastSpell VA 0x{ClientMagicSystemCastSpellVa:X8} unresolved — unavailable.");
             }
 
-            // Explicit-target cast pair (RC2-proven): GetMagicSystem @ 0x00567C00 +
-            // FreeHandsAndCastSpell @ 0x00567C90. Same byte-identical-retail VA rule as
-            // CastSpell above — validated in-module here, invoked via the SEH trampoline on
-            // the main thread. Replaces the SelectItem + CastSpell(targetIsSelected=1) two-step
-            // for TARGETED casts (the global-selection read that didn't survive the tick).
-            int gmsTextOff = GetMagicSystemVa - textSection.TextBaseVa;
-            int fhcTextOff = FreeHandsAndCastSpellVa - textSection.TextBaseVa;
-            bool gmsOk = GetMagicSystemVa >= csModStart && GetMagicSystemVa < csModEnd &&
-                         gmsTextOff >= 0 && gmsTextOff + 16 <= text.Length;
-            bool fhcOk = FreeHandsAndCastSpellVa >= csModStart && FreeHandsAndCastSpellVa < csModEnd &&
-                         fhcTextOff >= 0 && fhcTextOff + 16 <= text.Length;
-            if (gmsOk && fhcOk)
+            // Explicit-target cast pair (RC2-proven): GetMagicSystem + FreeHandsAndCastSpell,
+            // invoked via the SEH trampoline on AC's main thread. Replaces the SelectItem +
+            // CastSpell(targetIsSelected=1) two-step for TARGETED casts (the global-selection
+            // read that didn't survive being marshalled onto the tick).
+            HookResolver.ResolveResult gmsRes = HookResolver.Resolve(textSection, "CombatAction.GetMagicSystem", GetMagicSystemPattern, GetMagicSystemVa);
+            HookResolver.ResolveResult fhcRes = HookResolver.Resolve(textSection, "CombatAction.FreeHandsAndCastSpell", FreeHandsAndCastSpellPattern, FreeHandsAndCastSpellVa);
+            if (gmsRes.Success && fhcRes.Success)
             {
-                _getMagicSystemPtr = new IntPtr(GetMagicSystemVa);
-                _freeHandsCastPtr = new IntPtr(FreeHandsAndCastSpellVa);
+                _getMagicSystemPtr = gmsRes.Address;
+                _freeHandsCastPtr = fhcRes.Address;
                 RynthLog.Compat(
-                    $"Compat: explicit-target cast bound — GetMagicSystem=0x{GetMagicSystemVa:X8} " +
-                    $"(prologue {Convert.ToHexString(text, gmsTextOff, 8)}), FreeHandsAndCastSpell=0x{FreeHandsAndCastSpellVa:X8} " +
-                    $"(prologue {Convert.ToHexString(text, fhcTextOff, 8)}).");
+                    $"Compat: explicit-target cast bound — GetMagicSystem=0x{gmsRes.Address.ToInt32():X8} ({gmsRes.Detail}), " +
+                    $"FreeHandsAndCastSpell=0x{fhcRes.Address.ToInt32():X8} ({fhcRes.Detail}).");
             }
             else
             {
                 RynthLog.Compat(
-                    $"Compat: explicit-target cast VAs out of range (gms={gmsOk}, fhc={fhcOk}) — " +
+                    $"Compat: explicit-target cast VAs unresolved (gms={gmsRes.Success}, fhc={fhcRes.Success}) — " +
                     "targeted casts fail closed.");
             }
 
@@ -875,15 +851,13 @@ internal static class CombatActionHooks
         if (!AcClientModule.TryReadTextSection(out AcClientTextSection textSection))
             return;
 
-        IntPtr responsePtr = new(QueryHealthResponseVa);
-        int textStart = textSection.TextBaseVa;
-        int textEnd = textStart + textSection.Bytes.Length;
-        int responseVa = responsePtr.ToInt32();
-        if (responseVa < textStart || responseVa >= textEnd)
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(textSection, "CombatAction.QueryHealthResponse", QueryHealthResponsePattern, QueryHealthResponseVa);
+        if (!resolved.Success)
         {
-            RynthLog.Compat($"Compat: query-health-response hook skipped - invalid address 0x{QueryHealthResponseVa:X8}");
+            RynthLog.Compat($"Compat: query-health-response hook skipped - unresolved 0x{QueryHealthResponseVa:X8}");
             return;
         }
+        IntPtr responsePtr = resolved.Address;
 
         _queryHealthResponseDetour = QueryHealthResponseDetour;
         IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_queryHealthResponseDetour);

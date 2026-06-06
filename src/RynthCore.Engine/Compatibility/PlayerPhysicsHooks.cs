@@ -377,10 +377,9 @@ internal static class PlayerPhysicsHooks
 
         if (_getMaxSpeed == null)
         {
-            IntPtr ptr = new(ReferenceGetMaxSpeed);
-            if (!SmartBoxLocator.IsPointerInModule(ptr))
+            _getMaxSpeed = ResolveBind<GetMaxSpeedDelegate>("PlayerPhysics.GetMaxSpeed", PatGetMaxSpeed, ReferenceGetMaxSpeed);
+            if (_getMaxSpeed == null)
                 return false;
-            _getMaxSpeed = Marshal.GetDelegateForFunctionPointer<GetMaxSpeedDelegate>(ptr);
         }
 
         try
@@ -468,25 +467,39 @@ internal static class PlayerPhysicsHooks
         return BindPhysicsDelegates();
     }
 
+    // ── Pattern-resolved binding (1a hardening, 2026-06-05) ──────────────
+    // *Va consts above are FALLBACKs; these signatures (verified unique + landing at the VA
+    // offline via tools/pe_pattern.py) are the source of truth. GetHeading is a tail-call
+    // thunk (add ecx,0x50; jmp impl) — 4 bytes suffice for uniqueness. null = wildcard.
+    private static readonly byte?[] PatGetHeading = [ 0x83, 0xC1, 0x50, 0xE9 ];
+    private static readonly byte?[] PatSetHeading = [ 0x83, 0xEC, 0x40, 0x56, 0x8B, 0xF1, 0x8D, 0x46 ];
+    private static readonly byte?[] PatGetMaxSpeed = [ 0x51, 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x04, 0x85, 0xC9, 0xC7 ];
+
+    private static T? ResolveBind<T>(string name, byte?[] pattern, int fallbackVa) where T : Delegate
+    {
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
+            return null;
+        HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
+        return r.Success ? Marshal.GetDelegateForFunctionPointer<T>(r.Address) : null;
+    }
+
     private static bool BindPhysicsDelegates()
     {
         if (_getHeading != null && _setHeading != null)
             return true;
 
-        IntPtr getHeadingPtr = new(ReferencePhysicsGetHeading);
-        IntPtr setHeadingPtr = new(ReferencePhysicsSetHeading);
-        if (!SmartBoxLocator.IsPointerInModule(getHeadingPtr) || !SmartBoxLocator.IsPointerInModule(setHeadingPtr))
+        _getHeading = ResolveBind<PhysicsGetHeadingDelegate>("PlayerPhysics.GetHeading", PatGetHeading, ReferencePhysicsGetHeading);
+        _setHeading = ResolveBind<PhysicsSetHeadingDelegate>("PlayerPhysics.SetHeading", PatSetHeading, ReferencePhysicsSetHeading);
+        if (_getHeading == null || _setHeading == null)
         {
-            _statusMessage =
-                $"Physics heading pointers look invalid (get=0x{getHeadingPtr.ToInt32():X8}, set=0x{setHeadingPtr.ToInt32():X8}).";
+            _getHeading = null;
+            _setHeading = null;
+            _statusMessage = "Physics heading addresses failed to resolve.";
             RynthLog.Compat($"Compat: player physics heading bind failed - {_statusMessage}");
             return false;
         }
 
-        _getHeading = Marshal.GetDelegateForFunctionPointer<PhysicsGetHeadingDelegate>(getHeadingPtr);
-        _setHeading = Marshal.GetDelegateForFunctionPointer<PhysicsSetHeadingDelegate>(setHeadingPtr);
-        RynthLog.Verbose(
-            $"Compat: player heading hooks ready - get=0x{getHeadingPtr.ToInt32():X8}, set=0x{setHeadingPtr.ToInt32():X8}");
+        RynthLog.Verbose("Compat: player heading hooks ready (pattern-resolved).");
         return true;
     }
 }

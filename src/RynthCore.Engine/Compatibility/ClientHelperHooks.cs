@@ -146,25 +146,59 @@ internal static class ClientHelperHooks
     public static bool HasSalvagePanel => _sendNoticeOpenSalvagePanel != null && _gmSalvageUIAddNewItem != null && _gmSalvageUISalvage != null;
     private static int _currentGroundContainerId;
 
+    // ── Pattern-resolved binding (1a hardening, 2026-06-05) ─────────────
+    // The *Va consts above are FALLBACKs; these signatures (verified unique + landing exactly
+    // at the VA offline via tools/pe_pattern.py) are the source of truth, surviving AC-patch /
+    // ACE-rebuild drift. UseObjectOn/UseEquippedItem are sibling templates differing only in a
+    // trailing immediate (0x00 vs 0x01) — both run long to stay unique. null = wildcard (rel32).
+    private static readonly byte?[] PatSetSelectedObject = [ 0x8B, 0x4C, 0x24, 0x08, 0x85, 0xC9, 0xA1, 0x54 ];
+    private static readonly byte?[] PatUseObject = [ 0x8B, 0x44, 0x24, 0x04, 0x85, 0xC0, 0x56, 0x8B, 0xF1, 0x74, 0x11 ];
+    private static readonly byte?[] PatGetAcPlugin = [ 0xA1, 0x54, 0x10, 0x87, 0x00, 0x85, 0xC0, 0x74, 0x03 ];
+    private static readonly byte?[] PatUseObjectOn = [ 0x51, 0x56, 0x8B, 0x74, 0x24, 0x0C, 0x8B, 0x06, 0x8D, 0x4C, 0x24, 0x04, 0x51, 0x56, 0xC7, 0x44, 0x24, 0x0C, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x50, 0x20, 0x8B, 0x44, 0x24, 0x14, 0x8B, 0x16, 0x50, 0x56, 0xFF, 0x52, 0x18, 0x8B, 0x4C, 0x24, 0x10, 0x6A, 0x00 ];
+    private static readonly byte?[] PatUseEquippedItem = [ 0x51, 0x56, 0x8B, 0x74, 0x24, 0x0C, 0x8B, 0x06, 0x8D, 0x4C, 0x24, 0x04, 0x51, 0x56, 0xC7, 0x44, 0x24, 0x0C, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x50, 0x20, 0x8B, 0x44, 0x24, 0x14, 0x8B, 0x16, 0x50, 0x56, 0xFF, 0x52, 0x18, 0x8B, 0x4C, 0x24, 0x10, 0x6A, 0x01 ];
+    private static readonly byte?[] PatMoveItemExternal = [ 0x8B, 0x44, 0x24, 0x10, 0x8B, 0x4C, 0x24, 0x0C, 0x8B, 0x54, 0x24, 0x08, 0x50, 0x51, 0x52, 0xE8 ];
+    private static readonly byte?[] PatMoveItemInternal = [ 0x8B, 0x44, 0x24, 0x10, 0x8B, 0x4C, 0x24, 0x14, 0x8B, 0x54, 0x24, 0x0C ];
+    private static readonly byte?[] PatEventStackableMerge = [ 0x83, 0xEC, 0x0C, 0x53, 0x56, 0x57, 0xE8, null, null, null, null, 0x89, 0x44, 0x24, 0x14, 0x6A, 0x00, 0x8D, 0x44, 0x24, 0x10, 0x50, 0x8D, 0x4C, 0x24, 0x18, 0xC7, 0x44, 0x24, 0x18, 0x2C, 0x2C, 0x80, 0x00, 0xC7, 0x44, 0x24, 0x14, 0x00, 0x00, 0x00, 0x00, 0xE8, null, null, null, null, 0x8B, 0xF0, 0x83, 0xC6, 0x10, 0x56, 0xE8, null, null, null, null, 0x83, 0xC4, 0x04, 0x56, 0x8D, 0x4C, 0x24, 0x10, 0x51, 0x8D, 0x4C, 0x24, 0x18, 0x89, 0x44, 0x24, 0x14, 0x8B, 0xF8, 0xE8, null, null, null, null, 0x8B, 0x54, 0x24, 0x0C, 0x8B, 0x4C, 0x24, 0x1C, 0xC7, 0x02, 0x54 ];
+    private static readonly byte?[] PatInqPlayerCoords = [ 0x83, 0xEC, 0x10, 0x53, 0x8B, 0x5C, 0x24, 0x1C, 0x55, 0x56 ];
+    private static readonly byte?[] PatGetPlayerId = [ 0xA1, 0x58, 0xDA, 0x83, 0x00, 0x85, 0xC0, 0x74, 0x07 ];
+    private static readonly byte?[] PatAddTextToScroll = [ 0x81, 0xEC, 0x48, 0x09, 0x00, 0x00, 0x8A, 0x84 ];
+    private static readonly byte?[] PatUseWithTargetEvent = [ 0x83, 0xEC, 0x0C, 0x53, 0x56, 0x57, 0xE8, null, null, null, null, 0x89, 0x44, 0x24, 0x14, 0x6A, 0x00, 0x8D, 0x44, 0x24, 0x10, 0x50, 0x8D, 0x4C, 0x24, 0x18, 0xC7, 0x44, 0x24, 0x18, 0x2C, 0x2C, 0x80, 0x00, 0xC7, 0x44, 0x24, 0x14, 0x00, 0x00, 0x00, 0x00, 0xE8, null, null, null, null, 0x8B, 0xF0, 0x83, 0xC6, 0x0C, 0x56, 0xE8, null, null, null, null, 0x83, 0xC4, 0x04, 0x56, 0x8D, 0x4C, 0x24, 0x10, 0x51, 0x8D, 0x4C, 0x24, 0x18, 0x89, 0x44, 0x24, 0x14, 0x8B, 0xF8, 0xE8, null, null, null, null, 0x8B, 0x54, 0x24, 0x0C, 0x8B, 0x4C, 0x24, 0x1C, 0xC7, 0x02, 0x35 ];
+    private static readonly byte?[] PatSendNoticeOpenSalvagePanel = [ 0xE8, null, null, null, null, 0x8B, 0x10, 0x68, 0x22 ];
+    private static readonly byte?[] PatGmSalvageUIAddNewItem = [ 0x8B, 0x44, 0x24, 0x04, 0x56, 0x57, 0x50, 0x8B, 0xF9 ];
+    private static readonly byte?[] PatGmSalvageUISalvage = [ 0x83, 0xEC, 0x14, 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x8E ];
+
+    private static T? Bind<T>(AcClientTextSection text, string name, byte?[] pattern, int fallbackVa) where T : Delegate
+    {
+        HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
+        return r.Success ? Marshal.GetDelegateForFunctionPointer<T>(r.Address) : null;
+    }
+
     public static bool Probe()
     {
         try
         {
-            _setSelectedObject = Marshal.GetDelegateForFunctionPointer<SetSelectedObjectDelegate>(new IntPtr(SetSelectedObjectVa));
-            _useObject = Marshal.GetDelegateForFunctionPointer<UseObjectDelegate>(new IntPtr(UseObjectVa));
-            _getAcPlugin = Marshal.GetDelegateForFunctionPointer<GetAcPluginDelegate>(new IntPtr(GetAcPluginVa));
-            _useObjectOn = Marshal.GetDelegateForFunctionPointer<UseObjectOnDelegate>(new IntPtr(UseObjectOnVa));
-            _useEquippedItem = Marshal.GetDelegateForFunctionPointer<UseEquippedItemDelegate>(new IntPtr(UseEquippedItemVa));
-            _moveItemExternal = Marshal.GetDelegateForFunctionPointer<MoveItemExternalDelegate>(new IntPtr(MoveItemExternalVa));
-            _moveItemInternal = Marshal.GetDelegateForFunctionPointer<MoveItemInternalDelegate>(new IntPtr(MoveItemInternalVa));
-            _eventStackableMerge = Marshal.GetDelegateForFunctionPointer<EventStackableMergeDelegate>(new IntPtr(EventStackableMergeVa));
-            _inqPlayerCoords = Marshal.GetDelegateForFunctionPointer<InqPlayerCoordsDelegate>(new IntPtr(InqPlayerCoordsVa));
-            _getPlayerId = Marshal.GetDelegateForFunctionPointer<GetPlayerIdDelegate>(new IntPtr(GetPlayerIdVa));
-            _addTextToScroll = Marshal.GetDelegateForFunctionPointer<AddTextToScrollDelegate>(new IntPtr(AddTextToScrollVa));
-            _useWithTargetEvent = Marshal.GetDelegateForFunctionPointer<UseWithTargetEventDelegate>(new IntPtr(UseWithTargetEventVa));
-            _sendNoticeOpenSalvagePanel = Marshal.GetDelegateForFunctionPointer<SendNoticeOpenSalvagePanelDelegate>(new IntPtr(SendNoticeOpenSalvagePanelVa));
-            _gmSalvageUIAddNewItem = Marshal.GetDelegateForFunctionPointer<GmSalvageUIAddNewItemDelegate>(new IntPtr(GmSalvageUIAddNewItemVa));
-            _gmSalvageUISalvage = Marshal.GetDelegateForFunctionPointer<GmSalvageUISalvageDelegate>(new IntPtr(GmSalvageUISalvageVa));
+            if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
+            {
+                _statusMessage = "acclient .text not readable for pattern resolve.";
+                RynthLog.Compat($"Compat: helper hooks failed - {_statusMessage}");
+                return false;
+            }
+
+            _setSelectedObject = Bind<SetSelectedObjectDelegate>(text, "ClientHelper.SetSelectedObject", PatSetSelectedObject, SetSelectedObjectVa);
+            _useObject = Bind<UseObjectDelegate>(text, "ClientHelper.UseObject", PatUseObject, UseObjectVa);
+            _getAcPlugin = Bind<GetAcPluginDelegate>(text, "ClientHelper.GetAcPlugin", PatGetAcPlugin, GetAcPluginVa);
+            _useObjectOn = Bind<UseObjectOnDelegate>(text, "ClientHelper.UseObjectOn", PatUseObjectOn, UseObjectOnVa);
+            _useEquippedItem = Bind<UseEquippedItemDelegate>(text, "ClientHelper.UseEquippedItem", PatUseEquippedItem, UseEquippedItemVa);
+            _moveItemExternal = Bind<MoveItemExternalDelegate>(text, "ClientHelper.MoveItemExternal", PatMoveItemExternal, MoveItemExternalVa);
+            _moveItemInternal = Bind<MoveItemInternalDelegate>(text, "ClientHelper.MoveItemInternal", PatMoveItemInternal, MoveItemInternalVa);
+            _eventStackableMerge = Bind<EventStackableMergeDelegate>(text, "ClientHelper.Event_StackableMerge", PatEventStackableMerge, EventStackableMergeVa);
+            _inqPlayerCoords = Bind<InqPlayerCoordsDelegate>(text, "ClientHelper.InqPlayerCoords", PatInqPlayerCoords, InqPlayerCoordsVa);
+            _getPlayerId = Bind<GetPlayerIdDelegate>(text, "ClientHelper.GetPlayerId", PatGetPlayerId, GetPlayerIdVa);
+            _addTextToScroll = Bind<AddTextToScrollDelegate>(text, "ClientHelper.AddTextToScroll", PatAddTextToScroll, AddTextToScrollVa);
+            _useWithTargetEvent = Bind<UseWithTargetEventDelegate>(text, "ClientHelper.UseWithTargetEvent", PatUseWithTargetEvent, UseWithTargetEventVa);
+            _sendNoticeOpenSalvagePanel = Bind<SendNoticeOpenSalvagePanelDelegate>(text, "ClientHelper.SendNotice_OpenSalvagePanel", PatSendNoticeOpenSalvagePanel, SendNoticeOpenSalvagePanelVa);
+            _gmSalvageUIAddNewItem = Bind<GmSalvageUIAddNewItemDelegate>(text, "ClientHelper.gmSalvageUI_AddNewItem", PatGmSalvageUIAddNewItem, GmSalvageUIAddNewItemVa);
+            _gmSalvageUISalvage = Bind<GmSalvageUISalvageDelegate>(text, "ClientHelper.gmSalvageUI_Salvage", PatGmSalvageUISalvage, GmSalvageUISalvageVa);
             _initialized = true;
             _statusMessage = "Ready.";
             RynthLog.Verbose("Compat: helper hooks ready - validated select/state/chat helpers plus mapped interaction and inventory helpers.");
@@ -539,21 +573,26 @@ internal static class ClientHelperHooks
         if (_addTextToScroll == null || string.IsNullOrWhiteSpace(text))
             return false;
 
-        // Re-entry guard: AC's AddTextToScroll calls into our hook chain,
-        // which may call back to WriteToChat (transitively, via plugin
-        // notifications). One level of nesting is fine; deeper risks the
-        // crashing accumulation pattern.
+        // Off AC's main thread: rate-limit the spam, then marshal. Running
+        // AddTextToScroll off-thread races AC's chat-scroll buffer and corrupts it ->
+        // the recurring 0x00460D1D write-AV (killed a 5h+ session 2026-06-05). The
+        // rate-limit lives HERE (not on the drain path) so bot retry bursts are
+        // dropped before they queue, and drained messages are never re-dropped.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            long now = Environment.TickCount64;
+            long last = System.Threading.Interlocked.Read(ref _lastWriteToChatTick);
+            if (last != 0 && now - last < WriteToChatMinIntervalMs)
+                return false;
+            System.Threading.Interlocked.Exchange(ref _lastWriteToChatTick, now);
+            return AcMainThreadQueue.EnqueueWriteToChat(text!, chatType);
+        }
+
+        // On AC's main thread (drain, or a legit main-thread caller): execute directly.
+        // Re-entry guard: AC's AddTextToScroll calls back into our hook chain, which
+        // may re-enter WriteToChat. One level is fine; deeper risks the crash pattern.
         if (_writeToChatDepth > 0)
             return false;
-
-        // Rate limit: bot retry loops + plugin Think exceptions historically
-        // produced bursts of identical chat writes. Cap at one every
-        // WriteToChatMinIntervalMs to keep AC's chat-add state healthy.
-        long now = Environment.TickCount64;
-        long last = System.Threading.Interlocked.Read(ref _lastWriteToChatTick);
-        if (last != 0 && now - last < WriteToChatMinIntervalMs)
-            return false;
-        System.Threading.Interlocked.Exchange(ref _lastWriteToChatTick, now);
 
         try
         {
@@ -756,12 +795,26 @@ internal static class ClientHelperHooks
         return Marshal.ReadIntPtr(new IntPtr(address));
     }
 
+    // WidePString (AC1Legacy::PStringBase<ushort>) helper fns — pattern-resolved (1a, 2026-06-05).
+    private static readonly byte?[] PatWidePStringCtor = [ 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0x85, 0xFF, 0x8B, 0xF1, 0x74, 0x2C ];
+    private static readonly byte?[] PatWidePStringDtor = [ 0x56, 0x8B, 0x31, 0x83, 0xEE, 0x14, 0x8D, 0x46 ];
+
+    // Resolve a fn-ptr for static-init field use; returns the fallback VA (never null) on a
+    // total miss so the WidePString call sites keep their non-null assumption (old behavior).
+    private static unsafe void* ResolveFnPtr(string name, byte?[] pattern, int fallbackVa)
+    {
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text))
+            return (void*)fallbackVa;
+        HookResolver.ResolveResult r = HookResolver.Resolve(text, name, pattern, fallbackVa);
+        return (void*)(r.Success ? r.Address : new IntPtr(fallbackVa));
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private unsafe struct WidePString
     {
         private static readonly IntPtr NullWideBufferVa = new(0x00818340);
-        private static readonly delegate* unmanaged[Thiscall]<WidePString*, ushort*, void> Ctor = (delegate* unmanaged[Thiscall]<WidePString*, ushort*, void>)0x00402730;
-        private static readonly delegate* unmanaged[Thiscall]<WidePString*, void> Dtor = (delegate* unmanaged[Thiscall]<WidePString*, void>)0x004011B0;
+        private static readonly delegate* unmanaged[Thiscall]<WidePString*, ushort*, void> Ctor = (delegate* unmanaged[Thiscall]<WidePString*, ushort*, void>)ResolveFnPtr("ClientHelper.PStringBaseW_ctor", PatWidePStringCtor, 0x00402730);
+        private static readonly delegate* unmanaged[Thiscall]<WidePString*, void> Dtor = (delegate* unmanaged[Thiscall]<WidePString*, void>)ResolveFnPtr("ClientHelper.PStringBaseW_dtor", PatWidePStringDtor, 0x004011B0);
 
         public IntPtr CharBuffer;
 

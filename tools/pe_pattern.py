@@ -12,7 +12,10 @@ That window spans .text AND the start of .rdata/.data, so "unique here" == "uniq
   4. confirms that single match lands at the requested VA,
   5. prints a ready-to-paste C# byte?[] literal.
 
-Usage:  python pe_pattern.py "<path-to-acclient.exe>" [group]
+Usage:  python pe_pattern.py "<path-to-acclient.exe>" [group|ALL]
+Only FUNCTION (.text) VAs belong here. Data/global addresses (.data/.rdata singletons,
+RecvFrom slot, s_NullBuffer, selection globals) are Phase B — string/vtable discovery, not
+.text pattern scan.
 """
 import sys, struct
 
@@ -33,7 +36,6 @@ def read_window(path):
     image_base = struct.unpack_from("<I", data, opt + 28)[0]
     size_of_image = struct.unpack_from("<I", data, opt + 56)[0]
     sec_tbl = opt + size_opt
-    # Reconstruct the live virtual image (sections placed at their RVAs, gaps zero-filled).
     virt = bytearray(size_of_image)
     for i in range(num_sec):
         b = sec_tbl + i * 40
@@ -43,7 +45,6 @@ def read_window(path):
         end = min(vaddr + rawsize, size_of_image)
         chunk = data[rawptr:rawptr + (end - vaddr)]
         virt[vaddr:vaddr + len(chunk)] = chunk
-    # Mirror AcClientModule's window-sizing exactly.
     raw_text = size_of_image - DEFAULT_TEXT_RVA
     if raw_text <= 0 or raw_text > SUSPICIOUS:
         textsize = min(max(0, raw_text), MAX_TEXT_BYTES)
@@ -52,7 +53,7 @@ def read_window(path):
     window = bytes(virt[DEFAULT_TEXT_RVA:DEFAULT_TEXT_RVA + textsize])
     return window, image_base + DEFAULT_TEXT_RVA
 
-def wildcard_window(buf, off, n=56):
+def wildcard_window(buf, off, n=160):
     win = list(buf[off:off + n])
     pat = list(win)
     i = 0
@@ -101,6 +102,8 @@ def shortest_unique(text_b, full_pat, text_base, lo=8):
 def cs(pat):
     return "[ " + ", ".join("null" if p is None else f"0x{p:02X}" for p in pat) + " ]"
 
+# FUNCTION (.text) VAs only, grouped by the engine hook file that binds them.
+# Dups across files (same VA) are noted; resolve once in the catalog.
 GROUPS = {
     "ClientObjectHooks": [
         ("GetWeenieObject", 0x005583F0), ("GetNumContainedItems", 0x0058CCE0),
@@ -113,27 +116,97 @@ GROUPS = {
         ("InqSkillLevel", 0x00593380), ("InqSkillAdvancementClass", 0x00592B70),
         ("InqAttribute", 0x00592700), ("GetVitaeValue", 0x0058FE80),
     ],
+    "ClientHelperHooks": [
+        ("SetSelectedObject", 0x0058D110), ("GetAcPlugin", 0x0055A740),
+        ("UseObjectOn", 0x0055A8C0), ("UseEquippedItem", 0x0055A910),
+        ("MoveItemExternal", 0x0055A9E0), ("MoveItemInternal", 0x0055AA00),
+        ("Event_StackableMerge", 0x006ACDD0), ("ClientUISystem_UseObject", 0x00565750),
+        ("InqPlayerCoords", 0x00560E00), ("GetPlayerId", 0x0048E5F0),
+        ("AddTextToScroll", 0x005649F0), ("UseWithTargetEvent", 0x006AD3E0),
+        ("SendNotice_OpenSalvagePanel", 0x006AD4F0), ("gmSalvageUI_AddNewItem", 0x004CC020),
+        ("gmSalvageUI_Salvage", 0x004CC430), ("PStringBaseW_ctor", 0x00402730),
+        ("PStringBaseW_dtor", 0x004011B0),
+    ],
+    "PlayerVitalsHooks": [
+        ("UpdateAttribute2nd", 0x00559900), ("UpdateAttribute2ndLevel", 0x00559920),
+        ("PrivateUpdateAttribute2nd", 0x00559B20), ("PrivateUpdateAttribute2ndLevel", 0x00559B50),
+        ("OnStatUpdatedInt", 0x0058ED50), ("InqAttribute2nd_struct", 0x005927F0),
+        ("SendNotice_PlayerDescReceived", 0x0047A200), ("InqAttribute2nd_uint", 0x00592D20),
+    ],
+    "ClientCombatHooks": [
+        ("GetCombatSystem", 0x0056B210), ("SetRequestedAttackHeight", 0x0056D640),
+        ("StartAttackRequest", 0x0056CD90), ("EndAttackRequest", 0x0056CE30),
+        ("PlayerInReadyPosition", 0x0056C570), ("AutoTarget", 0x0056C9D0),
+        ("SendAttackHeightChanged", 0x006AAE10),
+    ],
+    "CharacterManagementHooks": [
+        ("UIFlow_GetPersistantData", 0x0051DFB0), ("GetPlayerSystem", 0x0055E1D0),
+        ("LogOnCharacter", 0x00560600), ("CharacterSet_GetIdentity", 0x004E8B20),
+        ("CharacterSet_GetName", 0x004FE980), ("CharacterSet_GetGid", 0x004FE9B0),
+    ],
+    "ChatCommandDispatcher": [
+        ("Event_Talk", 0x006A53E0), ("Event_Emote", 0x006A4F40),
+        ("Event_SoulEmote", 0x006A5320), ("Event_TalkDirectByName", 0x006A55A0),
+        ("Event_ChannelBroadcast", 0x006A4E50), ("PStringBaseC_ctor", 0x0048C3E0),
+        ("PStringBaseC_Clear", 0x004AB990),
+    ],
+    "CombatActionHooks": [
+        ("Handle_Combat_QueryHealthResponse", 0x006AA900), ("CastSpell", 0x00568DE0),
+        ("GetMagicSystem", 0x00567C00), ("FreeHandsAndCastSpell", 0x00567C90),
+    ],
+    "PlayerPhysicsHooks": [
+        ("CPhysicsObj_get_heading", 0x00512010), ("CPhysicsObj_set_heading", 0x00514C60),
+        ("CMotionInterp_get_max_speed", 0x005288C0),
+    ],
+    "GameTickHooks": [
+        ("Client_UseTime", 0x00411FA0),
+    ],
+    "TimeSyncHooks": [
+        ("ClientNet_HandleTimeSynch", 0x005448F0),
+    ],
 }
 
-def main():
-    if len(sys.argv) < 2:
-        raise SystemExit("usage: pe_pattern.py <acclient.exe> [group]")
-    text_b, text_base = read_window(sys.argv[1])
-    group = sys.argv[2] if len(sys.argv) > 2 else "ClientObjectHooks"
-    print(f"window base VA = 0x{text_base:08X}, window size = {len(text_b)} bytes\n")
+def best_pattern(text_b, text_base, va, off):
+    """Prefer a drift-tolerant wildcarded pattern; if template-siblings share it (the rel32
+    call target being the only differentiator), fall back to a literal pattern. Returns
+    (mode, pat) where mode is 'wild' | 'lit', or (None, None) if no unique prologue exists."""
+    for mode in ("wild", "lit"):
+        full = wildcard_window(text_b, off) if mode == "wild" else list(text_b[off:off + 160])
+        pat, mva = shortest_unique(text_b, full, text_base)
+        if len(matches(text_b, pat)) == 1 and mva == va:
+            return mode, pat
+    return None, None
+
+def process(text_b, text_base, group):
+    print(f"=== {group} ===")
     ok = bad = 0
     for name, va in GROUPS[group]:
         off = va - text_base
         if off < 0 or off >= len(text_b):
-            print(f"[SKIP] {name:30} 0x{va:08X} not in window"); bad += 1; continue
-        full = wildcard_window(text_b, off)
-        pat, mva = shortest_unique(text_b, full, text_base)
-        n = len(matches(text_b, pat))
-        good = (n == 1 and mva == va)
-        ok += good; bad += (not good)
-        print(f"[{'OK ' if good else '!! '}] {name:30} VA=0x{va:08X} matches={n} at=0x{mva:08X} len={len(pat)}")
+            print(f"[SKIP] {name:34} 0x{va:08X} not in window"); bad += 1; continue
+        mode, pat = best_pattern(text_b, text_base, va, off)
+        if pat is None:
+            bad += 1
+            print(f"[TB!] {name:34} VA=0x{va:08X} no unique prologue in 160B -> TIER-B (fixed VA + VerifyBytes)")
+            continue
+        ok += 1
+        print(f"[{'OK ' if mode == 'wild' else 'LIT'}] {name:34} VA=0x{va:08X} unique len={len(pat)} mode={mode}")
         print(f"        {cs(pat)}")
-    print(f"\nUnique+correct: {ok}/{ok+bad}")
+    return ok, bad
+
+def main():
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: pe_pattern.py <acclient.exe> [group|ALL]")
+    text_b, text_base = read_window(sys.argv[1])
+    sel = sys.argv[2] if len(sys.argv) > 2 else "ALL"
+    print(f"window base VA = 0x{text_base:08X}, window size = {len(text_b)} bytes\n")
+    groups = list(GROUPS) if sel.upper() == "ALL" else [sel]
+    tok = tbad = 0
+    for g in groups:
+        ok, bad = process(text_b, text_base, g)
+        tok += ok; tbad += bad
+        print()
+    print(f"TOTAL unique+correct: {tok}/{tok + tbad}")
 
 if __name__ == "__main__":
     main()
