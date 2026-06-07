@@ -23,12 +23,10 @@ internal static class SelectedTargetHooks
     /// fired before <c>_initialized=true</c> are dropped by the queue gate).
     /// </summary>
     public static uint ReadCurrentSelectedId() => ReadUInt32(_selectedIdAddr);
-    private static readonly byte[] SetSelectedObjectSignature =
+    // Verified unique + lands at 0x0058D110 offline (tools/pe_pattern.py).
+    private static readonly byte?[] SetSelectedObjectPattern =
     [
-        0x8B, 0x4C, 0x24, 0x08, 0x85, 0xC9, 0xA1, 0x54,
-        0x1E, 0x87, 0x00, 0x56, 0x8B, 0x74, 0x24, 0x08,
-        0x57, 0x8B, 0xF8, 0x75, 0x04, 0x3B, 0xC6, 0x74,
-        0x7A, 0x85, 0xC0, 0x74, 0x14, 0x50, 0xE8
+        0x8B, 0x4C, 0x24, 0x08, 0x85, 0xC9, 0xA1, 0x54
     ];
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -53,10 +51,10 @@ internal static class SelectedTargetHooks
             return;
         }
 
-        int funcOff = SetSelectedObjectVa - textSection.TextBaseVa;
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, funcOff, SetSelectedObjectSignature))
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(textSection, "SelectedTarget.SetSelectedObject", SetSelectedObjectPattern, SetSelectedObjectVa);
+        if (!resolved.Success)
         {
-            _statusMessage = $"ACCWeenieObject::SetSelectedObject signature mismatch @ 0x{SetSelectedObjectVa:X8}.";
+            _statusMessage = $"ACCWeenieObject::SetSelectedObject unresolved (VA 0x{SetSelectedObjectVa:X8}).";
             RynthLog.Compat($"Compat: selected-target hook failed - {_statusMessage}");
             return;
         }
@@ -65,7 +63,7 @@ internal static class SelectedTargetHooks
 
         try
         {
-            _targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
+            _targetAddress = resolved.Address;
             _setSelectedObjectDetour = SetSelectedObjectDetour;
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_setSelectedObjectDetour);
             _originalSetSelectedObject = Marshal.GetDelegateForFunctionPointer<SetSelectedObjectDelegate>(MinHook.HookCreate(_targetAddress, detourPtr));

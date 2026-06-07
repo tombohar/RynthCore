@@ -22,14 +22,15 @@ internal static class VendorHooks
     // gmVendorUI::RecvNotice_CloseVendor
     private const int RecvNoticeCloseVendorVa = 0x004C0F40;
 
-    // Verified entry bytes (from Ghidra)
-    private static readonly byte[] OpenVendorSignature =
+    // Verified unique + lands at 0x004C5790 offline (tools/pe_pattern.py).
+    private static readonly byte?[] OpenVendorPattern =
     [
-        0x83, 0xEC, 0x2C, 0x53, 0x55, 0x56, 0x57   // SUB ESP,2C; PUSH EBX; PUSH EBP; PUSH ESI; PUSH EDI
+        0x83, 0xEC, 0x2C, 0x53, 0x55, 0x56, 0x57, 0x8B, 0xF1   // SUB ESP,2C; PUSH EBX; PUSH EBP; PUSH ESI; PUSH EDI; MOV ESI,ECX
     ];
-    private static readonly byte[] CloseVendorSignature =
+    // Verified unique + lands at 0x004C0F40 offline (tools/pe_pattern.py).
+    private static readonly byte?[] CloseVendorPattern =
     [
-        0x8A, 0x44, 0x24, 0x04, 0x84, 0xC0, 0x75    // MOV AL,[ESP+4]; TEST AL,AL; JNZ ...
+        0x8A, 0x44, 0x24, 0x04, 0x84, 0xC0, 0x75, 0x17    // MOV AL,[ESP+4]; TEST AL,AL; JNZ ...
     ];
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
@@ -61,32 +62,31 @@ internal static class VendorHooks
             return;
         }
 
-        int openOff  = RecvNoticeOpenVendorVa  - textSection.TextBaseVa;
-        int closeOff = RecvNoticeCloseVendorVa - textSection.TextBaseVa;
-
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, openOff, OpenVendorSignature))
+        HookResolver.ResolveResult resolvedOpen = HookResolver.Resolve(textSection, "Vendor.OpenVendor", OpenVendorPattern, RecvNoticeOpenVendorVa);
+        if (!resolvedOpen.Success)
         {
-            _statusMessage = $"RecvNotice_OpenVendor signature mismatch @ 0x{RecvNoticeOpenVendorVa:X8}.";
+            _statusMessage = $"RecvNotice_OpenVendor unresolved (VA 0x{RecvNoticeOpenVendorVa:X8}).";
             RynthLog.Compat($"Compat: vendor hooks failed - {_statusMessage}");
             return;
         }
 
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, closeOff, CloseVendorSignature))
+        HookResolver.ResolveResult resolvedClose = HookResolver.Resolve(textSection, "Vendor.CloseVendor", CloseVendorPattern, RecvNoticeCloseVendorVa);
+        if (!resolvedClose.Success)
         {
-            _statusMessage = $"RecvNotice_CloseVendor signature mismatch @ 0x{RecvNoticeCloseVendorVa:X8}.";
+            _statusMessage = $"RecvNotice_CloseVendor unresolved (VA 0x{RecvNoticeCloseVendorVa:X8}).";
             RynthLog.Compat($"Compat: vendor hooks failed - {_statusMessage}");
             return;
         }
 
         try
         {
-            _openAddress   = new IntPtr(textSection.TextBaseVa + openOff);
+            _openAddress   = resolvedOpen.Address;
             _openDetour    = OpenVendorDetour;
             IntPtr openPtr = Marshal.GetFunctionPointerForDelegate(_openDetour);
             _originalOpen  = Marshal.GetDelegateForFunctionPointer<RecvNoticeOpenVendorDelegate>(
                 MinHook.HookCreate(_openAddress, openPtr));
 
-            _closeAddress   = new IntPtr(textSection.TextBaseVa + closeOff);
+            _closeAddress   = resolvedClose.Address;
             _closeDetour    = CloseVendorDetour;
             IntPtr closePtr = Marshal.GetFunctionPointerForDelegate(_closeDetour);
             _originalClose  = Marshal.GetDelegateForFunctionPointer<RecvNoticeCloseVendorDelegate>(

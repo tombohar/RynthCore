@@ -25,6 +25,15 @@ internal static class CommandInterpreterHooks
     private const int TakeControlOffsetFromSetAutoRun = ReferenceCommandInterpreterTakeControlFromServer - ReferenceCommandInterpreterSetAutoRun;
     private const int ClearAllCommandsOffsetFromSetAutoRun = ReferenceCommandInterpreterClearAllCommands - ReferenceCommandInterpreterSetAutoRun;
 
+    // Verified unique + lands at the Reference VA offline (tools/pe_pattern.py).
+    // Primary resolution; the *Offset deltas below remain as fallback only.
+    private static readonly byte?[] SetMotionPattern = [ 0x8B, 0x41, 0x08, 0x81, 0xEC, 0x0C, 0x01, 0x00 ];
+    private static readonly byte?[] StopCompletelyPattern = [ 0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x04, 0x85, 0xC0, 0x74, 0x32 ];
+    private static readonly byte?[] TurnToHeadingPattern = [ 0x83, 0xEC, 0x2C, 0x56, 0x8B, 0xF1, 0x8B, 0x06 ];
+    private static readonly byte?[] PlayerTeleportedPattern = [ 0x56, 0x8B, 0xF1, 0x8B, 0x06, 0x6A, 0x01, 0x6A ];
+    private static readonly byte?[] TakeControlFromServerPattern = [ 0x56, 0x8B, 0xF1, 0x8B, 0x46, 0x34, 0x85, 0xC0, 0x74 ];
+    private static readonly byte?[] ClearAllCommandsPattern = [ 0x56, 0x8B, 0xF1, 0x8D, 0x4E, 0x0C, 0xE8, null, null, null, null, 0x8D, 0x4E, 0x18, 0xE8, null, null, null, null, 0x8D, 0x4E, 0x24, 0x5E ];
+
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void CommenceJumpDelegate(IntPtr thisPtr);
 
@@ -54,6 +63,8 @@ internal static class CommandInterpreterHooks
 
     private static IntPtr _smartboxStaticAddr;
     private static IntPtr _boundCmdInterp;
+    private static bool _absResolved;
+    private static IntPtr _setMotionAbs, _stopCompletelyAbs, _turnToHeadingAbs, _playerTeleportedAbs, _takeControlAbs, _clearAllCommandsAbs;
     private static CommenceJumpDelegate? _commenceJump;
     private static DoJumpDelegate? _doJump;
     private static SetAutoRunDelegate? _setAutoRun;
@@ -301,6 +312,29 @@ internal static class CommandInterpreterHooks
         }
     }
 
+    // Resolve the six non-vtable-slot member functions by unique .text signature (primary),
+    // once and cached — they are static code addresses. On a miss they stay Zero and
+    // TryBindDelegates falls back to the live-anchor + hardcoded-delta computation (old behavior).
+    private static void EnsureAbsoluteResolved()
+    {
+        if (_absResolved) return;
+        if (!AcClientModule.TryReadTextSection(out AcClientTextSection text)) return; // retry next call
+        HookResolver.ResolveResult r;
+        r = HookResolver.Resolve(text, "CmdInterp.SetMotion", SetMotionPattern, ReferenceAccCmdInterpSetMotion);
+        _setMotionAbs = r.Success ? r.Address : IntPtr.Zero;
+        r = HookResolver.Resolve(text, "CmdInterp.StopCompletely", StopCompletelyPattern, ReferenceCommandInterpreterStopCompletely);
+        _stopCompletelyAbs = r.Success ? r.Address : IntPtr.Zero;
+        r = HookResolver.Resolve(text, "CmdInterp.TurnToHeading", TurnToHeadingPattern, ReferenceCommandInterpreterTurnToHeading);
+        _turnToHeadingAbs = r.Success ? r.Address : IntPtr.Zero;
+        r = HookResolver.Resolve(text, "CmdInterp.PlayerTeleported", PlayerTeleportedPattern, ReferenceCommandInterpreterPlayerTeleported);
+        _playerTeleportedAbs = r.Success ? r.Address : IntPtr.Zero;
+        r = HookResolver.Resolve(text, "CmdInterp.TakeControlFromServer", TakeControlFromServerPattern, ReferenceCommandInterpreterTakeControlFromServer);
+        _takeControlAbs = r.Success ? r.Address : IntPtr.Zero;
+        r = HookResolver.Resolve(text, "CmdInterp.ClearAllCommands", ClearAllCommandsPattern, ReferenceCommandInterpreterClearAllCommands);
+        _clearAllCommandsAbs = r.Success ? r.Address : IntPtr.Zero;
+        _absResolved = true;
+    }
+
     private static bool TryBindDelegates()
     {
         IntPtr selectedStaticAddr = IntPtr.Zero;
@@ -356,12 +390,13 @@ internal static class CommandInterpreterHooks
         IntPtr commenceJumpPtr = Marshal.ReadIntPtr(vtable, VtblCommenceJumpIndex * IntPtr.Size);
         IntPtr doJumpPtr = Marshal.ReadIntPtr(vtable, VtblDoJumpIndex * IntPtr.Size);
         IntPtr setAutoRunPtr = Marshal.ReadIntPtr(vtable, VtblSetAutoRunIndex * IntPtr.Size);
-        IntPtr setMotionPtr = ResolveSetMotionPointer(commenceJumpPtr, doJumpPtr);
-        IntPtr stopCompletelyPtr = AddOffset(setAutoRunPtr, StopCompletelyOffsetFromSetAutoRun);
-        IntPtr turnToHeadingPtr = AddOffset(setAutoRunPtr, TurnToHeadingOffsetFromSetAutoRun);
-        IntPtr playerTeleportedPtr = AddOffset(setAutoRunPtr, PlayerTeleportedOffsetFromSetAutoRun);
-        IntPtr takeControlPtr = AddOffset(setAutoRunPtr, TakeControlOffsetFromSetAutoRun);
-        IntPtr clearAllCommandsPtr = AddOffset(setAutoRunPtr, ClearAllCommandsOffsetFromSetAutoRun);
+        EnsureAbsoluteResolved();
+        IntPtr setMotionPtr = _setMotionAbs != IntPtr.Zero ? _setMotionAbs : ResolveSetMotionPointer(commenceJumpPtr, doJumpPtr);
+        IntPtr stopCompletelyPtr = _stopCompletelyAbs != IntPtr.Zero ? _stopCompletelyAbs : AddOffset(setAutoRunPtr, StopCompletelyOffsetFromSetAutoRun);
+        IntPtr turnToHeadingPtr = _turnToHeadingAbs != IntPtr.Zero ? _turnToHeadingAbs : AddOffset(setAutoRunPtr, TurnToHeadingOffsetFromSetAutoRun);
+        IntPtr playerTeleportedPtr = _playerTeleportedAbs != IntPtr.Zero ? _playerTeleportedAbs : AddOffset(setAutoRunPtr, PlayerTeleportedOffsetFromSetAutoRun);
+        IntPtr takeControlPtr = _takeControlAbs != IntPtr.Zero ? _takeControlAbs : AddOffset(setAutoRunPtr, TakeControlOffsetFromSetAutoRun);
+        IntPtr clearAllCommandsPtr = _clearAllCommandsAbs != IntPtr.Zero ? _clearAllCommandsAbs : AddOffset(setAutoRunPtr, ClearAllCommandsOffsetFromSetAutoRun);
 
         if (!SmartBoxLocator.IsPointerInModule(commenceJumpPtr) ||
             !SmartBoxLocator.IsPointerInModule(doJumpPtr) ||
@@ -411,6 +446,8 @@ internal static class CommandInterpreterHooks
     {
         _smartboxStaticAddr = IntPtr.Zero;
         _boundCmdInterp = IntPtr.Zero;
+        _absResolved = false;
+        _setMotionAbs = _stopCompletelyAbs = _turnToHeadingAbs = _playerTeleportedAbs = _takeControlAbs = _clearAllCommandsAbs = IntPtr.Zero;
         _commenceJump = null;
         _doJump = null;
         _setAutoRun = null;

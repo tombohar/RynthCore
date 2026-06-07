@@ -34,22 +34,15 @@ internal static class TextParserGuardHooks
     // FUN_0067D3C0 in retail/ACE acclient.exe (byte-identical; verified at install).
     private const int TargetVa = 0x0067D3C0;
 
-    // 29-byte prologue from the function start through the AV instruction. Includes
-    // the literal data pointer 0x007FF308 (bytes 5-9) — stable across retail/ACE —
-    // which makes this a strong validation signature.
-    private static readonly byte[] FuncSignature =
+    // Prologue from the function start, including the literal data pointer 0x007FF308
+    // (bytes 5-9) — stable across retail/ACE — which makes this a strong validation
+    // signature. Verified unique + lands at 0x0067D3C0 offline (tools/pe_pattern.py).
+    private static readonly byte?[] FuncPattern =
     [
         0x83, 0xEC, 0x50,                 // SUB  ESP, 0x50
         0x53,                              // PUSH EBX
         0x55,                              // PUSH EBP
-        0xB8, 0x08, 0xF3, 0x7F, 0x00,      // MOV  EAX, 0x7FF308
-        0x56,                              // PUSH ESI
-        0x33, 0xF6,                        // XOR  ESI, ESI
-        0x89, 0x44, 0x24, 0x3C,            // MOV  [ESP+0x3C], EAX
-        0x89, 0x44, 0x24, 0x4C,            // MOV  [ESP+0x4C], EAX
-        0x8B, 0x44, 0x24, 0x60,            // MOV  EAX, [ESP+0x60]   ; param1 = parser ctx
-        0x57,                              // PUSH EDI
-        0x8B, 0x78, 0x0C                   // MOV  EDI, [EAX+0xC]    ; <- AV when EAX==0
+        0xB8, 0x08, 0xF3                   // MOV  EAX, 0x7FF308 (low bytes)
     ];
 
     private static IntPtr _targetAddress;
@@ -85,18 +78,18 @@ internal static class TextParserGuardHooks
             return;
         }
 
-        int funcOff = TargetVa - textSection.TextBaseVa;
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, funcOff, FuncSignature))
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(textSection, "TextParserGuard.FUN_0067D3C0", FuncPattern, TargetVa);
+        if (!resolved.Success)
         {
             Volatile.Write(ref _installed, 0);
-            _statusMessage = $"signature mismatch @ 0x{TargetVa:X8}.";
+            _statusMessage = $"unresolved (VA 0x{TargetVa:X8}).";
             RynthLog.Compat($"Compat: text-parser guard NOT installed — {_statusMessage}");
             return;
         }
 
         try
         {
-            _targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
+            _targetAddress = resolved.Address;
 
             IntPtr detour = SehTrampoline.GetTagParserGuardAddress();
             if (detour == IntPtr.Zero)

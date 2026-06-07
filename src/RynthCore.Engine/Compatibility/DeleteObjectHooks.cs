@@ -9,12 +9,10 @@ namespace RynthCore.Engine.Compatibility;
 internal static class DeleteObjectHooks
 {
     private const int DeleteObjectVa = 0x00558330;
-    private static readonly byte[] DeleteObjectSignature =
+    // Verified unique + lands at 0x00558330 offline (tools/pe_pattern.py).
+    private static readonly byte?[] DeleteObjectPattern =
     [
-        0x56, 0x57, 0x8B, 0xF9, 0xE8, 0x67, 0x2D, 0x00,
-        0x00, 0x85, 0xC0, 0x8B, 0x74, 0x24, 0x0C, 0x74,
-        0x0C, 0xE8, 0xFA, 0x23, 0x00, 0x00, 0x8B, 0x08,
-        0x56, 0x50, 0xFF, 0x51, 0x24, 0x56, 0xE8
+        0x56, 0x57, 0x8B, 0xF9, 0xE8, null, null, null, null, 0x85, 0xC0, 0x8B, 0x74, 0x24, 0x0C
     ];
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
@@ -39,17 +37,17 @@ internal static class DeleteObjectHooks
             return;
         }
 
-        int funcOff = DeleteObjectVa - textSection.TextBaseVa;
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, funcOff, DeleteObjectSignature))
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(textSection, "DeleteObject.DeleteObject", DeleteObjectPattern, DeleteObjectVa);
+        if (!resolved.Success)
         {
-            _statusMessage = $"ACCObjectMaint::DeleteObject signature mismatch @ 0x{DeleteObjectVa:X8}.";
+            _statusMessage = $"ACCObjectMaint::DeleteObject unresolved (VA 0x{DeleteObjectVa:X8}).";
             RynthLog.Compat($"Compat: delete-object hook failed - {_statusMessage}");
             return;
         }
 
         try
         {
-            _targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
+            _targetAddress = resolved.Address;
             _deleteObjectDetour = DeleteObjectDetour;
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_deleteObjectDetour);
             _originalDeleteObject = Marshal.GetDelegateForFunctionPointer<DeleteObjectDelegate>(MinHook.HookCreate(_targetAddress, detourPtr));

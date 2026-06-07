@@ -12,12 +12,10 @@ internal static class VectorUpdateServerDispatchHooks
     private const int NetBlobBufPtrOffset = 0x2C;
     private const int NetBlobBufSizeOffset = 0x30;
     private const uint VectorUpdateOpcode = 0x0000F74E;
-    private static readonly byte[] DispatchSbVectorUpdateSignature =
+    // Verified unique + lands at 0x006ADC80 offline (tools/pe_pattern.py).
+    private static readonly byte?[] DispatchSbVectorUpdatePattern =
     [
-        0x83, 0xEC, 0x20, 0x53, 0x8B, 0x5C, 0x24, 0x2C,
-        0x85, 0xDB, 0x74, 0x08, 0x8B, 0x44, 0x24, 0x28,
-        0x85, 0xC0, 0x75, 0x0A, 0xB8, 0x03, 0x00, 0x00,
-        0x00, 0x5B, 0x83, 0xC4, 0x20, 0xC3
+        0x83, 0xEC, 0x20, 0x53, 0x8B, 0x5C, 0x24, 0x2C
     ];
 
     private static IntPtr _originalDispatchSbVectorUpdatePtr;
@@ -38,10 +36,10 @@ internal static class VectorUpdateServerDispatchHooks
             return;
         }
 
-        int funcOff = DispatchSbVectorUpdateVa - textSection.TextBaseVa;
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, funcOff, DispatchSbVectorUpdateSignature))
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(textSection, "VectorUpdate.DispatchSbVectorUpdate", DispatchSbVectorUpdatePattern, DispatchSbVectorUpdateVa);
+        if (!resolved.Success)
         {
-            _statusMessage = $"CM_Physics::DispatchSB_VectorUpdate signature mismatch @ 0x{DispatchSbVectorUpdateVa:X8}.";
+            _statusMessage = $"CM_Physics::DispatchSB_VectorUpdate unresolved (VA 0x{DispatchSbVectorUpdateVa:X8}).";
             RynthLog.Compat($"Compat: vector-update hook failed - {_statusMessage}");
             return;
         }
@@ -50,7 +48,7 @@ internal static class VectorUpdateServerDispatchHooks
         {
             unsafe
             {
-                _targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
+                _targetAddress = resolved.Address;
                 delegate* unmanaged[Cdecl]<IntPtr, IntPtr, uint> pDetour = &DispatchSbVectorUpdateDetour;
                 MinHook.Hook(_targetAddress, (IntPtr)pDetour, out _originalDispatchSbVectorUpdatePtr);
             }

@@ -10,18 +10,17 @@ internal static class ViewObjectContentsHooks
 {
     private const int ViewObjectContentsVa = 0x005596B0;
     private const int StopViewingObjectContentsVa = 0x00559770;
-    private static readonly byte[] ViewObjectContentsSignature =
+    // Verified unique + lands at 0x005596B0 offline (tools/pe_pattern.py).
+    private static readonly byte?[] ViewObjectContentsPattern =
     [
         0x53, 0x8B, 0x5C, 0x24, 0x08, 0x56, 0x57, 0x53,
-        0x8B, 0xF9, 0xE8, 0x71, 0xF2, 0xFA, 0xFF, 0x8B,
-        0xF0, 0x85, 0xF6, 0x75, 0x57
+        0x8B, 0xF9, 0xE8, null, null, null, null, 0x8B, 0xF0, 0x85
     ];
-    private static readonly byte[] StopViewingObjectContentsSignature =
+    // Verified unique + lands at 0x00559770 offline (tools/pe_pattern.py).
+    private static readonly byte?[] StopViewingObjectContentsPattern =
     [
         0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0x57, 0x8B,
-        0xF1, 0xE8, 0x62, 0xF1, 0xFA, 0xFF, 0x85, 0xC0,
-        0x74, 0x07, 0xC7, 0x40, 0x50, 0x00, 0x00, 0x00,
-        0x00
+        0xF1, 0xE8, null, null, null, null, 0x85, 0xC0, 0x74, 0x07
     ];
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
@@ -54,30 +53,30 @@ internal static class ViewObjectContentsHooks
             return;
         }
 
-        int viewOff = ViewObjectContentsVa - textSection.TextBaseVa;
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, viewOff, ViewObjectContentsSignature))
+        HookResolver.ResolveResult resolvedView = HookResolver.Resolve(textSection, "ViewContents.ViewObjectContents", ViewObjectContentsPattern, ViewObjectContentsVa);
+        if (!resolvedView.Success)
         {
-            _statusMessage = $"ACCObjectMaint::ViewObjectContents signature mismatch @ 0x{ViewObjectContentsVa:X8}.";
+            _statusMessage = $"ACCObjectMaint::ViewObjectContents unresolved (VA 0x{ViewObjectContentsVa:X8}).";
             RynthLog.Compat($"Compat: view-object-contents hook failed - {_statusMessage}");
             return;
         }
 
-        int stopOff = StopViewingObjectContentsVa - textSection.TextBaseVa;
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, stopOff, StopViewingObjectContentsSignature))
+        HookResolver.ResolveResult resolvedStop = HookResolver.Resolve(textSection, "ViewContents.StopViewingObjectContents", StopViewingObjectContentsPattern, StopViewingObjectContentsVa);
+        if (!resolvedStop.Success)
         {
-            _statusMessage = $"ACCObjectMaint::StopViewingObjectContents signature mismatch @ 0x{StopViewingObjectContentsVa:X8}.";
+            _statusMessage = $"ACCObjectMaint::StopViewingObjectContents unresolved (VA 0x{StopViewingObjectContentsVa:X8}).";
             RynthLog.Compat($"Compat: view-object-contents hook failed - {_statusMessage}");
             return;
         }
 
         try
         {
-            _viewTargetAddress = new IntPtr(textSection.TextBaseVa + viewOff);
+            _viewTargetAddress = resolvedView.Address;
             _viewObjectContentsDetour = ViewObjectContentsDetour;
             IntPtr viewDetourPtr = Marshal.GetFunctionPointerForDelegate(_viewObjectContentsDetour);
             _originalViewObjectContents = Marshal.GetDelegateForFunctionPointer<ViewObjectContentsDelegate>(MinHook.HookCreate(_viewTargetAddress, viewDetourPtr));
 
-            _stopTargetAddress = new IntPtr(textSection.TextBaseVa + stopOff);
+            _stopTargetAddress = resolvedStop.Address;
             _stopViewingObjectContentsDetour = StopViewingObjectContentsDetour;
             IntPtr stopDetourPtr = Marshal.GetFunctionPointerForDelegate(_stopViewingObjectContentsDetour);
             _originalStopViewingObjectContents = Marshal.GetDelegateForFunctionPointer<StopViewingObjectContentsDelegate>(MinHook.HookCreate(_stopTargetAddress, stopDetourPtr));

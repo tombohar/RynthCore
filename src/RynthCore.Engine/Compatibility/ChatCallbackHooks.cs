@@ -25,20 +25,17 @@ internal static class ChatCallbackHooks
     private const bool EnableOutgoingHook = true;
     private static IncomingChatMode CurrentIncomingMode => IncomingChatMode.AddTextToScrollHostEat;
 
-    private static readonly byte[] IncomingChatAddTextToScrollSignature =
+    // Verified unique + lands at 0x005649F0 offline (tools/pe_pattern.py).
+    private static readonly byte?[] IncomingChatAddTextToScrollPattern =
     [
-        0x81, 0xEC, 0x48, 0x09, 0x00, 0x00, 0x8A, 0x84,
-        0x24, 0x54, 0x09, 0x00, 0x00, 0x53, 0x55, 0x56,
-        0x33, 0xF6, 0x84, 0xC0, 0x57, 0x8B, 0xBC, 0x24,
-        0x5C, 0x09, 0x00, 0x00, 0x89, 0x4C, 0x24, 0x24
+        0x81, 0xEC, 0x48, 0x09, 0x00, 0x00, 0x8A, 0x84
     ];
 
-    private static readonly byte[] IncomingChatWrapperSignature =
+    // Verified unique + lands at 0x0058A000 offline (tools/pe_pattern.py).
+    private static readonly byte?[] IncomingChatWrapperPattern =
     [
         0xA1, 0xE4, 0x0B, 0x87, 0x00, 0x85, 0xC0, 0x75,
-        0x06, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3, 0x56,
-        0x8B, 0x74, 0x24, 0x10, 0x83, 0xFE, 0x01, 0x74,
-        0x0F
+        0x06, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3, 0x56
     ];
 
     private static readonly byte?[] OutgoingChatPattern =
@@ -198,17 +195,17 @@ internal static class ChatCallbackHooks
 
     private static bool TryInstallIncomingWrapperHook(AcClientTextSection textSection, out string incomingStatus)
     {
-        int incomingOff = IncomingChatWrapperVa - textSection.TextBaseVa;
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, incomingOff, IncomingChatWrapperSignature))
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(textSection, "ChatCallback.IncomingChatWrapper", IncomingChatWrapperPattern, IncomingChatWrapperVa);
+        if (!resolved.Success)
         {
-            incomingStatus = $"signature mismatch @ 0x{IncomingChatWrapperVa:X8}";
+            incomingStatus = $"unresolved (VA 0x{IncomingChatWrapperVa:X8})";
             RynthLog.Compat($"Compat: incoming chat hook unavailable - {incomingStatus}");
             return false;
         }
 
         try
         {
-            _incomingAddress = new IntPtr(textSection.TextBaseVa + incomingOff);
+            _incomingAddress = resolved.Address;
             _incomingChatWrapperDetour = IncomingChatWrapperDetour;
             IntPtr incomingPtr = Marshal.GetFunctionPointerForDelegate(_incomingChatWrapperDetour);
             _originalIncomingChatWrapper = Marshal.GetDelegateForFunctionPointer<IncomingChatWrapperDelegate>(MinHook.HookCreate(_incomingAddress, incomingPtr));
@@ -227,10 +224,10 @@ internal static class ChatCallbackHooks
 
     private static bool TryInstallIncomingAddTextHook(AcClientTextSection textSection, out string incomingStatus)
     {
-        int incomingOff = IncomingChatAddTextToScrollVa - textSection.TextBaseVa;
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, incomingOff, IncomingChatAddTextToScrollSignature))
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(textSection, "ChatCallback.IncomingChatAddTextToScroll", IncomingChatAddTextToScrollPattern, IncomingChatAddTextToScrollVa);
+        if (!resolved.Success)
         {
-            incomingStatus = $"signature mismatch @ 0x{IncomingChatAddTextToScrollVa:X8}";
+            incomingStatus = $"unresolved (VA 0x{IncomingChatAddTextToScrollVa:X8})";
             RynthLog.Compat($"Compat: incoming chat hook unavailable - {incomingStatus}");
             return false;
         }
@@ -239,7 +236,7 @@ internal static class ChatCallbackHooks
         {
             unsafe
             {
-                _incomingAddress = new IntPtr(textSection.TextBaseVa + incomingOff);
+                _incomingAddress = resolved.Address;
                 delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint, uint, IntPtr, int> pDetour = &IncomingChatAddTextDetour;
                 MinHook.Hook(_incomingAddress, (IntPtr)pDetour, out _originalIncomingChatAddTextPtr);
             }

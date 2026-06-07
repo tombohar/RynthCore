@@ -9,12 +9,10 @@ namespace RynthCore.Engine.Compatibility;
 internal static class CreateObjectHooks
 {
     private const int CreateObjectVa = 0x005594B0;
-    private static readonly byte[] CreateObjectSignature =
+    // Verified unique + lands at 0x005594B0 offline (tools/pe_pattern.py).
+    private static readonly byte?[] CreateObjectPattern =
     [
-        0x55, 0x8B, 0x6C, 0x24, 0x08, 0x56, 0x8B, 0xF1,
-        0x8B, 0x8E, 0x8C, 0x00, 0x00, 0x00, 0x8B, 0x96,
-        0x88, 0x00, 0x00, 0x00, 0x8B, 0xC5, 0xD3, 0xE8,
-        0x8B, 0x8E, 0x90, 0x00, 0x00, 0x00, 0x33, 0xC5
+        0x55, 0x8B, 0x6C, 0x24, 0x08, 0x56, 0x8B, 0xF1, 0x8B, 0x8E
     ];
 
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
@@ -41,17 +39,17 @@ internal static class CreateObjectHooks
             return;
         }
 
-        int funcOff = CreateObjectVa - textSection.TextBaseVa;
-        if (!PatternScanner.VerifyBytes(textSection.Bytes, funcOff, CreateObjectSignature))
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(textSection, "CreateObject.CreateObject", CreateObjectPattern, CreateObjectVa);
+        if (!resolved.Success)
         {
-            _statusMessage = $"ACCObjectMaint::CreateObject signature mismatch @ 0x{CreateObjectVa:X8}.";
+            _statusMessage = $"ACCObjectMaint::CreateObject unresolved (VA 0x{CreateObjectVa:X8}).";
             RynthLog.Compat($"Compat: create-object hook failed - {_statusMessage}");
             return;
         }
 
         try
         {
-            _targetAddress = new IntPtr(textSection.TextBaseVa + funcOff);
+            _targetAddress = resolved.Address;
             _createObjectDetour = CreateObjectDetour;
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_createObjectDetour);
             _originalCreateObject = Marshal.GetDelegateForFunctionPointer<CreateObjectDelegate>(MinHook.HookCreate(_targetAddress, detourPtr));

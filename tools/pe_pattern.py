@@ -235,6 +235,41 @@ def process_data(text_b):
     print(f"\nData xrefs found: {ok}/{ok + bad}")
     return ok, bad
 
+def _parse_vas(args):
+    out = []
+    for a in args:
+        a = a.strip().rstrip(",")
+        if a:
+            out.append(int(a, 16))
+    return out
+
+def process_gen(text_b, text_base, vas):
+    """Ad-hoc: cut a unique FUNCTION pattern for each VA passed on the command line
+    (read-only; does NOT touch GROUPS). For converting a fixed-VA+VerifyBytes hook to
+    HookResolver.Resolve without first editing this file. Prints a paste-ready byte?[]."""
+    print("=== GEN (ad-hoc function patterns) ===")
+    for va in vas:
+        off = va - text_base
+        if off < 0 or off >= len(text_b):
+            print(f"[SKIP] 0x{va:08X} not in window"); continue
+        mode, pat = best_pattern(text_b, text_base, va, off)
+        if pat is None:
+            print(f"[TB!] 0x{va:08X} no unique prologue in 160B -> TIER-B (keep fixed VA + VerifyBytes)")
+            continue
+        print(f"[{'OK ' if mode == 'wild' else 'LIT'}] 0x{va:08X} unique len={len(pat)} mode={mode}")
+        print(f"        {cs(pat)}")
+
+def process_gendata(text_b, vas):
+    """Ad-hoc: cut a code-xref pattern for each DATA/global VA on the command line."""
+    print("=== GENDATA (ad-hoc data globals via code-xref) ===")
+    for va in vas:
+        res = data_xref(text_b, va)
+        if res is None:
+            print(f"[!! ] 0x{va:08X} no unique code-xref found"); continue
+        pat, off = res
+        print(f"[OK ] 0x{va:08X} operandOffset={off} len={len(pat)}")
+        print(f"        {cs(pat)}")
+
 def process(text_b, text_base, group):
     print(f"=== {group} ===")
     ok = bad = 0
@@ -263,7 +298,10 @@ def parse_engine_patterns():
     srcs = {}
     for f in glob.glob(os.path.join(_compat_dir(), "*.cs")):
         with open(f, "r", encoding="utf-8") as fh:
-            srcs[f] = fh.read()
+            # Strip // line comments so commas / brackets inside an inline disasm
+            # comment (e.g. `0x84, 0xC0  // MOV AL,[ESP+4]; TEST AL,AL`) can't corrupt
+            # the byte?[] split or truncate the array match at a `]` inside the comment.
+            srcs[f] = re.sub(r'//[^\n]*', '', fh.read())
     consts = {}
     for s in srcs.values():
         for m in re.finditer(r'const\s+u?int\s+(\w+)\s*=\s*[^;]*?0x([0-9A-Fa-f]+)', s):
@@ -335,12 +373,16 @@ def process_check(text_b, text_base):
 
 def main():
     if len(sys.argv) < 2:
-        raise SystemExit("usage: pe_pattern.py <acclient.exe> [group|ALL|DATA|CHECK]")
+        raise SystemExit("usage: pe_pattern.py <acclient.exe> [group|ALL|DATA|CHECK|GEN <va...>|GENDATA <va...>]")
     text_b, text_base = read_window(sys.argv[1])
     sel = sys.argv[2] if len(sys.argv) > 2 else "ALL"
     print(f"window base VA = 0x{text_base:08X}, window size = {len(text_b)} bytes\n")
     if sel.upper() == "CHECK":
         sys.exit(process_check(text_b, text_base))
+    if sel.upper() == "GEN":
+        process_gen(text_b, text_base, _parse_vas(sys.argv[3:])); return
+    if sel.upper() == "GENDATA":
+        process_gendata(text_b, _parse_vas(sys.argv[3:])); return
     if sel.upper() == "DATA":
         process_data(text_b); return
     groups = list(GROUPS) if sel.upper() == "ALL" else [sel]

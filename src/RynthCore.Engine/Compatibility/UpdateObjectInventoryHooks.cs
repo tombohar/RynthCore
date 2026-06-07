@@ -9,12 +9,10 @@ namespace RynthCore.Engine.Compatibility;
 internal static class UpdateObjectInventoryHooks
 {
     private const int UpdateObjectInventoryExpectedVa = 0x0055A190;
-    private static readonly byte[] UpdateObjectInventorySignature =
+    // Verified unique + lands at 0x0055A190 offline (tools/pe_pattern.py).
+    private static readonly byte?[] UpdateObjectInventoryPattern =
     [
-        0x8B, 0x44, 0x24, 0x04, 0x50, 0xE8, 0x96, 0xE7,
-        0xFA, 0xFF, 0x8B, 0x4C, 0x24, 0x08, 0x51, 0x8D,
-        0x48, 0x3C, 0xE8, 0x69, 0xFF, 0xFF, 0xFF, 0xC2,
-        0x08, 0x00
+        0x8B, 0x44, 0x24, 0x04, 0x50, 0xE8, null, null, null, null, 0x8B, 0x4C
     ];
 
     // Derived from UpdateObjectInventory disasm: lea ecx, [eax+0x3C]
@@ -49,10 +47,10 @@ internal static class UpdateObjectInventoryHooks
 
         try
         {
-            int updateFuncOff = ResolveUpdateObjectInventoryOffset(textSection.Bytes, textSection.TextBaseVa, out bool updateUsedScan);
+            int updateFuncOff = ResolveUpdateObjectInventoryOffset(textSection, out bool updateUsedScan);
             if (updateFuncOff < 0)
             {
-                _statusMessage = "ACCObjectMaint::UpdateObjectInventory signature not found.";
+                _statusMessage = "ACCObjectMaint::UpdateObjectInventory unresolved.";
                 RynthLog.Compat($"Compat: update-object-inventory hook failed - {_statusMessage}");
                 return;
             }
@@ -78,22 +76,17 @@ internal static class UpdateObjectInventoryHooks
         }
     }
 
-    private static int ResolveUpdateObjectInventoryOffset(byte[] text, int textBaseVa, out bool usedPatternScan)
+    private static int ResolveUpdateObjectInventoryOffset(AcClientTextSection textSection, out bool usedPatternScan)
     {
         usedPatternScan = false;
 
-        int expectedOff = UpdateObjectInventoryExpectedVa - textBaseVa;
-        if (PatternScanner.VerifyBytes(text, expectedOff, UpdateObjectInventorySignature))
-            return expectedOff;
+        HookResolver.ResolveResult resolved = HookResolver.Resolve(
+            textSection, "UpdateInventory.UpdateObjectInventory", UpdateObjectInventoryPattern, UpdateObjectInventoryExpectedVa);
+        if (!resolved.Success)
+            return -1;
 
-        int scannedOff = PatternScanner.FindPattern(text, UpdateObjectInventorySignature);
-        if (scannedOff >= 0)
-        {
-            usedPatternScan = true;
-            return scannedOff;
-        }
-
-        return -1;
+        usedPatternScan = resolved.Source == HookResolver.ResolveSource.PatternScan;
+        return resolved.Address.ToInt32() - textSection.TextBaseVa;
     }
 
     private static void UpdateObjectInventoryDetour(IntPtr thisPtr, uint objectId, IntPtr newInventory)
