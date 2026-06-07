@@ -21,6 +21,7 @@ internal static class EngineSettings
     private static bool _enableEngine = true;
     private static int _engineHookCount = int.MaxValue;
     private static bool _enableImGuiBackend = true;
+    private static bool _enableHangMinidump = true;
     private static bool _loaded;
 
     public static IReadOnlyList<string> PluginPaths
@@ -142,6 +143,19 @@ internal static class EngineSettings
         }
     }
 
+    /// <summary>When true, MainThreadHangWatchdog writes a minidump to
+    /// Logs\dumps\ the first time AC's main thread is confirmed permanently
+    /// wedged — a targeted post-mortem to replace always-on procdump (which
+    /// dumped on every clean exit too). Default true.</summary>
+    public static bool EnableHangMinidump
+    {
+        get
+        {
+            EnsureLoaded();
+            return _enableHangMinidump;
+        }
+    }
+
     public static void AddPluginPath(string path)
     {
         EnsureLoaded();
@@ -239,6 +253,12 @@ internal static class EngineSettings
             {
                 _enableImGuiBackend = ibEl.GetBoolean();
             }
+
+            if (doc.RootElement.TryGetProperty("EnableHangMinidump", out var hmEl) &&
+                (hmEl.ValueKind == JsonValueKind.True || hmEl.ValueKind == JsonValueKind.False))
+            {
+                _enableHangMinidump = hmEl.GetBoolean();
+            }
         }
         catch (Exception ex)
         {
@@ -269,6 +289,7 @@ internal static class EngineSettings
                 w.WriteBoolean("EnableEngine", _enableEngine);
                 w.WriteNumber("EngineHookCount", _engineHookCount);
                 w.WriteBoolean("EnableImGuiBackend", _enableImGuiBackend);
+                w.WriteBoolean("EnableHangMinidump", _enableHangMinidump);
                 w.WriteEndObject();
             }
             File.WriteAllBytes(SettingsPath, ms.ToArray());

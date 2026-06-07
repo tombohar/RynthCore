@@ -64,6 +64,7 @@ public abstract class RynthPluginBase
     public virtual void OnVendorOpen(uint vendorId) { }
     public virtual void OnVendorClose(uint vendorId) { }
     public virtual void OnUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth) { }
+    public virtual void OnCombatDamage(uint damage, uint damageType, bool crit, bool isAttacker) { }
     public virtual void OnEnchantmentAdded(uint spellId, double durationSeconds) { }
     public virtual void OnEnchantmentRemoved(uint enchantmentId) { }
 }

@@ -223,6 +223,13 @@ public unsafe sealed class RynthPluginRuntime<TPlugin>
         catch (Exception ex) { LogException("OnUpdateHealth", ex); }
     }
 
+    public void OnCombatDamage(uint damage, uint damageType, uint crit, uint isAttacker)
+    {
+        if (!IsInitialized) return;
+        try { _plugin!.OnCombatDamage(damage, damageType, crit != 0, isAttacker != 0); }
+        catch (Exception ex) { LogException("OnCombatDamage", ex); }
+    }
+
     public void OnEnchantmentAdded(uint spellId, double durationSeconds)
     {
         if (!IsInitialized) return;

@@ -53,8 +53,14 @@ internal static class RynthLog
         if (EntryPoint.VerboseLogging) Write(msg);
     }
 
-    /// <summary>Always-on log for critical / uncategorised messages.</summary>
+    /// <summary>Always-on log for critical / uncategorised messages (INFO).</summary>
     internal static void Info(string msg) => Write(msg);
+
+    /// <summary>Always-on WARN line — a recoverable problem worth grepping for.</summary>
+    internal static void Warn(string msg) => EntryPoint.LogTagged("engine", msg, "WRN");
+
+    /// <summary>Always-on ERROR line — a fault/crash/disable. Triage with grep "[ERR]".</summary>
+    internal static void Error(string msg) => EntryPoint.LogTagged("engine", msg, "ERR");
 
     // ── Sink ─────────────────────────────────────────────────────────────
 

@@ -100,7 +100,7 @@ public static class EntryPoint
             string? loaderDir = GetLoaderDirectory();
             if (loaderDir == null)
             {
-                Log("FATAL: Could not determine loader directory.");
+                Log("FATAL: Could not determine loader directory.", "ERR");
                 return 2;
             }
 
@@ -109,7 +109,7 @@ public static class EntryPoint
             string enginePath = Path.Combine(loaderDir, EngineDllName);
             if (!File.Exists(enginePath))
             {
-                Log($"FATAL: Engine DLL not found at {enginePath}");
+                Log($"FATAL: Engine DLL not found at {enginePath}", "ERR");
                 return 3;
             }
 
@@ -125,7 +125,7 @@ public static class EntryPoint
         }
         catch (Exception ex)
         {
-            Log($"FATAL in loader RynthCoreInit: {ex}");
+            Log($"FATAL in loader RynthCoreInit: {ex}", "ERR");
             return 99;
         }
     }
@@ -527,11 +527,17 @@ public static class EntryPoint
 
     private static readonly object LogLock = new();
 
-    private static void Log(string message)
+    private static void Log(string message) => Log(message, "INF");
+
+    // Per-client session log: loader + engine + plugins inside this acclient.exe
+    // share this process's PID, so they all write one RynthCore.<pid>.log. The
+    // shared RynthCore.log is reserved for the injector/launcher. Kept in sync
+    // with RynthCore.Engine.LogPaths (the loader cannot reference the engine).
+    private static void Log(string message, string level)
     {
         try
         {
-            string line = $"[{DateTime.Now:HH:mm:ss.fff}] [pid:{Environment.ProcessId}] [loader] {message}\r\n";
+            string line = $"[{DateTime.Now:HH:mm:ss.fff}] [pid:{Environment.ProcessId}] [{level}] [loader] {message}\r\n";
             byte[] bytes = System.Text.Encoding.UTF8.GetBytes(line);
 
             lock (LogLock)
@@ -542,7 +548,7 @@ public static class EntryPoint
                     {
                         Directory.CreateDirectory(UnifiedLogDirectory);
                         using var fs = new FileStream(
-                            Path.Combine(UnifiedLogDirectory, UnifiedLogFileName),
+                            Path.Combine(UnifiedLogDirectory, $"RynthCore.{Environment.ProcessId}.log"),
                             FileMode.Append,
                             FileAccess.Write,
                             FileShare.ReadWrite);

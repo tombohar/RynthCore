@@ -124,6 +124,7 @@ internal static class SmartBoxHooks
         try
         {
             TryQueueHealthUpdate(blob, info);
+            TryQueueDamageEvent(blob, info);
 
             if (info.RawObjectId != 0 &&
                 (info.Opcode == PositionUpdateOpcode ||
@@ -157,6 +158,7 @@ internal static class SmartBoxHooks
         {
             info = ReadSmartBoxEventInfo(blob);
             TryQueueHealthUpdate(blob, info);
+            TryQueueDamageEvent(blob, info);
             CharacterCaptureHooks.ProcessPotentialCharacterMessage(blob, isGameEvent: true);
         }
         catch { }
@@ -220,6 +222,66 @@ internal static class SmartBoxHooks
             }
 
             PluginManager.QueueUpdateHealth(targetId, ratio, currentHealth, maxHealth);
+        }
+        catch
+        {
+        }
+    }
+
+    private static int _damageEventLogCount;
+
+    // AttackerNotification (0x01B1, you hit) / DefenderNotification (0x01B2, you're
+    // hit) carry the EXACT per-hit damage + crit — the only client-side source of
+    // real damage numbers (chat is flavor text; health deltas miss one-shots).
+    // These arrive as GameEvents whose blob envelope is
+    // [recipientId][sequence][eventType][payload] (eventType at +8), while
+    // SmartBox-dispatched events put eventType at +0. Detect the eventType at
+    // either offset, then parse the payload that follows:
+    //   string16 name (u16 charCount + cp1252 1-byte chars, padded so (2+len)%4==0)
+    //   u32 damageType, f64 percent, u32 damage, [u32 damageLocation (defender),]
+    //   u32 crit, u64 attackConditions
+    // Pure read-only byte math (no allocation) to stay detour-safe.
+    private static void TryQueueDamageEvent(IntPtr blob, SmartBoxEventInfo info)
+    {
+        if (blob == IntPtr.Zero || info.BlobSize < 24)
+            return;
+
+        try
+        {
+            IntPtr payloadPtr = Marshal.ReadIntPtr(IntPtr.Add(blob, NetBlobBufPtrOffset));
+            if (payloadPtr == IntPtr.Zero)
+                return;
+
+            uint et0 = unchecked((uint)Marshal.ReadInt32(payloadPtr));
+            uint et8 = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, 8)));
+
+            int nameOff;
+            uint eventType;
+            if (et0 == 0x01B1 || et0 == 0x01B2) { eventType = et0; nameOff = 4; }      // SmartBox-style
+            else if (et8 == 0x01B1 || et8 == 0x01B2) { eventType = et8; nameOff = 12; } // GameEvent envelope
+            else return;
+
+            bool attacker = eventType == 0x01B1;
+            int nameLen = (ushort)Marshal.ReadInt16(IntPtr.Add(payloadPtr, nameOff));
+            int strBlock = ((2 + nameLen + 3) / 4) * 4;     // u16 len + chars, padded to a multiple of 4
+            int off = nameOff + strBlock;                    // → damageType
+            int critOff = off + (attacker ? 16 : 20);        // type(4)+percent(8)+damage(4)[+dmgLoc(4)]
+            if (critOff + 4 > info.BlobSize)
+                return;
+
+            uint damageType = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, off)));
+            uint damage = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, off + 12)));
+            uint crit = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, critOff)));
+            if (damage == 0 || damage > 1_000_000)
+                return;
+
+            if (_damageEventLogCount < 12)
+            {
+                _damageEventLogCount++;
+                RynthLog.Compat($"Combat: damage evt 0x{eventType:X3} nameOff={nameOff} dmg={damage} crit={crit} atk={attacker} blob={info.BlobSize}");
+            }
+
+            PluginManager.QueueCombatDamage(damage, damageType, crit != 0, attacker);
         }
         catch
         {

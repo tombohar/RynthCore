@@ -13,7 +13,7 @@
 //                     no sub-windows yet; main-dashboard scope only).
 //
 //  Live data comes from the RynthAi plugin via these C exports:
-//    RynthPluginGetSnapshotJson         → JSON blob (polled every 250 ms)
+//    RynthPluginGetSnapshotJson         → JSON blob (polled every 33 ms)
 //    RynthPluginToggleMacro             → flip IsMacroRunning
 //    RynthPluginSetSubsystemEnabled(id) → 0=Combat 1=Buff 2=Nav 3=Loot 4=Meta
 //    RynthPluginSelectProfile(kind, i)  → 0=nav 1=loot 2=meta 3=profile
@@ -108,6 +108,7 @@ internal static partial class RynthAiPanel
     private static VoidFn? _togglePanelLock;
     private static VoidFn? _togglePanelMinimize;
     private static PtrFn? _sendNavCommand;
+    private static GetSnapshotJsonFn? _getPatrolInfoJson;
     private static bool _bindingLogged;
 
     /// <summary>
@@ -617,12 +618,22 @@ internal static partial class RynthAiPanel
             onLeftClick: () => AvaloniaOverlay.ActivateBarButton("Nav"));
         AddLauncher(launcherGrid, 1, 1, "Items",       "🛡",
             onClick: () => AvaloniaOverlay.ActivateBarButton("Items"));
-        AddLauncher(launcherGrid, 1, 2, "Patrol", "⬡",
+        var patrolBtn = AddLauncher(launcherGrid, 1, 2, "Patrol", "⬡",
             onClick: () =>
             {
                 if (_sendNavCommand == null) TryBind();
                 SendNavCmd("{\"Cmd\":\"dunPatrol\"}");
             });
+        ToolTip.SetTip(patrolBtn, "Left-click: start dungeon patrol.  Right-click: routes & recorded hazards.");
+        // Right-click → patrol management flyout (saved routes + recorded dungeon hazards).
+        patrolBtn.PointerPressed += (_, e) =>
+        {
+            if (e.GetCurrentPoint(patrolBtn).Properties.IsRightButtonPressed)
+            {
+                e.Handled = true;
+                ShowPatrolFlyout(patrolBtn);
+            }
+        };
 
         dash.Children.Add(launcherGrid);
 
@@ -755,11 +766,12 @@ internal static partial class RynthAiPanel
             ShowPicker(metaSelector, snap.MetaProfiles, snap.SelectedMetaIdx, idx => _selectProfile?.Invoke(2, idx));
 
         // ── Polling timer: refresh from snapshot ────────────────────────────
-        // 100 ms (10 Hz) — fast enough that vital changes feel "instant" to
-        // the eye while staying well below the cost threshold of building a
-        // full JSON snapshot. ImGui draws at ~60 Hz so it's still ahead, but
-        // the panel update is no longer perceptibly laggy.
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+        // 33 ms (~30 Hz) — vital changes feel instant to the eye. The
+        // underlying snapshot is event-driven so it's already fresh; this
+        // timer only bounds how often we rebuild the JSON snapshot and push
+        // it into the panel labels. The overlay composites at ~60 Hz so the
+        // panel stays ahead of the eye without saturating the dispatcher.
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
         timer.Tick += (_, _) =>
         {
             if (_getSnapshotJson == null) TryBind();
@@ -1170,7 +1182,7 @@ internal static partial class RynthAiPanel
         Grid.SetColumn(splitGrid, col);
     }
 
-    private static void AddLauncher(Grid grid, int row, int col, string label, string icon, Action? onClick = null)
+    private static Button AddLauncher(Grid grid, int row, int col, string label, string icon, Action? onClick = null)
     {
         var btn = new Button
         {
@@ -1201,6 +1213,7 @@ internal static partial class RynthAiPanel
         grid.Children.Add(btn);
         Grid.SetRow(btn, row);
         Grid.SetColumn(btn, col);
+        return btn;
     }
 
     private static void UpdateToggle(Button btn, bool on)
@@ -1306,6 +1319,7 @@ internal static partial class RynthAiPanel
         _togglePanelLock      ??= Bind<VoidFn>(plugin,             "RynthPluginTogglePanelLock");
         _togglePanelMinimize  ??= Bind<VoidFn>(plugin,             "RynthPluginTogglePanelMinimize");
         _sendNavCommand       ??= Bind<PtrFn>(plugin,              "RynthPluginSendNavCommand");
+        _getPatrolInfoJson    ??= Bind<GetSnapshotJsonFn>(plugin,  "RynthPluginGetPatrolInfoJson");
 
         if (!_bindingLogged && _getSnapshotJson != null)
         {
@@ -1374,4 +1388,166 @@ internal static partial class RynthAiPanel
 
     [JsonSerializable(typeof(Snapshot))]
     private sealed partial class SnapshotJsonContext : JsonSerializerContext { }
+
+    // ────────────────────────────────────────────────────────────────────────
+    //  Patrol management flyout (right-click the Patrol launcher button)
+    // ────────────────────────────────────────────────────────────────────────
+
+    private static void ShowPatrolFlyout(Control anchor)
+    {
+        var root = new StackPanel { Orientation = Orientation.Vertical, Spacing = 4, Width = 244, Margin = new Thickness(8) };
+        PopulatePatrolFlyout(root);
+        var scroll = new ScrollViewer
+        {
+            Content = root,
+            MaxHeight = 360,
+            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+        };
+        var flyout = new Flyout
+        {
+            Content = scroll,
+            Placement = PlacementMode.Top,
+        };
+        flyout.ShowAt(anchor);
+    }
+
+    private static void PopulatePatrolFlyout(StackPanel root)
+    {
+        root.Children.Clear();
+        PatrolInfo info = FetchPatrolInfo();
+
+        root.Children.Add(new TextBlock
+        {
+            Text = "PATROL & ROUTES", FontSize = 11, FontWeight = FontWeight.Bold, Foreground = ColTeal,
+        });
+
+        // ── Current dungeon ───────────────────────────────────────────────
+        root.Children.Add(SectionLabel("THIS DUNGEON"));
+        if (info.InDungeon)
+        {
+            var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+            row.Children.Add(new TextBlock
+            {
+                Text = $"0x{info.CurrentLandblock}  ·  {info.CurrentHazards} hazard cell(s)",
+                FontSize = 10, Foreground = ColTextDim, VerticalAlignment = VerticalAlignment.Center,
+            });
+            if (info.CurrentHazards > 0)
+            {
+                var clear = MiniButton("Clear");
+                clear.Click += (_, _) =>
+                {
+                    SendNavCmd($"{{\"Cmd\":\"clearHazards\",\"NavName\":\"{info.CurrentLandblock}\"}}");
+                    PopulatePatrolFlyout(root);
+                };
+                Grid.SetColumn(clear, 1);
+                row.Children.Add(clear);
+            }
+            root.Children.Add(row);
+        }
+        else
+        {
+            root.Children.Add(new TextBlock { Text = "Not in a dungeon.", FontSize = 10, Foreground = ColMute });
+        }
+
+        // ── Recorded hazard dungeons ──────────────────────────────────────
+        root.Children.Add(SectionLabel($"RECORDED HAZARDS ({info.Dungeons.Length})"));
+        if (info.Dungeons.Length == 0)
+        {
+            root.Children.Add(new TextBlock { Text = "None recorded yet.", FontSize = 10, Foreground = ColMute });
+        }
+        else
+        {
+            foreach (DungeonHaz d in info.Dungeons)
+            {
+                var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+                row.Children.Add(new TextBlock
+                {
+                    Text = $"0x{d.Landblock}  ·  {d.Cells} cell(s)",
+                    FontSize = 10, Foreground = ColTextDim, VerticalAlignment = VerticalAlignment.Center,
+                });
+                var clear = MiniButton("Clear");
+                clear.Click += (_, _) =>
+                {
+                    SendNavCmd($"{{\"Cmd\":\"clearHazards\",\"NavName\":\"{d.Landblock}\"}}");
+                    PopulatePatrolFlyout(root);
+                };
+                Grid.SetColumn(clear, 1);
+                row.Children.Add(clear);
+                root.Children.Add(row);
+            }
+
+            var clearAll = MiniButton("Clear all recorded hazards");
+            clearAll.HorizontalAlignment = HorizontalAlignment.Stretch;
+            clearAll.Margin = new Thickness(0, 3, 0, 0);
+            clearAll.Click += (_, _) =>
+            {
+                SendNavCmd("{\"Cmd\":\"clearHazardsAll\"}");
+                PopulatePatrolFlyout(root);
+            };
+            root.Children.Add(clearAll);
+        }
+
+        // ── Saved nav routes ──────────────────────────────────────────────
+        root.Children.Add(SectionLabel($"SAVED ROUTES ({info.Routes.Length})"));
+        if (info.Routes.Length == 0)
+        {
+            root.Children.Add(new TextBlock { Text = "No .nav routes saved.", FontSize = 10, Foreground = ColMute });
+        }
+        else
+        {
+            foreach (string name in info.Routes)
+                root.Children.Add(new TextBlock
+                {
+                    Text = "• " + name, FontSize = 10, Foreground = ColTextDim, TextWrapping = TextWrapping.NoWrap,
+                });
+        }
+    }
+
+    private static TextBlock SectionLabel(string text) => new TextBlock
+    {
+        Text = text, FontSize = 9, FontWeight = FontWeight.SemiBold, Foreground = ColMute,
+        Margin = new Thickness(0, 6, 0, 1),
+    };
+
+    private static Button MiniButton(string label) => new Button
+    {
+        Content = label, FontSize = 9, Height = 16, Padding = new Thickness(6, 0),
+        Background = ColBtnFill, Foreground = ColAmber, BorderBrush = ColBtnBord,
+        BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(2),
+        VerticalContentAlignment = VerticalAlignment.Center,
+        HorizontalContentAlignment = HorizontalAlignment.Center,
+    };
+
+    private static PatrolInfo FetchPatrolInfo()
+    {
+        if (_getPatrolInfoJson == null) TryBind();
+        if (_getPatrolInfoJson == null) return new PatrolInfo();
+        try
+        {
+            IntPtr p = _getPatrolInfoJson();
+            if (p == IntPtr.Zero) return new PatrolInfo();
+            string json = Marshal.PtrToStringAnsi(p) ?? "{}";
+            return JsonSerializer.Deserialize(json, PatrolJsonContext.Default.PatrolInfo) ?? new PatrolInfo();
+        }
+        catch { return new PatrolInfo(); }
+    }
+
+    private sealed class PatrolInfo
+    {
+        [JsonPropertyName("inDungeon")]        public bool InDungeon { get; set; }
+        [JsonPropertyName("currentLandblock")] public string CurrentLandblock { get; set; } = "0000";
+        [JsonPropertyName("currentHazards")]   public int CurrentHazards { get; set; }
+        [JsonPropertyName("liveHazards")]      public int LiveHazards { get; set; }
+        [JsonPropertyName("dungeons")]         public DungeonHaz[] Dungeons { get; set; } = Array.Empty<DungeonHaz>();
+        [JsonPropertyName("routes")]           public string[] Routes { get; set; } = Array.Empty<string>();
+    }
+
+    private sealed class DungeonHaz
+    {
+        [JsonPropertyName("landblock")] public string Landblock { get; set; } = "0000";
+        [JsonPropertyName("cells")]     public int Cells { get; set; }
+    }
+
+    [JsonSerializable(typeof(PatrolInfo))]
+    private sealed partial class PatrolJsonContext : JsonSerializerContext { }
 }

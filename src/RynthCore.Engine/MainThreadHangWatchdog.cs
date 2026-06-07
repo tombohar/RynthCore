@@ -67,6 +67,14 @@ internal static class MainThreadHangWatchdog
     private static volatile uint _mainThreadId;
     private static long _lastBeatTick;
     private static int _running;
+    // EndScene frame tally — single-writer (AC render thread via MainThreadBeat),
+    // read by HeartbeatLogger to report fps (0 fps = render dead but process alive).
+    private static int _frameCount;
+    // Once-per-session latch so a permanent wedge writes exactly one minidump.
+    private static int _dumpWritten;
+
+    /// <summary>Monotonic EndScene frame count since engine init.</summary>
+    internal static int FrameCount => _frameCount;
 
     /// <summary>
     /// Called from EndSceneDetour on AC's main thread, every frame. Must be
@@ -76,6 +84,7 @@ internal static class MainThreadHangWatchdog
     {
         if (_mainThreadId == 0)
             _mainThreadId = GetCurrentThreadId();
+        _frameCount++;
         Volatile.Write(ref _lastBeatTick, Environment.TickCount64);
     }
 
@@ -113,7 +122,7 @@ internal static class MainThreadHangWatchdog
                         sample = 0;
                         hangStartBeat = lastBeat;
                         RynthLog.Info("================================================================");
-                        RynthLog.Info($"==== MAIN THREAD HANG DETECTED tid={tid} build={EntryPoint.BuildStamp} initCount={EntryPoint.InitCount} (stalled {stale}ms) ====");
+                        RynthLog.Error($"==== MAIN THREAD HANG DETECTED tid={tid} build={EntryPoint.BuildStamp} initCount={EntryPoint.InitCount} (stalled {stale}ms) ====");
                     }
 
                     if (sample < MaxSamplesPerHang)
@@ -126,6 +135,10 @@ internal static class MainThreadHangWatchdog
                     {
                         sample++;
                         RynthLog.Info($"  (still hung after {MaxSamplesPerHang} samples — suppressing further samples until recovery)");
+                        // Confirmed permanent wedge (~10s+): write one targeted
+                        // minidump for WinDbg post-mortem if the log stack walk
+                        // isn't enough. Once per session.
+                        TryWriteHangDump(tid, stale);
                     }
                 }
                 else if (inHang)
@@ -137,6 +150,26 @@ internal static class MainThreadHangWatchdog
             }
             catch { /* a diagnostic must never destabilize the host */ }
         }
+    }
+
+    /// <summary>
+    /// On the first confirmed permanent hang of the session, write a minidump
+    /// (gated by EngineSettings.EnableHangMinidump). Best-effort; never throws.
+    /// </summary>
+    private static void TryWriteHangDump(uint tid, long staleMs)
+    {
+        if (Interlocked.Exchange(ref _dumpWritten, 1) != 0) return;   // once per session
+        try
+        {
+            if (!Plugins.EngineSettings.EnableHangMinidump)
+            {
+                RynthLog.Info("  (hang minidump disabled via EngineSettings.EnableHangMinidump)");
+                return;
+            }
+            CrashDump.WriteSelfDump(
+                $"main-thread hang tid={tid} stale={staleMs}ms build={EntryPoint.BuildStamp}", out _);
+        }
+        catch { /* a diagnostic must never destabilize the host */ }
     }
 
     private static void CaptureMainThreadStack(uint tid, long staleMs, int sampleNum, bool fullStack)

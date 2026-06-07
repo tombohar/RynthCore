@@ -554,7 +554,19 @@ internal static unsafe class Win32Backend
             // AC's own message pump during its shutdown.
             if (msg == WM_CLOSE && Interlocked.Exchange(ref _wmCloseSeen, 1) == 0)
             {
-                RynthLog.UI("Win32Backend: WM_CLOSE on AC window — kicking engine shutdown so floating panels close immediately.");
+                RynthLog.UI("Win32Backend: WM_CLOSE on AC window — quiescing plugin pump, then kicking engine shutdown.");
+                // Stop the off-thread plugin pump FIRST, synchronously, on AC's main
+                // thread — we run here BEFORE falling through to AC's own WndProc (which
+                // starts AC's object teardown). The pump's in-flight frame finishes on
+                // still-valid AC objects and then it exits; otherwise it keeps ticking
+                // into DestroyObjectCaches and races AC's frees -> the recurring on-close
+                // AVs (BusyCountHooks.ForceResetBusyCount / PlayerPhysicsHooks.TryGetPlayerPose
+                // -> AC, e.g. acclient+0x16547B null+0x1C; EIP->heap). Bounded ~2s inside
+                // StopTickPumpAndJoin; the background EngineLifecycle.Shutdown below then
+                // finds the pump already stopped (its TickPump.StopAndJoin is a no-op).
+                try { EntryPoint.StopTickPumpAndJoin(); }
+                catch (Exception ex) { RynthLog.UI($"Win32Backend: WM_CLOSE pump-stop threw {ex.GetType().Name}: {ex.Message}"); }
+
                 new Thread(() =>
                 {
                     try { EngineLifecycle.Shutdown(); }

@@ -699,6 +699,13 @@ internal class RynthOverlayWindow : Window
     private const uint WM_MOUSEMOVE     = 0x0200;
     private const uint WM_LBUTTONDOWN   = 0x0201;
     private const uint WM_LBUTTONUP    = 0x0202;
+    private const uint WM_RBUTTONDOWN   = 0x0204;
+    private const uint WM_RBUTTONUP     = 0x0205;
+    private const uint WM_MBUTTONDOWN   = 0x0207;
+    private const uint WM_MBUTTONUP     = 0x0208;
+    private const uint WM_MOUSEWHEEL    = 0x020A;
+    private const uint WM_NCMOUSEMOVE   = 0x00A0;
+    private const uint WM_SETCURSOR     = 0x0020;
     private const uint WM_MOUSELEAVE    = 0x02A3;
     private const uint WM_NCMOUSELEAVE  = 0x02A2;
     private const uint WM_SETFOCUS      = 0x0007;
@@ -765,6 +772,38 @@ internal class RynthOverlayWindow : Window
             RynthLog.UI("AvaloniaSubclass: WM_CLOSE on AC window — stopping plugin tick pump before AC teardown.");
             try { EntryPoint.StopTickPumpAndJoin(); }
             catch (Exception ex) { RynthLog.UI($"AvaloniaSubclass: WM_CLOSE pump-stop threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        // ── Once close is in flight, stop feeding mouse/cursor input to AC ──────
+        // When the user clicks X / Alt+F4, AC tears down its world — including the
+        // combat-system singleton. AC's ClientUISystem::UpdateCursorState
+        // (acclient 0x005653D0) runs on every mouse-move / cursor refresh to pick
+        // the melee/missile/magic targeting cursor; it dereferences
+        // GetCombatSystem()->[+0x1C]. Once that singleton is freed the accessor
+        // returns null → AV at acclient 0x0056547B reading [null+0x1C]. The user is
+        // actively moving the mouse toward the close control, so a trailing
+        // WM_MOUSEMOVE / WM_SETCURSOR lands right after the free and crashes AC.
+        //
+        // Drop the input messages that drive AC's mouse-over UI / targeting / cursor
+        // updates after WM_CLOSE; WM_CLOSE / WM_DESTROY / paint / etc. still pass
+        // through to AC's WndProc below, so the window closes normally.
+        if (Volatile.Read(ref _avaloniaWmCloseSeen) != 0)
+        {
+            switch (msg)
+            {
+                case WM_MOUSEMOVE:
+                case WM_NCMOUSEMOVE:
+                case WM_MOUSEWHEEL:
+                case WM_LBUTTONDOWN:
+                case WM_LBUTTONUP:
+                case WM_RBUTTONDOWN:
+                case WM_RBUTTONUP:
+                case WM_MBUTTONDOWN:
+                case WM_MBUTTONUP:
+                    return IntPtr.Zero;
+                case WM_SETCURSOR:
+                    return (IntPtr)1; // handled — halt AC's cursor-update chain
+            }
         }
 
         if (msg == WM_MOUSELEAVE || msg == WM_NCMOUSELEAVE)
@@ -3057,6 +3096,38 @@ internal class RynthOverlayWindow : Window
     }
 
     /// <summary>
+    /// Called by FloatingPanelHost when the user finishes resizing the floating
+    /// HWND (HTBOTTOMRIGHT drag). Persists the new logical size while preserving
+    /// the docked geometry and the floating screen position — without this the
+    /// resized size was never written to disk, so a popped-out panel always
+    /// reopened at its pre-resize size.
+    /// </summary>
+    internal void OnFloatingPanelResized(string title, double logicalWidth, double logicalHeight)
+    {
+        if (string.Equals(title, BarSentinel, StringComparison.Ordinal))
+            return;
+        if (logicalWidth <= 0 || logicalHeight <= 0)
+            return;
+
+        try
+        {
+            double left = 0, top = 0, floatingLeft = 0, floatingTop = 0;
+            if (PanelStateStore.TryGetPanel(title, out PanelStateStore.PanelEntry prior))
+            {
+                left = prior.Left;
+                top = prior.Top;
+                floatingLeft = prior.FloatingLeft;
+                floatingTop = prior.FloatingTop;
+            }
+
+            PanelStateStore.SetPanel(title, new PanelStateStore.PanelEntry(
+                true, left, top, logicalWidth, logicalHeight,
+                true, floatingLeft, floatingTop));
+        }
+        catch { /* persistence best-effort */ }
+    }
+
+    /// <summary>
     /// Called by FloatingPanelHost when the user clicks the close button on
     /// the floating chrome. We post the close to the dispatcher so the click
     /// handler completes (and Avalonia finishes its routed-event walk)
@@ -3821,8 +3892,30 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
             Dispatcher.UIThread.Invoke(() => ForwardInput(msg, wp, lp, cx, cy));
         _layered.OnMoved = (x, y) =>
             Dispatcher.UIThread.Invoke(() => OnLayeredMoved(x, y));
+        // Invoke (synchronous), NOT Post. This is deliberate: the WndProc runs
+        // on AC's game thread, and during an HTBOTTOMRIGHT drag it sits in the
+        // OS modal resize loop. The synchronous Invoke blocks that loop until
+        // the Avalonia UI thread services each WM_SIZE, which THROTTLES the
+        // resize-frame rate to what the UI thread can absorb. Switching this to
+        // Post removed that bound: the modal loop flooded the UI thread, and the
+        // resulting RenderTargetBitmap / pixel-buffer realloc churn tripped the
+        // LFH heap corruption (see rynthcore_overlay_lfh_pitfall) and hard-
+        // crashed AC mid-resize. Keep it synchronous until the resize path is
+        // moved off the OS modal loop entirely (custom grip tracking).
         _layered.OnResized = (w, h) =>
             Dispatcher.UIThread.Invoke(() => OnLayeredResized(w, h));
+        // Persist the final size once the drag ends so a popped-out panel
+        // reopens at the size the user left it (the live OnResized only
+        // reflows; it never writes to PanelStateStore).
+        _layered.OnResizeEnd = (_, _) =>
+            Dispatcher.UIThread.Post(() =>
+            {
+                double fw = PanelBorder.Width;
+                if (double.IsNaN(fw) || fw <= 0) fw = PanelBorder.Bounds.Width;
+                double fh = PanelBorder.Height;
+                if (double.IsNaN(fh) || fh <= 0) fh = PanelBorder.Bounds.Height;
+                _owner.OnFloatingPanelResized(Title, fw, fh);
+            });
         // Native click handling for the two chrome buttons — Avalonia's
         // hit-test drops forwarded clicks at canvas X past AC client
         // (the panel chrome lives at canvas X = FloatingOffBoundsX),
@@ -3942,16 +4035,26 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
                 _layered.CaptionHeight = desiredCaption;
         }
 
-        // Only grow — never shrink. Pop-out triggers a flurry of size oscillations
-        // for several seconds while OS layout, Avalonia layout, and DPI settle.
-        // Reallocating the RenderTargetBitmap (Skia surface in native heap) and
-        // the BGRA byte[] (LOH) on every pixel difference produced the LFH
-        // freelist corruption bisected to ntdll!RtlpHeap RVA 0x5B10C. CopyPixels
-        // takes an explicit rect so an RTT larger than (pxW,pxH) is safe.
+        // Only grow — never shrink, AND grow in CHUNKS. Pop-out triggers a
+        // flurry of size oscillations, and far worse, a resize-drag bumps
+        // (pxW,pxH) a few px on essentially every frame — so the plain
+        // "_rtt.PixelSize < px" guard still reallocated the RenderTargetBitmap
+        // (Skia surface, native heap) and the BGRA byte[] (LOH) hundreds of
+        // times across a single drag. That per-frame native realloc churn
+        // reproduces the LFH freelist corruption bisected to ntdll!RtlpHeap
+        // RVA 0x5B10C (see rynthcore_overlay_lfh_pitfall) — the hard crash on
+        // float-panel resize. Rounding the backing-store capacity up to a
+        // chunk lets a grow-drag reuse ONE allocation until it crosses a
+        // chunk boundary (a handful of reallocs per drag, not hundreds).
+        // CopyPixels takes an explicit rect, so an RTT/buffer larger than
+        // (pxW,pxH) is safe — we always read only the live (pxW,pxH) region.
+        const int ChunkPx = 256;
+        int capW = ((pxW + ChunkPx - 1) / ChunkPx) * ChunkPx;
+        int capH = ((pxH + ChunkPx - 1) / ChunkPx) * ChunkPx;
         if (_rtt == null || _rtt.PixelSize.Width < pxW || _rtt.PixelSize.Height < pxH)
         {
             _rtt?.Dispose();
-            _rtt = new RenderTargetBitmap(new PixelSize(pxW, pxH), new Vector(96 * scale, 96 * scale));
+            _rtt = new RenderTargetBitmap(new PixelSize(capW, capH), new Vector(96 * scale, 96 * scale));
         }
 
         // RenderTargetBitmap.Render walks the Border's visual subtree and
@@ -3960,8 +4063,10 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         _rtt.Render(PanelBorder);
 
         int byteCount = pxW * pxH * 4;
+        // Size the LOH buffer to the same chunked capacity so it doesn't
+        // realloc every grow-step either (same LFH rationale as the RTT).
         if (_pixelBuffer == null || _pixelBuffer.Length < byteCount)
-            _pixelBuffer = new byte[byteCount];
+            _pixelBuffer = new byte[capW * capH * 4];
 
         fixed (byte* p = _pixelBuffer)
         {
@@ -4201,6 +4306,54 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
             }
         }
 
+        // --- Text-input focus for popped-out content ------------------------
+        // Buttons/sliders/scrollbars get direct dispatch above. TextBox and the
+        // Meta source TextEditor used to fall through to the PostMessage path
+        // below, which targets the off-bounds canvas coord (X≈2500) that
+        // Avalonia's renderer hit-test rejects — so a click never focused them
+        // and the field stayed untypable while floating. Focus the deepest text
+        // input under the cursor directly (same off-bounds-safe geometry walk as
+        // the Button block); its GotFocus handler opens the keyboard gate
+        // (Win32Backend.AvaloniaTextInputActive) so forwarded WM_KEYDOWNs land
+        // in it and the WM_SETFOCUS reclaim is suppressed.
+        if (msg == WM_LBUTTONDOWN)
+        {
+            float tScale = AvaloniaOverlay.InputScale > 0 ? AvaloniaOverlay.InputScale : 1f;
+            double tlx = layeredClientX / tScale;
+            double tly = layeredClientY / tScale;
+            try
+            {
+                Control? input = FindDeepestTextInputAt(PanelBorder, new Point(tlx, tly));
+                if (input != null && input.IsEffectivelyEnabled && input.IsEffectivelyVisible)
+                {
+                    RynthLog.Info($"FloatingPanelHost({Title}): text-input hit {input.GetType().Name} at logical=({tlx:F1},{tly:F1}).");
+                    Control captured = input;
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        try
+                        {
+                            if (captured is global::AvaloniaEdit.TextEditor ed)
+                                ed.TextArea.Focus();
+                            else
+                            {
+                                captured.Focus();
+                                if (captured is TextBox tbx) tbx.SelectAll();
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            RynthLog.Info($"FloatingPanelHost({Title}): text-input focus threw {ex.GetType().Name}: {ex.Message}");
+                        }
+                    });
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                RynthLog.Info($"FloatingPanelHost({Title}): text-input hit-test threw {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         // Translate from layered-client (physical px) to Avalonia-client
         // (also physical px). The panel Border is parked at canvas LOGICAL
         // coord (OffBoundsCanvasX, OffBoundsCanvasY); multiply by inputScale
@@ -4270,6 +4423,32 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
                 result = deeper;
             else if (child is Button btn)
                 result = btn;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Deepest text input (a <see cref="TextBox"/> or AvaloniaEdit
+    /// <c>TextEditor</c>) whose layout rect contains <paramref name="pointInRoot"/>.
+    /// Same off-bounds-safe geometry walk as <see cref="FindDeepestButtonAt"/> —
+    /// used to focus a clicked field in a popped-out panel, where Avalonia's
+    /// renderer hit-test rejects the parked Border.
+    /// </summary>
+    private static Control? FindDeepestTextInputAt(Visual root, Point pointInRoot)
+    {
+        Control? result = null;
+        foreach (var child in root.GetVisualChildren())
+        {
+            if (!child.IsVisible) continue;
+            var bounds = child.Bounds;
+            if (!bounds.Contains(pointInRoot)) continue;
+
+            Point pInChild = new Point(pointInRoot.X - bounds.X, pointInRoot.Y - bounds.Y);
+            var deeper = FindDeepestTextInputAt(child, pInChild);
+            if (deeper != null)
+                result = deeper;
+            else if (child is TextBox || child is global::AvaloniaEdit.TextEditor)
+                result = (Control)child;
         }
         return result;
     }

@@ -18,6 +18,7 @@ using AvaloniaEdit.CodeCompletion;
 using AvaloniaEdit.Document;
 using AvaloniaEdit.Editing;
 using AvaloniaEdit.Rendering;
+using RynthCore.Engine.ImGuiBackend;
 
 namespace RynthCore.Engine.UI.Panels;
 
@@ -111,6 +112,13 @@ internal static class MetaSourceEditor
 
         // Initial text.
         editor.Document = new TextDocument(getText() ?? string.Empty);
+
+        // Open the keyboard gate while the editor has focus so forwarded
+        // WM_KEYDOWNs reach it instead of the game, and the WM_SETFOCUS hijack
+        // doesn't yank focus back ~50 ms after the click. Without this the
+        // Source field is untypable (most visibly when the panel is floating).
+        editor.TextArea.GotFocus  += (_, _) => Win32Backend.AvaloniaTextInputActive = true;
+        editor.TextArea.LostFocus += (_, _) => Win32Backend.AvaloniaTextInputActive = false;
 
         // Syntax highlighter.
         editor.TextArea.TextView.LineTransformers.Add(new MetaColorizer());

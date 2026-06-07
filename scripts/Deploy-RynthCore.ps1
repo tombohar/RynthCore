@@ -8,7 +8,14 @@ param(
     # held Avalonia.Base.dll causes a Copy-Item lock failure that wipes the
     # Runtime\ folder. Engine still publishes/deploys to Runtime\ and plugins
     # still deploy under $PluginsDestination.
-    [switch]$SkipLauncher
+    [switch]$SkipLauncher,
+    # Pre-deploy pattern gate (tools\check-patterns.ps1): verify every acclient.exe
+    # signature embedded in the engine source still resolves uniquely + correctly
+    # against the live client BEFORE shipping. -SkipPatternCheck bypasses it;
+    # -AcClient overrides the binary it checks (default: auto-detect the private
+    # copy under $Destination\AcClient, else C:\Turbine\Asheron's Call).
+    [switch]$SkipPatternCheck,
+    [string]$AcClient = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +38,7 @@ $loaderProject = Join-Path $repoRoot "src\RynthCore.Loader\RynthCore.Loader.cspr
 $rynthAiSourceRoot     = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthAi"
 $rynthChatSourceRoot   = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthChat"
 $rynthVisionSourceRoot = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthVision"
+$rynthJuiceSourceRoot  = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthJuice"
 $pluginProjects = @(
     @{
         Project    = Join-Path $rynthAiSourceRoot "RynthCore.Plugin.RynthAi.csproj"
@@ -58,6 +66,15 @@ $pluginProjects = @(
         Publish    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthTracker\bin\Release\net10.0-windows\win-x86\publish"
         DllName    = "RynthCore.Plugin.RynthTracker.dll"
         DestSubdir = "RynthTracker"
+    },
+    # RynthJuice sets <PublishDir> to its deploy home (like RynthVision), so
+    # publish lands directly in $PluginsDestination\RynthJuice and the copy step
+    # below detects source == dest and skips the redundant self-copy.
+    @{
+        Project    = Join-Path $rynthJuiceSourceRoot "RynthCore.Plugin.RynthJuice.csproj"
+        Publish    = Join-Path $PluginsDestination "RynthJuice"
+        DllName    = "RynthCore.Plugin.RynthJuice.dll"
+        DestSubdir = "RynthJuice"
     }
 )
 
@@ -78,6 +95,42 @@ function Copy-FilteredChildren {
     Get-ChildItem -LiteralPath $Source -Force | Where-Object {
         $ExcludeNames -notcontains $_.Name -and $ExcludeExtensions -notcontains $_.Extension
     } | Copy-Item -Destination $Target -Recurse -Force
+}
+
+# ---------------------------------------------------------------------------
+# Pre-deploy pattern gate: verify every acclient.exe signature embedded in the
+# engine source still resolves uniquely + correctly against the live client
+# binary BEFORE we publish/ship. A future AC patch / ACE rebuild that shifts
+# code or a data global fails HERE instead of silently shipping a hook that
+# falls back to a stale VA at runtime. (tools\pe_pattern.py CHECK, wrapped by
+# tools\check-patterns.ps1.) Bypass: -SkipPatternCheck. Target: -AcClient.
+# ---------------------------------------------------------------------------
+if (-not $SkipPatternCheck) {
+    $checkScript = Join-Path $repoRoot "tools\check-patterns.ps1"
+    $acClientPath = $AcClient
+    if ([string]::IsNullOrWhiteSpace($acClientPath)) {
+        foreach ($cand in @((Join-Path $Destination "AcClient\acclient.exe"), "C:\Turbine\Asheron's Call\acclient.exe")) {
+            if (Test-Path -LiteralPath $cand) { $acClientPath = $cand; break }
+        }
+    }
+
+    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        Write-Warning "Pattern gate SKIPPED: 'python' is not on PATH. Install Python, or pass -SkipPatternCheck to silence."
+    }
+    elseif (-not (Test-Path -LiteralPath $checkScript)) {
+        Write-Warning "Pattern gate SKIPPED: $checkScript not found."
+    }
+    elseif ([string]::IsNullOrWhiteSpace($acClientPath) -or -not (Test-Path -LiteralPath $acClientPath)) {
+        Write-Warning "Pattern gate SKIPPED: no acclient.exe found (tried '$Destination\AcClient' and 'C:\Turbine\Asheron''s Call'). Pass -AcClient <path> to enforce."
+    }
+    else {
+        Write-Host "Pattern gate: verifying engine signatures against $acClientPath ..."
+        & $checkScript -AcClient $acClientPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Pattern gate FAILED (exit $LASTEXITCODE) - aborting deploy. A signature drifted or is wrong; re-cut it with tools\pe_pattern.py (GEN / ALL / DATA), fix the source, rebuild, and retry. Override with -SkipPatternCheck only if you understand the risk."
+        }
+        Write-Host "Pattern gate PASSED - all engine signatures unique & correct."
+    }
 }
 
 if (-not $SkipPublish) {

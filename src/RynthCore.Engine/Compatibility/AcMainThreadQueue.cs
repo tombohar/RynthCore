@@ -219,6 +219,52 @@ internal static class AcMainThreadQueue
 
             tail = Volatile.Read(ref _tail);
         }
+
+        // Off-thread WriteToChat strings drain here too (same main-thread window).
+        DrainChat();
+    }
+
+    // ── Chat slot (WriteToChat strings) ──────────────────────────────────────────
+    // WriteToChat carries a string, which can't ride the uint Entry queue. Off-thread
+    // AddTextToScroll races AC's chat-scroll buffer and corrupts it (the recurring
+    // 0x00460D1D write-AV that killed a 5h+ session 2026-06-05). Chat writes marshal
+    // here and drain on the main thread from Drain(), alongside the item/movement
+    // actions. WriteToChat's 100 ms rate-limit runs BEFORE the enqueue, so a bot retry
+    // burst is dropped on the pump thread and this queue never fills with spam.
+    private static readonly System.Collections.Generic.Queue<(string Text, int ChatType)> _chatQueue = new();
+    private static readonly object _chatLock = new();
+    private const int MaxChatQueue = 64;
+
+    // Pump-thread enqueue. Drops (returns false) if the queue is full.
+    public static bool EnqueueWriteToChat(string text, int chatType)
+    {
+        lock (_chatLock)
+        {
+            if (_chatQueue.Count >= MaxChatQueue)
+            {
+                Interlocked.Increment(ref _dropped);
+                return false;
+            }
+            _chatQueue.Enqueue((text, chatType));
+            return true;
+        }
+    }
+
+    // Single-consumer drain on AC's main thread. Re-invokes WriteToChat, whose
+    // IsOnMainThread gate is satisfied here so it runs AddTextToScroll directly.
+    private static void DrainChat()
+    {
+        while (true)
+        {
+            (string Text, int ChatType) item;
+            lock (_chatLock)
+            {
+                if (_chatQueue.Count == 0) return;
+                item = _chatQueue.Dequeue();
+            }
+            try { ClientHelperHooks.WriteToChat(item.Text, item.ChatType); }
+            catch { }
+        }
     }
 
     // ── Cast slot (SelectItem + CastSpell pair) ─────────────────────────────────

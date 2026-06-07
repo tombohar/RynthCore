@@ -30,6 +30,7 @@ internal static class PluginManager
     private readonly record struct PendingVendorOpen(uint VendorId);
     private readonly record struct PendingVendorClose(uint VendorId);
     private readonly record struct PendingUpdateHealth(uint TargetId, float HealthRatio, uint CurrentHealth, uint MaxHealth);
+    private readonly record struct PendingCombatDamage(uint Damage, uint DamageType, uint Crit, uint IsAttacker);
     private readonly record struct PendingEnchantmentAdded(uint SpellId, double DurationSeconds);
     private readonly record struct PendingEnchantmentRemoved(uint EnchantmentId);
 
@@ -49,6 +50,7 @@ internal static class PluginManager
     private const int MaxPendingVendorOpen = 32;
     private const int MaxPendingVendorClose = 32;
     private const int MaxPendingUpdateHealth = 512;
+    private const int MaxPendingCombatDamage = 256;
     private const int MaxPendingEnchantmentEvents = 256;
     private const int MaxPrePluginCreateObjects = 4096;
     private static readonly Queue<uint> _prePluginCreateObjects = new();
@@ -76,6 +78,7 @@ internal static class PluginManager
     private static readonly Queue<PendingVendorOpen> _pendingVendorOpen = new();
     private static readonly Queue<PendingVendorClose> _pendingVendorClose = new();
     private static readonly Queue<PendingUpdateHealth> _pendingUpdateHealth = new();
+    private static readonly Queue<PendingCombatDamage> _pendingCombatDamage = new();
     private static readonly Queue<PendingEnchantmentAdded> _pendingEnchantmentAdded = new();
     private static readonly Queue<PendingEnchantmentRemoved> _pendingEnchantmentRemoved = new();
     private static readonly object PendingIncomingChatsLock = new();
@@ -93,6 +96,7 @@ internal static class PluginManager
     private static readonly object PendingVendorOpenLock = new();
     private static readonly object PendingVendorCloseLock = new();
     private static readonly object PendingUpdateHealthLock = new();
+    private static readonly object PendingCombatDamageLock = new();
     private static readonly object PendingEnchantmentAddedLock = new();
     private static readonly object PendingEnchantmentRemovedLock = new();
     private static bool _loaded;
@@ -464,6 +468,7 @@ internal static class PluginManager
         DispatchQueuedDeleteObject();
         DispatchQueuedSelectedTargetChange();
         DispatchQueuedUpdateHealth();
+        DispatchQueuedCombatDamage();
         DispatchQueuedEnchantmentAdded();
         DispatchQueuedEnchantmentRemoved();
         DispatchQueuedChatWindowText();
@@ -760,6 +765,20 @@ internal static class PluginManager
         }
     }
 
+    public static void QueueCombatDamage(uint damage, uint damageType, bool crit, bool isAttacker)
+    {
+        if (_plugins.Count == 0)
+            return;
+
+        lock (PendingCombatDamageLock)
+        {
+            if (_pendingCombatDamage.Count >= MaxPendingCombatDamage)
+                _pendingCombatDamage.Dequeue();
+
+            _pendingCombatDamage.Enqueue(new PendingCombatDamage(damage, damageType, crit ? 1u : 0u, isAttacker ? 1u : 0u));
+        }
+    }
+
     public static void QueueEnchantmentAdded(uint spellId, double durationSeconds)
     {
         if (_plugins.Count == 0)
@@ -844,8 +863,15 @@ internal static class PluginManager
         _api.D3DDevice = d3dDevice;
     }
 
+    /// <summary>Monotonic count of TickAll invocations — read by HeartbeatLogger
+    /// to report the plugin pump's tick rate (a flatlining rate = wedged pump).
+    /// int (atomic read/write on x86) updated by the single TickAll driver.</summary>
+    internal static int TickCount;
+
     public static void TickAll()
     {
+        TickCount++;
+
         // Sample the real cast gate on the single 30 Hz plugin heartbeat (this
         // is the one TickAll driver, off AC's render thread). Self-guarded;
         // never throws. Plugins read it via the GetCastBusyState host pull.
@@ -877,7 +903,7 @@ internal static class PluginManager
             catch (Exception ex)
             {
                 plugin.Failed = true;
-                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} Tick threw {ex.GetType().Name}: {ex.Message} - disabled.");
+                RynthLog.Error($"PluginManager: {plugin.DisplayName} Tick threw {ex.GetType().Name}: {ex.Message} - disabled.");
             }
         }
 
@@ -907,7 +933,7 @@ internal static class PluginManager
             catch (Exception ex)
             {
                 plugin.Failed = true;
-                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} Render threw {ex.GetType().Name}: {ex.Message} - disabled.");
+                RynthLog.Error($"PluginManager: {plugin.DisplayName} Render threw {ex.GetType().Name}: {ex.Message} - disabled.");
             }
         }
     }
@@ -972,6 +998,8 @@ internal static class PluginManager
             _pendingStopViewingObjectContents.Clear();
         lock (PendingUpdateHealthLock)
             _pendingUpdateHealth.Clear();
+        lock (PendingCombatDamageLock)
+            _pendingCombatDamage.Clear();
         lock (PendingEnchantmentAddedLock)
             _pendingEnchantmentAdded.Clear();
         lock (PendingEnchantmentRemovedLock)
@@ -1730,6 +1758,52 @@ internal static class PluginManager
                 {
                     plugin.Failed = true;
                     RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnUpdateHealth threw {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    private static void DispatchQueuedCombatDamage()
+    {
+        if (!_initialized || _plugins.Count == 0)
+            return;
+
+        PendingCombatDamage[] pending;
+        lock (PendingCombatDamageLock)
+        {
+            if (_pendingCombatDamage.Count == 0)
+                return;
+
+            pending = _pendingCombatDamage.ToArray();
+            _pendingCombatDamage.Clear();
+        }
+
+        foreach (PendingCombatDamage evt in pending)
+        {
+            for (int i = 0; i < _plugins.Count; i++)
+            {
+                var plugin = _plugins[i];
+                if (!plugin.Initialized || plugin.Failed)
+                    continue;
+
+                try
+                {
+                    unsafe
+                    {
+                        if (plugin.OnCombatDamagePtr != IntPtr.Zero)
+                        {
+                            ((delegate* unmanaged[Cdecl]<uint, uint, uint, uint, void>)plugin.OnCombatDamagePtr)(evt.Damage, evt.DamageType, evt.Crit, evt.IsAttacker);
+                        }
+                        else if (plugin.OnCombatDamage != null)
+                        {
+                            plugin.OnCombatDamage(evt.Damage, evt.DamageType, evt.Crit, evt.IsAttacker);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    plugin.Failed = true;
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnCombatDamage threw {ex.GetType().Name}: {ex.Message}");
                 }
             }
         }

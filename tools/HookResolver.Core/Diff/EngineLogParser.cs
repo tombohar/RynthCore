@@ -21,7 +21,34 @@ public sealed record EngineResolution(
 
 public static class EngineLogParser
 {
-    public const string DefaultLogPath = @"C:\Games\RynthCore\Logs\RynthCore.log";
+    public const string LogDirectory = @"C:\Games\RynthCore\Logs";
+    public const string DefaultLogPath = LogDirectory + @"\RynthCore.log";
+
+    /// <summary>
+    /// HookResolver lines are engine-origin, so since the per-client log split
+    /// they land in RynthCore.&lt;pid&gt;.log, not the shared RynthCore.log. Pick the
+    /// newest per-PID session log if any exist; otherwise fall back to the shared
+    /// file (and legacy single-file layouts).
+    /// </summary>
+    public static string ResolveDefaultLogPath()
+    {
+        try
+        {
+            if (Directory.Exists(LogDirectory))
+            {
+                string? newest = null;
+                System.DateTime newestTime = System.DateTime.MinValue;
+                foreach (string f in Directory.GetFiles(LogDirectory, "RynthCore.*.log"))
+                {
+                    var t = File.GetLastWriteTime(f);
+                    if (t > newestTime) { newestTime = t; newest = f; }
+                }
+                if (newest != null) return newest;
+            }
+        }
+        catch { /* fall through to the shared path */ }
+        return DefaultLogPath;
+    }
 
     private static readonly Regex Resolved = new(
         @"HookResolver\[(?<sym>[^\]]+)\]:\s+RESOLVED\s+via\s+(?<detail>\S+)\s+@\s+0x(?<addr>[0-9A-Fa-f]+)",
@@ -38,7 +65,7 @@ public static class EngineLogParser
     public static async Task<IReadOnlyDictionary<string, EngineResolution>> ParseAsync(
         string? path = null, CancellationToken ct = default)
     {
-        path ??= DefaultLogPath;
+        path ??= ResolveDefaultLogPath();
         var result = new Dictionary<string, EngineResolution>();
         if (!File.Exists(path)) return result;
 

@@ -174,13 +174,20 @@ Picked up on next AC launch. Hot-reload via the **RL** button doesn't help when 
 
 ## Logging
 
-Unified log: **`C:\Games\RynthCore\Logs\RynthCore.log`**
+Log directory: **`C:\Games\RynthCore\Logs\`**
 
-Loader, Engine, Injector, plugins, and CrashLogger all append to this single file with origin tags (`[engine]`, `[loader]`, `[injector]`, `[plugin]`, `[compat]`). On Engine cold start the log rotates to `RynthCore.log.old` if it exceeds 5 MB. Path is centralised in `src/RynthCore.Engine/LogPaths.cs`; Loader and Injector mirror the constants.
+- **`RynthCore.<pid>.log`** — per-client session log. Loader, Engine, and plugins inside one `acclient.exe` share that client's PID, so each running client gets its own file. This is where heartbeat, hooks, crashes, and hangs go. A daily multi-boxer can `grep` one client's session without the others interleaving, and the "scan `hb #N` for a gap" silent-death check works per file. Rotated to `.<pid>.log.old` at 5 MB; per-client logs older than 7 days are pruned at engine startup.
+- **`RynthCore.log`** — shared launch/orchestration log. Written by the injector and launcher (separate processes), plus a one-line `session start … -> RynthCore.<pid>.log` pointer from each engine, so this file stays the human entry point / index.
+
+Lines are `[HH:mm:ss.fff] [pid:N] [LVL] [tag] message` where `LVL` is `INF`/`WRN`/`ERR` (triage with `grep "[ERR]"`) and `tag` is the origin (`engine`/`loader`/`plugin`/`compat`/…). Path logic is centralised in `src/RynthCore.Engine/LogPaths.cs`; Loader and Injector mirror the constants. `RynthLog.Warn`/`.Error` set the level; everything else defaults to `INF`.
+
+The **heartbeat** (`HeartbeatLogger`) writes one line/sec carrying live state: `hb #N up=Ss fps=F plug=P/s ws=MMB login=1` — so a silent-death tail shows render rate (0 fps = render dead, process alive), plugin-pump rate (0 = wedged pump), memory trend, and in-world state, not just "alive at T".
 
 **Crash logging:**
-- `CrashLogger.cs` installs a Win32 Vectored Exception Handler. Catches AVs and other SEH faults that NativeAOT can't surface as managed exceptions. Dumps a `==== CRASH ====` banner with exception code, faulting module + RVA, register dump, EBP frame walk, and ESP stack sweep.
-- `EntryPoint.InstallManagedExceptionHandlers` hooks `AppDomain.UnhandledException` and `TaskScheduler.UnobservedTaskException` so managed exceptions escaping a worker thread (or unobserved task continuations) get logged with full stack before the process terminates.
+- `CrashLogger.cs` — the managed VEH/SUEF is **intentionally NOT installed** (proven fatal in NativeAOT-injected acclient; see the long banner comment in the file). Its dump-formatting logic (register dump, EBP frame walk, ESP stack sweep) is retained and reused by the hang watchdog. Native frames are emitted as `acclient.exe+0xRVA`.
+- `MainThreadHangWatchdog.cs` — beats off the EndScene detour; when AC's main thread stalls >4 s it suspends it, snapshots the context, and walks the native stack. On a confirmed permanent wedge it writes a **minidump** (`CrashDump.cs` → `Logs\dumps\hang_<pid>_<time>.dmp`, once per session, gated by `EngineSettings.EnableHangMinidump`, default true) — a targeted replacement for always-on procdump.
+- `EntryPoint.InstallManagedExceptionHandlers` hooks `AppDomain.UnhandledException`, `TaskScheduler.UnobservedTaskException`, and a filtered `FirstChanceException` (process-killer types only) — logged at `ERR`/`WRN` before the process terminates.
+- **`tools/symbolicate.py`** (offline, out-of-process) rewrites `acclient.exe+0xRVA` frames in a log into function names from `GhidraTools/symbols.csv` and flags known recurring AVs. Run `tools\symbolicate.ps1` (newest per-PID log → console).
 
 ---
 

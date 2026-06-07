@@ -23,6 +23,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using RynthCore.Engine.ImGuiBackend;
 using RynthCore.Engine.Plugins;
 
 namespace RynthCore.Engine.UI.Panels;
@@ -118,6 +119,7 @@ internal static class SettingsPanel
         public int PetMinMonsters { get; set; } = 1;
         // Spell Combat
         public int SpellCastIntervalMs { get; set; } = 400;
+        public int AttackSpellIntervalMs { get; set; } = 1500;
         public bool CastDispelSelf { get; set; }
         public int MinRingTargets { get; set; } = 4;
         public int MinSkillLevelTier1 { get; set; } = 35;
@@ -627,9 +629,12 @@ internal static class SettingsPanel
     private static void BuildSpellCombatTab(PanelState state, StackPanel p, PickerState picker)
     {
         p.Children.Add(SectionHeader("War/Void Casting Settings"));
-        p.Children.Add(IntRow("Spell Interval (ms)", state.Data.SpellCastIntervalMs, 100, 1500, 50,
+        p.Children.Add(IntRow("Buff Spell Interval (ms)", state.Data.SpellCastIntervalMs, 100, 1500, 50,
             v => { state.Data.SpellCastIntervalMs = v; Push(state); },
-            "Delay between spell casts (buffing and combat).\nLower = faster spell chains. 400ms is a good balance.\nBelow 200ms may cause fizzles or dropped casts on laggy servers."));
+            "Delay between BUFF / utility spell casts (not combat).\nLower = faster buff chains. 400ms is a good balance.\nBelow 200ms may cause fizzles or dropped casts on laggy servers."));
+        p.Children.Add(IntRow("Attack Spell Delay (ms)", state.Data.AttackSpellIntervalMs, 250, 5000, 50,
+            v => { state.Data.AttackSpellIntervalMs = v; Push(state); },
+            "Delay between offensive (war/void) COMBAT casts only.\nSpacing casts ~1-2s (1500ms default) stops back-to-back\n\"You're too busy!\" refusals that drop casts and cost kills.\nDoes NOT affect buffing speed."));
         p.Children.Add(BoolRow("Cast Dispel Self", state.Data.CastDispelSelf,
             v => { state.Data.CastDispelSelf = v; Push(state); }));
 
@@ -926,31 +931,8 @@ internal static class SettingsPanel
     {
         int current = Math.Clamp(value, min, max);
 
-        var valueText = new TextBlock
-        {
-            Text = current.ToString(),
-            Foreground = ColAmber,
-            FontSize = 11,
-            Width = 48,
-            TextAlignment = Avalonia.Media.TextAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-
         var minusBtn = StepButton("-");
         var plusBtn  = StepButton("+");
-
-        minusBtn.Click += (_, _) =>
-        {
-            current = Math.Max(min, current - step);
-            valueText.Text = current.ToString();
-            onChange(current);
-        };
-        plusBtn.Click += (_, _) =>
-        {
-            current = Math.Min(max, current + step);
-            valueText.Text = current.ToString();
-            onChange(current);
-        };
 
         // TextBox for direct entry
         var tb = new TextBox
@@ -968,14 +950,29 @@ internal static class SettingsPanel
             HorizontalContentAlignment = HorizontalAlignment.Center,
         };
         DisableInnerScroll(tb);
-        tb.GotFocus += (_, _) => { /* suppress poll while typing */ };
+        // Steppers drive the same visible TextBox the user types into.
+        minusBtn.Click += (_, _) =>
+        {
+            current = Math.Max(min, current - step);
+            tb.Text = current.ToString();
+            onChange(current);
+        };
+        plusBtn.Click += (_, _) =>
+        {
+            current = Math.Min(max, current + step);
+            tb.Text = current.ToString();
+            onChange(current);
+        };
+        // Open the keyboard gate while this field has focus so typed keys are
+        // routed to Avalonia instead of the game (and focus isn't yanked back).
+        tb.GotFocus += (_, _) => Win32Backend.AvaloniaTextInputActive = true;
         tb.LostFocus += (_, _) =>
         {
+            Win32Backend.AvaloniaTextInputActive = false;
             if (int.TryParse(tb.Text, out int parsed))
             {
                 current = Math.Clamp(parsed, min, max);
                 tb.Text = current.ToString();
-                valueText.Text = current.ToString();
                 onChange(current);
             }
             else
@@ -991,7 +988,6 @@ internal static class SettingsPanel
                 {
                     current = Math.Clamp(parsed, min, max);
                     tb.Text = current.ToString();
-                    valueText.Text = current.ToString();
                     onChange(current);
                 }
                 else tb.Text = current.ToString();
@@ -1053,7 +1049,8 @@ internal static class SettingsPanel
             else tb.Text = current.ToString("G4", CultureInfo.InvariantCulture);
         }
 
-        tb.LostFocus += (_, _) => Commit();
+        tb.GotFocus += (_, _) => Win32Backend.AvaloniaTextInputActive = true;
+        tb.LostFocus += (_, _) => { Win32Backend.AvaloniaTextInputActive = false; Commit(); };
         tb.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) Commit(); };
 
         var minusBtn = StepButton("-");
@@ -1126,7 +1123,8 @@ internal static class SettingsPanel
             else tb.Text = current.ToString("G4", CultureInfo.InvariantCulture);
         }
 
-        tb.LostFocus += (_, _) => Commit();
+        tb.GotFocus += (_, _) => Win32Backend.AvaloniaTextInputActive = true;
+        tb.LostFocus += (_, _) => { Win32Backend.AvaloniaTextInputActive = false; Commit(); };
         tb.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) Commit(); };
 
         var minusBtn = StepButton("-");

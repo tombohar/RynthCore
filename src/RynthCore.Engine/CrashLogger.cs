@@ -162,7 +162,7 @@ internal static class CrashLogger
     {
         try
         {
-            RynthLog.Info("==== SUEF (last-chance unhandled) FIRED ====");
+            RynthLog.Error("==== SUEF (last-chance unhandled) FIRED ====");
             ProcessException(pExceptionInfo, sourceTag: "SUEF");
         }
         catch
@@ -251,7 +251,7 @@ internal static class CrashLogger
             };
 
             RynthLog.Info("================================================================");
-            RynthLog.Info($"==== CRASH ({codeName}) [{sourceTag}]  build={EntryPoint.BuildStamp}  initCount={EntryPoint.InitCount}  thread={Environment.CurrentManagedThreadId}");
+            RynthLog.Error($"==== CRASH ({codeName}) [{sourceTag}]  build={EntryPoint.BuildStamp}  initCount={EntryPoint.InitCount}  thread={Environment.CurrentManagedThreadId}");
             RynthLog.Info(
                 $"  code=0x{er.ExceptionCode:X8}  addr=0x{er.ExceptionAddress.ToInt64():X8}  " +
                 $"module={ShortModule(module)}  base=0x{moduleBase.ToInt64():X8}  rva=0x{rva:X}");

@@ -434,6 +434,13 @@ internal static class PluginLoader
             plugin.OnUpdateHealth = Marshal.GetDelegateForFunctionPointer<PluginOnUpdateHealthDelegate>(onUpdateHealthPtr);
         }
 
+        IntPtr onCombatDamagePtr = GetProcAddress(handle, "RynthPluginOnCombatDamage");
+        if (onCombatDamagePtr != IntPtr.Zero)
+        {
+            plugin.OnCombatDamagePtr = onCombatDamagePtr;
+            plugin.OnCombatDamage = Marshal.GetDelegateForFunctionPointer<PluginOnCombatDamageDelegate>(onCombatDamagePtr);
+        }
+
         IntPtr onChatWindowTextPtr = GetProcAddress(handle, "RynthPluginOnChatWindowText");
         if (onChatWindowTextPtr != IntPtr.Zero)
         {
@@ -575,6 +582,7 @@ internal static class PluginLoader
         if (p.OnVendorOpen != null) parts.Add("vendor-open");
         if (p.OnVendorClose != null) parts.Add("vendor-close");
         if (p.OnUpdateHealth != null || p.OnUpdateHealthPtr != IntPtr.Zero) parts.Add("health");
+        if (p.OnCombatDamage != null || p.OnCombatDamagePtr != IntPtr.Zero) parts.Add("combatdmg");
         if (p.OnChatWindowText != null) parts.Add("chat-in");
         if (p.OnChatBarEnter != null) parts.Add("chat-out");
         if (p.OnBarAction != null) parts.Add("bar");

@@ -3,6 +3,8 @@
 **/obj/
 artifacts/
 TestResults/
+**/__pycache__/
+*.pyc
 
 # IDE and local tooling
 .vs/

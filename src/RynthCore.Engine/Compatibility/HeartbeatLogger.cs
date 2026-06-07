@@ -61,12 +61,36 @@ internal static class HeartbeatLogger
     private static void Run()
     {
         long tick = 0;
+        int lastFrames = 0;
+        int lastPlugTicks = 0;
+        long lastMs = Environment.TickCount64;
+        long startMs = lastMs;
         try
         {
             while (Volatile.Read(ref _stopRequested) == 0)
             {
                 tick++;
-                try { RynthLog.Info($"hb #{tick}"); }
+                // Rich beat: a silent-death log tail now shows WHAT the client
+                // was doing — render rate (0 fps = render dead, process alive),
+                // plugin pump rate (0 = wedged pump), memory trend, and in-world
+                // state — not just "alive at T". All cheap, engine-side reads.
+                try
+                {
+                    long nowMs = Environment.TickCount64;
+                    long dtMs = nowMs - lastMs; if (dtMs <= 0) dtMs = 1;
+                    int frames = MainThreadHangWatchdog.FrameCount;
+                    int plug   = Plugins.PluginManager.TickCount;
+                    int fps = (int)((frames - lastFrames) * 1000L / dtMs);
+                    int pps = (int)((plug - lastPlugTicks) * 1000L / dtMs);
+                    lastFrames = frames; lastPlugTicks = plug; lastMs = nowMs;
+
+                    long wsMb = 0;
+                    try { wsMb = Environment.WorkingSet / (1024 * 1024); } catch { }
+                    int login = 0;
+                    try { login = LoginLifecycleHooks.HasObservedLoginComplete ? 1 : 0; } catch { }
+
+                    RynthLog.Info($"hb #{tick} up={(nowMs - startMs) / 1000}s fps={fps} plug={pps}/s ws={wsMb}MB login={login}");
+                }
                 catch { /* never let the heartbeat itself bring anything down */ }
                 // Self-healing: clear a stuck floating-panel click-through
                 // (DockedPanelPointerCaptureActive whose disarm was lost ->

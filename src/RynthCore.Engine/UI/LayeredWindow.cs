@@ -11,10 +11,13 @@
 //  the Avalonia UI thread), and we push the BGRA pixels here via
 //  UpdateLayeredWindow with per-pixel alpha.
 //
-//  Position handling: WM_NCHITTEST returns HTCAPTION for the top CaptionHeight
-//  pixels and HTBOTTOMRIGHT for the bottom-right 22×22 grip, so the OS handles
-//  drag-to-move and edge-resize natively. WM_MOVE feeds the OnMoved callback
-//  for state persistence.
+//  Position handling: move (top CaptionHeight) and resize (bottom-right grip)
+//  are tracked NON-MODALLY in the WndProc (BeginDrag/UpdateDrag/EndDrag) — we do
+//  NOT return HTCAPTION/HTBOTTOMRIGHT, because the OS modal move/size loop would
+//  run on this WndProc's thread (AC's game thread) and freeze the client for the
+//  whole drag. SetCapture + WM_MOUSEMOVE + SetWindowPos keeps the pump live so AC
+//  keeps rendering. The DIB backing store is grown in chunks (never per-frame)
+//  to avoid the realloc churn that corrupts the heap on a drag.
 //
 //  Input forwarding: mouse messages fire OnInput; the host translates the
 //  layered-client coords into Avalonia-canvas coords (where the panel Border
@@ -77,6 +80,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
     private const uint WM_MOUSEWHEEL   = 0x020A;
     private const uint WM_MOUSEHWHEEL  = 0x020E;
     private const uint WM_NCMOUSEMOVE  = 0x00A0;
+    private const uint WM_CAPTURECHANGED = 0x0215;
 
     private const int HTCLIENT      = 1;
     private const int HTCAPTION     = 2;
@@ -188,6 +192,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
     [DllImport("user32.dll")] private static extern bool   PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool   AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll")] private static extern uint   GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")] private static extern bool   GetCursorPos(out POINT lpPoint);
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
 
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hDC);
@@ -307,6 +312,15 @@ internal sealed unsafe class LayeredWindow : IDisposable
     public Action<int, int>? OnResized;
 
     /// <summary>
+    /// Fired once when the user finishes an HTBOTTOMRIGHT resize drag
+    /// (WM_EXITSIZEMOVE), so the host can persist the final size. Distinct from
+    /// <see cref="OnResized"/>, which fires live on every WM_SIZE for reflow.
+    /// Like the deferred move notify, this is skipped for programmatic resizes
+    /// (UpdatePixels' SetWindowPos) so only genuine user drags persist.
+    /// </summary>
+    public Action<int, int>? OnResizeEnd;
+
+    /// <summary>
     /// Fired for forwarded mouse messages. Args: msg, wParam, lParam,
     /// layered-client-x, layered-client-y. The host translates client coords
     /// into Avalonia-canvas coords.
@@ -340,6 +354,30 @@ internal sealed unsafe class LayeredWindow : IDisposable
     // to WM_EXITSIZEMOVE (drag end).
     private bool _modalSizeMoveActive;
     private bool _pendingMoveNotify;
+    // Same deferral for resize: WM_SIZE fires per-pixel during the modal grip
+    // drag; persisting on each is unworkable, so latch and fire OnResizeEnd
+    // once at WM_EXITSIZEMOVE.
+    private bool _pendingResizeNotify;
+
+    // ─── Custom (non-modal) move/resize tracking ────────────────────────────
+    // We deliberately do NOT return HTCAPTION / HTBOTTOMRIGHT from WM_NCHITTEST,
+    // because the OS would then run its modal move/size loop INSIDE this HWND's
+    // WndProc — which lives on AC's game thread — freezing AC's render loop for
+    // the entire drag (the "FPS to 0 / window lags the cursor" problem). Instead
+    // we detect a caption/grip press in WM_LBUTTONDOWN and track the drag
+    // ourselves via SetCapture + WM_MOUSEMOVE, so each message returns
+    // immediately and AC keeps rendering between mouse moves.
+    private const int DragNone   = 0;
+    private const int DragMove   = 1;
+    private const int DragResize = 2;
+    private const int GripPx     = 22;   // bottom-right resize hot zone (matches WM_NCHITTEST grip below)
+    private const int MinDragW   = 80;   // floor so a resize can't shrink the HWND to nothing
+    private const int MinDragH   = 40;
+    private int  _dragMode;
+    private int  _dragAnchorX, _dragAnchorY;        // cursor screen pos at drag start
+    private int  _dragStartLeft, _dragStartTop;     // window screen pos at drag start
+    private int  _dragStartW, _dragStartH;          // window size at drag start
+    private long _lastResizeApplyTick;              // throttle resize applies (reflow cost)
 
     public LayeredWindow(int initialWidth, int initialHeight, int screenLeft, int screenTop, IntPtr ownerHwnd)
     {
@@ -389,13 +427,14 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 int cx = sx - ScreenLeft;
                 int cy = sy - ScreenTop;
 
-                if (cx >= Width - 22 && cy >= Height - 22 && cx < Width && cy < Height)
-                    return (IntPtr)HTBOTTOMRIGHT;
-                // Caption drag region. Exclude the right inset so chrome
-                // buttons (close, redock) stay clickable — HTCLIENT for that
-                // band routes WM_LBUTTONDOWN through to Avalonia normally.
-                if (cy >= 0 && cy < CaptionHeight && cx >= 0 && cx < Width - CaptionRightInset)
-                    return (IntPtr)HTCAPTION;
+                // NOTE: we intentionally do NOT return HTBOTTOMRIGHT (resize
+                // grip) or HTCAPTION (move) here. Either would make DefWindowProc
+                // run the OS modal move/size loop on THIS WndProc's thread — AC's
+                // game thread — freezing the client for the whole drag. The
+                // caption-move and grip-resize are handled non-modally in
+                // WM_LBUTTONDOWN/WM_MOUSEMOVE instead (see _dragMode). Everything
+                // opaque is therefore HTCLIENT.
+                //
                 // Transparent pixels: let clicks fall through to the AC window
                 // beneath so docked panels remain clickable when the floating
                 // window's bounding box overlaps their screen position.
@@ -466,6 +505,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
             case WM_ENTERSIZEMOVE:
                 _modalSizeMoveActive = true;
                 _pendingMoveNotify = false;
+                _pendingResizeNotify = false;
                 break;
 
             case WM_EXITSIZEMOVE:
@@ -474,6 +514,11 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 {
                     _pendingMoveNotify = false;
                     OnMoved?.Invoke(ScreenLeft, ScreenTop);
+                }
+                if (_pendingResizeNotify && !_suppressResizeCallback)
+                {
+                    _pendingResizeNotify = false;
+                    OnResizeEnd?.Invoke(Width, Height);
                 }
                 break;
 
@@ -515,6 +560,9 @@ internal sealed unsafe class LayeredWindow : IDisposable
                     // is never called back into this HWND while the OS modal
                     // loop is active, so there is no reentrant WM_SIZE chain.
                     OnResized?.Invoke(w, h);
+                    // Latch a one-shot persist for drag end (WM_EXITSIZEMOVE).
+                    if (_modalSizeMoveActive)
+                        _pendingResizeNotify = true;
                 }
                 break;
             }
@@ -548,6 +596,23 @@ internal sealed unsafe class LayeredWindow : IDisposable
                     return IntPtr.Zero;
                 }
 
+                // Resize grip (bottom-right). Handle the resize ourselves rather
+                // than via the OS modal loop — see BeginDrag / the WM_NCHITTEST
+                // note. Checked before the caption so the corner wins.
+                if (cx >= Width - GripPx && cy >= Height - GripPx && cx < Width && cy < Height)
+                {
+                    BeginDrag(DragResize);
+                    return IntPtr.Zero;
+                }
+                // Caption band → non-modal move. Exclude the right inset so the
+                // chrome buttons (handled above) and radar's button strip stay
+                // clickable / forwardable.
+                if (cy >= 0 && cy < CaptionHeight && cx >= 0 && cx < Width - CaptionRightInset)
+                {
+                    BeginDrag(DragMove);
+                    return IntPtr.Zero;
+                }
+
                 // Capture before forwarding so out-of-window drags continue
                 // to feed us mouse messages (the OS only sends WM_MOUSEMOVE
                 // to the window under the cursor unless capture is held).
@@ -562,6 +627,15 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 return IntPtr.Zero;
 
             case WM_LBUTTONUP:
+                if (_dragMode != DragNone)
+                {
+                    EndDrag();
+                    return IntPtr.Zero;
+                }
+                ReleaseCapture();
+                ForwardInput(msg, wParam, lParam);
+                return IntPtr.Zero;
+
             case WM_RBUTTONUP:
             case WM_MBUTTONUP:
                 ReleaseCapture();
@@ -569,12 +643,30 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 return IntPtr.Zero;
 
             case WM_MOUSEMOVE:
+                // A custom caption-move / grip-resize in progress: track it
+                // ourselves and don't forward to Avalonia.
+                if (_dragMode != DragNone)
+                {
+                    UpdateDrag();
+                    return IntPtr.Zero;
+                }
+                if (AvaloniaOverlay.DockedPanelPointerCaptureActive)
+                    SetClickThrough(true);
+                ForwardInput(msg, wParam, lParam);
+                return IntPtr.Zero;
+
             case WM_MOUSEWHEEL:
             case WM_MOUSEHWHEEL:
                 if (AvaloniaOverlay.DockedPanelPointerCaptureActive)
                     SetClickThrough(true);
                 ForwardInput(msg, wParam, lParam);
                 return IntPtr.Zero;
+
+            case WM_CAPTURECHANGED:
+                // Mouse capture was taken from us (alt-tab, another grab, or our
+                // own ReleaseCapture in EndDrag). Don't leave a drag latched.
+                CancelDragFromCaptureLoss();
+                break;
 
             case WM_DESTROY:
                 lock (_instancesLock)
@@ -628,8 +720,23 @@ internal sealed unsafe class LayeredWindow : IDisposable
 
     private void EnsureDib(int width, int height)
     {
-        if (_hbm != IntPtr.Zero && _dibWidth == width && _dibHeight == height)
+        // Grow-only, chunked capacity. A resize-drag changes the requested size
+        // every frame; reallocating the DIB section (CreateDIBSection +
+        // DeleteObject) on each one churns GDI and the heap — the same
+        // realloc-churn class that corrupts the heap on the RTT side (see
+        // rynthcore_overlay_lfh_pitfall). Round the backing store up to a chunk
+        // and never shrink so a grow-drag reuses one DIB. UpdatePixels addresses
+        // the DIB by its capacity stride (_dibWidth) and blits only the live
+        // window rect, so an oversized DIB is safe; the WM_NCHITTEST alpha read
+        // already uses _dibWidth as its stride.
+        int needW = Math.Max(width, 1);
+        int needH = Math.Max(height, 1);
+        if (_hbm != IntPtr.Zero && _dibWidth >= needW && _dibHeight >= needH)
             return;
+
+        const int Chunk = 256;
+        int capW = Math.Max(_dibWidth, ((needW + Chunk - 1) / Chunk) * Chunk);
+        int capH = Math.Max(_dibHeight, ((needH + Chunk - 1) / Chunk) * Chunk);
 
         DisposeDib();
 
@@ -643,12 +750,12 @@ internal sealed unsafe class LayeredWindow : IDisposable
             var bmi = new BITMAPINFOHEADER
             {
                 biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
-                biWidth = width,
-                biHeight = -height,
+                biWidth = capW,
+                biHeight = -capH,
                 biPlanes = 1,
                 biBitCount = 32,
                 biCompression = BI_RGB,
-                biSizeImage = (uint)(width * height * 4)
+                biSizeImage = (uint)(capW * capH * 4)
             };
 
             _hbm = CreateDIBSection(_memDc, ref bmi, DIB_RGB_COLORS, out _dibBits, IntPtr.Zero, 0);
@@ -657,8 +764,8 @@ internal sealed unsafe class LayeredWindow : IDisposable
                     $"LayeredWindow.CreateDIBSection failed: {Marshal.GetLastWin32Error()}");
 
             _hbmOld = SelectObject(_memDc, _hbm);
-            _dibWidth = width;
-            _dibHeight = height;
+            _dibWidth = capW;
+            _dibHeight = capH;
         }
         finally
         {
@@ -680,6 +787,113 @@ internal sealed unsafe class LayeredWindow : IDisposable
             AlphaFormat = AC_SRC_ALPHA
         };
         UpdateLayeredWindow(Hwnd, IntPtr.Zero, ref dstPt, ref size, _memDc, ref srcPt, 0, ref blend, ULW_ALPHA);
+    }
+
+    // ─── Custom non-modal move/resize (see the _dragMode fields) ─────────────
+
+    private void BeginDrag(int mode)
+    {
+        if (!GetCursorPos(out POINT p)) return;
+        _dragMode      = mode;
+        _dragAnchorX   = p.X;
+        _dragAnchorY   = p.Y;
+        _dragStartLeft = ScreenLeft;
+        _dragStartTop  = ScreenTop;
+        _dragStartW    = Width;
+        _dragStartH    = Height;
+        // Reuse the deferred-paint machinery (WM_MOVE PaintExistingPixelsAt +
+        // UpdatePixels' deferred-resize path) for the duration of the drag so
+        // the visual tracks the HWND while the panel reflow catches up.
+        _modalSizeMoveActive = true;
+        _pendingMoveNotify   = false;
+        _pendingResizeNotify = false;
+        _lastResizeApplyTick = 0;
+        SetCapture(Hwnd);
+    }
+
+    private void UpdateDrag()
+    {
+        if (!GetCursorPos(out POINT p)) return;
+        int dx = p.X - _dragAnchorX;
+        int dy = p.Y - _dragAnchorY;
+        if (_dragMode == DragMove)
+        {
+            // Move() repositions the HWND; WM_MOVE repaints the layered surface
+            // at the new spot. No reflow, so apply every move for smooth tracking.
+            Move(_dragStartLeft + dx, _dragStartTop + dy);
+        }
+        else if (_dragMode == DragResize)
+        {
+            // Each resize triggers a panel reflow + render, so throttle the
+            // applies to ~60 Hz; EndDrag applies the final size unconditionally.
+            long now = Environment.TickCount64;
+            if (now - _lastResizeApplyTick < 15) return;
+            _lastResizeApplyTick = now;
+            ResizeTo(_dragStartW + dx, _dragStartH + dy);
+        }
+    }
+
+    private void EndDrag()
+    {
+        int mode = _dragMode;
+        // Clear _dragMode BEFORE ReleaseCapture: ReleaseCapture synchronously
+        // posts WM_CAPTURECHANGED to this WndProc, and that handler also ends the
+        // drag — clearing first makes it a no-op so we don't fire the callbacks
+        // twice.
+        _dragMode = DragNone;
+
+        // Apply the final size — the last WM_MOUSEMOVE may have been throttled.
+        if (mode == DragResize && GetCursorPos(out POINT p))
+            ResizeTo(_dragStartW + (p.X - _dragAnchorX), _dragStartH + (p.Y - _dragAnchorY));
+
+        _modalSizeMoveActive = false;
+        _pendingMoveNotify   = false;
+        _pendingResizeNotify = false;
+        ReleaseCapture();
+
+        // Persist the final geometry (mirrors what WM_EXITSIZEMOVE used to do
+        // for the OS modal loop).
+        if (mode == DragMove)
+            OnMoved?.Invoke(ScreenLeft, ScreenTop);
+        else if (mode == DragResize)
+            OnResizeEnd?.Invoke(Width, Height);
+    }
+
+    /// <summary>
+    /// Capture lost mid-drag (e.g. the user alt-tabbed, or another window grabbed
+    /// capture). Abandon the drag at its current geometry rather than leaving
+    /// _dragMode latched so the next stray WM_MOUSEMOVE doesn't resize/move the
+    /// window. Persists the current size/pos. No-op if EndDrag already cleared
+    /// the drag (its own ReleaseCapture routes here).
+    /// </summary>
+    private void CancelDragFromCaptureLoss()
+    {
+        if (_dragMode == DragNone) return;
+        int mode = _dragMode;
+        _dragMode = DragNone;
+        _modalSizeMoveActive = false;
+        _pendingMoveNotify   = false;
+        _pendingResizeNotify = false;
+        if (mode == DragMove)
+            OnMoved?.Invoke(ScreenLeft, ScreenTop);
+        else if (mode == DragResize)
+            OnResizeEnd?.Invoke(Width, Height);
+    }
+
+    /// <summary>
+    /// Resize the HWND in place without the OS modal loop. SetWindowPos sends
+    /// WM_SIZE synchronously to our WndProc, which updates Width/Height and fires
+    /// OnResized so the panel reflows; UpdatePixels' deferred-resize path paints
+    /// the growing window each Tick. Clamped to a sane floor.
+    /// </summary>
+    private void ResizeTo(int newW, int newH)
+    {
+        if (_disposed || Hwnd == IntPtr.Zero) return;
+        if (newW < MinDragW) newW = MinDragW;
+        if (newH < MinDragH) newH = MinDragH;
+        if (newW == Width && newH == Height) return;
+        SetWindowPos(Hwnd, IntPtr.Zero, 0, 0, newW, newH,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     private void DisposeDib()
@@ -754,42 +968,48 @@ internal sealed unsafe class LayeredWindow : IDisposable
 
         if (_dibBits == IntPtr.Zero) return;
 
-        int dibW = modalDeferredResize ? Width : dataWidth;
-        int dibH = modalDeferredResize ? Height : dataHeight;
-        int dstStride = dibW * 4;
+        // On-screen rect to display this frame (the live window size). The DIB
+        // is allocated to a chunked, grow-only CAPACITY that may be larger, so
+        // address rows by the DIB's real stride (_dibWidth) and blit only this
+        // top-left blitW×blitH region.
+        int blitW = modalDeferredResize ? Width : dataWidth;
+        int blitH = modalDeferredResize ? Height : dataHeight;
+        if (blitW <= 0 || blitH <= 0) return;
+        int dibStride = _dibWidth * 4;
 
         if (modalDeferredResize)
         {
-            // Wipe to transparent so the right/bottom strips beyond the panel
-            // don't show stale pixels from before the user started dragging.
-            new Span<byte>((void*)_dibBits, dibW * dibH * 4).Clear();
+            // Wipe the visible region to transparent so the right/bottom strips
+            // beyond the panel data don't show stale pixels from before the drag.
+            for (int y = 0; y < blitH; y++)
+                new Span<byte>((byte*)_dibBits + (long)y * dibStride, blitW * 4).Clear();
         }
 
-        int copyRows = Math.Min(dataHeight, dibH);
-        int copyBytesPerRow = Math.Min(dataWidth * 4, dstStride);
+        int copyRows = Math.Min(dataHeight, blitH);
+        int copyBytesPerRow = Math.Min(dataWidth * 4, blitW * 4);
         for (int y = 0; y < copyRows; y++)
         {
-            byte* src = (byte*)bgraData + y * rowPitch;
-            byte* dst = (byte*)_dibBits + y * dstStride;
-            Buffer.MemoryCopy(src, dst, dstStride, copyBytesPerRow);
+            byte* src = (byte*)bgraData + (long)y * rowPitch;
+            byte* dst = (byte*)_dibBits + (long)y * dibStride;
+            Buffer.MemoryCopy(src, dst, dibStride, copyBytesPerRow);
         }
 
-        // Sample a handful of pixels so we can tell whether RenderTargetBitmap
-        // actually produced visible content (e.g. non-zero alpha somewhere).
-        // This is the most common failure mode: render into RTT, but the panel
-        // Border's canvas-position offset shifts everything off the RTT and
-        // every pixel ends up alpha=0.
+        // Sample a handful of pixels of the visible rect so we can tell whether
+        // RenderTargetBitmap actually produced visible content (non-zero alpha).
+        // A common failure mode: render into the RTT but the Border's canvas
+        // offset shifts everything off and every pixel ends up alpha=0.
         int nonZeroAlpha = 0;
-        int sampleCount = Math.Min(64, dibW * dibH);
+        int sampleCount = Math.Min(64, blitW * blitH);
         for (int i = 0; i < sampleCount; i++)
         {
-            int idx = (i * 9973) % (dibW * dibH); // pseudo-spread
-            byte alpha = ((byte*)_dibBits)[idx * 4 + 3];
+            int px = (i * 9973) % blitW;
+            int py = ((i * 9973) / blitW) % blitH;
+            byte alpha = ((byte*)_dibBits)[((long)py * _dibWidth + px) * 4 + 3];
             if (alpha != 0) nonZeroAlpha++;
         }
 
         var dstPt = new POINT { X = ScreenLeft, Y = ScreenTop };
-        var size = new SIZE { CX = dibW, CY = dibH };
+        var size = new SIZE { CX = blitW, CY = blitH };
         var srcPt = new POINT { X = 0, Y = 0 };
         var blend = new BLENDFUNCTION
         {

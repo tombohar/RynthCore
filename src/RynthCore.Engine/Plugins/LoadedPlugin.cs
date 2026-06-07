@@ -42,6 +42,8 @@ internal sealed class LoadedPlugin
     public PluginOnVendorCloseDelegate? OnVendorClose { get; set; }
     public IntPtr OnUpdateHealthPtr { get; set; }
     public PluginOnUpdateHealthDelegate? OnUpdateHealth { get; set; }
+    public IntPtr OnCombatDamagePtr { get; set; }
+    public PluginOnCombatDamageDelegate? OnCombatDamage { get; set; }
     public IntPtr OnChatWindowTextPtr { get; set; }
     public PluginOnChatWindowTextDelegate? OnChatWindowText { get; set; }
     public PluginOnChatBarEnterDelegate? OnChatBarEnter { get; set; }

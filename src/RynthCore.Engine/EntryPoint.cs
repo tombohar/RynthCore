@@ -22,7 +22,7 @@ namespace RynthCore.Engine;
 
 public static class EntryPoint
 {
-    internal const string BuildStamp = "2026-06-05-usetime-retval-fix";
+    internal const string BuildStamp = "2026-06-06-resize-nonmodal";
     private const int MaxRecentLogLines = 256;
     private static int _initialized;
     /// <summary>Init counter the loader passes in lpParam. 1 = cold start,
@@ -89,7 +89,15 @@ public static class EntryPoint
             // subsequent failures are captured in C:\Games\RynthCore\Logs.
             LogPaths.EnsureLogDirectory();
             if (_initCount <= 1)
+            {
                 LogPaths.RotateAtStartup();
+                LogPaths.PruneOldLogs();
+                // Index this client's session in the shared RynthCore.log so
+                // "start at RynthCore.log" still points the way after the
+                // per-PID split (engine/loader/plugin now write RynthCore.<pid>.log).
+                LogPaths.WriteSessionPointer(
+                    $"[{DateTime.Now:HH:mm:ss.fff}] [pid:{Environment.ProcessId}] [INF] [engine] session start build={BuildStamp} -> {LogPaths.LogFileName}");
+            }
 
             InstallManagedExceptionHandlers();
 
@@ -1075,7 +1083,7 @@ public static class EntryPoint
             if (ex == null) return;
             if (!IsProcessKillerException(ex)) return;
 
-            RynthLog.Info("==== FIRST-CHANCE PROCESS-KILLER EXCEPTION ====");
+            RynthLog.Error("==== FIRST-CHANCE PROCESS-KILLER EXCEPTION ====");
             RynthLog.Info($"  type:    {ex.GetType().FullName}");
             RynthLog.Info($"  message: {ex.Message}");
             RynthLog.Info($"  hresult: 0x{ex.HResult:X8}");
@@ -1118,7 +1126,7 @@ public static class EntryPoint
         try
         {
             var ex = e.ExceptionObject as Exception;
-            RynthLog.Info("==== UNHANDLED MANAGED EXCEPTION ====");
+            RynthLog.Error("==== UNHANDLED MANAGED EXCEPTION ====");
             RynthLog.Info($"  terminating={e.IsTerminating}  type={ex?.GetType().FullName ?? "<non-Exception>"}");
             if (ex != null)
             {
@@ -1141,7 +1149,7 @@ public static class EntryPoint
     {
         try
         {
-            RynthLog.Info("==== UNOBSERVED TASK EXCEPTION ====");
+            RynthLog.Warn("==== UNOBSERVED TASK EXCEPTION ====");
             RynthLog.Info($"  {e.Exception}");
             RynthLog.Info("===================================");
             e.SetObserved();
@@ -1151,20 +1159,25 @@ public static class EntryPoint
         }
     }
 
-    internal static void Log(string message) => LogTagged("engine", message);
+    internal static void Log(string message) => LogTagged("engine", message, "INF");
+
+    /// <summary>Back-compat: untyped lines default to INFO severity.</summary>
+    internal static void LogTagged(string tag, string message) => LogTagged(tag, message, "INF");
 
     /// <summary>
-    /// Write a tagged line to the unified log. Called by the loader, injector,
-    /// plugin SDK, and CrashLogger so every line in the file identifies its
-    /// origin. The lock here serializes writes from the engine module only;
-    /// other processes (injector) and module instances (loader, hot-reloaded
-    /// engines) use FileShare.ReadWrite + a brief retry to coexist.
+    /// Write a tagged, leveled line to this client's per-PID session log
+    /// (RynthCore.&lt;pid&gt;.log). <paramref name="level"/> is a 3-char severity
+    /// (INF/WRN/ERR) so triage is `grep "[ERR]"` and the in-AC Log panel can
+    /// filter. <paramref name="tag"/> identifies the origin (engine/plugin/...).
+    /// The lock serializes writes from the engine module only; other module
+    /// instances (loader, hot-reloaded engines) in the same process use
+    /// FileShare.ReadWrite + a brief retry to coexist.
     /// </summary>
-    internal static void LogTagged(string tag, string message)
+    internal static void LogTagged(string tag, string message, string level)
     {
         try
         {
-            string line = $"[{DateTime.Now:HH:mm:ss.fff}] [pid:{Environment.ProcessId}] [{tag}] {message}";
+            string line = $"[{DateTime.Now:HH:mm:ss.fff}] [pid:{Environment.ProcessId}] [{level}] [{tag}] {message}";
 
             lock (LogLock)
             {

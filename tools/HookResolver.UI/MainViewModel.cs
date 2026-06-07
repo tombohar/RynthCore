@@ -15,7 +15,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private string _acClientPath = DefaultAcClientPath;
     private string _manifestPath = DefaultManifestPath;
-    private string _logPath = EngineLogParser.DefaultLogPath;
+    private string _logPath = EngineLogParser.ResolveDefaultLogPath();
     private string _statusText = "Ready.";
     private string _sha256 = "—";
     private int _resolvedCount;

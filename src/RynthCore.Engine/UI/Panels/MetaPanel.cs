@@ -125,6 +125,7 @@ internal static class MetaPanel
         public string ActionData { get; set; } = string.Empty;
         public List<MetaRuleDto> Children { get; set; } = new();
         public List<MetaRuleDto> ActionChildren { get; set; } = new();
+        public bool Enabled { get; set; } = true;
         public long LastFiredMs { get; set; } = 99999;
     }
 
@@ -175,7 +176,7 @@ internal static class MetaPanel
         public bool ShowSaveInput;
         public HashSet<string> CollapsedStates = new();
         public HashSet<int> ExpandedRows = new();
-        public string LastSig = " first";   // content signature of the last Rebuild
+        public string LastSig = "init_sig";   // content signature of the last Rebuild
     }
 
     // Cheap content signature — everything the list view shows EXCEPT the
@@ -193,7 +194,7 @@ internal static class MetaPanel
             sb.Append('#').Append(r.State).Append('~').Append(r.Condition).Append('~')
               .Append(r.ConditionData).Append('~').Append(r.Action).Append('~')
               .Append(r.ActionData).Append('~').Append(r.Children.Count).Append('~')
-              .Append(r.ActionChildren.Count);
+              .Append(r.ActionChildren.Count).Append('~').Append(r.Enabled ? '1' : '0');
         return sb.ToString();
     }
 
@@ -466,10 +467,32 @@ internal static class MetaPanel
 
                 var row = new Grid
                 {
-                    ColumnDefinitions = new ColumnDefinitions("18,18,18,22,*,*"),
+                    ColumnDefinitions = new ColumnDefinitions("16,18,18,18,18,20,*,*"),
                     Background = firing ? ColFired : (gi % 2 == 0 ? ColPanelBg : ColRowAlt),
                     MinHeight  = 20,
+                    Opacity    = rule.Enabled ? 1.0 : 0.5,
                 };
+
+                // Enable/disable toggle (col 0)
+                var enBtn = new Button
+                {
+                    Content = rule.Enabled ? "☑" : "☐",
+                    Width = 14, Height = 16,
+                    Padding = new Thickness(0), Margin = new Thickness(1),
+                    Background = ColBtnFill,
+                    Foreground = rule.Enabled ? ColGreen : ColMute,
+                    BorderBrush = ColBtnBord, BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(2), FontSize = 10,
+                    HorizontalContentAlignment = HorizontalAlignment.Center,
+                };
+                ToolTip.SetTip(enBtn, rule.Enabled ? "Enabled — click to disable" : "Disabled — click to enable");
+                enBtn.Click += (_, e) =>
+                {
+                    e.Handled = true;
+                    Send(new MetaCmd { Op = "set_rule_enabled", Index = capturedGlobalIdx, Value = (!rule.Enabled).ToString().ToLowerInvariant() });
+                };
+                Grid.SetColumn(enBtn, 0);
+                row.Children.Add(enBtn);
 
                 // Expand button (col 0) — only when rule has children
                 if (hasChildren)
@@ -491,7 +514,7 @@ internal static class MetaPanel
                         else ps.ExpandedRows.Add(capturedGlobalIdx);
                         rebuild();
                     };
-                    Grid.SetColumn(expBtn, 0);
+                    Grid.SetColumn(expBtn, 1);
                     row.Children.Add(expBtn);
                 }
 
@@ -507,7 +530,7 @@ internal static class MetaPanel
                     IsEnabled = gi > 0,
                 };
                 upBtn.Click += (_, e) => { e.Handled = true; Send(new MetaCmd { Op = "move_up", Index = capturedGlobalIdx }); };
-                Grid.SetColumn(upBtn, 1);
+                Grid.SetColumn(upBtn, 2);
                 row.Children.Add(upBtn);
 
                 // Down button (col 2)
@@ -522,10 +545,25 @@ internal static class MetaPanel
                     IsEnabled = gi < stateRules.Count - 1,
                 };
                 dnBtn.Click += (_, e) => { e.Handled = true; Send(new MetaCmd { Op = "move_down", Index = capturedGlobalIdx }); };
-                Grid.SetColumn(dnBtn, 2);
+                Grid.SetColumn(dnBtn, 3);
                 row.Children.Add(dnBtn);
 
-                // Delete button (col 3)
+                // Duplicate button (col 4)
+                var dupBtn = new Button
+                {
+                    Content = "❏", Width = 16, Height = 16,
+                    Padding = new Thickness(0), Margin = new Thickness(1),
+                    Background = ColBtnFill, Foreground = ColMute,
+                    BorderBrush = ColBtnBord, BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(2), FontSize = 9,
+                    HorizontalContentAlignment = HorizontalAlignment.Center,
+                };
+                ToolTip.SetTip(dupBtn, "Duplicate rule");
+                dupBtn.Click += (_, e) => { e.Handled = true; Send(new MetaCmd { Op = "duplicate_rule", Index = capturedGlobalIdx, Rule = CloneRule(rule) }); };
+                Grid.SetColumn(dupBtn, 4);
+                row.Children.Add(dupBtn);
+
+                // Delete button (col 5)
                 var delBtn = new Button
                 {
                     Content = "X", Width = 18, Height = 16,
@@ -537,7 +575,7 @@ internal static class MetaPanel
                     HorizontalContentAlignment = HorizontalAlignment.Center,
                 };
                 delBtn.Click += (_, e) => { e.Handled = true; Send(new MetaCmd { Op = "delete_rule", Index = capturedGlobalIdx }); };
-                Grid.SetColumn(delBtn, 3);
+                Grid.SetColumn(delBtn, 5);
                 row.Children.Add(delBtn);
 
                 // Condition text (col 4)
@@ -564,7 +602,7 @@ internal static class MetaPanel
                     FontSize = 10, VerticalAlignment = VerticalAlignment.Center,
                     Margin = new Thickness(3, 0, 2, 0), TextTrimming = TextTrimming.CharacterEllipsis,
                 };
-                Grid.SetColumn(condLabel, 4);
+                Grid.SetColumn(condLabel, 6);
                 row.Children.Add(condLabel);
 
                 // Action text (col 5)
@@ -591,7 +629,7 @@ internal static class MetaPanel
                     FontSize = 10, VerticalAlignment = VerticalAlignment.Center,
                     Margin = new Thickness(2, 0, 2, 0), TextTrimming = TextTrimming.CharacterEllipsis,
                 };
-                Grid.SetColumn(actLabel, 5);
+                Grid.SetColumn(actLabel, 7);
                 row.Children.Add(actLabel);
 
                 // Click row to edit
@@ -1211,6 +1249,7 @@ internal static class MetaPanel
             State = src.State, Condition = src.Condition,
             ConditionData = src.ConditionData, Action = src.Action,
             ActionData = src.ActionData, LastFiredMs = src.LastFiredMs,
+            Enabled = src.Enabled,
         };
         foreach (var c in src.Children) r.Children.Add(CloneRule(c));
         foreach (var a in src.ActionChildren) r.ActionChildren.Add(CloneRule(a));
