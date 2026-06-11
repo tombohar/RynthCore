@@ -234,6 +234,97 @@ internal static class BusyCountHooks
     {
         _lastThisPtr = IntPtr.Zero;
         Volatile.Write(ref _realBusyPositiveTickMs, 0);
+        _pendingCastBusyDelta = 0;
+        _pendingCastGestureSeen = false;
+    }
+
+    // ── Per-cast busy reconciliation (source fix for the per-cast leak) ──────
+    // The engine's direct cast calls (FreeHandsAndCastSpell / CastSpell) make
+    // AC increment m_cBusy synchronously (wand-ready + cast is often +2), but
+    // they never register the queued action whose completion handler performs
+    // the matching decrements — that lives in the player-initiated flow we
+    // bypass. Result: EVERY direct cast leaked busy count, caught only by
+    // watchdogs (4322 plugin-side clears in one 10h soak). Source fix: the
+    // caster measures the real m_cBusy delta synchronously around its call
+    // (both run on AC's main thread, nothing interleaves, so the delta is
+    // exactly ours), then once the cast gesture has completed — or after a
+    // timeout if it never starts (server refusal) — we invoke the REAL
+    // DecrementBusyCount exactly delta times through the HOOKED entry, so the
+    // shadow counter and plugin busy events stay in sync. Deterministic, no
+    // ClearAllCommands side effects, never touches counts owned by others.
+    private static int _pendingCastBusyDelta;
+    private static long _pendingCastIssuedAtMs;
+    private static bool _pendingCastGestureSeen;
+    private static int _reconcileLogCount;
+    private const long CastBusyReconcileTimeoutMs = 4_000;
+
+    /// <summary>Snapshot the real m_cBusy immediately before a direct cast call (-1 = unreadable).</summary>
+    public static int CaptureRealBusyForCast() => ReadRealBusy();
+
+    /// <summary>
+    /// Arm reconciliation right after a direct cast call, given the pre-call
+    /// snapshot. Main thread only (cast calls already are).
+    /// </summary>
+    public static void NoteDirectCastIssued(int busyBefore)
+    {
+        if (busyBefore < 0) return;
+        int after = ReadRealBusy();
+        if (after < 0) return;
+        int delta = after - busyBefore;
+        if (delta <= 0) return;
+        _pendingCastBusyDelta += delta;
+        _pendingCastIssuedAtMs = Environment.TickCount64;
+        _pendingCastGestureSeen = false;
+    }
+
+    private static void ReconcileCastBusy(long now)
+    {
+        int pending = _pendingCastBusyDelta;
+        if (pending <= 0) return;
+
+        bool gesture = false;
+        try { if (!PlayerPhysicsHooks.TryGetCastGestureInProgress(out gesture)) gesture = false; }
+        catch { gesture = false; }
+
+        if (gesture)
+        {
+            // Cast animation running — completion is the decrement point.
+            _pendingCastGestureSeen = true;
+            return;
+        }
+
+        // Decrement once the observed gesture has ENDED, or after the timeout
+        // when no gesture was ever seen (refused cast / instant failure). The
+        // timeout matches the real-field watchdog window, so worst case this
+        // path is no slower than the old crutch.
+        if (!_pendingCastGestureSeen && now - _pendingCastIssuedAtMs <= CastBusyReconcileTimeoutMs)
+            return;
+
+        _pendingCastBusyDelta = 0;
+        _pendingCastGestureSeen = false;
+
+        IntPtr p = _lastThisPtr;
+        if (p == IntPtr.Zero || _decrementTargetAddress == IntPtr.Zero) return;
+        if (!ClientObjectHooks.IsReadablePointer(p + OffsetMCBusy)) return;
+
+        // Clamp to the live field — if AC (or a watchdog) already cleared part
+        // of it, never push m_cBusy negative.
+        int real = ReadRealBusy();
+        int n = Math.Min(pending, real);
+        if (n <= 0) return;
+
+        try
+        {
+            // Call the HOOKED decrement entry (not the trampoline): our detour
+            // fires, so _netBusyCount and the plugin busy-decremented events
+            // stay consistent for free.
+            var dec = Marshal.GetDelegateForFunctionPointer<BusyCountDelegate>(_decrementTargetAddress);
+            for (int i = 0; i < n; i++) dec(p);
+            if (_reconcileLogCount < 50 || _reconcileLogCount % 100 == 0)
+                RynthLog.Compat($"BusyCountHooks: cast-busy reconciled — decremented {n} (real now {ReadRealBusy()}, total reconciles {_reconcileLogCount + 1}).");
+            _reconcileLogCount++;
+        }
+        catch { }
     }
 
     /// <summary>
@@ -256,6 +347,11 @@ internal static class BusyCountHooks
         // mutates AC, so only clear on the main thread.
         if (MainThreadGuard.IsOnMainThread())
         {
+            // Reconcile our own cast increments FIRST — a clean deterministic
+            // decrement here means the stuck-field watchdog below (and the
+            // plugin-side clears) have nothing left to catch.
+            ReconcileCastBusy(now);
+
             int realBusy = ReadRealBusy();
             if (realBusy > 0)
             {

@@ -494,7 +494,14 @@ internal static class CombatActionHooks
                                 RynthLog.Compat($"[SEH] GetMagicSystem null/AV — targeted cast skipped spell={spellId} target=0x{targetId:X8}");
                             return false;
                         }
+                        // Measure the real m_cBusy delta around the call: the direct cast
+                        // increments it (wand-ready + cast, often +2) but never registers
+                        // the queued action whose completion would decrement — the per-cast
+                        // busy leak. BusyCountHooks reconciles the delta once the cast
+                        // gesture completes.
+                        int busyBefore = BusyCountHooks.CaptureRealBusyForCast();
                         bool okCast = SehTrampoline.FreeHandsCast(_freeHandsCastPtr, mgr, (uint)spellId, targetId);
+                        BusyCountHooks.NoteDirectCastIssued(busyBefore);
                         if (!okCast && System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
                             RynthLog.Compat($"[SEH] AV in FreeHandsAndCastSpell spell={spellId} target=0x{targetId:X8} — caught");
                         return okCast;
@@ -506,13 +513,22 @@ internal static class CombatActionHooks
                 // path — no selection dependency; lands buffs reliably.
                 if (SehTrampoline.IsAvailable && _castSpellClientPtr != IntPtr.Zero)
                 {
+                    // Same per-cast busy-leak reconciliation as the targeted path —
+                    // buff self-casts were the dominant leak source (4322 plugin
+                    // clears / 10h soak, nearly all on buffs).
+                    int busyBefore = BusyCountHooks.CaptureRealBusyForCast();
                     bool ok = SehTrampoline.CdeclVoidUintByte(_castSpellClientPtr, (uint)spellId, 0);
+                    BusyCountHooks.NoteDirectCastIssued(busyBefore);
                     if (!ok && System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
                         RynthLog.Compat($"[SEH] AV in self-CastSpell spell={spellId} — caught");
                     return ok;
                 }
 
-                _castSpellClient((uint)spellId, 0);
+                {
+                    int busyBefore = BusyCountHooks.CaptureRealBusyForCast();
+                    _castSpellClient((uint)spellId, 0);
+                    BusyCountHooks.NoteDirectCastIssued(busyBefore);
+                }
                 return true;
             }
             catch
