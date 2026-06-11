@@ -94,7 +94,11 @@ internal static class HeartbeatLogger
                     // dead — exactly the silent blackhole class the review found.
                     long dropped = 0;
                     try { dropped = AcMainThreadQueue.DroppedCount; } catch { }
-                    RynthLog.Info($"hb #{tick} up={(nowMs - startMs) / 1000}s fps={fps} plug={pps}/s ws={wsMb}MB login={login} qd={dropped}");
+                    // rec = busy reconciles (cast/item-action), fcl = force-clears.
+                    // Soak health: rec climbs during combat/loot; fcl stays flat.
+                    long rec = 0, fcl = 0;
+                    try { rec = BusyCountHooks.ReconcileCount; fcl = BusyCountHooks.ForceClearCount; } catch { }
+                    RynthLog.Info($"hb #{tick} up={(nowMs - startMs) / 1000}s fps={fps} plug={pps}/s ws={wsMb}MB login={login} qd={dropped} rec={rec} fcl={fcl}");
                 }
                 catch { /* never let the heartbeat itself bring anything down */ }
                 // Self-healing: clear a stuck floating-panel click-through

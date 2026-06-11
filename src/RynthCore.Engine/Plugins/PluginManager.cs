@@ -470,12 +470,22 @@ internal static class PluginManager
         // happens this frame and Tick/Render skip stale state.
         if (_logoutDispatchPending && _initialized)
             DispatchPendingLogout();
-        DispatchQueuedBusyCountDecremented();
+        // ⚠ Ordering matters for causality-paired event types (per-type queues
+        // can't preserve true interleaving, but the common real pattern is
+        // bump-then-clear / open-then-close, so drain the "first half" first):
+        //   • Increment BEFORE Decrement — AC bumps busy then clears it; draining
+        //     all-Decr-then-all-Incr made a same-frame incr→decr land as
+        //     decr→incr and a zero-clamped plugin mirror net +1 (the busy-leak
+        //     desync the reconciler/watchdogs then fought).
+        //   • View BEFORE Stop — a container open-then-close in one frame must
+        //     end "closed"; draining Stop-then-View left the plugin believing the
+        //     container was still open.
         DispatchQueuedBusyCountIncremented();
+        DispatchQueuedBusyCountDecremented();
         DispatchQueuedCombatModeChange();
         DispatchQueuedSmartBoxEvent();
-        DispatchQueuedStopViewingObjectContents();
         DispatchQueuedViewObjectContents();
+        DispatchQueuedStopViewingObjectContents();
         DispatchQueuedVendorOpen();
         DispatchQueuedVendorClose();
         DispatchQueuedUpdateObjectInventory();

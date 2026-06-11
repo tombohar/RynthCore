@@ -86,10 +86,20 @@ internal static class BusyCountHooks
     /// cursor refresh below. Even when requested, the motion flush is skipped
     /// while a cast/action gesture is animating.
     /// </summary>
+    // Session counters surfaced in the heartbeat so a soak shows the busy-fix
+    // machinery working: fcl = force-clears performed, rec = cast/item-action
+    // reconciles performed. A healthy post-fix soak should see rec climb during
+    // combat/looting and fcl stay near-flat (force-clear is now just a backstop).
+    private static long _forceClearCount;
+    private static long _reconcileCount;
+    public static long ForceClearCount => Interlocked.Read(ref _forceClearCount);
+    public static long ReconcileCount => Interlocked.Read(ref _reconcileCount);
+
     public static void ForceResetBusyCount(bool clearMotion = false)
     {
         if (!IsInstalled || _lastThisPtr == IntPtr.Zero)
             return;
+        Interlocked.Increment(ref _forceClearCount);
 
         // Never mutate through a stale pointer: after logout/close AC frees the
         // ClientUISystem singleton, and the decrement/cursor calls below would
@@ -351,8 +361,9 @@ internal static class BusyCountHooks
             // stay consistent for free.
             var dec = Marshal.GetDelegateForFunctionPointer<BusyCountDelegate>(_decrementTargetAddress);
             for (int i = 0; i < n; i++) dec(p);
+            Interlocked.Increment(ref _reconcileCount);
             if (_reconcileLogCount < 50 || _reconcileLogCount % 100 == 0)
-                RynthLog.Compat($"BusyCountHooks: cast-busy reconciled — decremented {n} (real now {ReadRealBusy()}, total reconciles {_reconcileLogCount + 1}).");
+                RynthLog.Compat($"BusyCountHooks: direct-action busy reconciled — decremented {n} (real now {ReadRealBusy()}, total reconciles {_reconcileLogCount + 1}).");
             _reconcileLogCount++;
         }
         catch { }
