@@ -71,8 +71,22 @@ internal static class BusyCountHooks
     /// <summary>Returns 0 if the character is idle, positive if a UI action is in progress.</summary>
     public static int GetBusyState() => Math.Max(0, _netBusyCount);
 
-    /// <summary>Force-reset the client's busy count to zero and re-evaluate the cursor.</summary>
-    public static void ForceResetBusyCount()
+    /// <summary>
+    /// Force-reset the client's busy count to zero and re-evaluate the cursor.
+    /// <paramref name="clearMotion"/> additionally flushes the command
+    /// interpreter (ClearAllCommands/TakeControlFromServer/PlayerTeleported) —
+    /// ⚠ DANGEROUS and OFF by default: AC only runs that triplet inside full
+    /// teleport flows that also reset the physics sequence. Fired standalone
+    /// around a live gesture it can leave the player's CSequence with a null
+    /// current anim node → AC's next animation tick AVs at acclient 0x5264A9
+    /// reading null+0xC (CSequence::update_internal). Diagnosed live
+    /// 2026-06-11: the loot busy-watchdog called this every ~2s for an hour
+    /// (every corpse open leaks +1 m_cBusy) and one clear landed in the
+    /// gesture window. The busy UNSTICK itself only needs the decrement loop +
+    /// cursor refresh below. Even when requested, the motion flush is skipped
+    /// while a cast/action gesture is animating.
+    /// </summary>
+    public static void ForceResetBusyCount(bool clearMotion = false)
     {
         if (!IsInstalled || _lastThisPtr == IntPtr.Zero)
             return;
@@ -101,9 +115,22 @@ internal static class BusyCountHooks
         try { Marshal.WriteInt32(_lastThisPtr + OffsetMCBusy, 0); }
         catch { /* non-fatal */ }
 
-        CommandInterpreterHooks.ClearAllCommands();
-        CommandInterpreterHooks.TakeControlFromServer();
-        CommandInterpreterHooks.PlayerTeleported();
+        if (clearMotion)
+        {
+            bool gesture = false;
+            try { if (!PlayerPhysicsHooks.TryGetCastGestureInProgress(out gesture)) gesture = false; }
+            catch { gesture = false; }
+            if (gesture)
+            {
+                RynthLog.Compat("BusyCountHooks: motion flush SKIPPED — a gesture is animating (the CSequence-corruption window).");
+            }
+            else
+            {
+                CommandInterpreterHooks.ClearAllCommands();
+                CommandInterpreterHooks.TakeControlFromServer();
+                CommandInterpreterHooks.PlayerTeleported();
+            }
+        }
 
         if (_updateCursorStateAddress != IntPtr.Zero)
         {

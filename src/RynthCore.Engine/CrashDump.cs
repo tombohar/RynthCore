@@ -83,6 +83,10 @@ internal static class CrashDump
             if (!ok)
             {
                 RynthLog.Error($"CrashDump: MiniDumpWriteDump failed err={err} reason={reason}");
+                // Don't leave a 0-byte .dmp behind — it reads as a crash marker
+                // during triage (observed: hang_17692_20260611_114430.dmp, 0
+                // bytes, main thread suspended mid-exception-dispatch).
+                try { fs.Close(); File.Delete(dumpPath); } catch { }
                 return false;
             }
 
