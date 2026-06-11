@@ -451,8 +451,15 @@ public static class EntryPoint
             // EntryPointNotFoundException inside a detour — silent feature death
             // plus per-event exception churn. Keep the probe name in sync with
             // the most recently added SEH_* export.
+            // ⚠ Probe by MODULE NAME, not a path: PreloadNativeDll has its own
+            // multi-location resolution and the DLL is ALREADY loaded at this
+            // point — a path-based TryLoad against engineDir fails for
+            // shadow-copied engine generations (engineDir = .engine_loads\,
+            // where native DLLs don't live), which on 2026-06-11 false-flagged
+            // a healthy trampoline as STALE and silently fail-closed every
+            // targeted combat cast ("bot stands there, activity says Combat").
             else if (!System.Runtime.InteropServices.NativeLibrary.TryLoad(
-                         System.IO.Path.Combine(engineDir, "RynthCore.SehTrampoline.dll"), out IntPtr sehModule)
+                         "RynthCore.SehTrampoline.dll", out IntPtr sehModule)
                      || !System.Runtime.InteropServices.NativeLibrary.TryGetExport(sehModule, "SEH_ThiscallIntUintPtr", out _))
             {
                 RynthLog.Warn("WARNING: RynthCore.SehTrampoline.dll is STALE (missing SEH_ThiscallIntUintPtr) — SEH wrappers DISABLED; rebuild with native\\SehTrampoline\\Build-SehTrampoline.ps1 and redeploy.");
