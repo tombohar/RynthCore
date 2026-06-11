@@ -77,6 +77,16 @@ internal static class BusyCountHooks
         if (!IsInstalled || _lastThisPtr == IntPtr.Zero)
             return;
 
+        // Never mutate through a stale pointer: after logout/close AC frees the
+        // ClientUISystem singleton, and the decrement/cursor calls below would
+        // run native code against freed memory (uncatchable under NativeAOT).
+        if (!ClientObjectHooks.IsReadablePointer(_lastThisPtr + OffsetMCBusy))
+        {
+            RynthLog.Compat("BusyCountHooks: ForceResetBusyCount skipped — cached ClientUISystem pointer is no longer readable.");
+            _lastThisPtr = IntPtr.Zero;
+            return;
+        }
+
         int was = _netBusyCount;
 
         if (_originalDecrementBusyCount != null)
@@ -204,8 +214,26 @@ internal static class BusyCountHooks
     {
         IntPtr p = _lastThisPtr;
         if (p == IntPtr.Zero) return -1;
+        // The try/catch below cannot catch a non-null-page AV under NativeAOT
+        // (only null-page faults map to NullReferenceException). If AC freed
+        // the ClientUISystem singleton (logout/close teardown) a stale pointer
+        // read is fail-fast — probe the page first. TOCTOU-narrow but this is
+        // a watchdog: skipping one beat is free.
+        if (!ClientObjectHooks.IsReadablePointer(p + OffsetMCBusy)) return -1;
         try { return Marshal.ReadInt32(p + OffsetMCBusy); }
         catch { return -1; }
+    }
+
+    /// <summary>
+    /// Drop the cached ClientUISystem pointer at logout / client-close so the
+    /// watchdog and ForceResetBusyCount can't touch a freed singleton (the
+    /// 0x0056547B close-AV class). The increment/decrement detours re-capture
+    /// it on the next legit AC call.
+    /// </summary>
+    public static void ResetSession()
+    {
+        _lastThisPtr = IntPtr.Zero;
+        Volatile.Write(ref _realBusyPositiveTickMs, 0);
     }
 
     /// <summary>
@@ -247,8 +275,12 @@ internal static class BusyCountHooks
                     return;
                 }
             }
-            else if (realBusy == 0)
+            else
             {
+                // 0 = idle; -1 = unreadable (no pointer / freed page). Either
+                // way disarm the timer — leaving it armed across an unreadable
+                // stretch caused an instant force-clear when reads resumed
+                // (e.g. first beat after the next login).
                 Volatile.Write(ref _realBusyPositiveTickMs, 0);
             }
         }

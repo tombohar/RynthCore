@@ -98,6 +98,14 @@ internal static class HeartbeatLogger
                 // purpose: independent of the input path that strands it.
                 try { RynthCore.Engine.UI.AvaloniaOverlay.WatchdogClearStuckClickThrough(); }
                 catch { /* never let the heartbeat itself bring anything down */ }
+                // Mid-session log rotation (~once/minute): without it a long
+                // soak grows RynthCore.<pid>.log without bound (startup-only
+                // rotation never fires mid-session and is skipped on reload).
+                if (tick % 60 == 0)
+                {
+                    try { LogPaths.RotateIfOversized(); }
+                    catch { /* never let the heartbeat itself bring anything down */ }
+                }
                 // Sleep in short slices so a stop signal is observed within <100ms,
                 // not up to a full IntervalMs after request.
                 int slept = 0;

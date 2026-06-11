@@ -578,6 +578,11 @@ internal static class RynthChatPanel
             }
         };
         timer.Start();
+        // Stop with the visual tree — a running DispatcherTimer roots the closed
+        // view forever (this one polls at 100ms!). RadarPanel idiom; must
+        // restart on attach: drag/resize fires Detached→Attached.
+        root.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
+        root.DetachedFromVisualTree += (_, _) => timer.Stop();
 
         // Apply loaded active-channel to tab button visuals.
         SelectTab(_activeChannel);

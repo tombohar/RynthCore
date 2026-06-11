@@ -20,10 +20,16 @@ internal static class EngineJsonStore
         "RynthCore",
         "engine.json");
 
+    // Latched when an EXISTING engine.json failed to parse. While set, Write()
+    // is refused: writing the (empty) read-back would silently destroy every
+    // field the parse failure hid — EnableImGuiShell, PluginPaths, the lot —
+    // the exact clobber this class's doc comment promises not to do.
+    private static bool _refuseWrites;
+
     /// <summary>
     /// Returns the JSON document as a mutable dictionary. Missing file → empty
-    /// dict. Parse errors → empty dict (best-effort: don't fail the launcher
-    /// because someone hand-edited engine.json).
+    /// dict. Parse error on an EXISTING file → empty dict for read-only use,
+    /// but writes are disabled until the file is fixed or deleted.
     /// </summary>
     public static Dictionary<string, JsonElement> Read()
     {
@@ -35,16 +41,25 @@ internal static class EngineJsonStore
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return result;
             foreach (JsonProperty p in doc.RootElement.EnumerateObject())
                 result[p.Name] = p.Value.Clone();
+            _refuseWrites = false;
         }
-        catch
+        catch (Exception ex)
         {
-            // Best effort — caller treats missing/corrupt as empty.
+            if (!_refuseWrites)
+                LauncherDiag.Info($"ENGINEJSON: {Path} failed to parse ({ex.GetType().Name}: {ex.Message}) — launcher writes to it are DISABLED until the file is fixed or deleted, so the engine's settings can't be clobbered.");
+            _refuseWrites = true;
         }
         return result;
     }
 
     public static void Write(Dictionary<string, JsonElement> fields)
     {
+        if (_refuseWrites)
+        {
+            LauncherDiag.Info($"ENGINEJSON: write refused — {Path} is corrupt (see earlier ENGINEJSON line). Fix or delete it, then retry.");
+            return;
+        }
+
         string? dir = System.IO.Path.GetDirectoryName(Path);
         if (dir != null) Directory.CreateDirectory(dir);
 
@@ -59,7 +74,15 @@ internal static class EngineJsonStore
             }
             w.WriteEndObject();
         }
-        File.WriteAllBytes(Path, ms.ToArray());
+
+        // Atomic swap (with .bak) — a crash mid-write otherwise truncates the
+        // file, and the engine silently reverts ALL settings on a corrupt read.
+        string tmp = Path + ".tmp";
+        File.WriteAllBytes(tmp, ms.ToArray());
+        if (File.Exists(Path))
+            File.Replace(tmp, Path, Path + ".bak");
+        else
+            File.Move(tmp, Path);
     }
 
     public static bool? GetBool(string field)

@@ -2049,6 +2049,18 @@ internal partial class MainWindow : Window
                 process.Kill();
                 _launchedSessionPids.Remove(pid);
                 _launchedPidInfo.Remove(pid);
+
+                // Count the reap as a crash. The killed client's uptime exceeds
+                // the quick-exit window (StuckClientTimeoutSeconds >= 60s vs
+                // 30s), so DetectQuickExits classifies it "normal close" — and
+                // auto-launch would relaunch a perpetually-stuck client in an
+                // endless kill/relaunch loop, bypassing the circuit breaker.
+                string crashKey = BuildAccountKey(accountName);
+                if (!string.IsNullOrEmpty(crashKey))
+                {
+                    RecordCrash(crashKey);
+                    LauncherDiag.Info($"MaybeKillStuckClients: PID {pid} ({accountName}) reaped -> RecordCrash so the relaunch circuit breaker sees it.");
+                }
             }
             catch (Exception ex)
             {

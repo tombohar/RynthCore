@@ -223,8 +223,12 @@ internal static class PluginManager
     private static GetObjectStateCallbackDelegate? _getObjectStateCallback;
     private static GetObjectBitfieldCallbackDelegate? _getObjectBitfieldCallback;
     private static GetObjectPalettesCallbackDelegate? _getObjectPalettesCallback;
-    private static IntPtr _accountNameScratchPtr;
-    private static IntPtr _worldNameScratchPtr;
+    // [ThreadStatic] like the sibling scratch pointers: these are host pulls
+    // callable from any plugin/UI thread with a free-then-realloc pattern —
+    // as plain statics, two concurrent callers could FreeHGlobal the same
+    // pointer (double-free → the LFH heap-corruption class).
+    [ThreadStatic] private static IntPtr _accountNameScratchPtr;
+    [ThreadStatic] private static IntPtr _worldNameScratchPtr;
     [ThreadStatic] private static IntPtr _objectNameScratchPtr;
     private static string _pluginsDir = "";
     private static string _shadowRootDir = "";
@@ -906,7 +910,11 @@ internal static class PluginManager
         // Fire the delayed login self-identify once AC's vitals UI has settled
         // (armed in DispatchLoginCompleteToLoadedPlugins; deferred past the
         // early-init window where AC's gmVitalsUI::Update AV'd — 2026-06-09).
-        if (_selfIdentifyDueTick != 0 && Environment.TickCount64 >= _selfIdentifyDueTick)
+        // Gated on _loginCompleteObserved: a logout within the 15s window
+        // otherwise let this fire at char-select — exactly the vitals-teardown
+        // window the delay exists to avoid (the due-tick is also cleared in
+        // DispatchPendingLogout; this is the belt to that suspender).
+        if (_selfIdentifyDueTick != 0 && _loginCompleteObserved && Environment.TickCount64 >= _selfIdentifyDueTick)
         {
             _selfIdentifyDueTick = 0;
             try
@@ -1135,6 +1143,10 @@ internal static class PluginManager
         // SendNoticePlayerDescReceived after the next login completes.
         Compatibility.PlayerVitalsHooks.ResetSession();
 
+        // Drop the cached ClientUISystem pointer for the same reason — the busy
+        // watchdog/force-clear must not touch the freed singleton at char-select.
+        Compatibility.BusyCountHooks.ResetSession();
+
         // Reset login observation so the next SendLoginCompleteNotification kicks
         // off a fresh login-complete cycle.
         for (int i = 0; i < _plugins.Count; i++)
@@ -1142,6 +1154,11 @@ internal static class PluginManager
 
         _loginCompleteObserved = false;
         _loginDispatchPending = false;
+        // Disarm the delayed self-identify: if the player logs out inside the
+        // 15s arming window, firing RequestId at char-select hits AC mid
+        // vitals-UI teardown — the gmVitalsUI::Update AV the delay was built
+        // to dodge. Re-login re-arms it in DispatchLoginCompleteToLoadedPlugins.
+        _selfIdentifyDueTick = 0;
         LoginLifecycleHooks.ResetObservation();
         LogoutLifecycleHooks.ResetObservation();
     }
@@ -2082,12 +2099,17 @@ internal static class PluginManager
         for (int i = _plugins.Count - 1; i >= 0; i--)
         {
             var plugin = _plugins[i];
-            if (plugin.Initialized && !plugin.Failed)
+            // Shutdown runs for ANY Initialized plugin, including Failed ones.
+            // Failed means "a callback threw once" — the plugin's threads,
+            // timers, and handles are still live, and skipping its Shutdown
+            // export leaked them into the next engine generation (which loads
+            // a FRESH copy of the same plugin → double-instance after reload).
+            if (plugin.Initialized && plugin.Shutdown != null)
             {
                 try
                 {
-                    plugin.Shutdown!();
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} shut down.");
+                    plugin.Shutdown();
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} shut down{(plugin.Failed ? " (was Failed)" : "")}.");
                 }
                 catch (Exception ex)
                 {

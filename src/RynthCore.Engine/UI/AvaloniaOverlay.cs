@@ -443,7 +443,14 @@ internal static class AvaloniaOverlay
         // in this file). Spawn a small background poller that finds AC's
         // visible window via EnumWindows and writes both fields. This
         // de-couples Avalonia mode from the D3D9/ImGui path entirely.
-        if (!Plugins.EngineSettings.EnableImGuiBackend || !Plugins.EngineSettings.EnableD3D9Hook)
+        // Decal coexistence skips the entire D3D9/ImGui init even when both
+        // flags are TRUE — without this gate term the game window was left
+        // completely unsubclassed for Decal users: no WM_CLOSE pump-quiesce
+        // (freeze-on-close returns), no focus-restore after panel clicks, and
+        // dead floating-panel text input.
+        if (!Plugins.EngineSettings.EnableImGuiBackend
+            || !Plugins.EngineSettings.EnableD3D9Hook
+            || Compatibility.DecalDetection.IsDecalLoaded)
         {
             new Thread(() =>
             {

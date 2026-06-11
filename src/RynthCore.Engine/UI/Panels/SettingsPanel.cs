@@ -400,6 +400,11 @@ internal static class SettingsPanel
             RebuildContent(state, contentStack, picker);
         };
         timer.Start();
+        // Stop with the visual tree — a running DispatcherTimer roots the closed
+        // view forever (one immortal poller per open/close). RadarPanel idiom;
+        // must restart on attach: drag/resize fires Detached→Attached.
+        root.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
+        root.DetachedFromVisualTree += (_, _) => timer.Stop();
 
         return root;
     }

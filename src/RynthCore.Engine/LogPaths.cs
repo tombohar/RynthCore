@@ -132,11 +132,38 @@ internal static class LogPaths
                 }
                 catch { /* locked by a live client or already gone — skip */ }
             }
+
+            // Dump retention: hang/crash minidumps under Logs\dumps otherwise
+            // accumulate forever, and a failed write attempt leaves a 0-byte
+            // .dmp that reads as a crash marker during triage.
+            string dumps = Path.Combine(LogDirectory, "dumps");
+            if (Directory.Exists(dumps))
+            {
+                foreach (string dmp in Directory.GetFiles(dumps, "*.dmp"))
+                {
+                    try
+                    {
+                        var fi = new FileInfo(dmp);
+                        if (fi.Length == 0 || fi.LastWriteTime < cutoff)
+                            fi.Delete();
+                    }
+                    catch { }
+                }
+            }
         }
         catch
         {
         }
     }
+
+    /// <summary>
+    /// Mid-session rotation — same size-gated rotate as startup, safe to call
+    /// while the client runs (the writer opens per-append; on a held handle it
+    /// falls back to truncate). Called from the heartbeat loop ~once/minute:
+    /// startup-only rotation never ran on a 10h+ soak and was skipped entirely
+    /// on hot-reload (initCount > 1), so the per-PID log grew without bound.
+    /// </summary>
+    internal static void RotateIfOversized() => RotateAtStartup();
 
     /// <summary>
     /// Append a single best-effort line to the SHARED RynthCore.log so it acts as

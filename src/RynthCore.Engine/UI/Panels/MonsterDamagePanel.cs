@@ -150,6 +150,12 @@ internal static class MonsterDamagePanel
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             timer.Tick += (_, _) => Poll();
             timer.Start();
+            // Stop with the visual tree (RadarPanel idiom): a running
+            // DispatcherTimer roots the closed panel view forever — every
+            // open/close otherwise adds another immortal poller hitting the
+            // plugin C exports against a detached tree.
+            grid.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
+            grid.DetachedFromVisualTree += (_, _) => timer.Stop();
             Poll();
         }
 

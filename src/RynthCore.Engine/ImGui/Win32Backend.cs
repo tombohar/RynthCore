@@ -556,6 +556,11 @@ internal static unsafe class Win32Backend
             if (msg == WM_CLOSE && Interlocked.Exchange(ref _wmCloseSeen, 1) == 0)
             {
                 RynthLog.UI("Win32Backend: WM_CLOSE on AC window — quiescing plugin pump, then kicking engine shutdown.");
+                // AC is about to free the ClientUISystem singleton — drop the
+                // busy watchdog's cached pointer so no force-clear can run
+                // against freed memory during the teardown window.
+                try { Compatibility.BusyCountHooks.ResetSession(); }
+                catch { }
                 // Stop the off-thread plugin pump FIRST, synchronously, on AC's main
                 // thread — we run here BEFORE falling through to AC's own WndProc (which
                 // starts AC's object teardown). The pump's in-flight frame finishes on
@@ -678,7 +683,11 @@ internal static unsafe class Win32Backend
 
             // ── Chat: Enter in-game activates the chat TextBox ───────────
             // Numpad Enter (extended key, lParam bit 24) is reserved for AC functions — never capture it.
-            if (msg == WM_KEYDOWN && (int)wParam == VK_RETURN && !IsExtendedKey(lParam) && !ChatCaptureActive)
+            // !AvaloniaTextInputActive: while the user is typing in a docked
+            // panel TextBox this branch otherwise runs BEFORE the text-input
+            // forwarding block and hijacks Enter into chat capture — stealing
+            // the TextBox's own commit handler and every subsequent keystroke.
+            if (msg == WM_KEYDOWN && (int)wParam == VK_RETURN && !IsExtendedKey(lParam) && !ChatCaptureActive && !AvaloniaTextInputActive)
             {
                 if (OnChatCaptureActivated != null)
                 {
