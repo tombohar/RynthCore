@@ -182,6 +182,44 @@ SEH_ThiscallUintNoArg(void* fn, void* this_ptr, unsigned int* out_result)
     return 1;
 }
 
+/* int __thiscall fn(unsigned int stype, void* outStruct)
+ * e.g. CACQualities/CWeenieObject::InqAttribute2nd(stype, &SecondaryAttribute).
+ * this in ECX; stype + outStruct on the stack (callee cleans, thiscall). Reads a
+ * 2nd-level attribute (health/stam/mana) into the caller's struct. Used to pull a
+ * MONSTER's real MaxHealth out of its (possibly partially-populated) qualities
+ * table without crashing if a sub-table is null — the AV that forced the
+ * AllowNonPlayerQualities gate. */
+static int __cdecl
+_helper_thiscall_int_uint_ptr(void* fn_ptr, void* this_ptr,
+                              unsigned int arg1, void* arg2)
+{
+    int result = 0;
+    __asm {
+        mov  ecx, this_ptr
+        push arg2          /* outStruct (rightmost) */
+        push arg1          /* stype */
+        call fn_ptr        /* thiscall callee cleans the 8 stack bytes */
+        mov  result, eax
+    }
+    return result;
+}
+
+__declspec(dllexport) int __cdecl
+SEH_ThiscallIntUintPtr(void* fn, void* this_ptr, unsigned int arg1, void* arg2,
+                       int* out_result)
+{
+    *out_result = 0;
+    __try {
+        *out_result = _helper_thiscall_int_uint_ptr(fn, this_ptr, arg1, arg2);
+    }
+    __except(GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+             ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        *out_result = 0;
+        return 0;
+    }
+    return 1;
+}
+
 /* ── Process-wide native crash logger (VEH) ───────────────────────────────
  * Logs the faulting 32-bit context + a module-resolved stack sweep to a
  * dedicated file BEFORE the process dies, for the fatal exceptions that bypass

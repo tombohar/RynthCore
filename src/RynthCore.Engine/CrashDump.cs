@@ -35,13 +35,16 @@ internal static class CrashDump
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentProcessId();
 
-    // MINIDUMP_TYPE: Normal (all thread stacks + module list) + thread timing +
-    // handle table. Deliberately NOT WithFullMemory — AC's working set is ~1 GB
-    // and a hang dump only needs stacks to find the wedge.
-    private const uint DumpType =
-        0x00000000   // MiniDumpNormal
-      | 0x00001000   // MiniDumpWithThreadInfo
-      | 0x00000004;  // MiniDumpWithHandleData
+    // MINIDUMP_TYPE. ⚠ AC ships an ANCIENT dbghelp.dll 6.1 (2003) in its own
+    // directory; it's already loaded by base name, so [DllImport("dbghelp.dll")]
+    // binds to THAT, not the modern OS v10. dbghelp 6.1 predates
+    // MiniDumpWithThreadInfo (0x1000, added in 6.5) and REJECTS it with
+    // ERROR_INVALID_PARAMETER (87) — which is why every hang dump failed
+    // (diagnosed 2026-06-10). Use only flags 6.1 supports: MiniDumpNormal already
+    // carries ALL thread stacks (enough to read a deadlock's lock holder);
+    // WithHandleData (0x4, since 5.1) is kept. On any failure we retry bare Normal.
+    private const uint DumpTypePreferred = 0x00000000 | 0x00000004; // Normal + WithHandleData
+    private const uint DumpTypeFallback  = 0x00000000;              // Normal only (universally supported)
 
     /// <summary>
     /// Write a minidump of the current process to Logs\dumps\. Best-effort;
@@ -61,11 +64,24 @@ internal static class CrashDump
             using var fs = new FileStream(dumpPath, FileMode.Create, FileAccess.Write, FileShare.None);
             bool ok = MiniDumpWriteDump(
                 GetCurrentProcess(), GetCurrentProcessId(), fs.SafeFileHandle,
-                DumpType, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                DumpTypePreferred, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            int err = ok ? 0 : Marshal.GetLastWin32Error();
+
+            // ERROR_INVALID_PARAMETER (87) ⇒ AC's ancient dbghelp 6.1 rejected a flag.
+            // Retry with bare MiniDumpNormal (universally supported, still has every
+            // thread stack — what we need to read the deadlock's lock holder).
+            if (!ok && err == 87)
+            {
+                fs.SetLength(0);
+                ok = MiniDumpWriteDump(
+                    GetCurrentProcess(), GetCurrentProcessId(), fs.SafeFileHandle,
+                    DumpTypeFallback, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                err = ok ? 0 : Marshal.GetLastWin32Error();
+                if (ok) RynthLog.Error($"CrashDump: rich flags rejected by AC's old dbghelp 6.1 — wrote bare Normal dump, reason={reason}");
+            }
 
             if (!ok)
             {
-                int err = Marshal.GetLastWin32Error();
                 RynthLog.Error($"CrashDump: MiniDumpWriteDump failed err={err} reason={reason}");
                 return false;
             }

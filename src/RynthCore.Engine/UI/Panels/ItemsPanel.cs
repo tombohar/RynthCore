@@ -66,7 +66,7 @@ internal static class ItemsPanel
         { "Slash", "Pierce", "Bludgeon", "Fire", "Cold", "Lightning", "Acid", "Nether" };
 
     private static readonly string[] ConsumableTypes =
-        { "General", "Lockpick", "HealthKit", "ManaStone", "Stamina" };
+        { "General", "Lockpick", "HealthKit", "ManaStone", "Stamina", "Pet" };
 
     internal sealed class Payload
     {

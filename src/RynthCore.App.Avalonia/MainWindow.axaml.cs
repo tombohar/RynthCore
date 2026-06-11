@@ -186,8 +186,23 @@ internal partial class MainWindow : Window
         if (_settings.WindowHeight.HasValue) Height = _settings.WindowHeight.Value;
         if (_settings.WindowX.HasValue && _settings.WindowY.HasValue)
         {
-            Position = new PixelPoint((int)_settings.WindowX.Value, (int)_settings.WindowY.Value);
-            WindowStartupLocation = WindowStartupLocation.Manual;
+            int wx = (int)_settings.WindowX.Value;
+            int wy = (int)_settings.WindowY.Value;
+            // Guard against a saved minimized / off-screen position. Windows reports
+            // -32000,-32000 for a minimized window, and a stale multi-monitor layout
+            // can leave the saved point off every screen; restoring either opens the
+            // launcher invisibly (the "launcher won't show" symptom). Honor only a
+            // sane on-screen point — otherwise fall back to the default centered
+            // location so the window is always reachable.
+            if (wx > -2000 && wy > -2000 && wx < 30000 && wy < 30000)
+            {
+                Position = new PixelPoint(wx, wy);
+                WindowStartupLocation = WindowStartupLocation.Manual;
+            }
+            else
+            {
+                WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            }
         }
     }
 
@@ -198,6 +213,15 @@ internal partial class MainWindow : Window
 
     private void SaveWindowLayout()
     {
+        // Never persist a minimized / off-screen geometry. Windows reports
+        // Position -32000,-32000 while a window is minimized; saving that makes
+        // the next launch restore an invisible window (the launcher "won't show
+        // open"). Skip the capture entirely in that state and keep the last good
+        // on-screen layout. Maximized still persists (its bounds restore fine).
+        if (WindowState == WindowState.Minimized)
+            return;
+        if (Position.X <= -2000 || Position.Y <= -2000)
+            return;
         _settings.WindowWidth = Width;
         _settings.WindowHeight = Height;
         _settings.WindowX = Position.X;
@@ -2553,6 +2577,35 @@ internal partial class MainWindow : Window
                 || Math.Abs(profile.WindowHeight!.Value - h) > Tolerance;
             if (!changed)
                 return;
+        }
+
+        // ── Reject AC's character-select / login window ──────────────────────
+        // IsLoggedIn latches true for the whole acclient.exe process: it is set
+        // once at the first LoginComplete and is deliberately never flipped back
+        // at char-select (so the stuck-client reaper can't kill a healthy in-game
+        // client — see SessionStateRegistry). So when the player logs a character
+        // back out to character-select, AC shrinks its own window to the small
+        // login/char-select size while this method still sees loggedIn==true and
+        // would happily persist that tiny rect over the real in-game geometry.
+        // Next launch then restores the tiny size and the game is unplayable.
+        //
+        // AC's char-select/login window is *much* smaller than any window a player
+        // games in, so treat a capture that collapses the window below half the
+        // established in-game area as that transient window and skip it. Growth
+        // and moderate resizes (genuine user intent) still persist; a profile
+        // whose saved size was already corrupted small self-heals on the first
+        // resize back up to a real in-game size.
+        int refW = profile.WindowWidth ?? 0;
+        int refH = profile.WindowHeight ?? 0;
+        if ((refW <= 0 || refH <= 0) && _baselineWindowRects.TryGetValue(process.Id, out var refRect))
+        {
+            refW = refRect.w;
+            refH = refRect.h;
+        }
+        if (refW > 0 && refH > 0 && (long)w * h * 2L < (long)refW * refH)
+        {
+            LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}): ignored char-select/login shrink ({w}x{h}, <50% of in-game {refW}x{refH}).");
+            return;
         }
 
         _baselineWindowRects[process.Id] = (x, y, w, h);

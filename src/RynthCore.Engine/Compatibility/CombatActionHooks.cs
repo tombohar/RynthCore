@@ -690,6 +690,7 @@ internal static class CombatActionHooks
     }
 
     private static int _identifyWireLogCount;
+    private static int _mobHpReadLogCount;
 
     /// <summary>
     /// Parses the IdentifyObject response (game event 0xC9) to extract
@@ -884,6 +885,8 @@ internal static class CombatActionHooks
                 // thread so the direct read is safe.
                 uint maxHealth = 0;
                 uint currentHealth = 0;
+                uint playerId = ClientHelperHooks.GetPlayerId();
+
                 // Appraisal-only (see SmartBoxHooks.TryQueueHealthUpdate):
                 // emit absolute ONLY from a real appraisal's wire-parsed
                 // CreatureProfile; otherwise max=0 → UI shows %. ACE creature
@@ -893,10 +896,33 @@ internal static class CombatActionHooks
                     maxHealth = exact.MaxHealth;
                     currentHealth = (uint)Math.Round(maxHealth * Math.Clamp(healthRatio, 0f, 1f));
                 }
+                else if (targetId != 0 && targetId != playerId)
+                {
+                    // No appraisal yet: read the mob's real MaxHealth straight from its
+                    // CACQualities (InqAttribute2nd on the qualities sub-object, SEH-
+                    // guarded). This is what fills in true HP (e.g. Olthoi Swarm
+                    // Harvester = 175) BEFORE the player's appraise skill is high enough
+                    // to produce a CreatureProfile. The earlier bug passed the weenie
+                    // ptr as `this`; InqAttribute2nd derefs this+0x60 for the attribute
+                    // cache, so it MUST get the CACQualities sub-object (resolved inside
+                    // TryReadCreatureMaxHealth). Gated to the main thread inside
+                    // TryGetQualitiesPtr — this detour runs on AC's game thread.
+                    if (ClientObjectHooks.TryReadCreatureMaxHealth(targetId, out uint mobMax)
+                        && mobMax > 0 && mobMax < 1_000_000)
+                    {
+                        maxHealth = mobMax;
+                        currentHealth = (uint)Math.Round(maxHealth * Math.Clamp(healthRatio, 0f, 1f));
+                        ObjectQualityCache.SetCreatureVitals(targetId,
+                            new CreatureVitals(currentHealth, maxHealth, 0, 0, 0, 0));
+
+                        int hlog = Interlocked.Increment(ref _mobHpReadLogCount);
+                        if (hlog <= 20)
+                            RynthLog.Compat($"Compat: mob-hp qualities-read id=0x{targetId:X8} maxHp={maxHealth} ratio={healthRatio:F3}");
+                    }
+                }
 
                 // If this response is for the player, derive true MaxHealth from the ratio.
                 // e.g. health=92541, ratio=0.925 → trueMax ≈ 99999
-                uint playerId = ClientHelperHooks.GetPlayerId();
                 if (playerId != 0 && targetId == playerId && healthRatio > 0f && healthRatio <= 1f)
                     PlayerVitalsHooks.UpdateMaxFromHealthRatio(healthRatio);
 

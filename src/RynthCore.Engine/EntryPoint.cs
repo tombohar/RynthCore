@@ -709,7 +709,10 @@ public static class EntryPoint
                     // launcher must take its entire surface area out of process so the
                     // diagnostic "is plugin X the off-thread caller?" question is testable.
                     if (HasPluginDll("RynthCore.Plugin.RynthAi.dll"))
+                    {
                         OverlayHost.RegisterPanel("RynthAi", RynthAiPanel.Create);
+                        OverlayHost.RegisterPanel("Damage", MonsterDamagePanel.Create);
+                    }
                     else
                         RynthLog.Info("InitWorker: RynthAi panel skipped — DLL not in engine.json PluginPaths.");
 

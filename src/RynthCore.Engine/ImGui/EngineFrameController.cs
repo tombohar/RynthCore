@@ -362,6 +362,14 @@ internal static class EngineFrameController
             // does not touch font / vertex buffer state.
             if (!nav3DAlreadyRendered)
                 DX9Backend.RenderNav3D(pDevice);
+
+            // Custom D3D9 vital HUD (Health/Stamina/Mana). Always-on (independent
+            // of EnableImGuiBackend) so it shows even in Avalonia-only mode; drawn
+            // last so it sits on top of the world + AC UI. Reads the vitals
+            // snapshot maintained on this same (AC main) thread and does its own
+            // device state save/restore. No-op until vitals are seeded.
+            if (Plugins.EngineSettings.DrawCustomVitalBars)
+                D3D9.VitalHud.Draw(pDevice);
         }
         catch (Exception ex)
         {

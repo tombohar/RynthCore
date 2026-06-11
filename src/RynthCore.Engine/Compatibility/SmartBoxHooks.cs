@@ -27,14 +27,20 @@ internal static class SmartBoxHooks
         0x89, 0x54, 0x24, 0x08, 0x72, null, 0x8B, 0x08
     ];
 
-    // ACGame::DispatchGameEvent
-    // 83 EC 08 53 8B 5C 24 10 8B 53 30 83 FA 04 8B 43 2C 56 8B F1 89 44 24 14 89 54 24 08 72 ?? 8B 08
+    // UIQueueManager::ProcessNetBlobData @ 0x0055BCD0 — the real inbound GameEvent
+    // dispatcher (switches on inner event type: 0x1B1/0x1B2 attack, 0x1AC/0x1AD
+    // victim/killer, 0x1C0 health, …). thiscall(this, uint* data, int end);
+    // the inner event type is *data and the payload follows at data+4.
+    // ⚠ This MUST differ from DispatchSmartBoxEventPattern — they were once an
+    // identical copy-paste, which deduped this hook away (it never installed, so
+    // combat events were never seen). Verified unique vs acclient.exe.
     private static readonly byte?[] DispatchGameEventPattern =
     [
-        0x83, 0xEC, 0x08, 0x53, 0x8B, 0x5C, 0x24, 0x10,
-        0x8B, 0x53, 0x30, 0x83, 0xFA, 0x04, 0x8B, 0x43,
-        0x2C, 0x56, 0x8B, 0xF1, 0x89, 0x44, 0x24, 0x14,
-        0x89, 0x54, 0x24, 0x08, 0x72, null, 0x8B, 0x08
+        0x81, 0xEC, 0xC0, 0x01, 0x00, 0x00, 0x53, 0x55,
+        0x8B, 0xAC, 0x24, 0xD0, 0x01, 0x00, 0x00, 0x56,
+        0x57, 0x8B, 0xF9, 0x8B, 0x8C, 0x24, 0xD4, 0x01,
+        0x00, 0x00, 0x8B, 0x11, 0x8B, 0xC1, 0x8D, 0x34,
+        0x29, 0x83, 0xC1, 0x04
     ];
 
     private static IntPtr _originalDispatchSmartBoxEventPtr;
@@ -85,7 +91,7 @@ internal static class SmartBoxHooks
                         IntPtr geAddr = new IntPtr(textSection.TextBaseVa + geOff);
                         if (hookedAddresses.Add(geAddr))
                         {
-                            delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint> pGeDetour = &DispatchGameEventDetour;
+                            delegate* unmanaged[Thiscall]<IntPtr, IntPtr, int, uint> pGeDetour = &DispatchGameEventDetour;
                             MinHook.Hook(geAddr, (IntPtr)pGeDetour, out _originalDispatchGameEventPtr);
                             RynthLog.Verbose($"Compat: game-event hook ready @ 0x{geAddr.ToInt32():X8}");
                         }
@@ -119,6 +125,7 @@ internal static class SmartBoxHooks
         }
 
         SmartBoxEventInfo info = ReadSmartBoxEventInfo(blob);
+        DiagEvent("SB", false, blob, info);
         uint status = pOriginal(thisPtr, blob);
 
         try
@@ -140,31 +147,132 @@ internal static class SmartBoxHooks
         return status;
     }
 
+    // UIQueueManager::ProcessNetBlobData(this, uint* data, int end). thiscall:
+    // `this` in ECX (thisPtr), then the two stack args (data, end). The inner
+    // GameEvent type is *data; the event payload follows at data+4; `end` is the
+    // one-past-the-last data pointer (len = end - data). NOTE: this is a DIFFERENT
+    // function/shape than DispatchSmartBoxEvent — must keep the 2nd stack arg or
+    // the thiscall callee-cleanup imbalances the stack and crashes AC.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvThiscall) })]
-    private static unsafe uint DispatchGameEventDetour(IntPtr thisPtr, IntPtr blob)
+    private static unsafe uint DispatchGameEventDetour(IntPtr thisPtr, IntPtr data, int end)
     {
         MainThreadGuard.RecordIfFirst();
-        // Engine-side BusyCount watchdog: piggyback on this detour (fires
-        // on every server game event while in-world, runs on AC's main
-        // thread). If busy count has been positive for > 5s, force-clear
-        // it. Self-heals from desync between our tracker and AC's m_cBusy
-        // when the user can't reach the chat box to run `/ra clearbusy`.
+        // Engine-side BusyCount watchdog: fires on every inbound game event
+        // while in-world (AC's main thread). Self-heals busy-count desync.
         try { BusyCountHooks.CheckWatchdog(); } catch { }
         RecursionGuard.Tick("SmartBoxHooks.DispatchGameEvent");
-        var pOriginal = (delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint>)_originalDispatchGameEventPtr;
+        var pOriginal = (delegate* unmanaged[Thiscall]<IntPtr, IntPtr, int, uint>)_originalDispatchGameEventPtr;
 
-        SmartBoxEventInfo info = default;
         try
         {
-            info = ReadSmartBoxEventInfo(blob);
-            TryQueueHealthUpdate(blob, info);
-            TryQueueDamageEvent(blob, info);
-            CharacterCaptureHooks.ProcessPotentialCharacterMessage(blob, isGameEvent: true);
+            if (data != IntPtr.Zero)
+            {
+                uint eventType = unchecked((uint)Marshal.ReadInt32(data));
+                int len = end - data.ToInt32();
+                if (len < 4 || len > 0x4000) len = 0x4000; // sanity clamp; real reads are small + bounded
+                ParseGameEvent(eventType, data, (uint)len);
+            }
         }
         catch { }
 
-        uint result = pOriginal(thisPtr, blob);
-        return result;
+        return pOriginal(thisPtr, data, end);
+    }
+
+    private static int _geEventLogCount;
+    private static int _hpReadLogCount;
+
+    // Parse an inbound GameEvent for the events combat cares about. `data` points
+    // at the event blob: inner type @ +0, payload @ +4. `size` bounds reads.
+    private static void ParseGameEvent(uint eventType, IntPtr data, uint size)
+    {
+        // Diagnostic: surface the first handful of combat-range events so the hook
+        // can be verified live and any offset corrected from real bytes. Capped.
+        if (eventType >= 0x0180 && eventType <= 0x01E0 && _geEventLogCount < 40)
+        {
+            _geEventLogCount++;
+            uint d1 = size >= 8  ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4)))  : 0;
+            uint d2 = size >= 12 ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 8)))  : 0;
+            uint d3 = size >= 16 ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 12))) : 0;
+            RynthLog.Compat($"GE evt=0x{eventType:X4} len={size} p=[{d1:X8} {d2:X8} {d3:X8}]");
+        }
+
+        switch (eventType)
+        {
+            case 0x01C0: // UpdateHealth: [targetId u32][ratio f32]
+                if (size >= 12)
+                {
+                    uint targetId = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4)));
+                    float ratio = Marshal.PtrToStructure<float>(IntPtr.Add(data, 8));
+                    uint maxHealth = 0, currentHealth = 0;
+                    // We're on AC's main thread here, so read the creature's REAL
+                    // MaxHealth straight from its qualities (SEH-guarded, appraisal-
+                    // free) — fixes the bogus 50 stub for mobs the char can't assess.
+                    // The plugin QueryHealth()s its combat target on lock, which is
+                    // what makes this fire for the mobs it's actually fighting.
+                    // Falls back to the wire-parsed appraisal cache if the read fails.
+                    bool gotReal = ClientObjectHooks.TryReadCreatureMaxHealth(targetId, out uint realMax) && realMax > 0;
+                    if (gotReal)
+                        maxHealth = realMax;
+                    else if (ObjectQualityCache.TryGetCreatureVitals(targetId, out CreatureVitals exact) && exact.MaxHealth > 0)
+                        maxHealth = exact.MaxHealth;
+                    if (maxHealth > 0)
+                        currentHealth = (uint)Math.Round(maxHealth * Math.Clamp(ratio, 0f, 1f));
+                    if (_hpReadLogCount < 25)
+                    {
+                        _hpReadLogCount++;
+                        RynthLog.Compat($"Creature HP id=0x{targetId:X8}: sehRead={(gotReal ? realMax.ToString() : "none")} used={maxHealth} ratio={ratio:0.00}");
+                    }
+                    PluginManager.QueueUpdateHealth(targetId, ratio, currentHealth, maxHealth);
+                }
+                break;
+
+            case 0x01B1: // AttackerNotification (we hit)
+            case 0x01B2: // DefenderNotification (we're hit)
+                ParseGameEventDamage(eventType, data, size);
+                break;
+
+            case 0x01AD: // KillerNotification — death message string (we got a kill)
+            {
+                string? msg = ReadString16Latin1(data, 4, size);
+                if (!string.IsNullOrEmpty(msg))
+                {
+                    if (_killNotifyLogCount < 12)
+                    {
+                        _killNotifyLogCount++;
+                        RynthLog.Compat($"Combat: kill notify '{msg}'");
+                    }
+                    PluginManager.QueueKillNotification(msg);
+                }
+                break;
+            }
+        }
+    }
+
+    // AttackerNotification (0x01B1) / DefenderNotification (0x01B2). Payload at
+    // data+4: string16 name, u32 damageType, f64 percent, u32 damage,
+    // [u32 damageLocation (defender only),] u32 crit, …. Read-only byte math.
+    private static void ParseGameEventDamage(uint eventType, IntPtr data, uint size)
+    {
+        if (size < 24) return;
+        bool attacker = eventType == 0x01B1;
+
+        int nameLen = (ushort)Marshal.ReadInt16(IntPtr.Add(data, 4));
+        int strBlock = ((2 + nameLen + 3) / 4) * 4;       // u16 len + chars, padded to a multiple of 4
+        int off = 4 + strBlock;                            // → damageType
+        int critOff = off + (attacker ? 16 : 20);          // type(4)+percent(8)+damage(4)[+dmgLoc(4)]
+        if (critOff + 4 > size) return;
+
+        uint damageType = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, off)));
+        uint damage = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, off + 12)));
+        uint crit = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, critOff)));
+        if (damage == 0 || damage > 1_000_000) return;
+
+        if (_damageEventLogCount < 12)
+        {
+            _damageEventLogCount++;
+            RynthLog.Compat($"Combat: damage evt 0x{eventType:X3} dmg={damage} crit={crit} atk={attacker} len={size}");
+        }
+        PluginManager.QueueCombatDamage(damage, damageType, crit != 0, attacker);
     }
 
     private static SmartBoxEventInfo ReadSmartBoxEventInfo(IntPtr blob)
@@ -286,6 +394,127 @@ internal static class SmartBoxHooks
         catch
         {
         }
+    }
+
+    private static int _killNotifyLogCount;
+
+    // KillerNotification (0x01AD) is sent to the player ONLY when they kill
+    // something, at the lethal hit — before the death animation plays out and
+    // the creature reclassifies to a corpse. That makes it the EARLIEST
+    // reliable "target dead" signal: the health=0 update and the Monster->Corpse
+    // flip both land at/after the corpse swap (ACE delays CreateCorpse by the
+    // full death-animation length), so combat that paces on those would burn a
+    // second full cast at an already-dead mob. Payload is a single string16 —
+    // the formatted death message with the victim name embedded; there is NO
+    // object id (GameEventKillerNotification just WriteString16L's the text).
+    // We forward the string so the plugin can match it against its one active
+    // target by name. Same envelope ambiguity as the damage events: eventType
+    // at +0 (SmartBox-style) or +8 (GameEvent envelope); the string16 follows
+    // immediately after the eventType u32.
+    private static void TryQueueKillNotification(IntPtr blob, SmartBoxEventInfo info)
+    {
+        if (blob == IntPtr.Zero || info.BlobSize < 6)
+            return;
+
+        try
+        {
+            IntPtr payloadPtr = Marshal.ReadIntPtr(IntPtr.Add(blob, NetBlobBufPtrOffset));
+            if (payloadPtr == IntPtr.Zero)
+                return;
+
+            uint et0 = unchecked((uint)Marshal.ReadInt32(payloadPtr));
+            uint et8 = info.BlobSize >= 12 ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, 8))) : 0;
+
+            int strOff;
+            if (et0 == 0x01AD) strOff = 4;       // SmartBox-style: eventType at +0
+            else if (et8 == 0x01AD) strOff = 12; // GameEvent envelope: eventType at +8
+            else return;
+
+            string? deathMessage = ReadString16Latin1(payloadPtr, strOff, info.BlobSize);
+            if (string.IsNullOrEmpty(deathMessage))
+                return;
+
+            if (_killNotifyLogCount < 12)
+            {
+                _killNotifyLogCount++;
+                RynthLog.Compat($"Combat: kill notify strOff={strOff} blob={info.BlobSize} msg='{deathMessage}'");
+            }
+
+            PluginManager.QueueKillNotification(deathMessage);
+        }
+        catch
+        {
+        }
+    }
+
+    // Reads an AC string16 (u16 char count + that many 1-byte cp1252 chars) at
+    // the given payload offset, bounded by the blob size. Returns null on a
+    // missing/oversize length so a corrupt field can't allocate wildly inside
+    // this main-thread detour. High bytes are taken as Latin-1 (monster names
+    // are ASCII in practice). One small string alloc per kill — the same
+    // pattern ChatCallbackHooks already uses for inbound chat capture.
+    private static string? ReadString16Latin1(IntPtr payloadPtr, int off, uint blobSize)
+    {
+        if (off < 0 || off + 2 > blobSize) return null;
+        int len = (ushort)Marshal.ReadInt16(IntPtr.Add(payloadPtr, off));
+        if (len <= 0 || len > 256) return null;
+        if (off + 2 + len > blobSize) return null;
+
+        Span<char> chars = stackalloc char[len];
+        for (int i = 0; i < len; i++)
+            chars[i] = (char)Marshal.ReadByte(IntPtr.Add(payloadPtr, off + 2 + i));
+        return new string(chars);
+    }
+
+    // ── RE instrumentation (TEMPORARY) ───────────────────────────────────
+    // Diagnose why combat GameEvents (damage 0x1B1/2, kill 0x1AC/AD, health
+    // 0x1C0) don't reach the parsers on the user's Decal-coexistence client.
+    // Logs three things, all capped: (1) detour ALIVE + busyness — proves the
+    // hook fires and isn't on the wrong function; (2) any combat-range event's
+    // first dwords (COMBAT) so we see the opcode + envelope offset; (3) for the
+    // game-event detour, the first 30 events unfiltered (GE-ANY) so structure is
+    // visible even if the opcode sits at an unexpected offset. Remove once fixed.
+    private static int _geFire, _sbFire, _geCombat, _sbCombat, _geAny;
+
+    private static unsafe void DiagEvent(string tag, bool isGe, IntPtr blob, SmartBoxEventInfo info)
+    {
+        int fired = isGe ? ++_geFire : ++_sbFire;
+        if (fired == 1 || fired == 50 || fired % 500 == 0)
+            RynthLog.Compat($"{tag}-ALIVE fired={fired} lastOp=0x{info.Opcode:X4} blob={info.BlobSize}");
+
+        if (blob == IntPtr.Zero || info.BlobSize < 4)
+            return;
+
+        try
+        {
+            IntPtr p = Marshal.ReadIntPtr(IntPtr.Add(blob, NetBlobBufPtrOffset));
+            if (p == IntPtr.Zero)
+                return;
+
+            uint sz = info.BlobSize;
+            uint et0 = unchecked((uint)Marshal.ReadInt32(p));
+            uint w1  = sz >= 8  ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(p, 4)))  : 0;
+            uint et8 = sz >= 12 ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(p, 8)))  : 0;
+            uint w3  = sz >= 16 ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(p, 12))) : 0;
+            uint w4  = sz >= 20 ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(p, 16))) : 0;
+
+            bool combat = (et0 >= 0x0180 && et0 <= 0x01E0) || (et8 >= 0x0180 && et8 <= 0x01E0);
+            if (combat)
+            {
+                ref int c = ref (isGe ? ref _geCombat : ref _sbCombat);
+                if (c < 50)
+                {
+                    c++;
+                    RynthLog.Compat($"{tag}-COMBAT sz={sz} w=[{et0:X8} {w1:X8} {et8:X8} {w3:X8} {w4:X8}]");
+                }
+            }
+            else if (isGe && _geAny < 30)
+            {
+                _geAny++;
+                RynthLog.Compat($"GE-ANY sz={sz} w=[{et0:X8} {w1:X8} {et8:X8} {w3:X8} {w4:X8}]");
+            }
+        }
+        catch { }
     }
 
 

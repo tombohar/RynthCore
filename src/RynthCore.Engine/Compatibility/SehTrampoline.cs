@@ -96,6 +96,10 @@ internal static class SehTrampoline
                CallingConvention = CallingConvention.Cdecl)]
     private static extern unsafe int _ThiscallUintNoArg(IntPtr fn, IntPtr thisPtr, uint* outResult);
 
+    [DllImport("RynthCore.SehTrampoline.dll", EntryPoint = "SEH_ThiscallIntUintPtr",
+               CallingConvention = CallingConvention.Cdecl)]
+    private static extern unsafe int _ThiscallIntUintPtr(IntPtr fn, IntPtr thisPtr, uint arg1, void* arg2, int* outResult);
+
     [DllImport("RynthCore.SehTrampoline.dll", EntryPoint = "RC_InstallCrashLogger",
                CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
     private static extern void _InstallCrashLogger([MarshalAs(UnmanagedType.LPWStr)] string logPath);
@@ -173,5 +177,18 @@ internal static class SehTrampoline
             avCaught = _ThiscallUintNoArg(fn, thisPtr, &result) == 0;
             return result;
         }
+    }
+
+    /// <summary>
+    /// int __thiscall fn(this, uint arg1, void* outStruct) — e.g.
+    /// InqAttribute2nd(stype, &SecondaryAttribute). Returns the native int result
+    /// (nonzero = success); avCaught=true (and result 0) if an AV was intercepted.
+    /// outStruct points at caller-owned memory the callee fills on success.
+    /// </summary>
+    public static unsafe int ThiscallIntUintPtr(IntPtr fn, IntPtr thisPtr, uint arg1, void* outStruct, out bool avCaught)
+    {
+        int result;
+        avCaught = _ThiscallIntUintPtr(fn, thisPtr, arg1, outStruct, &result) == 0;
+        return result;
     }
 }

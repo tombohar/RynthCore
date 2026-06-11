@@ -671,6 +671,16 @@ internal static unsafe class Win32Backend
             else if (msg == WM_KILLFOCUS)
                 RynthLog.Info($"Win32Backend: game WM_KILLFOCUS (to hwnd=0x{wParam.ToInt64():X} {DescribeHwnd(wParam)}).");
 
+            // ── Vital HUD drag/resize ─────────────────────────────────────
+            // Give the custom vital-bar HUD first crack at mouse input: a click
+            // landing on it moves/resizes the HUD and is swallowed so it never
+            // reaches AC (no camera spin) or the Avalonia panels. Placed before
+            // the ImGui EnqueueInput/capture-eat below so ImGui never tracks the
+            // HUD drag (keeps our SetCapture from fighting NewFrame's). No-op
+            // unless the HUD is drawn.
+            if (IsMouseMessage(msg) && VitalHud.TryHandleMouse(hWnd, msg, wParam, lParam))
+                return IntPtr.Zero;
+
             // ── Avalonia panel hit-test & input forwarding ────────────────
             if (IsMouseMessage(msg))
             {

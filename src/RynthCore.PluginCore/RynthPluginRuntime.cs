@@ -230,6 +230,13 @@ public unsafe sealed class RynthPluginRuntime<TPlugin>
         catch (Exception ex) { LogException("OnCombatDamage", ex); }
     }
 
+    public void OnKillNotification(IntPtr textUtf16)
+    {
+        if (!IsInitialized) return;
+        try { _plugin!.OnKillNotification(textUtf16 != IntPtr.Zero ? Marshal.PtrToStringUni(textUtf16) : null); }
+        catch (Exception ex) { LogException("OnKillNotification", ex); }
+    }
+
     public void OnEnchantmentAdded(uint spellId, double durationSeconds)
     {
         if (!IsInitialized) return;

@@ -182,6 +182,9 @@ internal static class PlayerVitalsHooks
     private static int _seedLogCount;
     private static PlayerVitalsSnapshot _snapshot;
     private static InqAttribute2ndStructDelegate? _inqAttribute2ndStruct;
+    // Raw address of InqAttribute2nd(struct) — passed to the SEH trampoline so a
+    // monster's partial qualities table can be read without crashing on an AV.
+    private static IntPtr _inqAttribute2ndStructFnPtr;
 
     public static bool IsInstalled { get; private set; }
     public static string StatusMessage => _statusMessage;
@@ -218,6 +221,7 @@ internal static class PlayerVitalsHooks
             }
 
             _inqAttribute2ndStruct = Marshal.GetDelegateForFunctionPointer<InqAttribute2ndStructDelegate>(inqAttribute2ndStructPtr);
+            _inqAttribute2ndStructFnPtr = inqAttribute2ndStructPtr;
 
             // Buffed-uint overload — used by hot-reload re-seed and any path
             // that needs the same number AC's vital bars render. The struct
@@ -272,6 +276,32 @@ internal static class PlayerVitalsHooks
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Read a creature's REAL MaxHealth from its qualities (2nd-level attribute
+    /// table) via InqAttribute2nd, routed through the SEH trampoline so a
+    /// partial/null MONSTER sub-table AVs into a safe failure instead of killing
+    /// the client. This is the appraisal-free path to a mob's true HP (appraisal
+    /// returns a 50 stub for mobs the char's Assess skill can't read). MAIN
+    /// THREAD ONLY — AC isn't thread-safe. Returns false if the trampoline is
+    /// unavailable, the read AVs, or the value is 0.
+    /// </summary>
+    public static unsafe bool TryReadCreatureMaxHealthSafe(IntPtr weeniePtr, out uint maxHealth)
+    {
+        maxHealth = 0;
+        if (weeniePtr == IntPtr.Zero || _inqAttribute2ndStructFnPtr == IntPtr.Zero)
+            return false;
+        if (!SehTrampoline.IsAvailable)
+            return false; // never call InqAttribute2nd unguarded on a non-player weenie
+
+        SecondaryAttributeNative result = default;
+        int rc = SehTrampoline.ThiscallIntUintPtr(
+            _inqAttribute2ndStructFnPtr, weeniePtr, MaxHealthType, &result, out bool avCaught);
+        if (avCaught || rc == 0 || result._currentLevel == 0)
+            return false;
+        maxHealth = result._currentLevel;
+        return true;
     }
 
     /// <summary>
@@ -379,6 +409,7 @@ internal static class PlayerVitalsHooks
         var original = (delegate* unmanaged[Thiscall]<IntPtr, byte, uint, uint, int, uint>)_originalUpdateAttribute2ndLevelPtr;
         uint result = original(thisPtr, wts, sender, stype, val);
         UpdateCache(sender, stype, val, isPrivate: false);
+        ForwardCreatureHealth(sender, stype, val);
         return result;
     }
 
@@ -437,6 +468,8 @@ internal static class PlayerVitalsHooks
             return;
 
         UpdateCache(sender, stype, unchecked((int)val->_currentLevel), isPrivate);
+        if (!isPrivate)
+            ForwardCreatureHealth(sender, stype, unchecked((int)val->_currentLevel));
 
         // For max-vital types (MaxHealth=1, MaxStamina=3, MaxMana=5), _currentLevel is the
         // effective buffed maximum — that's already handled by the UpdateCache call above.
@@ -444,6 +477,46 @@ internal static class PlayerVitalsHooks
         // For current-vital types (Health=2, Stamina=4, Mana=6), do NOT derive max from
         // _initLevel + _levelFromCp — that's the unbuffed base max and would overwrite the
         // correct buffed value set by the seed or a direct MaxHealth update.
+    }
+
+    // Live monster (non-player) health, captured from the broadcast vital-update
+    // stream that UpdateCache discards. The server pushes a creature's current
+    // (stype=Health) and max (stype=MaxHealth) attribute levels here for combat
+    // mobs in awareness — NO appraisal needed (so it works on high-level mobs
+    // whose Assess skill we lack) and NO Inq* read (so no non-player-qualities AV).
+    // Pre-sized + capped so the per-creature add can't realloc inside this
+    // main-thread detour. Packed (current<<32 | max) to avoid per-entry alloc.
+    private static readonly Dictionary<uint, ulong> _creatureHp = new(1024);
+    private static readonly object _creatureHpLock = new();
+    private static int _creatureHpLogCount;
+
+    private static void ForwardCreatureHealth(uint sender, uint stype, int val)
+    {
+        if (sender == 0 || val < 0) return;
+        if (stype != HealthType && stype != MaxHealthType) return;
+        uint playerId = ClientHelperHooks.GetPlayerId();
+        if (playerId == 0 || sender == playerId) return; // player handled by UpdateCache
+
+        uint cur, max;
+        lock (_creatureHpLock)
+        {
+            _creatureHp.TryGetValue(sender, out ulong packed);
+            cur = (uint)(packed >> 32);
+            max = (uint)packed;
+            if (stype == HealthType) cur = (uint)val; else max = (uint)val;
+            if (cur > max) max = cur; // current can't exceed max
+            if (_creatureHp.Count < 1024 || _creatureHp.ContainsKey(sender))
+                _creatureHp[sender] = ((ulong)cur << 32) | max;
+        }
+
+        if (_creatureHpLogCount < 40)
+        {
+            _creatureHpLogCount++;
+            RynthLog.Compat($"Compat: creature vital sender=0x{sender:X8} stype={stype} val={val} -> cur={cur} max={max}");
+        }
+
+        if (max > 0)
+            Plugins.PluginManager.QueueUpdateHealth(sender, Math.Clamp((float)cur / max, 0f, 1f), cur, max);
     }
 
     private static void UpdateCache(uint sender, uint stype, int val, bool isPrivate)

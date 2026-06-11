@@ -186,6 +186,28 @@ internal static class BusyCountHooks
     private const long BusyWatchdogTimeoutMs = 5_000;
     private const long BusyWatchdogCooldownMs = 2_000;
 
+    // Real-field watchdog. The shadow counter (_netBusyCount) DESYNCS from AC's
+    // real m_cBusy whenever AC mutates the field through a path we don't hook (or
+    // a detour is missed): the counter drifts to ~0 while the real field stays
+    // pinned > 0. A pinned real m_cBusy makes AC LOCALLY refuse combat-mode
+    // changes (its SetCombatMode never even fires) and casts ("You're too
+    // busy!") — wedging the bot in NonCombat (can't re-enter Magic to buff/fight)
+    // with NEITHER counter-based watchdog firing, because the counter says idle.
+    // So the watchdog must also trust the REAL field, read straight from
+    // [ClientUISystem + OffsetMCBusy]. (Diagnosed 2026-06-09: SetCombatMode
+    // stopped firing for 30+ min while ChangeCombatMode was re-sent and 191
+    // "too busy" refusals piled up, yet zero force-clears — classic desync.)
+    private static long _realBusyPositiveTickMs;
+    private const long RealBusyWatchdogTimeoutMs = 4_000;
+
+    private static int ReadRealBusy()
+    {
+        IntPtr p = _lastThisPtr;
+        if (p == IntPtr.Zero) return -1;
+        try { return Marshal.ReadInt32(p + OffsetMCBusy); }
+        catch { return -1; }
+    }
+
     /// <summary>
     /// Auto-clear busy state if it has been positive for too long.
     /// Safe to call from any thread; only performs work on AC's main
@@ -194,11 +216,48 @@ internal static class BusyCountHooks
     /// </summary>
     public static void CheckWatchdog()
     {
+        long now = Environment.TickCount64;
+
+        // ── Real-field watchdog (catches counter desync) ─────────────────────
+        // Trust AC's REAL m_cBusy over our shadow counter: when they diverge a
+        // pinned real field is what actually wedges the client (mode-change /
+        // cast refusal) while _netBusyCount reads ~0 and the counter watchdog
+        // below never fires. A legit action returns the field to 0 within ~2-3s
+        // (resetting the timer); only a genuinely stuck field reaches the 4s
+        // timeout. Field read is harmless off-thread, but ForceResetBusyCount
+        // mutates AC, so only clear on the main thread.
+        if (MainThreadGuard.IsOnMainThread())
+        {
+            int realBusy = ReadRealBusy();
+            if (realBusy > 0)
+            {
+                long sinceR = Volatile.Read(ref _realBusyPositiveTickMs);
+                if (sinceR == 0)
+                {
+                    Volatile.Write(ref _realBusyPositiveTickMs, now);
+                }
+                else if (now - sinceR > RealBusyWatchdogTimeoutMs
+                         && now - Volatile.Read(ref _lastWatchdogFireTickMs) > BusyWatchdogCooldownMs)
+                {
+                    Volatile.Write(ref _lastWatchdogFireTickMs, now);
+                    RynthLog.Compat($"BusyCountHooks: REAL m_cBusy stuck at {realBusy} for {now - sinceR}ms (counter={_netBusyCount}) — force-clearing desync.");
+                    ForceResetBusyCount();
+                    Volatile.Write(ref _realBusyPositiveTickMs, 0);
+                    Volatile.Write(ref _busyBecamePositiveTickMs, 0);
+                    return;
+                }
+            }
+            else if (realBusy == 0)
+            {
+                Volatile.Write(ref _realBusyPositiveTickMs, 0);
+            }
+        }
+
+        // ── Counter-based watchdog (original) ────────────────────────────────
         long stuckSince = Volatile.Read(ref _busyBecamePositiveTickMs);
         if (stuckSince == 0)
             return;
 
-        long now = Environment.TickCount64;
         long elapsed = now - stuckSince;
         if (elapsed < BusyWatchdogTimeoutMs)
             return;

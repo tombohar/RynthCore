@@ -31,6 +31,7 @@ internal static class PluginManager
     private readonly record struct PendingVendorClose(uint VendorId);
     private readonly record struct PendingUpdateHealth(uint TargetId, float HealthRatio, uint CurrentHealth, uint MaxHealth);
     private readonly record struct PendingCombatDamage(uint Damage, uint DamageType, uint Crit, uint IsAttacker);
+    private readonly record struct PendingKillNotification(string? DeathMessage);
     private readonly record struct PendingEnchantmentAdded(uint SpellId, double DurationSeconds);
     private readonly record struct PendingEnchantmentRemoved(uint EnchantmentId);
 
@@ -51,6 +52,7 @@ internal static class PluginManager
     private const int MaxPendingVendorClose = 32;
     private const int MaxPendingUpdateHealth = 512;
     private const int MaxPendingCombatDamage = 256;
+    private const int MaxPendingKillNotifications = 64;
     private const int MaxPendingEnchantmentEvents = 256;
     private const int MaxPrePluginCreateObjects = 4096;
     private static readonly Queue<uint> _prePluginCreateObjects = new();
@@ -79,6 +81,7 @@ internal static class PluginManager
     private static readonly Queue<PendingVendorClose> _pendingVendorClose = new();
     private static readonly Queue<PendingUpdateHealth> _pendingUpdateHealth = new();
     private static readonly Queue<PendingCombatDamage> _pendingCombatDamage = new();
+    private static readonly Queue<PendingKillNotification> _pendingKillNotifications = new();
     private static readonly Queue<PendingEnchantmentAdded> _pendingEnchantmentAdded = new();
     private static readonly Queue<PendingEnchantmentRemoved> _pendingEnchantmentRemoved = new();
     private static readonly object PendingIncomingChatsLock = new();
@@ -97,6 +100,7 @@ internal static class PluginManager
     private static readonly object PendingVendorCloseLock = new();
     private static readonly object PendingUpdateHealthLock = new();
     private static readonly object PendingCombatDamageLock = new();
+    private static readonly object PendingKillNotificationsLock = new();
     private static readonly object PendingEnchantmentAddedLock = new();
     private static readonly object PendingEnchantmentRemovedLock = new();
     private static bool _loaded;
@@ -105,6 +109,14 @@ internal static class PluginManager
     private static bool _uiInitializedObserved;
     private static bool _uiDispatchPending;
     private static bool _loginCompleteObserved;
+
+    // Delayed login self-identify (crash fix 2026-06-09). Sending RequestId(player)
+    // at LoginComplete makes AC re-process the full player qualities and re-run its
+    // vital-UI update path (gmVitalsUI::Update) while that UI may still be
+    // initialising → an intermittent null-deref AV (39076/13648). Arm a deadline
+    // here and let TickAll fire it once AC has settled past the init window.
+    private static long _selfIdentifyDueTick;
+    private const long SelfIdentifyDelayMs = 15_000;
     private static bool _loginDispatchPending;
     private static bool _logoutDispatchPending;
     private static long _nextUpdateObjectDispatchTick;
@@ -469,6 +481,7 @@ internal static class PluginManager
         DispatchQueuedSelectedTargetChange();
         DispatchQueuedUpdateHealth();
         DispatchQueuedCombatDamage();
+        DispatchQueuedKillNotifications();
         DispatchQueuedEnchantmentAdded();
         DispatchQueuedEnchantmentRemoved();
         DispatchQueuedChatWindowText();
@@ -779,6 +792,24 @@ internal static class PluginManager
         }
     }
 
+    // KillerNotification (GameEvent 0x01AD) — "you killed something". Queued
+    // from SmartBoxHooks on AC's main thread; dispatched to plugins on the
+    // pump. The death message carries the victim name so the plugin can match
+    // its active target.
+    public static void QueueKillNotification(string? deathMessage)
+    {
+        if (_plugins.Count == 0)
+            return;
+
+        lock (PendingKillNotificationsLock)
+        {
+            if (_pendingKillNotifications.Count >= MaxPendingKillNotifications)
+                _pendingKillNotifications.Dequeue();
+
+            _pendingKillNotifications.Enqueue(new PendingKillNotification(deathMessage));
+        }
+    }
+
     public static void QueueEnchantmentAdded(uint spellId, double durationSeconds)
     {
         if (_plugins.Count == 0)
@@ -871,6 +902,24 @@ internal static class PluginManager
     public static void TickAll()
     {
         TickCount++;
+
+        // Fire the delayed login self-identify once AC's vitals UI has settled
+        // (armed in DispatchLoginCompleteToLoadedPlugins; deferred past the
+        // early-init window where AC's gmVitalsUI::Update AV'd — 2026-06-09).
+        if (_selfIdentifyDueTick != 0 && Environment.TickCount64 >= _selfIdentifyDueTick)
+        {
+            _selfIdentifyDueTick = 0;
+            try
+            {
+                uint pid = ClientHelperHooks.GetPlayerId();
+                if (pid != 0 && CombatActionHooks.HasRequestId)
+                {
+                    CombatActionHooks.RequestId(pid);
+                    RynthLog.Plugin($"PluginManager: sent (delayed) self-identify for player 0x{pid:X8} to seed max vitals.");
+                }
+            }
+            catch { }
+        }
 
         // Sample the real cast gate on the single 30 Hz plugin heartbeat (this
         // is the one TickAll driver, off AC's render thread). Self-guarded;
@@ -1000,6 +1049,8 @@ internal static class PluginManager
             _pendingUpdateHealth.Clear();
         lock (PendingCombatDamageLock)
             _pendingCombatDamage.Clear();
+        lock (PendingKillNotificationsLock)
+            _pendingKillNotifications.Clear();
         lock (PendingEnchantmentAddedLock)
             _pendingEnchantmentAdded.Clear();
         lock (PendingEnchantmentRemovedLock)
@@ -1809,6 +1860,61 @@ internal static class PluginManager
         }
     }
 
+    private static void DispatchQueuedKillNotifications()
+    {
+        if (!_initialized || _plugins.Count == 0)
+            return;
+
+        PendingKillNotification[] pending;
+        lock (PendingKillNotificationsLock)
+        {
+            if (_pendingKillNotifications.Count == 0)
+                return;
+
+            pending = _pendingKillNotifications.ToArray();
+            _pendingKillNotifications.Clear();
+        }
+
+        foreach (PendingKillNotification evt in pending)
+        {
+            IntPtr textPtr = evt.DeathMessage != null ? Marshal.StringToHGlobalUni(evt.DeathMessage) : IntPtr.Zero;
+            try
+            {
+                for (int i = 0; i < _plugins.Count; i++)
+                {
+                    var plugin = _plugins[i];
+                    if (!plugin.Initialized || plugin.Failed)
+                        continue;
+
+                    try
+                    {
+                        unsafe
+                        {
+                            if (plugin.OnKillNotificationPtr != IntPtr.Zero)
+                            {
+                                ((delegate* unmanaged[Cdecl]<IntPtr, void>)plugin.OnKillNotificationPtr)(textPtr);
+                            }
+                            else
+                            {
+                                plugin.OnKillNotification?.Invoke(textPtr);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        plugin.Failed = true;
+                        RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnKillNotification threw {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+            }
+            finally
+            {
+                if (textPtr != IntPtr.Zero)
+                    Marshal.FreeHGlobal(textPtr);
+            }
+        }
+    }
+
     private static void DispatchQueuedEnchantmentAdded()
     {
         if (!_initialized || _plugins.Count == 0)
@@ -2048,13 +2154,13 @@ internal static class PluginManager
             }
         }
 
-        // Auto-identify the player to get exact max vitals from the CreatureProfile
-        uint playerId = ClientHelperHooks.GetPlayerId();
-        if (playerId != 0 && CombatActionHooks.HasRequestId)
-        {
-            CombatActionHooks.RequestId(playerId);
-            RynthLog.Plugin($"PluginManager: sent self-identify for player 0x{playerId:X8} to seed max vitals.");
-        }
+        // Auto-identify the player to seed exact max vitals from the CreatureProfile.
+        // DELAYED, not sent here: firing it at LoginComplete made AC re-process the
+        // full player qualities and re-run its vital-UI update path (gmVitalsUI::Update)
+        // while that UI may still be initialising — an intermittent null-deref AV
+        // (crash investigation 2026-06-09, 39076/13648). Arm it for SelfIdentifyDelayMs
+        // later; TickAll sends it once AC's UI has settled.
+        _selfIdentifyDueTick = Environment.TickCount64 + SelfIdentifyDelayMs;
 
         // Sync the actual current combat mode to newly initialized plugins.
         // Reads directly from ClientCombatSystem so this is accurate even at first inject.

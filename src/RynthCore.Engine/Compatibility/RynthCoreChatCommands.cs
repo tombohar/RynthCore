@@ -10,11 +10,16 @@ namespace RynthCore.Engine.Compatibility;
 ///   <item>dispatch.txt / OnLoginCommandRunner / Host.InvokeChatParser —
 ///         <see cref="ChatCommandDispatcher.Dispatch"/></item>
 /// </list>
-/// The single use case today is recovering the RynthCore overlay bar when a
-/// user has dragged it off the visible client area: its only in-overlay
-/// "Rs" reset button is on the bar itself, so it is unreachable once the bar
-/// is. <c>/rc resetbar</c> (and the launcher button that writes it to
-/// dispatch.txt) is the out-of-band recovery.
+/// Commands:
+/// <list type="bullet">
+///   <item><c>/rc resetbar</c> — recover the RynthCore overlay bar when it has
+///         been dragged off the visible client area (its in-overlay "Rs" reset
+///         button rides the bar itself, so it's unreachable once the bar is).
+///         The launcher button writes this to dispatch.txt as the out-of-band
+///         recovery.</item>
+///   <item><c>/rc vitals</c> (alias <c>/rc hud</c>) — toggle the custom D3D9
+///         Health/Stamina/Mana HUD on/off (persisted to engine.json).</item>
+/// </list>
 /// </summary>
 internal static class RynthCoreChatCommands
 {
@@ -43,6 +48,18 @@ internal static class RynthCoreChatCommands
                 RynthLog.Compat("RynthCoreChatCommands: /rc resetbar — resetting overlay bar position.");
                 ImGuiBackend.RynthCoreShell.RequestExternalReset();
                 return true;
+
+            case "vitals":
+            case "hud":
+            {
+                // Toggle the custom D3D9 vital HUD. Setter persists to engine.json
+                // so it survives relaunch. (No AC-chat echo — the AddTextToScroll
+                // path has a known AV risk; the HUD appearing/vanishing confirms.)
+                bool now = !Plugins.EngineSettings.DrawCustomVitalBars;
+                Plugins.EngineSettings.DrawCustomVitalBars = now;
+                RynthLog.Compat($"RynthCoreChatCommands: /rc vitals — custom vital HUD {(now ? "ON" : "OFF")}.");
+                return true;
+            }
 
             default:
                 // Consume anything else under the /rc namespace so a typo

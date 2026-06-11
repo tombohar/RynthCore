@@ -1442,6 +1442,34 @@ internal static class ClientObjectHooks
     /// </summary>
     internal static bool AllowNonPlayerQualities;
 
+    /// <summary>
+    /// Read a creature's REAL MaxHealth straight from the live client (its
+    /// qualities table), SEH-guarded. Appraisal-free — returns the true HP even
+    /// for mobs the character's Assess skill can't read (where the appraisal path
+    /// only yields a 50 stub). MAIN-THREAD ONLY: AC isn't thread-safe, so this
+    /// returns false when called off AC's main thread. Returns false if the
+    /// weenie can't be resolved or the guarded read AVs / yields 0.
+    /// </summary>
+    public static bool TryReadCreatureMaxHealth(uint objectId, out uint maxHealth)
+    {
+        maxHealth = 0;
+        if (objectId == 0 || _getWeenieObject == null) return false;
+        if (!MainThreadGuard.IsOnMainThread()) return false;
+
+        IntPtr weeniePtr;
+        try { weeniePtr = _getWeenieObject(objectId); } catch { return false; }
+        if (weeniePtr == IntPtr.Zero || !IsReadablePointer(weeniePtr)) return false;
+
+        // InqAttribute2nd's `this` is the CACQualities sub-object (it derefs
+        // this+0x60 = the attribute cache), NOT the weenie object — passing the
+        // raw weenie reads garbage. Resolve the qualities pointer first.
+        if (!TryGetQualitiesPtr(weeniePtr, out IntPtr qualitiesPtr) || qualitiesPtr == IntPtr.Zero)
+            return false;
+        if (!IsReadablePointer(qualitiesPtr)) return false;
+
+        return PlayerVitalsHooks.TryReadCreatureMaxHealthSafe(qualitiesPtr, out maxHealth);
+    }
+
     private static bool TryGetObjectQualitiesPtr(uint objectId, out IntPtr qualitiesPtr)
     {
         qualitiesPtr = IntPtr.Zero;

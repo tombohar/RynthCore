@@ -22,6 +22,7 @@ internal static class EngineSettings
     private static int _engineHookCount = int.MaxValue;
     private static bool _enableImGuiBackend = true;
     private static bool _enableHangMinidump = true;
+    private static bool _drawCustomVitalBars = true;
     private static bool _loaded;
 
     public static IReadOnlyList<string> PluginPaths
@@ -156,6 +157,27 @@ internal static class EngineSettings
         }
     }
 
+    /// <summary>When true, the engine draws the custom D3D9 Health/Stamina/Mana HUD
+    /// (<see cref="D3D9.VitalHud"/>) in EndScene. Toggleable live via "/rc vitals";
+    /// the setter persists to engine.json so it survives relaunch. Default true.
+    /// Only takes visible effect on a clean (no-Decal) client where the
+    /// D3D9/EndScene path runs.</summary>
+    public static bool DrawCustomVitalBars
+    {
+        get
+        {
+            EnsureLoaded();
+            return _drawCustomVitalBars;
+        }
+        set
+        {
+            EnsureLoaded();   // populate _pluginPaths before Save() rewrites the file
+            if (_drawCustomVitalBars == value) return;
+            _drawCustomVitalBars = value;
+            Save();
+        }
+    }
+
     public static void AddPluginPath(string path)
     {
         EnsureLoaded();
@@ -259,6 +281,12 @@ internal static class EngineSettings
             {
                 _enableHangMinidump = hmEl.GetBoolean();
             }
+
+            if (doc.RootElement.TryGetProperty("DrawCustomVitalBars", out var cvbEl) &&
+                (cvbEl.ValueKind == JsonValueKind.True || cvbEl.ValueKind == JsonValueKind.False))
+            {
+                _drawCustomVitalBars = cvbEl.GetBoolean();
+            }
         }
         catch (Exception ex)
         {
@@ -290,6 +318,7 @@ internal static class EngineSettings
                 w.WriteNumber("EngineHookCount", _engineHookCount);
                 w.WriteBoolean("EnableImGuiBackend", _enableImGuiBackend);
                 w.WriteBoolean("EnableHangMinidump", _enableHangMinidump);
+                w.WriteBoolean("DrawCustomVitalBars", _drawCustomVitalBars);
                 w.WriteEndObject();
             }
             File.WriteAllBytes(SettingsPath, ms.ToArray());

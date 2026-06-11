@@ -637,6 +637,9 @@ internal delegate void PluginOnUpdateHealthDelegate(uint targetId, float healthR
 internal delegate void PluginOnCombatDamageDelegate(uint damage, uint damageType, uint crit, uint isAttacker);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void PluginOnKillNotificationDelegate(IntPtr textUtf16);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void PluginOnChatWindowTextDelegate(IntPtr textUtf16, int chatType, IntPtr eatFlag);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]

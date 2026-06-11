@@ -1443,6 +1443,22 @@ internal static partial class RynthAiPanel
                 row.Children.Add(clear);
             }
             root.Children.Add(row);
+
+            // Mark / unmark the cell the player is standing in — the reliable way to flag
+            // environmental lava/acid the name detector can't see.
+            var markRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(0, 2, 0, 0) };
+            var mark = MiniButton("Mark cell as hazard");
+            mark.Click += (_, _) => { SendNavCmd("{\"Cmd\":\"markHazardHere\"}"); PopulatePatrolFlyout(root); };
+            var unmark = MiniButton("Unmark");
+            unmark.Click += (_, _) => { SendNavCmd("{\"Cmd\":\"unmarkHazardHere\"}"); PopulatePatrolFlyout(root); };
+            markRow.Children.Add(mark);
+            markRow.Children.Add(unmark);
+            root.Children.Add(markRow);
+            root.Children.Add(new TextBlock
+            {
+                Text = "Stand on the lava/acid, click Mark, then re-run Patrol.",
+                FontSize = 9, Foreground = ColMute, TextWrapping = TextWrapping.Wrap,
+            });
         }
         else
         {
