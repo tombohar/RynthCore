@@ -107,23 +107,35 @@ internal static class GameTickHooks
         // pending. Must never throw into AC's native frame.
         try { AcMainThreadQueue.DrainCasts(); }
         catch { }
-        // Drain the full marshalled-action ring here too. The game-logic tick is
-        // AC's main thread and fires regardless of the D3D9/EndScene hook — so
-        // queued mutators (combat mode, attack, movement, item ops, chat) still
-        // execute under Decal-coexistence / EnableD3D9Hook=false, where EndScene
-        // (previously the ring's ONLY drain site) never installs and every
-        // marshalled action silently blackholed once the 256-slot ring filled.
-        // Same thread as the EndScene drain, so double-draining is benign; both
-        // are alloc-free when the ring is empty.
+
+        // Run AC's own game-logic + physics + animation pass.
+        int result;
+        try { result = _originalUseTime!(thisPtr); }
+        catch { result = 0; }
+
+        // Drain the marshalled-action ring AFTER AC's tick, NOT before.
+        // ⚠ Issuing a UseObject (corpse open) / movement / stance change starts
+        // or REPLACES the player's CSequence motion — and AC's animation update
+        // (CPhysicsObj::update_object -> CSequence::update_internal ->
+        // AnimSequenceNode::get_high_frame) runs inside _originalUseTime above.
+        // Draining BEFORE that call meant the SAME tick walked the sequence we
+        // had just perturbed, hitting a freed/null anim node -> hard AV at
+        // acclient 0x5263xx/0x5264xx (null+0xC). Live-diagnosed 2026-06-11
+        // during a rapid corpse-open grind (AC-only crash stack, no engine
+        // frames). Draining after lets AC install the new gesture's node and
+        // walk it cleanly on its NEXT tick. The EndScene drain (the other call
+        // site) is already post-physics in the frame, so it was never the
+        // trigger. (Casts stay PRE-tick above — their selection-timing
+        // requirement, and they go through the separate cast slot.)
         try { AcMainThreadQueue.Drain(); }
         catch { }
-        // Second main-thread anchor for the busy watchdog (primary = the
-        // game-event detour) — keeps desync self-healing alive even if the GE
-        // hook ever fails to install again.
+        // Busy watchdog: also post-tick now. Its decrement / cursor-refresh
+        // touch m_cBusy, not the motion sequence, so order is immaterial here;
+        // keeping all engine-issued mutations after AC's pass is the invariant.
         try { BusyCountHooks.CheckWatchdog(); }
         catch { }
+
         // MUST return Client::UseTime's own bool — AC loops do/while on it.
-        try { return _originalUseTime!(thisPtr); }
-        catch { return 0; }
+        return result;
     }
 }
