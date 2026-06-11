@@ -396,7 +396,9 @@ internal static unsafe class Win32Backend
         IntPtr hookPtr = Marshal.GetFunctionPointerForDelegate(_wndProcDelegate);
         _installedWndProcPtr = hookPtr;
         _originalWndProc = SetWindowLong32(hWnd, GWL_WNDPROC, hookPtr);
-        RynthLog.Render($"Win32Backend: subclass installed — hook=0x{hookPtr:X8}, previous WndProc=0x{_originalWndProc:X8}.");
+        // RynthLog.UI (not .Render — RenderEnabled is false) so chain
+        // composition across generations is reconstructible from the log.
+        RynthLog.UI($"Win32Backend: subclass installed — hook=0x{hookPtr:X8}, previous WndProc=0x{_originalWndProc:X8}.");
 
         if (_originalWndProc == IntPtr.Zero)
         {
@@ -430,7 +432,7 @@ internal static unsafe class Win32Backend
         if (currentProc == _installedWndProcPtr || currentProc == IntPtr.Zero)
         {
             SetWindowLong32(_gameHwnd, GWL_WNDPROC, _originalWndProc);
-            RynthLog.Render("Win32Backend: Shutdown — WndProc restored (we were chain head).");
+            RynthLog.UI("Win32Backend: Shutdown — WndProc restored (we were chain head).");
         }
         else
         {
@@ -440,7 +442,10 @@ internal static unsafe class Win32Backend
             // restore was originally added for). Forward-only keeps the
             // foreign chain intact AND keeps this generation inert.
             _forwardOnly = true;
-            RynthLog.Render($"Win32Backend: Shutdown — chain head is 0x{currentProc:X8}, not ours (0x{_installedWndProcPtr:X8}); leaving the chain intact, hook now forward-only.");
+            // A hit on this line positively confirms a foreign subclasser
+            // stacks above us in live sessions — the blind-restore wedge's
+            // missing precondition. Must be visible in the log.
+            RynthLog.UI($"Win32Backend: Shutdown — chain head is 0x{currentProc:X8}, not ours (0x{_installedWndProcPtr:X8}); leaving the chain intact, hook now forward-only.");
         }
         lock (_inputLock)
             _pendingInput.Clear();

@@ -88,6 +88,22 @@ internal static class MainThreadHangWatchdog
         Volatile.Write(ref _lastBeatTick, Environment.TickCount64);
     }
 
+    /// <summary>
+    /// Second beat source: the Client::UseTime game-logic tick. Does NOT bump
+    /// the frame counter (fps must keep meaning rendered frames). Closes the
+    /// watchdog's blind spot where the main thread wedges BEFORE the new
+    /// generation's EndScene hook ever fires (the 2026-06-11 reload wedge ran
+    /// for ~60s with no hang detection and therefore no minidump) — with this
+    /// beat, a wedged main thread always goes silent on BOTH sources and the
+    /// watchdog produces the dump that names where the thread sits.
+    /// </summary>
+    internal static void MainThreadBeatNoFrame()
+    {
+        if (_mainThreadId == 0)
+            _mainThreadId = GetCurrentThreadId();
+        Volatile.Write(ref _lastBeatTick, Environment.TickCount64);
+    }
+
     private static Thread? _thread;
 
     internal static void Start()

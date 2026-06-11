@@ -113,6 +113,14 @@ internal static class EngineLifecycle
         // the next engine generation is initializing.
         Step("MainThreadHangWatchdog.Stop", () => MainThreadHangWatchdog.Stop());
 
+        // Disarm the marshalled-action queue BEFORE anything else tears down.
+        // The UseTime/EndScene detours stay live until MH_DisableHook(ALL), so
+        // without this a queued plugin mutation (SetAutoRun etc.) executes on
+        // AC's main thread mid-teardown against state the plugin Shutdowns are
+        // concurrently freeing — a heap-corruption window adjacent to the
+        // 2026-06-11 DINPUT8 reload wedge.
+        Step("AcMainThreadQueue.Disarm", () => Compatibility.AcMainThreadQueue.Disarm());
+
         Step("EndSceneHook.Uninstall", () => EndSceneHook.Uninstall());
 
         // Give in-flight EndScene calls a chance to drain. AC's render thread

@@ -150,11 +150,24 @@ internal static class AcMainThreadQueue
     public static bool EnqueueMergeStackInternal(uint sourceObjectId, uint targetObjectId) =>
         Enqueue(ActionKind.MergeStackInternal, sourceObjectId, targetObjectId, 0);
 
+    // Latched by EngineLifecycle.Shutdown: once teardown begins, queued plugin
+    // actions must NOT keep executing on AC's main thread — the detours stay
+    // live until MH_DisableHook(ALL), so without this latch a marshalled
+    // mutation (SetAutoRun etc.) can run mid-teardown against state that
+    // plugin Shutdowns are concurrently freeing (observed live at
+    // 2026-06-11 07:44:03: "Move: SetAutoRun(False)" fired between plugin
+    // shutdown steps). Abandoned entries are benign.
+    private static volatile bool _disarmed;
+
+    /// <summary>Stop executing queued actions/casts permanently (engine teardown).</summary>
+    public static void Disarm() => _disarmed = true;
+
     // Single-consumer drain on AC's main thread (EngineFrameController.OnEndScene).
     // Re-invokes the public action methods; on the main thread they execute the
     // real AC call directly (their IsOnMainThread gate is satisfied here).
     public static void Drain()
     {
+        if (_disarmed) return;
         int head = _head;                       // only the main thread writes _head
         int tail = Volatile.Read(ref _tail);
         while (head != tail)
@@ -298,6 +311,7 @@ internal static class AcMainThreadQueue
     // cast directly (SelectItem + ClientMagicSystem::CastSpell via the SEH trampoline).
     public static void DrainCasts()
     {
+        if (_disarmed) return;                               // engine teardown in progress
         if (Volatile.Read(ref _castPending) == 0) return;   // alloc-free fast path
         uint target, spell;
         lock (_castLock)

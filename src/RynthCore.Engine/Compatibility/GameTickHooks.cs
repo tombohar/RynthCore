@@ -94,6 +94,11 @@ internal static class GameTickHooks
 
     private static int UseTimeDetour(IntPtr thisPtr)
     {
+        // Hang-watchdog beat from the game-logic tick (no frame count): the
+        // EndScene beat alone left the watchdog blind to a main thread that
+        // wedges before the new generation's EndScene hook installs.
+        try { MainThreadHangWatchdog.MainThreadBeatNoFrame(); }
+        catch { }
         // Drain any queued cast BEFORE AC's game-logic tick: SelectItem sets AC's
         // selection and the cast initiates, then THIS SAME UseTime call processes it to
         // completion — mimicking AC's natural input -> UseTime flow. (Draining AFTER the
