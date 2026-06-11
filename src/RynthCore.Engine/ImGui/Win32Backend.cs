@@ -87,6 +87,9 @@ internal static unsafe class Win32Backend
     [DllImport("user32.dll", EntryPoint = "SetWindowLongA", SetLastError = true)]
     private static extern IntPtr SetWindowLong32(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongA", SetLastError = true)]
+    private static extern IntPtr GetWindowLong32(IntPtr hWnd, int nIndex);
+
     [DllImport("user32.dll", EntryPoint = "CallWindowProcA")]
     private static extern IntPtr CallWindowProcA(IntPtr lpPrevWndFunc, IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
@@ -378,6 +381,7 @@ internal static unsafe class Win32Backend
     public static bool Init(IntPtr hWnd)
     {
         if (_initialized) return true;
+        _forwardOnly = false;   // re-arming in this generation — stop any pass-through latch
         _gameHwnd = hWnd;
         _uiCaptureEnabled = true;
         _hasFocus = false;
@@ -390,7 +394,9 @@ internal static unsafe class Win32Backend
         // Subclass the window
         _wndProcDelegate = WndProcHook;
         IntPtr hookPtr = Marshal.GetFunctionPointerForDelegate(_wndProcDelegate);
+        _installedWndProcPtr = hookPtr;
         _originalWndProc = SetWindowLong32(hWnd, GWL_WNDPROC, hookPtr);
+        RynthLog.Render($"Win32Backend: subclass installed — hook=0x{hookPtr:X8}, previous WndProc=0x{_originalWndProc:X8}.");
 
         if (_originalWndProc == IntPtr.Zero)
         {
@@ -404,12 +410,38 @@ internal static unsafe class Win32Backend
         return true;
     }
 
+    private static IntPtr _installedWndProcPtr;
+    private static volatile bool _forwardOnly;
+
     public static void Shutdown()
     {
         if (!_initialized) return;
 
-        // Restore original WndProc
-        SetWindowLong32(_gameHwnd, GWL_WNDPROC, _originalWndProc);
+        // Restore the original WndProc ONLY if we are still the head of the
+        // chain. If something subclassed on top of us after Init (Decal /
+        // DINPUT8 re-hooks, a newer engine generation), a blind restore RIPS
+        // their hook out of the chain — DirectInput's hook proc then
+        // dereferences a freed per-window record on AC's main thread and the
+        // render pump never recovers (the 2026-06-11 DINPUT8+0x20CCC reload
+        // wedge). Leaving the chain intact is always safe: our thunk stays
+        // valid because engine module pages are intentionally leaked across
+        // reloads, and a no-longer-initialized backend just forwards.
+        IntPtr currentProc = GetWindowLong32(_gameHwnd, GWL_WNDPROC);
+        if (currentProc == _installedWndProcPtr || currentProc == IntPtr.Zero)
+        {
+            SetWindowLong32(_gameHwnd, GWL_WNDPROC, _originalWndProc);
+            RynthLog.Render("Win32Backend: Shutdown — WndProc restored (we were chain head).");
+        }
+        else
+        {
+            // Become a pure pass-through instead: a frozen generation that
+            // keeps PROCESSING input swallows WM_CHAR and kills AC's chat
+            // after a reload (the historic stacking bug the unconditional
+            // restore was originally added for). Forward-only keeps the
+            // foreign chain intact AND keeps this generation inert.
+            _forwardOnly = true;
+            RynthLog.Render($"Win32Backend: Shutdown — chain head is 0x{currentProc:X8}, not ours (0x{_installedWndProcPtr:X8}); leaving the chain intact, hook now forward-only.");
+        }
         lock (_inputLock)
             _pendingInput.Clear();
         Array.Clear(_mouseButtons, 0, _mouseButtons.Length);
@@ -522,6 +554,11 @@ internal static unsafe class Win32Backend
 
     private static IntPtr WndProcHook(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
+        // Post-shutdown pass-through: Shutdown could not restore the chain
+        // (someone subclassed after us) — this generation must be inert.
+        if (_forwardOnly)
+            return CallWindowProcA(_originalWndProc, hWnd, msg, wParam, lParam);
+
         try
         {
             _wndProcLogCount++;

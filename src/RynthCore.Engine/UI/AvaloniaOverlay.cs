@@ -443,14 +443,19 @@ internal static class AvaloniaOverlay
         // in this file). Spawn a small background poller that finds AC's
         // visible window via EnumWindows and writes both fields. This
         // de-couples Avalonia mode from the D3D9/ImGui path entirely.
-        // Decal coexistence skips the entire D3D9/ImGui init even when both
-        // flags are TRUE — without this gate term the game window was left
-        // completely unsubclassed for Decal users: no WM_CLOSE pump-quiesce
-        // (freeze-on-close returns), no focus-restore after panel clicks, and
-        // dead floating-panel text input.
-        if (!Plugins.EngineSettings.EnableImGuiBackend
-            || !Plugins.EngineSettings.EnableD3D9Hook
-            || Compatibility.DecalDetection.IsDecalLoaded)
+        // ⚠ Do NOT subclass the game window when Decal is loaded. A
+        // "|| DecalDetection.IsDecalLoaded" gate term was added 2026-06-11 to
+        // give Decal-coexistence clients panel input / close-quiesce — and
+        // REVERTED the same morning: inserting our subclass into the WndProc
+        // chain that DINPUT8/Decal also hook caused a read-after-free inside
+        // DINPUT8's hook proc on AC's main thread (native-crash.log
+        // DINPUT8.DLL+0x20CCC, READ 0x308xE198) within seconds of the
+        // subclass install / next hot-reload teardown — the render pump never
+        // recovered (fps=0 wedge until the reaper killed the client). Verified
+        // by bisect across the 07:25/07:44/07:52 reloads. Decal coexistence
+        // input needs a chain-safe design (message hook, not SetWindowLong)
+        // before this returns.
+        if (!Plugins.EngineSettings.EnableImGuiBackend || !Plugins.EngineSettings.EnableD3D9Hook)
         {
             new Thread(() =>
             {
