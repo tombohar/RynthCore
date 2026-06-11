@@ -444,6 +444,19 @@ public static class EntryPoint
             // Non-fatal: if missing, dangerous AC API calls run without SEH protection.
             if (!PreloadNativeDll(engineDir, "RynthCore.SehTrampoline.dll"))
                 RynthLog.Info("WARNING: RynthCore.SehTrampoline.dll not found — object-teardown AVs will not be caught.");
+            // Probe the NEWEST export before declaring the trampoline available:
+            // a successful load only proves SOME build of the hand-built DLL is
+            // present. A stale binary missing a newer wrapper would leave
+            // IsAvailable=true with every guarded call to that wrapper throwing
+            // EntryPointNotFoundException inside a detour — silent feature death
+            // plus per-event exception churn. Keep the probe name in sync with
+            // the most recently added SEH_* export.
+            else if (!System.Runtime.InteropServices.NativeLibrary.TryLoad(
+                         System.IO.Path.Combine(engineDir, "RynthCore.SehTrampoline.dll"), out IntPtr sehModule)
+                     || !System.Runtime.InteropServices.NativeLibrary.TryGetExport(sehModule, "SEH_ThiscallIntUintPtr", out _))
+            {
+                RynthLog.Warn("WARNING: RynthCore.SehTrampoline.dll is STALE (missing SEH_ThiscallIntUintPtr) — SEH wrappers DISABLED; rebuild with native\\SehTrampoline\\Build-SehTrampoline.ps1 and redeploy.");
+            }
             else
             {
                 SehTrampoline.MarkAvailable();

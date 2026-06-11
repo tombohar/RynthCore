@@ -89,7 +89,12 @@ internal static class HeartbeatLogger
                     int login = 0;
                     try { login = LoginLifecycleHooks.HasObservedLoginComplete ? 1 : 0; } catch { }
 
-                    RynthLog.Info($"hb #{tick} up={(nowMs - startMs) / 1000}s fps={fps} plug={pps}/s ws={wsMb}MB login={login}");
+                    // qd = marshalled actions silently dropped (ring full). A
+                    // climbing qd with healthy fps means the consumer phase is
+                    // dead — exactly the silent blackhole class the review found.
+                    long dropped = 0;
+                    try { dropped = AcMainThreadQueue.DroppedCount; } catch { }
+                    RynthLog.Info($"hb #{tick} up={(nowMs - startMs) / 1000}s fps={fps} plug={pps}/s ws={wsMb}MB login={login} qd={dropped}");
                 }
                 catch { /* never let the heartbeat itself bring anything down */ }
                 // Self-healing: clear a stuck floating-panel click-through

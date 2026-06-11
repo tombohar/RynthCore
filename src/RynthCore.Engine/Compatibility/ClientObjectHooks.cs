@@ -1343,6 +1343,12 @@ internal static class ClientObjectHooks
                 return false;
             // PublicWeenieDesc starts at _phys_obj offset + 4 (pointer size)
             int pwdBase = _weeniePhysicsObjOffset + 4;
+            // Page-probe both ends of the field span (siblings TryGetObjectWcid/
+            // Bitfield do the same): a freed-but-decommitted weenie here is an
+            // uncatchable AV under NativeAOT — the catch below only covers
+            // null-page faults.
+            if (!IsReadablePointer(weeniePtr + pwdBase + 28) || !IsReadablePointer(weeniePtr + pwdBase + 44))
+                return false;
             containerID = (uint)Marshal.ReadInt32(weeniePtr + pwdBase + 28);
             wielderID = (uint)Marshal.ReadInt32(weeniePtr + pwdBase + 32);
             location = (uint)Marshal.ReadInt32(weeniePtr + pwdBase + 44);

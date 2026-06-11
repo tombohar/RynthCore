@@ -800,9 +800,6 @@ internal static class CombatActionHooks
                 var vitals = new CreatureVitals(health, maxHealth, stamina, maxStamina, mana, maxMana);
                 ObjectQualityCache.SetCreatureVitals(objectId, vitals);
 
-                if (ClientObjectHooks.TryGetWeenieObjectPtr(objectId, out IntPtr pWeenie) && pWeenie != IntPtr.Zero)
-                    ObjectQualityCache.SetMaxHealth(pWeenie, maxHealth);
-
                 float ratio = (float)health / maxHealth;
                 PluginManager.QueueUpdateHealth(objectId, ratio, health, maxHealth);
 

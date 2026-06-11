@@ -40,6 +40,12 @@ internal static class PlayerVitalsHooks
     internal static void ResetSession()
     {
         KnownPlayerQualitiesPtr = IntPtr.Zero;
+        // Creature health is keyed by object id — ids don't survive the
+        // session, and without this clear the 1024-entry cap filled over a
+        // long session and every NEW creature was silently never tracked.
+        lock (_creatureHpLock)
+            _creatureHp.Clear();
+        ObjectQualityCache.ClearSession();
     }
 
     /// <summary>
@@ -437,10 +443,9 @@ internal static class PlayerVitalsHooks
         var original = (delegate* unmanaged[Thiscall]<IntPtr, uint, int, void>)_originalOnStatUpdatedIntPtr;
         original(thisPtr, stype, val);
 
-        // Cache MaxHealth for every object — used by CombatActionHooks to resolve the
-        // absolute target health from the healthRatio in QueryHealthResponse packets.
-        if (stype == MaxHealthType && val > 0)
-            ObjectQualityCache.SetMaxHealth(thisPtr, unchecked((uint)val));
+        // (A per-object MaxHealth-by-pointer cache write used to live here —
+        // removed 2026-06-11: nothing ever read it, and it allocated on
+        // dictionary growth inside this UnmanagedCallersOnly detour.)
 
         if (!SmartBoxLocator.TryGetPlayer(out IntPtr player, out uint playerId, out _))
             return;
@@ -497,25 +502,44 @@ internal static class PlayerVitalsHooks
         uint playerId = ClientHelperHooks.GetPlayerId();
         if (playerId == 0 || sender == playerId) return; // player handled by UpdateCache
 
+        // Packed entry: bit 63 = "current seen", bit 62 = "max seen",
+        // bits 32-61 = current, bits 0-31 = max. Both halves must be observed
+        // before a ratio is forwarded — fabricating the missing half reported
+        // a near-dead mob as FULL (Health-only: max := cur → 1.0) or a fresh
+        // mob as DEAD (MaxHealth-only: cur = 0 → 0.0), corrupting plugin
+        // combat decisions.
+        const ulong SeenCur = 1UL << 63;
+        const ulong SeenMax = 1UL << 62;
+        const ulong CurMask = 0x3FFF_FFFFUL;
+
         uint cur, max;
+        bool complete;
         lock (_creatureHpLock)
         {
+            // Bounded with self-healing: the old cap silently stopped tracking
+            // every NEW creature once 1024 distinct senders had been seen.
+            // Wholesale clear + reinsert is cheap and recovers within one
+            // server vital-burst per visible mob. (Also cleared at logout.)
+            if (_creatureHp.Count >= 1024 && !_creatureHp.ContainsKey(sender))
+                _creatureHp.Clear();
+
             _creatureHp.TryGetValue(sender, out ulong packed);
-            cur = (uint)(packed >> 32);
+            cur = (uint)((packed >> 32) & CurMask);
             max = (uint)packed;
-            if (stype == HealthType) cur = (uint)val; else max = (uint)val;
-            if (cur > max) max = cur; // current can't exceed max
-            if (_creatureHp.Count < 1024 || _creatureHp.ContainsKey(sender))
-                _creatureHp[sender] = ((ulong)cur << 32) | max;
+            if (stype == HealthType) { cur = (uint)val & (uint)CurMask; packed |= SeenCur; }
+            else                     { max = (uint)val;                 packed |= SeenMax; }
+            if (cur > max && (packed & SeenMax) != 0) max = cur; // server can momentarily push cur past a stale max
+            complete = (packed & SeenCur) != 0 && (packed & SeenMax) != 0;
+            _creatureHp[sender] = (packed & (SeenCur | SeenMax)) | ((ulong)cur << 32) | max;
         }
 
         if (_creatureHpLogCount < 40)
         {
             _creatureHpLogCount++;
-            RynthLog.Compat($"Compat: creature vital sender=0x{sender:X8} stype={stype} val={val} -> cur={cur} max={max}");
+            RynthLog.Compat($"Compat: creature vital sender=0x{sender:X8} stype={stype} val={val} -> cur={cur} max={max} complete={complete}");
         }
 
-        if (max > 0)
+        if (complete && max > 0)
             Plugins.PluginManager.QueueUpdateHealth(sender, Math.Clamp((float)cur / max, 0f, 1f), cur, max);
     }
 
