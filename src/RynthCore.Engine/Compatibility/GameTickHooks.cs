@@ -46,6 +46,7 @@ internal static class GameTickHooks
     private static ThisCallBoolDelegate? _useTimeDetour;
     private static IntPtr _targetAddress;
     private static int _installed;
+    private static int _exitLatch;
 
     // Verified unique + lands exactly at UseTimeVa offline (tools/pe_pattern.py).
     // Replaces the prior warn-only prologue check; null = wildcard (rel32 call operand).
@@ -112,6 +113,38 @@ internal static class GameTickHooks
         int result;
         try { result = _originalUseTime!(thisPtr); }
         catch { result = 0; }
+
+        // ── Game loop is exiting — quiesce BEFORE AC's teardown ──────────────
+        // AC's main loop is `do { } while (UseTime() != 0)`; a 0 return means
+        // this was the LAST tick and AC tears its world down next (DBCache::
+        // DestroyObjectCaches frees every DBObj). This is the only close signal
+        // that covers ALL exit paths: the in-game exit / logout-quit flow never
+        // delivers WM_CLOSE, so the Win32Backend/AvaloniaOverlay WM_CLOSE
+        // quiesce never ran and the ~63 Hz pump kept firing Move/SetAutoRun/
+        // object reads into freed objects -> the on-close AV at acclient
+        // 0x00416C86 (DBOCache::DestroyObj reading [null+0x28]). We are still
+        // INSIDE the final UseTime call here — AC objects are all valid — so
+        // the pump's in-flight frame finishes safely during the bounded join.
+        if (result == 0 && Interlocked.Exchange(ref _exitLatch, 1) == 0)
+        {
+            try { RynthLog.Compat("GameTickHooks: Client::UseTime returned 0 — game loop exiting; quiescing plugin pump + late input before AC teardown."); }
+            catch { }
+            // Drop the busy watchdog's cached ClientUISystem ptr (freed next).
+            try { BusyCountHooks.ResetSession(); }
+            catch { }
+            // Arm the late mouse/cursor swallow in BOTH game-window subclasses
+            // (the 0x0056547B UpdateCursorState close-AV trigger) — WM_CLOSE
+            // never fired on this path, so neither latch is set yet.
+            try { ImGuiBackend.Win32Backend.MarkCloseInFlight(); }
+            catch { }
+            try { UI.RynthOverlayWindow.MarkCloseInFlight(); }
+            catch { }
+            try { EntryPoint.StopTickPumpAndJoin(); }
+            catch { }
+            // Skip the post-tick drains/watchdog below — no engine-issued
+            // mutation may run once the loop has decided to exit.
+            return 0;
+        }
 
         // Drain the marshalled-action ring AFTER AC's tick, NOT before.
         // ⚠ Issuing a UseObject (corpse open) / movement / stance change starts

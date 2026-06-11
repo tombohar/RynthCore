@@ -47,6 +47,14 @@ internal static unsafe class Win32Backend
     // once even if AC reposts WM_CLOSE during its shutdown sequence.
     private static int _wmCloseSeen;
 
+    /// <summary>Arms the post-close mouse/cursor input swallow without running the
+    /// WM_CLOSE pump-stop/shutdown block (the caller has already quiesced). Used by
+    /// GameTickHooks when AC exits via a path that never delivers WM_CLOSE (in-game
+    /// exit / logout-quit) — late WM_MOUSEMOVE/WM_SETCURSOR otherwise reach
+    /// ClientUISystem::UpdateCursorState after AC frees the combat-system singleton
+    /// (the 0x0056547B close AV).</summary>
+    internal static void MarkCloseInFlight() => Interlocked.Exchange(ref _wmCloseSeen, 1);
+
     private const int GWL_WNDPROC = -4;
     private const uint GA_ROOT = 2;
     private const int HTCLIENT = 1;

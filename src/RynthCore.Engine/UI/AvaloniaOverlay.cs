@@ -734,6 +734,13 @@ internal class RynthOverlayWindow : Window
     // game WndProc). See the WM_CLOSE branch in AvaloniaSubclassWndProc.
     private static int _avaloniaWmCloseSeen;
     private static IntPtr _avaloniaSubclassedHwnd;
+
+    /// <summary>Arms the post-close mouse/cursor input swallow without running the
+    /// WM_CLOSE pump-stop (the caller has already quiesced). Used by GameTickHooks
+    /// when AC exits via a path that never delivers WM_CLOSE (in-game exit /
+    /// logout-quit).</summary>
+    internal static void MarkCloseInFlight() =>
+        System.Threading.Interlocked.Exchange(ref _avaloniaWmCloseSeen, 1);
     // True between WM_LBUTTONDOWN and WM_LBUTTONUP on avHwnd (panel click in flight).
     // Used to defer WM_KILLFOCUS so Avalonia's pointer capture isn't cancelled mid-click.
     private static volatile bool _avaloniaMouseButtonDown;
