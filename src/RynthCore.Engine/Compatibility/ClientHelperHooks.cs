@@ -295,7 +295,14 @@ internal static class ClientHelperHooks
             if (uiSystem == IntPtr.Zero)
                 return false;
 
+            // Reconcile the busy this open/use leaks (same source-fix as casts):
+            // UseObject bumps m_cBusy but no retail completion handler runs to
+            // decrement it, so corpse-open grinds left the plugin force-clearing
+            // every ~2s. Snapshot the delta; BusyCountHooks decrements it once
+            // the use-reach gesture completes. Both run on AC's main thread here.
+            int busyBefore = BusyCountHooks.CaptureRealBusyForCast();
             _useObject(uiSystem, objectId);
+            BusyCountHooks.NoteDirectCastIssued(busyBefore);
             return true;
         }
         catch
@@ -317,7 +324,12 @@ internal static class ClientHelperHooks
 
         try
         {
+            // Reconcile leaked busy (same source-fix as casts / UseObject) — a
+            // use-on-target (e.g. PetManager essence refill) bumps m_cBusy with
+            // no retail completion decrement.
+            int busyBefore = BusyCountHooks.CaptureRealBusyForCast();
             _useWithTargetEvent(sourceObjectId, targetObjectId);
+            BusyCountHooks.NoteDirectCastIssued(busyBefore);
             LogInteraction($"UseObjectOn invoked via Event_UseWithTargetEvent source=0x{sourceObjectId:X8} target=0x{targetObjectId:X8}");
             return true;
         }

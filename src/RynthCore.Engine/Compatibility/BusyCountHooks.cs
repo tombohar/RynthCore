@@ -265,32 +265,36 @@ internal static class BusyCountHooks
         _pendingCastGestureSeen = false;
     }
 
-    // ── Per-cast busy reconciliation (source fix for the per-cast leak) ──────
-    // The engine's direct cast calls (FreeHandsAndCastSpell / CastSpell) make
-    // AC increment m_cBusy synchronously (wand-ready + cast is often +2), but
-    // they never register the queued action whose completion handler performs
-    // the matching decrements — that lives in the player-initiated flow we
-    // bypass. Result: EVERY direct cast leaked busy count, caught only by
-    // watchdogs (4322 plugin-side clears in one 10h soak). Source fix: the
-    // caster measures the real m_cBusy delta synchronously around its call
-    // (both run on AC's main thread, nothing interleaves, so the delta is
-    // exactly ours), then once the cast gesture has completed — or after a
-    // timeout if it never starts (server refusal) — we invoke the REAL
-    // DecrementBusyCount exactly delta times through the HOOKED entry, so the
-    // shadow counter and plugin busy events stay in sync. Deterministic, no
-    // ClearAllCommands side effects, never touches counts owned by others.
+    // ── Direct-action busy reconciliation (source fix for the per-action leak) ──
+    // The engine's direct AC calls — casts (FreeHandsAndCastSpell / CastSpell)
+    // AND item actions (UseObject corpse-open / equip / item-use, UseObjectOn) —
+    // make AC increment m_cBusy synchronously, but they never register the queued
+    // action whose completion handler performs the matching decrements (that
+    // lives in the player-initiated flow we bypass). Result: EVERY such call
+    // leaked busy, caught only downstream by watchdogs (casts: 4322 plugin-side
+    // clears in one 10h soak; corpse opens: a force-clear every ~2s during loot
+    // grinds). Source fix: measure the real m_cBusy delta synchronously around
+    // the call (both run on AC's main thread, nothing interleaves, so the delta
+    // is exactly ours), then once the action GESTURE has completed
+    // ([CMI+0x80] empties — a use-reach is a sequenced motion just like a cast
+    // wind-up) — or after a timeout if it never starts (server refusal) — invoke
+    // the REAL DecrementBusyCount exactly delta times through the HOOKED entry,
+    // so the shadow counter and plugin busy events stay in sync. Deterministic,
+    // no ClearAllCommands side effects, never touches counts owned by others.
+    // A single accumulator serves both casts and item actions (all are
+    // engine-issued busy that should clear at the next gesture-end).
     private static int _pendingCastBusyDelta;
     private static long _pendingCastIssuedAtMs;
     private static bool _pendingCastGestureSeen;
     private static int _reconcileLogCount;
     private const long CastBusyReconcileTimeoutMs = 4_000;
 
-    /// <summary>Snapshot the real m_cBusy immediately before a direct cast call (-1 = unreadable).</summary>
+    /// <summary>Snapshot the real m_cBusy immediately before a direct cast/item-action call (-1 = unreadable).</summary>
     public static int CaptureRealBusyForCast() => ReadRealBusy();
 
     /// <summary>
-    /// Arm reconciliation right after a direct cast call, given the pre-call
-    /// snapshot. Main thread only (cast calls already are).
+    /// Arm reconciliation right after a direct cast/item-action call, given the
+    /// pre-call snapshot. Main thread only (these calls already run there).
     /// </summary>
     public static void NoteDirectCastIssued(int busyBefore)
     {
