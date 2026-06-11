@@ -222,7 +222,13 @@ internal static class EngineFrameController
             ViewportRendererBackend.Shutdown();
             ViewportPlatformBackend.Shutdown();
             DX9Backend.Shutdown();
-            Win32Backend.Shutdown();
+            // Do NOT call Win32Backend.Shutdown() here. EngineLifecycle.Shutdown
+            // owns that step explicitly, AFTER AvaloniaOverlay.Stop — floating
+            // panels are destroyed via RunOnGameThread (a SendMessage handled by
+            // our subclass WndProc), so restoring AC's original WndProc this
+            // early makes that SendMessage land on AC's proc, get ignored, and
+            // "succeed" — DestroyWindow never runs and the orphaned panel HWND
+            // outlives the engine module with its WndProc pointing at freed code.
             ImGuiNET.ImGui.DestroyContext(contextToDestroy);
 
             _imguiInitialized = false;

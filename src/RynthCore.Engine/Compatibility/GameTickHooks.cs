@@ -102,6 +102,21 @@ internal static class GameTickHooks
         // pending. Must never throw into AC's native frame.
         try { AcMainThreadQueue.DrainCasts(); }
         catch { }
+        // Drain the full marshalled-action ring here too. The game-logic tick is
+        // AC's main thread and fires regardless of the D3D9/EndScene hook — so
+        // queued mutators (combat mode, attack, movement, item ops, chat) still
+        // execute under Decal-coexistence / EnableD3D9Hook=false, where EndScene
+        // (previously the ring's ONLY drain site) never installs and every
+        // marshalled action silently blackholed once the 256-slot ring filled.
+        // Same thread as the EndScene drain, so double-draining is benign; both
+        // are alloc-free when the ring is empty.
+        try { AcMainThreadQueue.Drain(); }
+        catch { }
+        // Second main-thread anchor for the busy watchdog (primary = the
+        // game-event detour) — keeps desync self-healing alive even if the GE
+        // hook ever fails to install again.
+        try { BusyCountHooks.CheckWatchdog(); }
+        catch { }
         // MUST return Client::UseTime's own bool — AC loops do/while on it.
         try { return _originalUseTime!(thisPtr); }
         catch { return 0; }

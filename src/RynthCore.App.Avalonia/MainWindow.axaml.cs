@@ -175,6 +175,11 @@ internal partial class MainWindow : Window
     private void LoadSettings()
     {
         _settings = AppSettingsStore.Load();
+        if (AppSettingsStore.LastLoadDiagnostic is string loadDiag)
+        {
+            LauncherDiag.Info("SETTINGS: " + loadDiag);
+            try { AppendActivity("Settings: " + loadDiag); } catch { }
+        }
         _settings.ServerProfiles ??= [];
         _settings.AccountProfiles ??= [];
         _settings.CheckedLaunchAccountProfileIds ??= [];
@@ -208,7 +213,20 @@ internal partial class MainWindow : Window
 
     private void SaveSettings()
     {
-        AppSettingsStore.Save(_settings);
+        // Save is called from dozens of UI handlers (checkbox toggles, window
+        // moves, the 2s tick). An IOException here (file locked by a second
+        // launcher instance, AV scan, disk full) must not take the launcher
+        // down with an unhandled exception — log it and keep running on the
+        // in-memory settings; the next successful save persists everything.
+        try
+        {
+            AppSettingsStore.Save(_settings);
+        }
+        catch (Exception ex)
+        {
+            LauncherDiag.Info($"SETTINGS: save failed ({ex.GetType().Name}: {ex.Message})");
+            try { AppendActivity($"Settings save failed: {ex.Message}"); } catch { }
+        }
     }
 
     private void SaveWindowLayout()
@@ -2122,19 +2140,30 @@ internal partial class MainWindow : Window
 
             _autoInjectAttemptedPids.Add(pid);
             _autoInjectInFlightPids.Add(pid);
-            _ = AutoInjectExternalClientAsync(target, pid, enginePath);
+            _ = AutoInjectExternalClientAsync(pid, enginePath);
         }
     }
 
-    private async Task AutoInjectExternalClientAsync(Process target, int pid, string enginePath)
+    private async Task AutoInjectExternalClientAsync(int pid, string enginePath)
     {
         try
         {
             AppendActivity($"Auto-inject: starting injection into external AC PID {pid}.");
-            InjectionResult result = await Task.Run(() => _injector.InjectIntoProcess(
-                target,
-                enginePath,
-                line => Dispatcher.UIThread.Post(() => AppendActivity(line))));
+            // Re-open the process by PID inside the task. The caller's Process
+            // array is disposed at the end of the same session tick, which races
+            // this async injection: Dispose() resets the cached PID, so reading
+            // target.Id/.ProcessName inside InjectIntoProcess threw
+            // InvalidOperationException — and since the PID was already in
+            // _autoInjectAttemptedPids it was never retried (auto-inject was
+            // broken-to-flaky since the 0cb8f76 dispose fix).
+            InjectionResult result = await Task.Run(() =>
+            {
+                using Process target = Process.GetProcessById(pid);
+                return _injector.InjectIntoProcess(
+                    target,
+                    enginePath,
+                    line => Dispatcher.UIThread.Post(() => AppendActivity(line)));
+            });
 
             await Dispatcher.UIThread.InvokeAsync(() =>
             {

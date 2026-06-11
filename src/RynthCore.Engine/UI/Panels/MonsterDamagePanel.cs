@@ -258,7 +258,7 @@ internal static class MonsterDamagePanel
             }
             _filterBtn.Content = "Weapon: " + Trunc(_filterName, 22) + " ▾";
             // Force a structural rebuild for the new filter.
-            _displayedKeys = new List<string> { " force" };
+            _displayedKeys = new List<string> { "\0force" };
             Reconcile();
         }
 

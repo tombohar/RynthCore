@@ -645,7 +645,7 @@ public sealed class EngineInjectionService
                 return false;
             }
 
-            if (!targetProcess.Responding)
+            if (!IsWindowResponding(targetProcess.MainWindowHandle))
             {
                 status = "Auto-inject wait: waiting for the AC window to respond.";
                 return false;
@@ -665,6 +665,23 @@ public sealed class EngineInjectionService
             status = $"Auto-inject wait: readiness probe failed ({ex.Message}).";
             return false;
         }
+    }
+
+    // Bounded replacement for Process.Responding, which is
+    // SendMessageTimeout(WM_NULL, ..., SMTO_ABORTIFHUNG, 5000) under the hood —
+    // up to a 5s stall per probe on a busy-but-not-yet-ghosted client. Callers
+    // poll readiness on the launcher UI thread every 2s per client, so that 5s
+    // window can wedge the whole launcher behind one slow AC client. 250ms
+    // bounds it; a client that can't answer WM_NULL in 250ms isn't ready yet.
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out IntPtr result);
+
+    private static bool IsWindowResponding(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return false;
+        return SendMessageTimeoutW(hwnd, 0 /* WM_NULL */, IntPtr.Zero, IntPtr.Zero, SMTO_ABORTIFHUNG, 250, out _) != IntPtr.Zero;
     }
 
     private static uint GetExportRva(string dllPath, string exportName)

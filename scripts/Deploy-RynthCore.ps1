@@ -75,6 +75,14 @@ $pluginProjects = @(
         Publish    = Join-Path $PluginsDestination "RynthJuice"
         DllName    = "RynthCore.Plugin.RynthJuice.dll"
         DestSubdir = "RynthJuice"
+    },
+    # RynthNav also publishes straight to its deploy home via <PublishDir>.
+    # It was missing from this list entirely, so full deploys never refreshed it.
+    @{
+        Project    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthNav\RynthCore.Plugin.RynthNav.csproj"
+        Publish    = Join-Path $PluginsDestination "RynthNav"
+        DllName    = "RynthCore.Plugin.RynthNav.dll"
+        DestSubdir = "RynthNav"
     }
 )
 
@@ -114,14 +122,17 @@ if (-not $SkipPatternCheck) {
         }
     }
 
+    # Fail CLOSED: a gate that silently downgrades to a warning when python /
+    # the script / the binary is missing is no gate at all — the explicit
+    # bypass is -SkipPatternCheck.
     if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-        Write-Warning "Pattern gate SKIPPED: 'python' is not on PATH. Install Python, or pass -SkipPatternCheck to silence."
+        throw "Pattern gate cannot run: 'python' is not on PATH. Install Python, or pass -SkipPatternCheck to bypass deliberately."
     }
     elseif (-not (Test-Path -LiteralPath $checkScript)) {
-        Write-Warning "Pattern gate SKIPPED: $checkScript not found."
+        throw "Pattern gate cannot run: $checkScript not found. Pass -SkipPatternCheck to bypass deliberately."
     }
     elseif ([string]::IsNullOrWhiteSpace($acClientPath) -or -not (Test-Path -LiteralPath $acClientPath)) {
-        Write-Warning "Pattern gate SKIPPED: no acclient.exe found (tried '$Destination\AcClient' and 'C:\Turbine\Asheron''s Call'). Pass -AcClient <path> to enforce."
+        throw "Pattern gate cannot run: no acclient.exe found (tried '$Destination\AcClient' and 'C:\Turbine\Asheron''s Call'). Pass -AcClient <path>, or -SkipPatternCheck to bypass deliberately."
     }
     else {
         Write-Host "Pattern gate: verifying engine signatures against $acClientPath ..."
@@ -133,18 +144,32 @@ if (-not $SkipPatternCheck) {
     }
 }
 
+function Invoke-Publish {
+    param(
+        [Parameter(Mandatory = $true)][string]$What,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    dotnet @Arguments
+    # PS 5.1's $ErrorActionPreference=Stop does NOT throw on a native exe's
+    # nonzero exit — without this check a failed publish silently deployed the
+    # PREVIOUS publish output (the root staleness trap).
+    if ($LASTEXITCODE -ne 0) {
+        throw "dotnet publish FAILED for $What (exit $LASTEXITCODE) - aborting deploy so stale output cannot ship."
+    }
+}
+
 if (-not $SkipPublish) {
     $env:DOTNET_CLI_HOME = Join-Path $repoRoot ".dotnet-home-deploy-clean"
     $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
 
     if (-not $SkipLauncher) {
         # --self-contained false is required: omitting it with the launcher's IncludeNativeLibrariesForSelfExtract=true produces a broken half-payload (apphost + coreclr.dll, no framework) that reports ".NET is not installed".
-        dotnet publish $launcherProject -c Release -r win-x86 --self-contained false
+        Invoke-Publish -What "launcher" -Arguments @('publish', $launcherProject, '-c', 'Release', '-r', 'win-x86', '--self-contained', 'false')
     }
-    dotnet publish $engineProject -c Release
-    dotnet publish $loaderProject -c Release
+    Invoke-Publish -What "engine" -Arguments @('publish', $engineProject, '-c', 'Release')
+    Invoke-Publish -What "loader" -Arguments @('publish', $loaderProject, '-c', 'Release')
     foreach ($plugin in $pluginProjects) {
-        dotnet publish $plugin.Project -c Release
+        Invoke-Publish -What $plugin.DllName -Arguments @('publish', $plugin.Project, '-c', 'Release')
     }
 }
 
@@ -183,6 +208,24 @@ if (-not $SkipLauncher) {
 }
 
 if (Test-Path -LiteralPath $runtimeDir) {
+    # Lock pre-flight BEFORE the destructive wipe. A running client holds
+    # Runtime\RynthCore.Loader.dll (loaded UNshadowed into acclient.exe) and
+    # its .engine_loads shadow DLLs; the old behavior wiped Runtime\ first and
+    # then died on the locked file, leaving a half-destroyed deploy. Probe
+    # every file for an exclusive open and abort cleanly while the old deploy
+    # is still intact.
+    $locked = @()
+    foreach ($f in Get-ChildItem -LiteralPath $runtimeDir -Recurse -File) {
+        try {
+            $s = [System.IO.File]::Open($f.FullName, 'Open', 'ReadWrite', 'None')
+            $s.Close()
+        } catch {
+            $locked += $f.FullName
+        }
+    }
+    if ($locked.Count -gt 0) {
+        throw ("Deploy aborted BEFORE wiping Runtime\ - $($locked.Count) file(s) are locked by running processes (close all AC clients and the launcher, then retry):`n  " + ($locked -join "`n  "))
+    }
     Remove-Item -LiteralPath $runtimeDir -Recurse -Force
 }
 
@@ -206,12 +249,23 @@ Copy-Item -LiteralPath (Join-Path $loaderPublish "RynthCore.Loader.dll") -Destin
 # around dangerous AC API calls so object-teardown AVs are caught instead of
 # crashing acclient.exe. Built by native\SehTrampoline\Build-SehTrampoline.ps1.
 $sehTrampolineSrc = Join-Path $repoRoot "native\SehTrampoline\bin\RynthCore.SehTrampoline.dll"
-if (Test-Path -LiteralPath $sehTrampolineSrc) {
-    Copy-Item -LiteralPath $sehTrampolineSrc -Destination (Join-Path $runtimeDir "RynthCore.SehTrampoline.dll") -Force
-    Write-Host "SEH trampoline deployed to $runtimeDir"
-} else {
-    Write-Warning "RynthCore.SehTrampoline.dll not found at $sehTrampolineSrc - build it with native\SehTrampoline\Build-SehTrampoline.ps1"
+$sehTrampolineC   = Join-Path $repoRoot "native\SehTrampoline\SehTrampoline.c"
+if (-not (Test-Path -LiteralPath $sehTrampolineSrc)) {
+    # Fail closed: the trampoline is load-bearing (SEH-guarded AC reads) and a
+    # missing DLL silently shipped an engine whose guarded calls all throw.
+    throw "RynthCore.SehTrampoline.dll not found at $sehTrampolineSrc - build it with native\SehTrampoline\Build-SehTrampoline.ps1, then re-run deploy."
 }
+if (Test-Path -LiteralPath $sehTrampolineC) {
+    # The trampoline is hand-built (cl.exe), not part of dotnet publish — a
+    # newer .c than the built DLL means the binary about to ship is stale.
+    $srcTime = (Get-Item -LiteralPath $sehTrampolineC).LastWriteTime
+    $dllTime = (Get-Item -LiteralPath $sehTrampolineSrc).LastWriteTime
+    if ($srcTime -gt $dllTime) {
+        throw "RynthCore.SehTrampoline.dll is STALE (SehTrampoline.c edited $srcTime > DLL built $dllTime). Rebuild with native\SehTrampoline\Build-SehTrampoline.ps1, then re-run deploy."
+    }
+}
+Copy-Item -LiteralPath $sehTrampolineSrc -Destination (Join-Path $runtimeDir "RynthCore.SehTrampoline.dll") -Force
+Write-Host "SEH trampoline deployed to $runtimeDir"
 
 if (-not $SkipLauncher) {
     Copy-Item -LiteralPath (Join-Path $launcherPublish "RynthCore.App.Avalonia.exe") -Destination (Join-Path $Destination "RynthCore.exe") -Force
@@ -242,7 +296,10 @@ foreach ($plugin in $pluginProjects) {
     }
 }
 
-Get-ChildItem -Path $Destination -Recurse -Filter *.pdb -File | Remove-Item -Force
+# Scoped pdb sweep: root + Runtime\ only. A $Destination-wide recurse walked
+# the ~1.4 GB private AcClient copy on every deploy for nothing.
+Get-ChildItem -Path $Destination -Filter *.pdb -File | Remove-Item -Force
+Get-ChildItem -Path $runtimeDir -Recurse -Filter *.pdb -File | Remove-Item -Force
 
 if (-not $SkipLauncher) {
     Write-Host "Launcher deployed to $Destination"

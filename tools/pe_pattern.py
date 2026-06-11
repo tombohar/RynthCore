@@ -345,8 +345,22 @@ def parse_engine_patterns():
             add('fn', m.group(1), m.group(2), resolve_va(m.group(3)), 0, fn)
     return items
 
+# Fail CLOSED: if the source-parsing regexes in parse_engine_patterns() ever
+# stop matching after an engine refactor (renamed Resolve, reordered args,
+# new pattern syntax), items silently shrinks toward 0 and CHECK would print
+# "PASS - all 0 embedded patterns" with exit 0 - a green gate verifying
+# nothing. As of 2026-06-11 the engine embeds 120 patterns; a parse count
+# below this floor means the PARSER broke, not that patterns were removed.
+# Raise/lower deliberately when the real pattern count changes.
+CHECK_MIN_PATTERNS = 100
+
 def process_check(text_b, text_base):
     items = parse_engine_patterns()
+    if len(items) < CHECK_MIN_PATTERNS:
+        print(f"FAIL - only {len(items)} embedded patterns parsed from the engine source "
+              f"(floor: {CHECK_MIN_PATTERNS}). The CHECK parser has likely drifted from the "
+              f"engine's Resolve-site syntax - fix parse_engine_patterns() before trusting this gate.")
+        return 1
     print(f"Verifying {len(items)} embedded engine patterns against this acclient.exe...\n")
     fails = 0
     for it in sorted(items, key=lambda i: (i['file'], i['name'])):
