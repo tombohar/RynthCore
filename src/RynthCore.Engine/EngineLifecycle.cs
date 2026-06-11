@@ -106,6 +106,13 @@ internal static class EngineLifecycle
 
         RynthLog.Info("EngineLifecycle: Shutdown beginning.");
 
+        // Stop the hang watchdog BEFORE its beat source (the EndScene detour)
+        // is uninstalled. A still-running old-generation watchdog sees the beat
+        // go silent, declares a false hang ~4s later, suspends AC's healthy main
+        // thread for stack samples, and writes a spurious minidump — all while
+        // the next engine generation is initializing.
+        Step("MainThreadHangWatchdog.Stop", () => MainThreadHangWatchdog.Stop());
+
         Step("EndSceneHook.Uninstall", () => EndSceneHook.Uninstall());
 
         // Give in-flight EndScene calls a chance to drain. AC's render thread
@@ -125,6 +132,12 @@ internal static class EngineLifecycle
         // → AC chat box stops receiving input after a reload). Idempotent —
         // no-ops if Init never ran or the ImGui path already tore it down.
         Step("Win32Backend.Shutdown (input subclass)", () => ImGuiBackend.Win32Backend.Shutdown());
+
+        // Stop the dispatch-file watcher and the auto-ID drain timer before the
+        // tick pump and plugins go away — both otherwise keep firing in the old
+        // generation's (intentionally still-mapped) module across hot-reloads.
+        Step("ChatFileDispatcher.Stop", () => Compatibility.ChatFileDispatcher.Stop());
+        Step("AutoIdService.Stop", () => Compatibility.AutoIdService.Stop());
 
         // Stop the headless tick pump BEFORE plugin shutdown / FreeLibrary.
         // Otherwise the pump's TickAll/ProcessPendingActions can be mid-call

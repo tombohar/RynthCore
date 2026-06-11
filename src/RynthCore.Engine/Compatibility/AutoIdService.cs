@@ -42,6 +42,20 @@ internal static class AutoIdService
     }
 
     /// <summary>
+    /// Dispose the drain timer at engine shutdown so it doesn't keep firing in
+    /// the old generation's (intentionally still-mapped) module across hot-reloads.
+    /// </summary>
+    public static void Stop()
+    {
+        if (!_started)
+            return;
+        _started = false;
+        _drainTimer?.Dispose();
+        _drainTimer = null;
+        RynthLog.Verbose("Compat: AutoIdService stopped.");
+    }
+
+    /// <summary>
     /// Enqueue an object for automatic appraisal. Called from CreateObjectHooks detour.
     /// </summary>
     public static void Enqueue(uint objectId)

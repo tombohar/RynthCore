@@ -88,12 +88,33 @@ internal static class MainThreadHangWatchdog
         Volatile.Write(ref _lastBeatTick, Environment.TickCount64);
     }
 
+    private static Thread? _thread;
+
     internal static void Start()
     {
         if (Interlocked.Exchange(ref _running, 1) != 0) return;
         Volatile.Write(ref _lastBeatTick, Environment.TickCount64);
-        new Thread(Loop) { Name = "RynthCore.MainThreadHangWatchdog", IsBackground = true }.Start();
+        _thread = new Thread(Loop) { Name = "RynthCore.MainThreadHangWatchdog", IsBackground = true };
+        _thread.Start();
         RynthLog.Info($"MainThreadHangWatchdog: armed (threshold={HangThresholdMs}ms).");
+    }
+
+    /// <summary>
+    /// Stop the watchdog thread. Must run during EngineLifecycle.Shutdown: once
+    /// the EndScene detour is uninstalled the beat goes silent, and a still-running
+    /// old-generation watchdog declares a false hang within 4s of every hot-reload —
+    /// suspending AC's healthy main thread and writing a spurious minidump while
+    /// the next engine generation is initializing.
+    /// </summary>
+    internal static void Stop()
+    {
+        if (Interlocked.Exchange(ref _running, 0) == 0) return;
+        var t = _thread;
+        _thread = null;
+        if (t != null && !t.Join(1500))
+            RynthLog.Warn("MainThreadHangWatchdog: thread did not exit within 1500ms — continuing shutdown.");
+        else
+            RynthLog.Info("MainThreadHangWatchdog: stopped.");
     }
 
     private static void Loop()

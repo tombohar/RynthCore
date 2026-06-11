@@ -18,6 +18,7 @@ internal static unsafe class Win32Backend
 {
     // ─── Win32 messages ───────────────────────────────────────────────
     private const uint WM_MOUSEMOVE = 0x0200;
+    private const uint WM_NCMOUSEMOVE = 0x00A0;
     private const uint WM_SETFOCUS = 0x0007;
     private const uint WM_KILLFOCUS = 0x0008;
     private const uint WM_ACTIVATE    = 0x0006;
@@ -575,6 +576,37 @@ internal static unsafe class Win32Backend
                 { Name = "RynthCore.WmCloseShutdown", IsBackground = true }.Start();
                 // Fall through to AC's original WndProc so AC starts its own
                 // shutdown sequence in parallel with ours.
+            }
+
+            // ── Once close is in flight, stop feeding mouse/cursor input to AC ──
+            // After WM_CLOSE, AC tears down its world — including the combat-system
+            // singleton. AC's ClientUISystem::UpdateCursorState (acclient 0x005653D0)
+            // runs on every mouse-move / cursor refresh and dereferences
+            // GetCombatSystem()->[+0x1C]; once the singleton is freed that's an AV at
+            // acclient 0x0056547B reading [null+0x1C]. The user is actively moving the
+            // mouse toward the close control, so a trailing WM_MOUSEMOVE / WM_SETCURSOR
+            // lands right after the free. THIS subclass is the one installed on the
+            // game window (AvaloniaSubclassWndProc carries a matching block, but it is
+            // installed on the off-screen Avalonia HWND and never sees AC's mouse
+            // traffic). WM_CLOSE / WM_DESTROY / paint still fall through so the window
+            // closes normally.
+            if (Volatile.Read(ref _wmCloseSeen) != 0)
+            {
+                switch (msg)
+                {
+                    case WM_MOUSEMOVE:
+                    case WM_NCMOUSEMOVE:
+                    case WM_MOUSEWHEEL:
+                    case WM_LBUTTONDOWN:
+                    case WM_LBUTTONUP:
+                    case WM_RBUTTONDOWN:
+                    case WM_RBUTTONUP:
+                    case WM_MBUTTONDOWN:
+                    case WM_MBUTTONUP:
+                        return IntPtr.Zero;
+                    case WM_SETCURSOR:
+                        return (IntPtr)1; // handled — halt AC's cursor-update chain
+                }
             }
 
             // ── Chat capture: consume all key input for the chat TextBox ────

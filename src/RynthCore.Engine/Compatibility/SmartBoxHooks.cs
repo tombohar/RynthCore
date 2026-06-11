@@ -147,14 +147,15 @@ internal static class SmartBoxHooks
         return status;
     }
 
-    // UIQueueManager::ProcessNetBlobData(this, uint* data, int end). thiscall:
-    // `this` in ECX (thisPtr), then the two stack args (data, end). The inner
-    // GameEvent type is *data; the event payload follows at data+4; `end` is the
-    // one-past-the-last data pointer (len = end - data). NOTE: this is a DIFFERENT
-    // function/shape than DispatchSmartBoxEvent — must keep the 2nd stack arg or
-    // the thiscall callee-cleanup imbalances the stack and crashes AC.
+    // UIQueueManager::ProcessNetBlobData(this, uint* data, int size). thiscall:
+    // `this` in ECX (thisPtr), then the two stack args (data, size). The inner
+    // GameEvent type is *data; the event payload follows at data+4. `size` is the
+    // payload byte LENGTH — verified against the live binary: the hooked fn's
+    // prologue computes its own bound as `lea esi,[data+size]`. NOTE: this is a
+    // DIFFERENT function/shape than DispatchSmartBoxEvent — must keep the 2nd
+    // stack arg or the thiscall callee-cleanup imbalances the stack and crashes AC.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvThiscall) })]
-    private static unsafe uint DispatchGameEventDetour(IntPtr thisPtr, IntPtr data, int end)
+    private static unsafe uint DispatchGameEventDetour(IntPtr thisPtr, IntPtr data, int size)
     {
         MainThreadGuard.RecordIfFirst();
         // Engine-side BusyCount watchdog: fires on every inbound game event
@@ -165,17 +166,19 @@ internal static class SmartBoxHooks
 
         try
         {
-            if (data != IntPtr.Zero)
+            // Reject undersized payloads instead of clamping up: an inflated
+            // bound would let parsers read past the real payload (uncatchable
+            // NativeAOT AV on a page boundary).
+            if (data != IntPtr.Zero && size >= 4)
             {
                 uint eventType = unchecked((uint)Marshal.ReadInt32(data));
-                int len = end - data.ToInt32();
-                if (len < 4 || len > 0x4000) len = 0x4000; // sanity clamp; real reads are small + bounded
+                int len = size > 0x4000 ? 0x4000 : size;
                 ParseGameEvent(eventType, data, (uint)len);
             }
         }
         catch { }
 
-        return pOriginal(thisPtr, data, end);
+        return pOriginal(thisPtr, data, size);
     }
 
     private static int _geEventLogCount;

@@ -894,6 +894,8 @@ internal delegate IntPtr GetObjectStringPropertyCallbackDelegate(uint objectId, 
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int GetObjectWielderInfoCallbackDelegate(uint objectId, uint* wielderID, uint* location);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int GetContainerContentsCallbackDelegate(uint containerId, uint* itemIds, int maxCount);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
