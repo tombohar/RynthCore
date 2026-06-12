@@ -737,7 +737,12 @@ public static class EntryPoint
                         RynthLog.Info("InitWorker: RynthAi panel skipped — DLL not in engine.json PluginPaths.");
 
                     if (HasPluginDll("RynthCore.Plugin.RynthChat.dll"))
+                    {
                         OverlayHost.RegisterPanel("Chat", RynthChatPanel.Create);
+                        // Regex filter-rule editor — its own panel (opened from
+                        // the chat panel's Filters button or the bar).
+                        OverlayHost.RegisterPanel("ChatFilters", RynthChatFiltersPanel.Create);
+                    }
                     else
                         RynthLog.Info("InitWorker: RynthChat panel skipped — DLL not in engine.json PluginPaths.");
 

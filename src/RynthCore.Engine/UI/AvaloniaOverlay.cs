@@ -4373,6 +4373,40 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
             }
         }
 
+        // --- Chat scrollback line-selection for the popped-out Chat panel ---
+        // Same off-bounds rationale as Button/Slider/ScrollBar: pointer events
+        // never reach the chat ScrollViewer while floating, so drag-to-select
+        // would be dead. Forward raw DOWN/MOVE/UP in PanelBorder-logical
+        // coordinates to RynthChatPanel, which does its own layout-bounds
+        // translation + line hit-test and copies on release. DOWN only claims
+        // the message when it actually lands on a chat line (so tab buttons,
+        // search box, scrollbar etc. above keep their existing dispatch).
+        if (string.Equals(Title, "Chat", StringComparison.OrdinalIgnoreCase))
+        {
+            const uint WM_MOUSEMOVE_CH = 0x0200;
+            const uint WM_LBUTTONUP_CH = 0x0202;
+            float chScale = AvaloniaOverlay.InputScale > 0 ? AvaloniaOverlay.InputScale : 1f;
+            var chPt = new Point(layeredClientX / chScale, layeredClientY / chScale);
+            if (msg == WM_LBUTTONDOWN)
+            {
+                bool claimed = false;
+                try { claimed = Panels.RynthChatPanel.FloatingSelectionDown(PanelBorder, chPt); }
+                catch (Exception ex) { RynthLog.Info($"FloatingPanelHost({Title}): chat selection down threw {ex.GetType().Name}: {ex.Message}"); }
+                if (claimed) return;
+            }
+            else if (Panels.RynthChatPanel.FloatingSelectionActive &&
+                     (msg == WM_MOUSEMOVE_CH || msg == WM_LBUTTONUP_CH))
+            {
+                try
+                {
+                    if (msg == WM_MOUSEMOVE_CH) Panels.RynthChatPanel.FloatingSelectionMove(PanelBorder, chPt);
+                    else                        Panels.RynthChatPanel.FloatingSelectionUp(PanelBorder, chPt);
+                }
+                catch (Exception ex) { RynthLog.Info($"FloatingPanelHost({Title}): chat selection move/up threw {ex.GetType().Name}: {ex.Message}"); }
+                return;
+            }
+        }
+
         // Translate from layered-client (physical px) to Avalonia-client
         // (also physical px). The panel Border is parked at canvas LOGICAL
         // coord (OffBoundsCanvasX, OffBoundsCanvasY); multiply by inputScale
