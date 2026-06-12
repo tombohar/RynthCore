@@ -292,6 +292,18 @@ internal static class AcMainThreadQueue
     private static uint _castSpellId;
     private static readonly object _castLock = new();
 
+    // Ticks DrainCasts has deferred the pending cast because a motion gesture was
+    // still in flight. Bounded so a stuck gesture (the documented wand-wield wedge
+    // variant) can't park a cast forever: past the cap the cast is DROPPED — the
+    // plugin's no-chat-resolve machinery already retries casts that produce no
+    // chat, so a drop degrades to one retry cycle, never a wedge.
+    private static int _castDeferTicks;
+    private static long _castDeferDrops;
+    private const int CastDeferTickCap = 250;   // ~4-8 s at the 30-63 Hz UseTime rate
+
+    /// <summary>Casts dropped after deferring CastDeferTickCap ticks (stuck gesture).</summary>
+    public static long CastDeferDropCount => Interlocked.Read(ref _castDeferDrops);
+
     // Pump-thread enqueue. Returns false (caller retries next tick) if a cast is
     // already pending.
     public static bool EnqueueCast(uint targetId, uint spellId)
@@ -313,6 +325,33 @@ internal static class AcMainThreadQueue
     {
         if (_disarmed) return;                               // engine teardown in progress
         if (Volatile.Read(ref _castPending) == 0) return;   // alloc-free fast path
+
+        // ── Anim-walk race guard (dump-proven 2026-06-12) ────────────────────
+        // DrainCasts runs PRE-tick (selection timing), but a cast initiates a
+        // wind-up gesture that REPLACES the player's pending CSequence motions —
+        // and the SAME UseTime call then walks that sequence. If a gesture is
+        // already mid-flight when we inject, the walker can hit a freed/null
+        // node: AV at acclient 0x00526840 AnimSequenceNode::get_part_frame
+        // [null+0xC], full stack in CrashDumps\acclient_anim_av_4716.dmp
+        // (7.6 h overnight soak, crash INSIDE _originalUseTime, our detour on
+        // the stack below it). Same mechanism the post-tick reorder fixed for
+        // UseObject/movement — casts were exempted and carried the residue.
+        // Defer while the pending-motion list is non-empty (the exact structure
+        // the tick walks); main-thread read, alloc-free, fail-open: if the read
+        // itself fails we cast (pre-fix behavior) rather than park.
+        if (PlayerPhysicsHooks.TryGetCastGestureInProgress(out bool gestureInFlight) && gestureInFlight)
+        {
+            if (++_castDeferTicks <= CastDeferTickCap)
+                return;                                      // retry next tick
+            // Gesture stuck past the cap — drop the cast instead of injecting
+            // into a wedged motion graph; the plugin retries via no-chat-resolve.
+            lock (_castLock) { _castPending = 0; }
+            _castDeferTicks = 0;
+            Interlocked.Increment(ref _castDeferDrops);
+            return;
+        }
+        _castDeferTicks = 0;
+
         uint target, spell;
         lock (_castLock)
         {
