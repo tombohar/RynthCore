@@ -30,6 +30,18 @@ internal sealed class AppSettings
     /// Decal-mode clients are skipped (no engine = no IsLoggedIn signal).
     public bool KillStuckClients { get; set; }
     public int StuckClientTimeoutSeconds { get; set; } = 60;
+
+    /// When true (default), the launcher kills+relaunches a RynthCore-mode
+    /// client whose per-PID heartbeat shows the WEDGE signature: login=1 and
+    /// fps=0 sustained for <see cref="WedgeRestartSeconds"/> while the engine
+    /// heartbeat keeps flowing (AC main thread dead, process alive — the AV
+    /// class). Containment for the residual corruption AVs: an overnight soak
+    /// loses ~2 minutes to a wedge instead of the rest of the night.
+    /// Minimized windows are exempt (some drivers stop presenting). Relaunch
+    /// rides the existing crash-relaunch machinery (counts toward the
+    /// circuit breaker) and needs AutoLaunch for the relaunch half.
+    public bool AutoRestartWedgedClients { get; set; } = true;
+    public int WedgeRestartSeconds { get; set; } = 90;
     public List<string> EnabledPluginIds { get; set; } = [];
     public List<string> PluginDllPaths { get; set; } = [];
 

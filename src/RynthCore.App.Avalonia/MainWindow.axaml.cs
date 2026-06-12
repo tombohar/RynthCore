@@ -1929,6 +1929,7 @@ internal partial class MainWindow : Window
         MaybeQueueAutoLaunch(activeContexts, activeSessions);
         MaybeAutoInjectExternalClients(targets, activePids, activeContexts, activeSessions);
         MaybeKillStuckClients(targets, activeContexts, activeSessions);
+        MaybeRestartWedgedClients(targets, activeContexts, activeSessions);
 
         // Dispose this tick's Process handles. FindTargetProcesses() allocates fresh
         // System.Diagnostics.Process objects (each holds a native OS handle); on the 2s
@@ -2066,6 +2067,149 @@ internal partial class MainWindow : Window
             {
                 AppendActivity($"Failed to kill stuck PID {pid}: {ex.Message}");
             }
+        }
+    }
+
+    // ── Wedge auto-restart ─────────────────────────────────────────────────
+    // The residual AV class wedges AC's main thread while the engine lives on:
+    // the per-PID heartbeat keeps flowing with the signature login=1 + fps=0.
+    // Detect that from the log tail and kill the client; the existing
+    // crash-relaunch machinery (RecordCrash + AutoLaunch) brings it back.
+    // Containment, not cure: an overnight soak loses ~2 minutes to a wedge
+    // instead of the rest of the night.
+    private readonly Dictionary<int, DateTime> _wedgeZeroFpsSinceUtc = new();
+    private static readonly System.Text.RegularExpressions.Regex WedgeHbRegex =
+        new(@"hb #\d+ .*?fps=(\d+) .*?login=(\d)", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    private void MaybeRestartWedgedClients(
+        Process[] targets,
+        IReadOnlyDictionary<int, LaunchContextRecord> activeContexts,
+        IReadOnlyDictionary<int, SessionStateRecord> activeSessions)
+    {
+        if (!_settings.AutoRestartWedgedClients)
+            return;
+
+        DateTime nowUtc = DateTime.UtcNow;
+        // Drop bookkeeping for exited PIDs so a recycled PID starts fresh.
+        foreach (int stale in _wedgeZeroFpsSinceUtc.Keys.ToList())
+            if (!targets.Any(p => { try { return p.Id == stale; } catch { return false; } }))
+                _wedgeZeroFpsSinceUtc.Remove(stale);
+
+        foreach (Process process in targets)
+        {
+            int pid;
+            try { pid = process.Id; } catch { continue; }
+
+            // Scope: only clients we launched that reached in-world at least
+            // once (pre-login problems belong to the stuck-client reaper).
+            if (!_launchedSessionPids.Contains(pid) || !_everLoggedInPids.Contains(pid))
+                continue;
+
+            // Minimized windows are exempt — some drivers stop presenting when
+            // iconic, which would read as fps=0 on a healthy client.
+            try
+            {
+                IntPtr hwnd = process.MainWindowHandle;
+                if (hwnd != IntPtr.Zero && IsIconic(hwnd))
+                {
+                    _wedgeZeroFpsSinceUtc.Remove(pid);
+                    continue;
+                }
+            }
+            catch { continue; }
+
+            // Tail the per-PID log for the last heartbeat line. Cheap: seek to
+            // the end, read ~2KB, FileShare-tolerant of the engine's writer.
+            string logPath = System.IO.Path.Combine(@"C:\Games\RynthCore\Logs", $"RynthCore.{pid}.log");
+            string tail;
+            try
+            {
+                var fi = new FileInfo(logPath);
+                if (!fi.Exists) { _wedgeZeroFpsSinceUtc.Remove(pid); continue; }
+                // Heartbeat itself dead >120s while the process lives and the
+                // char was in-world = the engine died inside the client. Treat
+                // as wedged too (same containment applies).
+                bool hbStale = (DateTime.Now - fi.LastWriteTime).TotalSeconds > 120;
+
+                using var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                long want = Math.Min(2048, fs.Length);
+                fs.Seek(-want, SeekOrigin.End);
+                byte[] buf = new byte[want];
+                int read = fs.Read(buf, 0, (int)want);
+                tail = System.Text.Encoding.UTF8.GetString(buf, 0, read);
+
+                if (hbStale)
+                {
+                    KillWedgedClient(process, pid, activeContexts, activeSessions,
+                        $"engine heartbeat silent for >120s while process alive");
+                    continue;
+                }
+            }
+            catch { continue; }
+
+            var matches = WedgeHbRegex.Matches(tail);
+            if (matches.Count == 0) continue;
+            var last = matches[matches.Count - 1];
+            bool fpsZero = last.Groups[1].Value == "0";
+            bool inWorld = last.Groups[2].Value == "1";
+
+            if (!inWorld || !fpsZero)
+            {
+                _wedgeZeroFpsSinceUtc.Remove(pid);
+                continue;
+            }
+
+            if (!_wedgeZeroFpsSinceUtc.TryGetValue(pid, out DateTime since))
+            {
+                _wedgeZeroFpsSinceUtc[pid] = nowUtc;
+                continue;
+            }
+
+            int holdSec = Math.Max(30, _settings.WedgeRestartSeconds);
+            if ((nowUtc - since).TotalSeconds < holdSec)
+                continue;
+
+            KillWedgedClient(process, pid, activeContexts, activeSessions,
+                $"fps=0 with login=1 for >{holdSec}s (heartbeat alive — AC main thread wedged)");
+        }
+    }
+
+    private void KillWedgedClient(
+        Process process, int pid,
+        IReadOnlyDictionary<int, LaunchContextRecord> activeContexts,
+        IReadOnlyDictionary<int, SessionStateRecord> activeSessions,
+        string reason)
+    {
+        _wedgeZeroFpsSinceUtc.Remove(pid);
+
+        activeSessions.TryGetValue(pid, out SessionStateRecord? sess);
+        string? accountName = sess?.AccountName
+                              ?? (activeContexts.TryGetValue(pid, out LaunchContextRecord? ctx) ? ctx.AccountName : null);
+
+        try
+        {
+            AppendActivity($"Wedge restart: killing PID {pid} ({accountName ?? "?"}) — {reason}."
+                + (_settings.AutoLaunch ? " Auto-launch will relaunch it." : " AutoLaunch is OFF — enable it for automatic relaunch."));
+            LauncherDiag.Info($"WEDGE: PID {pid} ({accountName ?? "?"}) killed — {reason}");
+            process.Kill();
+            _launchedSessionPids.Remove(pid);
+            _launchedPidInfo.Remove(pid);
+
+            // Count it as a crash so the relaunch circuit breaker sees a
+            // repeatedly-wedging account and stops the loop.
+            if (!string.IsNullOrWhiteSpace(accountName))
+            {
+                string key = BuildAccountKey(accountName);
+                if (!string.IsNullOrEmpty(key))
+                    RecordCrash(key);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendActivity($"Wedge restart: failed to kill PID {pid}: {ex.Message}");
         }
     }
 
