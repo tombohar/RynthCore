@@ -58,6 +58,15 @@ internal static class AcMainThreadQueue
         MoveItemInternal,
         SplitStackInternal,
         MergeStackInternal,
+        // CommandInterpreter movement marshalled 2026-06-12: SetAutoRun /
+        // TurnToHeading / StopCompletely were the last direct off-thread AC
+        // mutators (dump-proven: a SetAutoRun executed 15s after a main thread
+        // had wedged) — they rewrite the locomotion channels of the SAME
+        // CommandInterpreter/motion graph the CSequence-AV class corrupts.
+        SetAutoRun,
+        TurnToHeading,
+        StopCompletely,
+        SetMotion,
     }
 
     // Four payload slots cover every routed action (the 4th was added for
@@ -126,6 +135,18 @@ internal static class AcMainThreadQueue
     public static bool EnqueueStopMovement(uint motion, int holdKey) =>
         Enqueue(ActionKind.StopMovement, motion, unchecked((uint)holdKey), 0);
 
+    public static bool EnqueueSetAutoRun(bool enabled) =>
+        Enqueue(ActionKind.SetAutoRun, enabled ? 1u : 0u, 0, 0);
+
+    public static bool EnqueueTurnToHeading(float headingDegrees) =>
+        Enqueue(ActionKind.TurnToHeading, BitConverter.SingleToUInt32Bits(headingDegrees), 0, 0);
+
+    public static bool EnqueueStopCompletely() =>
+        Enqueue(ActionKind.StopCompletely, 0, 0, 0);
+
+    public static bool EnqueueSetMotion(uint motion, bool enabled) =>
+        Enqueue(ActionKind.SetMotion, motion, enabled ? 1u : 0u, 0);
+
     public static bool EnqueueJump(float extent) =>
         Enqueue(ActionKind.Jump, BitConverter.SingleToUInt32Bits(extent), 0, 0);
 
@@ -165,11 +186,37 @@ internal static class AcMainThreadQueue
     // Single-consumer drain on AC's main thread (EngineFrameController.OnEndScene).
     // Re-invokes the public action methods; on the main thread they execute the
     // real AC call directly (their IsOnMainThread gate is satisfied here).
+    // Gesture-phase defer state for the action ring (mirrors the cast slot's
+    // 56e6946 guard; see DrainDeferTickCap note below for why we PROCEED
+    // rather than drop after the cap).
+    private static int _drainDeferTicks;
+    private const int DrainDeferTickCap = 250;
+
     public static void Drain()
     {
         if (_disarmed) return;
         int head = _head;                       // only the main thread writes _head
         int tail = Volatile.Read(ref _tail);
+
+        // ── Gesture-phase serialization (extends the 56e6946 anim-walk guard
+        // to the whole ring) ─────────────────────────────────────────────────
+        // Every ring action perturbs AC's action/motion state to some degree:
+        // UseObject starts a reach gesture, ChangeCombatMode rebuilds the
+        // motion graph, movement rewrites locomotion channels. Retail AC
+        // serializes these against the IN-FLIGHT gesture via its action queue;
+        // we previously serialized thread + tick-phase but not gesture-phase.
+        // Defer the drain while the pending-motion list [CMI+0x80] is
+        // non-empty — bounded, then PROCEED (unlike the cast slot we never
+        // drop: dropping arbitrary item/movement actions desyncs the bot far
+        // worse than a late injection, and the pre-2026-06-12 behavior was
+        // "always inject" anyway, so proceeding past the cap is never worse).
+        if (head != tail)
+        {
+            if (PlayerPhysicsHooks.TryGetCastGestureInProgress(out bool gestureInFlight) && gestureInFlight
+                && ++_drainDeferTicks <= DrainDeferTickCap)
+                return;
+            _drainDeferTicks = 0;
+        }
         while (head != tail)
         {
             Entry e = _slots[head & Mask];
@@ -220,6 +267,18 @@ internal static class AcMainThreadQueue
                         break;
                     case ActionKind.MergeStackInternal:
                         ClientHelperHooks.MergeStackInternal(e.A, e.B);
+                        break;
+                    case ActionKind.SetAutoRun:
+                        CommandInterpreterHooks.SetAutoRun(e.A != 0);
+                        break;
+                    case ActionKind.TurnToHeading:
+                        CommandInterpreterHooks.TurnToHeading(BitConverter.UInt32BitsToSingle(e.A));
+                        break;
+                    case ActionKind.StopCompletely:
+                        CommandInterpreterHooks.StopCompletely();
+                        break;
+                    case ActionKind.SetMotion:
+                        CommandInterpreterHooks.SetMotion(e.A, e.B != 0);
                         break;
                 }
             }

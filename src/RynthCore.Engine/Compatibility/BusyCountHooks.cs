@@ -95,8 +95,27 @@ internal static class BusyCountHooks
     public static long ForceClearCount => Interlocked.Read(ref _forceClearCount);
     public static long ReconcileCount => Interlocked.Read(ref _reconcileCount);
 
+    // Off-thread force-reset requests latch here and are consumed by
+    // CheckWatchdog on the main thread (post-tick). ≤1 tick latency —
+    // irrelevant for a 2-5s watchdog; coalesces bursts for free.
+    private static int _forceResetRequested;
+
     public static void ForceResetBusyCount(bool clearMotion = false)
     {
+        // ⚠ MAIN THREAD ONLY (2026-06-12 cross-incident forensics, top-ranked
+        // corruption writer): the plugin host API called this raw from the
+        // pump thread 284-471×/session — up to 20 native DecrementBusyCount
+        // calls (each falling through into UpdateCursorState's UI/object-graph
+        // walk) plus a raw m_cBusy write, concurrent with AC's main thread.
+        // Leading suspect for the LFH heap detonation (ntdll+0x87D99, free()
+        // during object teardown, last off-thread clear ≤1s before the AV).
+        // Off-thread callers latch a request consumed post-tick instead.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            Interlocked.Exchange(ref _forceResetRequested, 1);
+            return;
+        }
+
         if (!IsInstalled || _lastThisPtr == IntPtr.Zero)
             return;
         Interlocked.Increment(ref _forceClearCount);
@@ -393,6 +412,11 @@ internal static class BusyCountHooks
             // decrement here means the stuck-field watchdog below (and the
             // plugin-side clears) have nothing left to catch.
             ReconcileCastBusy(now);
+
+            // Consume any off-thread force-reset request (plugin watchdogs):
+            // the actual clear runs HERE, on the main thread.
+            if (Interlocked.Exchange(ref _forceResetRequested, 0) == 1)
+                ForceResetBusyCount();
 
             int realBusy = ReadRealBusy();
             if (realBusy > 0)

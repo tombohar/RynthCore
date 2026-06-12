@@ -133,6 +133,15 @@ internal static class CommandInterpreterHooks
 
     public static bool SetAutoRun(bool enabled)
     {
+        // ⚠ Main thread only (2026-06-12 cross-incident forensics): these
+        // CommandInterpreter calls were the last direct off-thread AC mutators
+        // — dump-proven executing 15s after a main thread had wedged. They
+        // rewrite the locomotion channels of the same CommandInterpreter /
+        // motion graph the CSequence-AV corruption class kills. Off-thread
+        // callers marshal through the action ring (drained post-tick,
+        // gesture-gated) like every other mutator.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueSetAutoRun(enabled);
         int n = System.Threading.Interlocked.Increment(ref _setAutoRunCalls);
         if (!TryBindDelegates())
         {
@@ -158,6 +167,8 @@ internal static class CommandInterpreterHooks
 
     public static bool SetMotion(uint motion, bool enabled)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueSetMotion(motion, enabled); // same off-thread class as SetAutoRun
         if (!TryBindDelegates() || _setMotion == null)
             return false;
 
@@ -174,6 +185,8 @@ internal static class CommandInterpreterHooks
 
     public static bool StopCompletely()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueStopCompletely(); // same off-thread class as SetAutoRun
         if (!TryBindDelegates() || _stopCompletely == null)
             return false;
 
@@ -190,6 +203,8 @@ internal static class CommandInterpreterHooks
 
     public static bool TurnToHeading(float headingDegrees)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueTurnToHeading(headingDegrees); // same off-thread class as SetAutoRun
         int n = System.Threading.Interlocked.Increment(ref _turnToHeadingCalls);
         if (!TryBindDelegates() || _turnToHeading == null)
         {
