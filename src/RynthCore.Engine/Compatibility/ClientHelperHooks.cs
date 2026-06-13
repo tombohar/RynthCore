@@ -253,6 +253,19 @@ internal static class ClientHelperHooks
 
     public static bool SetSelectedObjectId(uint objectId)
     {
+        // Marshal onto AC's main thread. AC's SetSelectedObject (0x0058D110)
+        // rewrites the selection/targeting UIElement subtree; off the pump thread
+        // it raced AC's own main-thread UI walk and corrupted a UIElement ->
+        // the deterministic write-AV at acclient+0x60D1D (UIElement smart-ptr
+        // refcount writeback into read-only .text; native-crash.log captured it
+        // on TWO threads at once during corpse-loot target selection, 2026-06-13).
+        // This was the last AC-mutating helper still calling AC directly off-thread
+        // (every UseObject/MoveItem/cast sibling already marshals). Drain re-invokes
+        // this on the main thread, where the gate is satisfied and it runs directly.
+        // SelectItem() funnels through here, so this one gate covers both.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueSetSelectedObject(objectId);
+
         if (_setSelectedObject == null)
             return false;
 

@@ -67,6 +67,14 @@ internal static class AcMainThreadQueue
         TurnToHeading,
         StopCompletely,
         SetMotion,
+        // SetSelectedObject marshalled 2026-06-13: the host-API SelectItem /
+        // SetSelectedObjectId (looting/targeting) was the LAST AC-mutating helper
+        // still calling AC directly off the pump thread. AC's SetSelectedObject
+        // (0x0058D110) updates the selection/targeting UIElement subtree; run off
+        // the main thread it raced AC's own UI walk -> deterministic corruption AV
+        // at acclient+0x60D1D (UIElement smart-ptr refcount writeback into
+        // read-only .text, 5 captures in native-crash.log, two threads at once).
+        SetSelectedObject,
     }
 
     // Four payload slots cover every routed action (the 4th was added for
@@ -171,6 +179,9 @@ internal static class AcMainThreadQueue
     public static bool EnqueueMergeStackInternal(uint sourceObjectId, uint targetObjectId) =>
         Enqueue(ActionKind.MergeStackInternal, sourceObjectId, targetObjectId, 0);
 
+    public static bool EnqueueSetSelectedObject(uint objectId) =>
+        Enqueue(ActionKind.SetSelectedObject, objectId, 0, 0);
+
     // Latched by EngineLifecycle.Shutdown: once teardown begins, queued plugin
     // actions must NOT keep executing on AC's main thread — the detours stay
     // live until MH_DisableHook(ALL), so without this latch a marshalled
@@ -267,6 +278,11 @@ internal static class AcMainThreadQueue
                         break;
                     case ActionKind.MergeStackInternal:
                         ClientHelperHooks.MergeStackInternal(e.A, e.B);
+                        break;
+                    case ActionKind.SetSelectedObject:
+                        // On the main thread now -> SetSelectedObjectId's gate is
+                        // satisfied and it calls AC's SetSelectedObject directly.
+                        ClientHelperHooks.SetSelectedObjectId(e.A);
                         break;
                     case ActionKind.SetAutoRun:
                         CommandInterpreterHooks.SetAutoRun(e.A != 0);
