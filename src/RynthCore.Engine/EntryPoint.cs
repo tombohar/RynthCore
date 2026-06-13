@@ -602,47 +602,26 @@ public static class EntryPoint
             // viewport platform/renderer. Avalonia floating panels still
             // work because they ride a separate LayeredWindow (GDI), not
             // the D3D9 swap chain.
-            LoginLifecycleHooks.LoginComplete += () =>
+            LoginLifecycleHooks.LoginComplete += RunPostLoginBootstrap;
+
+            // ── Fast-login race guard (first launch, initCount==1) ───────────
+            // AC's SendLoginCompleteNotification can fire DURING the ~9 s
+            // hook-init / plugin-load window above — i.e. BEFORE the line above
+            // subscribed RunPostLoginBootstrap. SignalLoginComplete raises the
+            // event exactly once and does NOT replay for late subscribers, so a
+            // fast login leaves RunPostLoginBootstrap never called: no EndScene
+            // hook, no NormalPluginPump, plugins loaded-but-never-initialized
+            // (macro/raycast/radar all dead — observed live pid 29888 2026-06-13:
+            // login at +9.3 s, this subscription ~0.4 s later). If login already
+            // fired, run the bootstrap now. The initCount>=2 hot-reload path
+            // below handles the analogous "already in-world" case via
+            // MarkAlreadyComplete. RunPostLoginBootstrap is once-guarded so the
+            // event and this direct call can never both execute the body.
+            if (_initCount < 2 && LoginLifecycleHooks.HasObservedLoginComplete)
             {
-                if (DecalDetection.IsDecalLoaded)
-                {
-                    RynthLog.Info(
-                        $"D3D9: Decal coexistence — '{DecalDetection.DetectedModule}' loaded, " +
-                        "skipping EndScene hook and ImGui init. " +
-                        "In-game overlay bars are disabled; Avalonia floating panels still work.");
-                    if (Plugins.EngineSettings.EnablePlugins)
-                        InitPluginsForDecalCoexistence();
-                    else
-                        RynthLog.Info("DecalCoexistence: plugin pump disabled via engine.json (EnablePlugins=false).");
-                    return;
-                }
-
-                if (!Plugins.EngineSettings.EnableD3D9Hook)
-                {
-                    RynthLog.Info("D3D9: Login complete — D3D9Bootstrapper disabled via engine.json (EnableD3D9Hook=false). No EndScene hook will be installed.");
-                    return;
-                }
-                RynthLog.Info("D3D9: Login complete — starting D3D9 bootstrapper.");
-                D3D9Bootstrapper.Start();
-
-                // 2026-05-16: the plugin lifecycle no longer ticks from the
-                // EndScene path. The 2026-05-10 design ran InitPlugins/
-                // ProcessPendingActions/TickAll inline on AC's D3D9 render
-                // thread (the EndScene reverse-P/Invoke); a GC during the
-                // plugin tick on that AC-owned thread fail-fasts NativeAOT's
-                // RhpReversePInvokeAttachOrTrapThread2 (root cause proven from
-                // the 2026-05-16 09:39 dump — see crash memory). The tick now
-                // runs on a dedicated managed pump thread, off the render
-                // thread, mirroring the proven DecalCoexistence pump.
-                //
-                // Still EXACTLY ONE TickAll driver: non-Decal → this normal
-                // pump; Decal → InitPluginsForDecalCoexistence (the Decal
-                // branch above returns before reaching here). Never both.
-                if (Plugins.EngineSettings.EnablePlugins)
-                    StartNormalPluginPump();
-                else
-                    RynthLog.Info("NormalPluginPump: disabled via engine.json (EnablePlugins=false).");
-            };
+                RynthLog.Info("D3D9: LoginComplete already observed before the bootstrap handler subscribed (fast-login race) — starting bootstrapper directly.");
+                RunPostLoginBootstrap();
+            }
 
             RynthLog.Info($"InitWorker: post-init checkpoint, _initCount={_initCount}");
 
@@ -936,6 +915,64 @@ public static class EntryPoint
     /// StopTickPumpAndJoin already tears it down before plugin Shutdown /
     /// FreeLibrary.
     /// </summary>
+    // Once-guard for the post-login D3D9 + plugin-pump bootstrap. The event
+    // subscription and the first-launch fast-login direct call (InitWorker) can
+    // race; first one wins. (D3D9Bootstrapper.Start and StartNormalPluginPump are
+    // each independently idempotent too, but guarding here keeps the body single-run
+    // and the log clean.)
+    private static int _postLoginBootstrapStarted;
+
+    /// <summary>
+    /// Installs the D3D9 EndScene hook and starts the off-render-thread plugin
+    /// pump after AC signals login complete. Invoked from the
+    /// <see cref="LoginLifecycleHooks.LoginComplete"/> event AND directly from
+    /// InitWorker when login already fired before the subscription (fast-login
+    /// race). Once-guarded.
+    /// </summary>
+    private static void RunPostLoginBootstrap()
+    {
+        if (Interlocked.CompareExchange(ref _postLoginBootstrapStarted, 1, 0) != 0)
+            return;
+
+        if (DecalDetection.IsDecalLoaded)
+        {
+            RynthLog.Info(
+                $"D3D9: Decal coexistence — '{DecalDetection.DetectedModule}' loaded, " +
+                "skipping EndScene hook and ImGui init. " +
+                "In-game overlay bars are disabled; Avalonia floating panels still work.");
+            if (Plugins.EngineSettings.EnablePlugins)
+                InitPluginsForDecalCoexistence();
+            else
+                RynthLog.Info("DecalCoexistence: plugin pump disabled via engine.json (EnablePlugins=false).");
+            return;
+        }
+
+        if (!Plugins.EngineSettings.EnableD3D9Hook)
+        {
+            RynthLog.Info("D3D9: Login complete — D3D9Bootstrapper disabled via engine.json (EnableD3D9Hook=false). No EndScene hook will be installed.");
+            return;
+        }
+        RynthLog.Info("D3D9: Login complete — starting D3D9 bootstrapper.");
+        D3D9Bootstrapper.Start();
+
+        // 2026-05-16: the plugin lifecycle no longer ticks from the EndScene
+        // path. The 2026-05-10 design ran InitPlugins/ProcessPendingActions/
+        // TickAll inline on AC's D3D9 render thread (the EndScene reverse-
+        // P/Invoke); a GC during the plugin tick on that AC-owned thread
+        // fail-fasts NativeAOT's RhpReversePInvokeAttachOrTrapThread2 (root
+        // cause proven from the 2026-05-16 09:39 dump — see crash memory). The
+        // tick now runs on a dedicated managed pump thread, off the render
+        // thread, mirroring the proven DecalCoexistence pump.
+        //
+        // Still EXACTLY ONE TickAll driver: non-Decal → this normal pump;
+        // Decal → InitPluginsForDecalCoexistence (the Decal branch above
+        // returns before reaching here). Never both.
+        if (Plugins.EngineSettings.EnablePlugins)
+            StartNormalPluginPump();
+        else
+            RynthLog.Info("NormalPluginPump: disabled via engine.json (EnablePlugins=false).");
+    }
+
     private static void StartNormalPluginPump()
     {
         if (Interlocked.CompareExchange(ref _normalPumpStarted, 1, 0) != 0)
