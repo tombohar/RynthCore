@@ -55,8 +55,14 @@ KNOWN_CRASHES = {
     0x0056547B: "ClientUISystem::UpdateCursorState reading the freed combat "
                 "singleton on a trailing mouse/cursor msg after WM_CLOSE -> "
                 "swallow mouse input once WM_CLOSE seen. [rynthcore_freeze_on_close_fix]",
-    0x00460D1D: "AddTextToScroll AV from buff 'too busy' cast spam -> CastGate. "
-                "[rynthai_cast_gate_design]",
+    0x00460D1D: "UIElement::GetAttribute_Bool (0x460CC0+0x5D) smart-ptr refcount "
+                "writeback into read-only .text: AC's selection/targeting UIElement "
+                "subtree was corrupted by an OFF-THREAD SetSelectedObject (0x58D110) "
+                "racing AC's main-thread UI walk during corpse-loot SelectItem. "
+                "regs eax/dataAddr=0x472175 ecx=0x472171 edi=0xD; often two threads "
+                "faulting at once. FIXED 74f6d8c (main-thread marshal). NOT "
+                "AddTextToScroll / NOT the 'too busy' chat spam -- that was a stale "
+                "misattribution, corrected 2026-06-13. [rynthcore_offthread_av_class]",
 }
 
 
