@@ -10,6 +10,10 @@ on:
         description: 'Version number (e.g. 0.3) — creates tag v<version>'
         required: true
         default: '0.3'
+      rynthsuite_ref:
+        description: 'RynthSuite ref to build against (tag/branch/SHA). Blank = matching version tag, else default branch.'
+        required: false
+        default: ''
   push:
     tags:
       - 'v*'
@@ -31,16 +35,34 @@ jobs:
     - name: Checkout RynthCore
       uses: actions/checkout@v4
 
-    - name: Checkout RynthSuite (sibling of RynthCore)
+    # Pin the sibling to the matching version tag so a tagged release is
+    # REPRODUCIBLE (otherwise it builds against whatever RynthSuite main is at
+    # build time — PluginContractVersion skew is one push away). Falls back to
+    # the default branch (with a CI warning) if the matching tag doesn't exist
+    # yet, e.g. a manual dispatch before RynthSuite is tagged.
+    - name: Checkout RynthSuite (sibling, pinned)
       shell: pwsh
       run: |
         $parent = Split-Path "$env:GITHUB_WORKSPACE" -Parent
         $dest   = "$parent\RynthSuite"
-        Write-Host "Cloning RynthSuite to: $dest"
+        if ("${{ github.event_name }}" -eq "push") { $want = "${{ github.ref_name }}" }
+        else { $want = "v${{ github.event.inputs.version }}" }
+        $override = "${{ github.event.inputs.rynthsuite_ref }}"
+        if ($override) { $want = $override }
+        Write-Host "Cloning RynthSuite to: $dest (pin target: $want)"
         # If RynthSuite is private, set a GH_PAT secret and use the token URL:
         # git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/tombohar/RynthSuite.git $dest
         git clone https://github.com/tombohar/RynthSuite.git $dest
         if ($LASTEXITCODE -ne 0) { throw "git clone RynthSuite failed" }
+        git -C $dest fetch --tags --quiet
+        if ($want -and (git -C $dest rev-parse --verify --quiet "$want^{commit}")) {
+          git -C $dest checkout --quiet $want
+          if ($LASTEXITCODE -ne 0) { throw "checkout RynthSuite $want failed" }
+          Write-Host "RynthSuite pinned to: $want"
+        } else {
+          Write-Host "::warning::RynthSuite ref '$want' not found; building against default branch HEAD (NOT reproducible)"
+        }
+        Write-Host "RynthSuite at commit: $(git -C $dest rev-parse HEAD)"
 
     # ── Toolchain ─────────────────────────────────────────────────────────────
     - name: Setup .NET 10
@@ -51,6 +73,33 @@ jobs:
     - name: Install Inno Setup 6
       run: choco install innosetup --yes --no-progress
       shell: pwsh
+
+    - name: Setup Python (for validation gates)
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    # ── Validation gates (fail the release before building if any trips) ───────
+    # Gate 1: off-thread AC-mutator check — guards the off-thread-mutation AV
+    #   class (the root of the 2026-06 crash week). Pure source scan, no binary.
+    # Gate 2: LootSdk golden tests — 60+ assertions on the loot-profile parser
+    #   that ships in the bundled plugin (run against the pinned RynthSuite).
+    # Gate 3 (pe_pattern CHECK) is LOCAL-ONLY: it needs the 1.4 GB acclient.exe
+    #   that CI doesn't have, so it runs as a pre-deploy gate in Deploy-RynthCore.ps1.
+    - name: Validation gates
+      shell: pwsh
+      run: |
+        $parent = Split-Path "$env:GITHUB_WORKSPACE" -Parent
+        Write-Host "== Gate 1: off-thread AC-mutator check =="
+        python "$env:GITHUB_WORKSPACE\tools\check_offthread_mutators.py"
+        if ($LASTEXITCODE -ne 0) { throw "off-thread mutator gate FAILED — an AC mutator is reachable off the main thread" }
+
+        Write-Host "== Gate 2: LootSdk golden tests =="
+        dotnet run --project "$parent\RynthSuite\Tools\RynthCore.LootSdkTests\RynthCore.LootSdkTests.csproj" -c Release
+        if ($LASTEXITCODE -ne 0) { throw "LootSdk golden tests FAILED" }
+
+        Write-Host "== Gate 3: pe_pattern CHECK — LOCAL ONLY =="
+        Write-Host "  (skipped in CI: needs the 1.4 GB acclient.exe; runs pre-deploy via Deploy-RynthCore.ps1)"
 
     # ── Determine version ──────────────────────────────────────────────────────
     - name: Resolve version

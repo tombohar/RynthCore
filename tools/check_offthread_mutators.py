@@ -38,7 +38,13 @@ pe_pattern gate.
 from __future__ import annotations
 import os, re, sys
 
-HOOKS_DIR = r"C:\Projects\RynthCore\src\RynthCore.Engine\Compatibility"
+# Resolve the engine Compatibility dir relative to this script so it works both
+# locally (C:\Projects\RynthCore\tools\..) and in CI ($GITHUB_WORKSPACE\tools\..).
+# Override order: argv[1] > $RC_HOOKS_DIR > derived-from-script-location.
+_DERIVED_HOOKS = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "src", "RynthCore.Engine", "Compatibility"))
+HOOKS_DIR = (sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-")
+             else os.environ.get("RC_HOOKS_DIR") or _DERIVED_HOOKS)
 
 # Curated AC-STATE-MUTATOR native delegate fields. Hand-maintained: add a field
 # here when a new hook calls an AC function that WRITES client state (selection,
@@ -107,6 +113,7 @@ def is_allowed(name, attrs):
 
 
 def main():
+    print(f"=== off-thread AC-mutator gate check ===\nscanning: {HOOKS_DIR}")
     if not os.path.isdir(HOOKS_DIR):
         print(f"cannot read {HOOKS_DIR}")
         return 2
@@ -139,7 +146,6 @@ def main():
                 checked_b += 1
                 violations.append((fn, line, name, f"invokes AC-mutator delegate {hit}() without a MainThreadGuard gate"))
 
-    print("=== off-thread AC-mutator gate check ===")
     if violations:
         for fn, line, name, why in violations:
             print(f"  [VIOLATION] {fn}:{line} {name}() - {why}")
