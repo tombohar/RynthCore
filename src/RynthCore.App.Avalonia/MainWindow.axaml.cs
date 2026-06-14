@@ -2078,8 +2078,21 @@ internal partial class MainWindow : Window
     // Containment, not cure: an overnight soak loses ~2 minutes to a wedge
     // instead of the rest of the night.
     private readonly Dictionary<int, DateTime> _wedgeZeroFpsSinceUtc = new();
+    // fps (1), login (2), qd = main-thread queue depth (3, optional on older engines).
     private static readonly System.Text.RegularExpressions.Regex WedgeHbRegex =
-        new(@"hb #\d+ .*?fps=(\d+) .*?login=(\d)", System.Text.RegularExpressions.RegexOptions.Compiled);
+        new(@"hb #\d+ .*?fps=(\d+) .*?login=(\d)(?:.*?qd=(\d+))?", System.Text.RegularExpressions.RegexOptions.Compiled);
+    // Item-action hard-lock while STILL rendering (fps>0): RynthAi can't re-enter
+    // combat mode for a long stretch (AC refuses all item actions on an orphaned
+    // pending-action state; only relog clears it). The plugin logs the stuck
+    // duration; >5 min is unambiguous. Catches the wedge phase the fps=0 rule
+    // misses — observed 2026-06-14: fps=60, item-locked for 2h before fps→0.
+    private static readonly System.Text.RegularExpressions.Regex StanceStuckRegex =
+        new(@"ChangeCombatMode\([^)]*\) retry #\d+ \(stuck (\d+)s", System.Text.RegularExpressions.RegexOptions.Compiled);
+    // qd ~0 on a healthy client (the AcMainThreadQueue drains every tick); it
+    // explodes to tens of thousands once AC's main thread stops draining = wedged.
+    private const int QueueWedgeDepth = 2000;
+    // Can't enter combat mode for this long while in-world = item-action hard-lock.
+    private const int StanceStuckWedgeSeconds = 300;
 
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr hWnd);
@@ -2135,7 +2148,9 @@ internal partial class MainWindow : Window
                 bool hbStale = (DateTime.Now - fi.LastWriteTime).TotalSeconds > 120;
 
                 using var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                long want = Math.Min(2048, fs.Length);
+                // 16KB tail: enough to contain the every-30s combat-mode-stuck
+                // line for the item-lock detector, still cheap per poll.
+                long want = Math.Min(16384, fs.Length);
                 fs.Seek(-want, SeekOrigin.End);
                 byte[] buf = new byte[want];
                 int read = fs.Read(buf, 0, (int)want);
@@ -2153,10 +2168,41 @@ internal partial class MainWindow : Window
             var matches = WedgeHbRegex.Matches(tail);
             if (matches.Count == 0) continue;
             var last = matches[matches.Count - 1];
-            bool fpsZero = last.Groups[1].Value == "0";
             bool inWorld = last.Groups[2].Value == "1";
 
-            if (!inWorld || !fpsZero)
+            if (!inWorld)
+            {
+                _wedgeZeroFpsSinceUtc.Remove(pid);
+                continue;
+            }
+
+            // ── Item-action hard-lock while STILL rendering (fps>0) ──────────
+            // The fps=0 rule below misses this: AC refuses every item action
+            // (combat-mode, casts, opens) on an orphaned pending-action state
+            // while the render loop keeps running. The plugin's combat-mode
+            // retry counter is the proof; >5 min stuck = a relog-only lock the
+            // engine busy watchdog can't clear. No hold timer — the logged
+            // duration is already the dwell.
+            int stanceStuckSec = 0;
+            foreach (System.Text.RegularExpressions.Match sm in StanceStuckRegex.Matches(tail))
+                if (int.TryParse(sm.Groups[1].Value, out int s) && s > stanceStuckSec)
+                    stanceStuckSec = s;
+            if (stanceStuckSec >= StanceStuckWedgeSeconds)
+            {
+                KillWedgedClient(process, pid, activeContexts, activeSessions,
+                    $"combat-mode stuck {stanceStuckSec}s with login=1 (item-action hard-lock — heartbeat alive)");
+                continue;
+            }
+
+            // ── fps=0 OR main-thread queue backing up = AC main thread wedged ─
+            bool fpsZero = last.Groups[1].Value == "0";
+            int qd = (last.Groups[3].Success && int.TryParse(last.Groups[3].Value, out int q)) ? q : 0;
+            string? wedgeReason =
+                fpsZero ? "fps=0 with login=1"
+                : qd > QueueWedgeDepth ? $"main-thread queue backing up (qd={qd}, login=1)"
+                : null;
+
+            if (wedgeReason == null)
             {
                 _wedgeZeroFpsSinceUtc.Remove(pid);
                 continue;
@@ -2173,7 +2219,7 @@ internal partial class MainWindow : Window
                 continue;
 
             KillWedgedClient(process, pid, activeContexts, activeSessions,
-                $"fps=0 with login=1 for >{holdSec}s (heartbeat alive — AC main thread wedged)");
+                $"{wedgeReason} for >{holdSec}s (heartbeat alive — AC main thread wedged)");
         }
     }
 
