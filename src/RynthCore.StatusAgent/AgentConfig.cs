@@ -46,6 +46,27 @@ internal sealed class AgentConfig
     /// <summary>Label for this machine in the payload. Empty = use the machine name.</summary>
     [JsonPropertyName("Host")] public string Host { get; set; } = "";
 
+    // ── Pull delivery: let an app fetch status instead of (or as well as) POST ──
+
+    /// <summary>When true, the agent serves the latest status at GET /status on
+    /// <see cref="ServePrefix"/> so an app can pull it with no backend. Default
+    /// false — no socket is opened unless you turn this on.</summary>
+    [JsonPropertyName("ServeHttp")] public bool ServeHttp { get; set; } = false;
+
+    /// <summary>HttpListener prefix to serve on. 127.0.0.1 = this PC only (no
+    /// admin needed). Use http://+:8740/ for LAN/Tailscale (needs a one-time
+    /// netsh urlacl or running elevated). Must end in '/'.</summary>
+    [JsonPropertyName("ServePrefix")] public string ServePrefix { get; set; } = "http://127.0.0.1:8740/";
+
+    /// <summary>Optional shared secret. When set, GET /status requires
+    /// <c>Authorization: Bearer &lt;token&gt;</c> or <c>?token=</c>. Empty = open
+    /// (fine for a 127.0.0.1 / private-tailnet bind).</summary>
+    [JsonPropertyName("ServeToken")] public string ServeToken { get; set; } = "";
+
+    /// <summary>When true, also write the latest rollup to
+    /// Logs\status\aggregate.json — handy for file-sync delivery or debugging.</summary>
+    [JsonPropertyName("WriteAggregateFile")] public bool WriteAggregateFile { get; set; } = true;
+
     public static string DefaultConfigPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "RynthCore", "statusagent.json");

@@ -94,19 +94,46 @@ Edit `%APPDATA%\RynthCore\statusagent.json`:
   "UseHeartbeatLogFallback": true,
   "StaleAfterSeconds": 12,
   "DropDeadAfterSeconds": 300,
-  "Host": ""
+  "Host": "",
+  "ServeHttp": false,
+  "ServePrefix": "http://127.0.0.1:8740/",
+  "ServeToken": "",
+  "WriteAggregateFile": true
 }
 ```
 
-- **Endpoint** — required to send anything. Empty = print-only.
+- **Endpoint** — required to **push**. Empty = no POST.
 - **AuthHeaderName/Value** — optional; sent as a request header if both set.
 - **UseHeartbeatLogFallback** — when a running client has no status file (e.g.
   `EnableStatusExport` is off), derive basic status from its heartbeat log line.
   You get run/idle/loading/hung detection but no macro/profile/vitals.
 - **Host** — label for this machine; empty uses the machine name.
+- **ServeHttp / ServePrefix / ServeToken** — opt-in **pull** endpoint (see below).
+- **WriteAggregateFile** — also drop the latest rollup to
+  `Logs\status\aggregate.json` (for file-sync delivery or debugging).
 
-The "micro manager" app then reads whatever your backend exposes from these
-posts.
+## Three ways to get it to the app — pick one (or several)
+
+The agent produces one payload per cycle and can deliver it three ways at once;
+they're all opt-in, so use whichever fits the app you end up building:
+
+1. **Push (POST).** Set `Endpoint` (+ optional auth). The agent POSTs the JSON to
+   your server, which the app reads. Best when you already run a backend.
+2. **Pull (serve).** Set `ServeHttp: true`. The agent serves the latest JSON at
+   `GET <ServePrefix>status` — **no backend needed**, the app just fetches a URL:
+   - `http://127.0.0.1:8740/` (default) — this PC only.
+   - `http://+:8740/` — reachable on the LAN, and from anywhere if the PC is on
+     a private mesh like **Tailscale** (phone hits `http://<tailscale-ip>:8740/status`).
+     A `+` bind needs a one-time `netsh http add urlacl url=http://+:8740/ user=Everyone`
+     (or run the agent elevated).
+   - Set `ServeToken` to require `Authorization: Bearer <token>` (or `?token=`).
+   - `GET /healthz` returns `ok` for uptime checks.
+3. **File sync.** Leave `WriteAggregateFile: true` and point iCloud/Dropbox/etc.
+   at `Logs\status\aggregate.json`; the app reads the synced copy.
+
+For a phone dashboard with no server, **pull + Tailscale** is the lowest-friction
+path: turn on `ServeHttp`, bind to `http://+:8740/`, and fetch
+`http://<pc-tailscale-ip>:8740/status` from the app.
 
 ---
 
