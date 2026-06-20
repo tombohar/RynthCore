@@ -23,6 +23,7 @@ internal static class EngineSettings
     private static bool _enableImGuiBackend = true;
     private static bool _enableHangMinidump = true;
     private static bool _drawCustomVitalBars = true;
+    private static bool _enableStatusExport = false;   // [status-export]
     private static bool _loaded;
 
     public static IReadOnlyList<string> PluginPaths
@@ -178,6 +179,28 @@ internal static class EngineSettings
         }
     }
 
+    /// <summary>
+    /// [status-export] When true, the engine writes a small LOCAL status JSON
+    /// (<see cref="RynthCore.Engine.LogPaths.StatusFilePath"/>) once per second
+    /// for the out-of-process RynthCore.StatusAgent to read. LOCAL FILE ONLY —
+    /// the engine never opens a network connection. Default <c>false</c>, so
+    /// clients that don't opt in get zero new behaviour. Can also be forced on
+    /// for a session with the env var <c>RYNTHCORE_STATUS_EXPORT=1</c> without
+    /// editing engine.json. Remove this property + the writer to strip the feature.
+    /// </summary>
+    public static bool EnableStatusExport
+    {
+        get
+        {
+            if (string.Equals(
+                    Environment.GetEnvironmentVariable("RYNTHCORE_STATUS_EXPORT"),
+                    "1", StringComparison.Ordinal))
+                return true;
+            EnsureLoaded();
+            return _enableStatusExport;
+        }
+    }
+
     public static void AddPluginPath(string path)
     {
         EnsureLoaded();
@@ -287,6 +310,12 @@ internal static class EngineSettings
             {
                 _drawCustomVitalBars = cvbEl.GetBoolean();
             }
+
+            if (doc.RootElement.TryGetProperty("EnableStatusExport", out var seEl) &&   // [status-export]
+                (seEl.ValueKind == JsonValueKind.True || seEl.ValueKind == JsonValueKind.False))
+            {
+                _enableStatusExport = seEl.GetBoolean();
+            }
         }
         catch (Exception ex)
         {
@@ -319,6 +348,7 @@ internal static class EngineSettings
                 w.WriteBoolean("EnableImGuiBackend", _enableImGuiBackend);
                 w.WriteBoolean("EnableHangMinidump", _enableHangMinidump);
                 w.WriteBoolean("DrawCustomVitalBars", _drawCustomVitalBars);
+                w.WriteBoolean("EnableStatusExport", _enableStatusExport);   // [status-export]
                 w.WriteEndObject();
             }
             File.WriteAllBytes(SettingsPath, ms.ToArray());
