@@ -58,6 +58,7 @@ internal static class AcMainThreadQueue
         MoveItemInternal,
         SplitStackInternal,
         MergeStackInternal,
+        GiveObjectTo,
         // CommandInterpreter movement marshalled 2026-06-12: SetAutoRun /
         // TurnToHeading / StopCompletely were the last direct off-thread AC
         // mutators (dump-proven: a SetAutoRun executed 15s after a main thread
@@ -179,6 +180,9 @@ internal static class AcMainThreadQueue
     public static bool EnqueueMergeStackInternal(uint sourceObjectId, uint targetObjectId) =>
         Enqueue(ActionKind.MergeStackInternal, sourceObjectId, targetObjectId, 0);
 
+    public static bool EnqueueGiveObjectTo(uint objectId, uint targetId, int amount) =>
+        Enqueue(ActionKind.GiveObjectTo, objectId, targetId, unchecked((uint)amount));
+
     public static bool EnqueueSetSelectedObject(uint objectId) =>
         Enqueue(ActionKind.SetSelectedObject, objectId, 0, 0);
 
@@ -279,6 +283,9 @@ internal static class AcMainThreadQueue
                     case ActionKind.MergeStackInternal:
                         ClientHelperHooks.MergeStackInternal(e.A, e.B);
                         break;
+                    case ActionKind.GiveObjectTo:
+                        ClientHelperHooks.GiveObjectTo(e.A, e.B, unchecked((int)e.C));
+                        break;
                     case ActionKind.SetSelectedObject:
                         // On the main thread now -> SetSelectedObjectId's gate is
                         // satisfied and it calls AC's SetSelectedObject directly.
@@ -310,6 +317,52 @@ internal static class AcMainThreadQueue
 
         // Off-thread WriteToChat strings drain here too (same main-thread window).
         DrainChat();
+
+        // AutoIdService appraisal (0xC8) sends marshalled here too (own queue below).
+        DrainRequestIds();
+    }
+
+    // ── RequestId slot (0xC8 appraisal sends from AutoIdService) ──────────────────
+    // AutoIdService runs on a Timer thread; sending 0xC8 directly there does AC heap
+    // allocation + a non-atomic shared UI-counter increment off AC's main thread (the
+    // off-thread-send class flagged for RequestId). Marshal onto the main thread here.
+    // Kept in its OWN queue — NOT the gesture-deferred action ring above — so a backlog
+    // of appraisals can never crowd out combat/movement actions or get gesture-deferred:
+    // an appraisal is just a packet send and doesn't perturb AC's motion/UI state.
+    private static readonly System.Collections.Generic.Queue<uint> _requestIdQueue = new();
+    private static readonly object _requestIdLock = new();
+    private const int MaxRequestIdQueue = 256;
+
+    // Pump/Timer-thread enqueue. Drops (returns false) if the queue is full.
+    public static bool EnqueueRequestId(uint objectId)
+    {
+        if (objectId == 0) return false;
+        lock (_requestIdLock)
+        {
+            if (_requestIdQueue.Count >= MaxRequestIdQueue)
+            {
+                Interlocked.Increment(ref _dropped);
+                return false;
+            }
+            _requestIdQueue.Enqueue(objectId);
+            return true;
+        }
+    }
+
+    // Single-consumer drain on AC's main thread (from Drain()). On the main thread
+    // CombatActionHooks.RequestId sends the 0xC8 directly.
+    private static void DrainRequestIds()
+    {
+        while (true)
+        {
+            uint id;
+            lock (_requestIdLock)
+            {
+                if (_requestIdQueue.Count == 0) return;
+                id = _requestIdQueue.Dequeue();
+            }
+            try { CombatActionHooks.RequestId(id); } catch { }
+        }
     }
 
     // ── Chat slot (WriteToChat strings) ──────────────────────────────────────────

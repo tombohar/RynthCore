@@ -62,6 +62,15 @@ internal static class ClientHelperHooks
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate byte EventStackableMergeDelegate(uint mergeFromId, uint mergeToId, int amount);
 
+    // CM_Inventory::Event_GiveObjectRequest — the public give-item-to-NPC API.
+    // Byte-identical sibling of Event_StackableMerge (differs only in the action
+    // opcode immediate: give writes 0xCD, merge 0x54). Cdecl, returns bool.
+    // Chorizite map: 002ACA60 -> live VA 0x006ACA60. Sends the F7B1 give
+    // GameAction. amount = stack count to give (0 = whole object).
+    // Args (live-disasm + call-site UIAttemptGive confirmed): item, targetNpc, amount.
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate byte EventGiveObjectRequestDelegate(uint objectId, uint targetId, int amount);
+
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void UseObjectDelegate(IntPtr clientUiSystem, uint objectId);
 
@@ -94,6 +103,8 @@ internal static class ClientHelperHooks
     private const int TotalStackVa = 0x0081D7F0;  // total_stack
     // CM_Inventory::Event_StackableMerge — public merge-stack API (from Chorizite map).
     private const int EventStackableMergeVa = 0x006ACDD0;
+    // CM_Inventory::Event_GiveObjectRequest — public give-to-NPC API (FALLBACK only; pattern-scanned).
+    private const int EventGiveObjectRequestVa = 0x006ACA60;
     private const int UseObjectVa = 0x00565750;
     private const int PlayerSystemVa = 0x0087119C;
     private const int InqPlayerCoordsVa = 0x00560E00;
@@ -114,6 +125,7 @@ internal static class ClientHelperHooks
     private static MoveItemExternalDelegate? _moveItemExternal;
     private static MoveItemInternalDelegate? _moveItemInternal;
     private static EventStackableMergeDelegate? _eventStackableMerge;
+    private static EventGiveObjectRequestDelegate? _eventGiveObjectRequest;
     private static InqPlayerCoordsDelegate? _inqPlayerCoords;
     private static GetPlayerIdDelegate? _getPlayerId;
     private static AddTextToScrollDelegate? _addTextToScroll;
@@ -138,6 +150,7 @@ internal static class ClientHelperHooks
     public static bool HasMoveItemInternal => _moveItemInternal != null;
     public static bool HasSplitStackInternal => _moveItemInternal != null;
     public static bool HasMergeStackInternal => _eventStackableMerge != null;
+    public static bool HasGiveObjectTo => _eventGiveObjectRequest != null;
     public static bool HasGetCurCoords => _inqPlayerCoords != null;
     public static bool HasGetPlayerId => _getPlayerId != null;
     public static bool HasGetGroundContainerId => true;
@@ -159,6 +172,12 @@ internal static class ClientHelperHooks
     private static readonly byte?[] PatMoveItemExternal = [ 0x8B, 0x44, 0x24, 0x10, 0x8B, 0x4C, 0x24, 0x0C, 0x8B, 0x54, 0x24, 0x08, 0x50, 0x51, 0x52, 0xE8 ];
     private static readonly byte?[] PatMoveItemInternal = [ 0x8B, 0x44, 0x24, 0x10, 0x8B, 0x4C, 0x24, 0x14, 0x8B, 0x54, 0x24, 0x0C ];
     private static readonly byte?[] PatEventStackableMerge = [ 0x83, 0xEC, 0x0C, 0x53, 0x56, 0x57, 0xE8, null, null, null, null, 0x89, 0x44, 0x24, 0x14, 0x6A, 0x00, 0x8D, 0x44, 0x24, 0x10, 0x50, 0x8D, 0x4C, 0x24, 0x18, 0xC7, 0x44, 0x24, 0x18, 0x2C, 0x2C, 0x80, 0x00, 0xC7, 0x44, 0x24, 0x14, 0x00, 0x00, 0x00, 0x00, 0xE8, null, null, null, null, 0x8B, 0xF0, 0x83, 0xC6, 0x10, 0x56, 0xE8, null, null, null, null, 0x83, 0xC4, 0x04, 0x56, 0x8D, 0x4C, 0x24, 0x10, 0x51, 0x8D, 0x4C, 0x24, 0x18, 0x89, 0x44, 0x24, 0x14, 0x8B, 0xF8, 0xE8, null, null, null, null, 0x8B, 0x54, 0x24, 0x0C, 0x8B, 0x4C, 0x24, 0x1C, 0xC7, 0x02, 0x54 ];
+    // CM_Inventory::Event_GiveObjectRequest @0x006ACA60. Identical to the merge
+    // pattern except the trailing action-opcode write (give 0xCD vs merge 0x54) —
+    // that last byte is the uniqueness discriminator vs the merge/usewith siblings,
+    // so do NOT trim it. Generated + verified unique (1 match @0x006ACA60) via
+    // pe_pattern.py GEN against both acclient copies.
+    private static readonly byte?[] PatEventGiveObjectRequest = [ 0x83, 0xEC, 0x0C, 0x53, 0x56, 0x57, 0xE8, null, null, null, null, 0x89, 0x44, 0x24, 0x14, 0x6A, 0x00, 0x8D, 0x44, 0x24, 0x10, 0x50, 0x8D, 0x4C, 0x24, 0x18, 0xC7, 0x44, 0x24, 0x18, 0x2C, 0x2C, 0x80, 0x00, 0xC7, 0x44, 0x24, 0x14, 0x00, 0x00, 0x00, 0x00, 0xE8, null, null, null, null, 0x8B, 0xF0, 0x83, 0xC6, 0x10, 0x56, 0xE8, null, null, null, null, 0x83, 0xC4, 0x04, 0x56, 0x8D, 0x4C, 0x24, 0x10, 0x51, 0x8D, 0x4C, 0x24, 0x18, 0x89, 0x44, 0x24, 0x14, 0x8B, 0xF8, 0xE8, null, null, null, null, 0x8B, 0x54, 0x24, 0x0C, 0x8B, 0x4C, 0x24, 0x1C, 0xC7, 0x02, 0xCD ];
     private static readonly byte?[] PatInqPlayerCoords = [ 0x83, 0xEC, 0x10, 0x53, 0x8B, 0x5C, 0x24, 0x1C, 0x55, 0x56 ];
     private static readonly byte?[] PatGetPlayerId = [ 0xA1, 0x58, 0xDA, 0x83, 0x00, 0x85, 0xC0, 0x74, 0x07 ];
     private static readonly byte?[] PatAddTextToScroll = [ 0x81, 0xEC, 0x48, 0x09, 0x00, 0x00, 0x8A, 0x84 ];
@@ -218,6 +237,7 @@ internal static class ClientHelperHooks
             _moveItemExternal = Bind<MoveItemExternalDelegate>(text, "ClientHelper.MoveItemExternal", PatMoveItemExternal, MoveItemExternalVa);
             _moveItemInternal = Bind<MoveItemInternalDelegate>(text, "ClientHelper.MoveItemInternal", PatMoveItemInternal, MoveItemInternalVa);
             _eventStackableMerge = Bind<EventStackableMergeDelegate>(text, "ClientHelper.Event_StackableMerge", PatEventStackableMerge, EventStackableMergeVa);
+            _eventGiveObjectRequest = Bind<EventGiveObjectRequestDelegate>(text, "ClientHelper.Event_GiveObjectRequest", PatEventGiveObjectRequest, EventGiveObjectRequestVa);
             _inqPlayerCoords = Bind<InqPlayerCoordsDelegate>(text, "ClientHelper.InqPlayerCoords", PatInqPlayerCoords, InqPlayerCoordsVa);
             _getPlayerId = Bind<GetPlayerIdDelegate>(text, "ClientHelper.GetPlayerId", PatGetPlayerId, GetPlayerIdVa);
             _addTextToScroll = Bind<AddTextToScrollDelegate>(text, "ClientHelper.AddTextToScroll", PatAddTextToScroll, AddTextToScrollVa);
@@ -533,6 +553,39 @@ internal static class ClientHelperHooks
         }
     }
 
+    /// <summary>
+    /// Give an item to an NPC (or another player) via the canonical public API
+    /// CM_Inventory::Event_GiveObjectRequest (cdecl) at 0x006ACA60 — the F7B1 give
+    /// GameAction, the same path the drag-onto-NPC UI uses. This is the CORRECT
+    /// give-to-NPC primitive; MoveItemExternal is move-to-container and does not
+    /// give. amount=0 gives the whole object; positive = partial stack.
+    /// </summary>
+    public static bool GiveObjectTo(uint objectId, uint targetId, int amount = 0)
+    {
+        // Marshal onto AC's main thread — off-thread F7B1 inventory sends race AC's
+        // per-tick object/container bookkeeping (the looting null-deref AV class),
+        // exactly like MoveItemExternal / MergeStackInternal.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueGiveObjectTo(objectId, targetId, amount);
+
+        if (_eventGiveObjectRequest == null) return false;
+        if (!IsValidObjectId(objectId)) return false;
+        if (!IsValidObjectId(targetId)) return false;
+        if (amount < 0) return false;
+
+        try
+        {
+            byte rv = _eventGiveObjectRequest(objectId, targetId, amount);
+            RynthLog.Verbose($"Compat: Event_GiveObjectRequest item=0x{objectId:X8} -> target=0x{targetId:X8} amount={amount} rv={rv}");
+            return rv != 0;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"Compat: Event_GiveObjectRequest threw - {ex.Message}");
+            return false;
+        }
+    }
+
     public static bool TryGetCurCoords(out double northSouth, out double eastWest)
     {
         northSouth = 0;
@@ -809,6 +862,7 @@ internal static class ClientHelperHooks
         _moveItemExternal = null;
         _moveItemInternal = null;
         _eventStackableMerge = null;
+        _eventGiveObjectRequest = null;
         _inqPlayerCoords = null;
         _getPlayerId = null;
         _addTextToScroll = null;
