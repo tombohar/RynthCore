@@ -164,6 +164,7 @@ internal static class PluginManager
     private static MoveItemInternalCallbackDelegate? _moveItemInternalCallback;
     private static SplitStackInternalCallbackDelegate? _splitStackInternalCallback;
     private static MergeStackInternalCallbackDelegate? _mergeStackInternalCallback;
+    private static GiveObjectToCallbackDelegate? _giveObjectToCallback;
     private static WriteToChatCallbackDelegate? _writeToChatCallback;
     private static GetPlayerPoseCallbackDelegate? _getPlayerPoseCallback;
     private static IsPortalingCallbackDelegate? _isPortalingCallback;
@@ -215,6 +216,7 @@ internal static class PluginManager
     private static GetObjectHeadingCallbackDelegate? _getObjectHeadingCallback;
     private static GetBusyStateCallbackDelegate? _getBusyStateCallback;
     private static GetCastBusyStateCallbackDelegate? _getCastBusyStateCallback;
+    private static GetUseDoneSeqCallbackDelegate? _getUseDoneSeqCallback;
     private static ForceResetBusyCountCallbackDelegate? _forceResetBusyCountCallback;
     private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
     private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
@@ -2257,6 +2259,7 @@ internal static class PluginManager
         _moveItemInternalCallback ??= MoveItemInternal;
         _splitStackInternalCallback ??= SplitStackInternal;
         _mergeStackInternalCallback ??= MergeStackInternal;
+        _giveObjectToCallback ??= GiveObjectTo;
         _writeToChatCallback ??= WriteToChat;
         _getPlayerPoseCallback ??= GetPlayerPose;
         _isPortalingCallback ??= IsPortalingCallback;
@@ -2308,6 +2311,7 @@ internal static class PluginManager
         _getObjectHeadingCallback ??= GetObjectHeadingAction;
         _getBusyStateCallback ??= GetBusyStateAction;
         _getCastBusyStateCallback ??= GetCastBusyStateAction;
+        _getUseDoneSeqCallback ??= GetUseDoneSeqAction;
         _forceResetBusyCountCallback ??= ForceResetBusyCountAction;
         _getObjectSpellIdsCallback ??= GetObjectSpellIdsAction;
         _getObjectSkillBuffedCallback ??= GetObjectSkillLevelAction;
@@ -2390,6 +2394,7 @@ internal static class PluginManager
         _api.GetObjectOwnershipInfoFn = Marshal.GetFunctionPointerForDelegate(_getObjectOwnershipInfoCallback);
         _api.SplitStackInternalFn = Marshal.GetFunctionPointerForDelegate(_splitStackInternalCallback);
         _api.MergeStackInternalFn = Marshal.GetFunctionPointerForDelegate(_mergeStackInternalCallback);
+        _api.GiveObjectToFn = Marshal.GetFunctionPointerForDelegate(_giveObjectToCallback);
         _api.GetCurrentCombatModeFn = Marshal.GetFunctionPointerForDelegate(_getCurrentCombatModeCallback);
         _api.SalvagePanelOpenFn = Marshal.GetFunctionPointerForDelegate(_salvagePanelOpenCallback);
         _api.SalvagePanelAddItemFn = Marshal.GetFunctionPointerForDelegate(_salvagePanelAddItemCallback);
@@ -2403,6 +2408,7 @@ internal static class PluginManager
         _api.GetObjectHeadingFn = Marshal.GetFunctionPointerForDelegate(_getObjectHeadingCallback);
         _api.GetBusyStateFn = Marshal.GetFunctionPointerForDelegate(_getBusyStateCallback);
         _api.GetCastBusyStateFn = Marshal.GetFunctionPointerForDelegate(_getCastBusyStateCallback);
+        _api.GetUseDoneSeqFn = Marshal.GetFunctionPointerForDelegate(_getUseDoneSeqCallback);
         _api.GetObjectSpellIdsFn = Marshal.GetFunctionPointerForDelegate(_getObjectSpellIdsCallback);
         _api.GetObjectSkillBuffedFn = Marshal.GetFunctionPointerForDelegate(_getObjectSkillBuffedCallback);
         _api.GetObjectAttributeFn = Marshal.GetFunctionPointerForDelegate(_getObjectAttributeCallback);
@@ -2974,6 +2980,11 @@ internal static class PluginManager
         return ToAbiBool(ClientHelperHooks.MergeStackInternal(sourceObjectId, targetObjectId));
     }
 
+    private static int GiveObjectTo(uint objectId, uint targetId, int amount)
+    {
+        return ToAbiBool(ClientHelperHooks.GiveObjectTo(objectId, targetId, amount));
+    }
+
     private static int WriteToChat(IntPtr textUtf16, int chatType)
     {
         string? text = textUtf16 != IntPtr.Zero ? Marshal.PtrToStringUni(textUtf16) : null;
@@ -3063,6 +3074,8 @@ internal static class PluginManager
     private static int GetBusyStateAction() => BusyCountHooks.GetBusyState();
 
     private static int GetCastBusyStateAction() => CastGate.GetCastBusyState();
+
+    private static int GetUseDoneSeqAction() => SmartBoxHooks.GetUseDoneSeq();
 
     private static void ForceResetBusyCountAction() => BusyCountHooks.ForceResetBusyCount();
 

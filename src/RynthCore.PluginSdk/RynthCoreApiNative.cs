@@ -111,4 +111,7 @@ public struct RynthCoreApiNative
     public IntPtr ReadKnownSpellsFn;
     public IntPtr Nav3DAddTriangleFn;
     public IntPtr Nav3DAddRingExFn;
+    // APPEND-AT-END (ABI): must mirror PluginContract.RynthCoreAPI order exactly. v62+.
+    public IntPtr GiveObjectToFn;
+    public IntPtr GetUseDoneSeqFn; // v63: monotonic count of inbound server UseDone (0x1C7)
 }

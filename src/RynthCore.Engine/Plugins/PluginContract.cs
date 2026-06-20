@@ -537,6 +537,24 @@ internal struct RynthCoreAPI
     /// marker) without coupling visual thickness to wall height. Requires
     /// API v61+.</summary>
     public IntPtr Nav3DAddRingExFn;
+
+    /// <summary>Function pointer: int GiveObjectTo(uint objectId, uint targetId, int amount)
+    /// Gives an item to an NPC/player via CM_Inventory::Event_GiveObjectRequest
+    /// (the F7B1 give GameAction). amount=0 gives the whole object. This is the
+    /// correct give-to-NPC primitive; MoveItemExternal is move-to-container and
+    /// does NOT give. Requires API v62+. APPENDED-AT-END for ABI safety.</summary>
+    public IntPtr GiveObjectToFn;
+
+    /// <summary>Function pointer: int GetUseDoneSeq()
+    /// Monotonic count of inbound server UseDone (GameEvent 0x01C7) events. The
+    /// server sends UseDone when it FINISHES an action (cast/use) — completed
+    /// (WeenieError.None) or refused (e.g. YoureTooBusy). A plugin records this
+    /// at cast time and watches for it to change to know the server resolved the
+    /// cast, so combat casts can be paced on real completion instead of a blind
+    /// interval (which re-fires into the deferred-windup window and orphans the
+    /// cast). Read-only observation; never touches client m_cBusy. Returns 0 when
+    /// unavailable. Requires API v63+. APPENDED-AT-END for ABI safety.</summary>
+    public IntPtr GetUseDoneSeqFn;
 }
 
 
@@ -544,7 +562,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 61;
+    public const uint Current = 63;
 }
 
 internal static class ClientActionHookFlags
@@ -768,6 +786,9 @@ internal delegate int SplitStackInternalCallbackDelegate(uint objectId, uint tar
 internal delegate int MergeStackInternalCallbackDelegate(uint sourceObjectId, uint targetObjectId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int GiveObjectToCallbackDelegate(uint objectId, uint targetId, int amount);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int WriteToChatCallbackDelegate(IntPtr textUtf16, int chatType);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -939,6 +960,9 @@ internal delegate int GetBusyStateCallbackDelegate();
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int GetCastBusyStateCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int GetUseDoneSeqCallbackDelegate();
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int GetObjectSpellIdsCallbackDelegate(uint guid, uint* spellIds, int maxCount);

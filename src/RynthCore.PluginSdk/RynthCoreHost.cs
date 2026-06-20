@@ -5,7 +5,7 @@ namespace RynthCore.PluginSdk;
 
 public readonly unsafe struct RynthCoreHost
 {
-    public const uint CurrentApiVersion = 61;
+    public const uint CurrentApiVersion = 63;
 
     private readonly RynthCoreApiNative _api;
 
@@ -111,6 +111,7 @@ public readonly unsafe struct RynthCoreHost
     public bool HasSetRadarSuppressed    => _api.Version >= 54 && _api.SetRadarSuppressedFn    != IntPtr.Zero;
     public bool HasSetChatSuppressed     => _api.Version >= 55 && _api.SetChatSuppressedFn     != IntPtr.Zero;
     public bool HasSetPowerbarSuppressed => _api.Version >= 56 && _api.SetPowerbarSuppressedFn != IntPtr.Zero;
+    public bool HasGiveObjectTo => _api.Version >= 62 && _api.GiveObjectToFn != IntPtr.Zero;
 
     // ─── Methods ────────────────────────────────────────────────────────────
 
@@ -485,6 +486,19 @@ public readonly unsafe struct RynthCoreHost
                ((delegate* unmanaged[Cdecl]<uint, uint, int>)_api.MergeStackInternalFn)(sourceObjectId, targetObjectId) != 0;
     }
 
+    /// <summary>
+    /// Gives an item to an NPC or another player by sending the F7B1 give
+    /// GameAction (CM_Inventory::Event_GiveObjectRequest). This is the correct
+    /// primitive for /mt givep — MoveItemExternal is move-to-container and
+    /// silently fails to give to an NPC. amount=0 gives the whole object;
+    /// positive = partial stack. Requires engine API v62+ (check HasGiveObjectTo).
+    /// </summary>
+    public bool GiveObjectTo(uint objectId, uint targetId, int amount = 0)
+    {
+        return _api.GiveObjectToFn != IntPtr.Zero &&
+               ((delegate* unmanaged[Cdecl]<uint, uint, int, int>)_api.GiveObjectToFn)(objectId, targetId, amount) != 0;
+    }
+
     public bool WriteToChat(string text, int chatType)
     {
         if (_api.WriteToChatFn == IntPtr.Zero || string.IsNullOrEmpty(text))
@@ -642,6 +656,23 @@ public readonly unsafe struct RynthCoreHost
     /// engines fall back to the consumer's throttle/park behaviour.
     /// </summary>
     public bool CanCastNow => GetCastBusyState() == 0;
+
+    /// <summary>True when the engine exposes the server UseDone (0x1C7) counter.</summary>
+    public bool HasUseDoneSeq => _api.GetUseDoneSeqFn != IntPtr.Zero;
+
+    /// <summary>
+    /// Monotonic count of inbound server UseDone (GameEvent 0x01C7) events. The
+    /// server sends one when it FINISHES an action (cast/use) — completed or
+    /// refused. Record this at cast time and watch for it to change to know the
+    /// server resolved the cast, so combat casts can be paced on real completion
+    /// instead of a blind interval. Returns 0 on an engine without the signal
+    /// (callers must fall back to a timeout). Requires API v63+.
+    /// </summary>
+    public int GetUseDoneSeq()
+    {
+        if (_api.GetUseDoneSeqFn == IntPtr.Zero) return 0;
+        return ((delegate* unmanaged[Cdecl]<int>)_api.GetUseDoneSeqFn)();
+    }
 
     public bool TryGetObjectName(uint objectId, out string name)
     {
