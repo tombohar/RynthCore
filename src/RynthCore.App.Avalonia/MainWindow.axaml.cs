@@ -2072,15 +2072,28 @@ internal partial class MainWindow : Window
 
     // ── Wedge auto-restart ─────────────────────────────────────────────────
     // The residual AV class wedges AC's main thread while the engine lives on:
-    // the per-PID heartbeat keeps flowing with the signature login=1 + fps=0.
-    // Detect that from the log tail and kill the client; the existing
-    // crash-relaunch machinery (RecordCrash + AutoLaunch) brings it back.
-    // Containment, not cure: an overnight soak loses ~2 minutes to a wedge
-    // instead of the rest of the night.
+    // the per-PID heartbeat keeps flowing while the main thread is stuck. Detect
+    // that from the log tail and kill the client; the existing crash-relaunch
+    // machinery (RecordCrash + AutoLaunch) brings it back. Containment, not cure:
+    // an overnight soak loses ~2 minutes to a wedge instead of the rest of the
+    // night.
+    //
+    // Signals (minimized windows are exempted first via IsIconic — a backgrounded
+    // client throttles its fps on its own): a confirmed permanent main-thread
+    // wedge (HangPermRegex — beats off the UseTime tick, strongest), fps=0 on a
+    // VISIBLE in-world client (render dead; a healthy visible client renders tens
+    // of fps — verified live), plug=0 (plugin pump dead), qd backing up (main
+    // thread not draining the marshalled-action queue), and a stale heartbeat
+    // file.
     private readonly Dictionary<int, DateTime> _wedgeZeroFpsSinceUtc = new();
-    // fps (1), login (2), qd = main-thread queue depth (3, optional on older engines).
+    // fps (1), plug pump rate (2), login (3), qd = main-thread queue depth (4, optional on older engines).
     private static readonly System.Text.RegularExpressions.Regex WedgeHbRegex =
-        new(@"hb #\d+ .*?fps=(\d+) .*?login=(\d)(?:.*?qd=(\d+))?", System.Text.RegularExpressions.RegexOptions.Compiled);
+        new(@"hb #\d+ .*?fps=(\d+) .*?plug=(\d+)/s .*?login=(\d)(?:.*?qd=(\d+))?", System.Text.RegularExpressions.RegexOptions.Compiled);
+    // The engine's MainThreadHangWatchdog confirms a permanent main-thread wedge
+    // ("still hung after" with no later RECOVERED). Beats off the UseTime tick,
+    // so it works in every overlay config — the strongest cross-config signal.
+    private static readonly System.Text.RegularExpressions.Regex HangPermRegex =
+        new(@"still hung after", System.Text.RegularExpressions.RegexOptions.Compiled);
     // Item-action hard-lock while STILL rendering (fps>0): RynthAi can't re-enter
     // combat mode for a long stretch (AC refuses all item actions on an orphaned
     // pending-action state; only relog clears it). The plugin logs the stuck
@@ -2165,10 +2178,26 @@ internal partial class MainWindow : Window
             }
             catch { continue; }
 
+            // STRONGEST signal: the engine's own watchdog confirmed a permanent
+            // main-thread wedge. Act immediately — it already held ~10s+ before
+            // logging this, and it works even when fps is structurally 0.
+            int hangIdx = tail.LastIndexOf("MAIN THREAD HANG DETECTED", StringComparison.Ordinal);
+            if (hangIdx >= 0)
+            {
+                string afterHang = tail.Substring(hangIdx);
+                if (HangPermRegex.IsMatch(afterHang)
+                    && !afterHang.Contains("MAIN THREAD RECOVERED", StringComparison.Ordinal))
+                {
+                    KillWedgedClient(process, pid, activeContexts, activeSessions,
+                        "in-process MainThreadHangWatchdog confirmed a permanent main-thread wedge");
+                    continue;
+                }
+            }
+
             var matches = WedgeHbRegex.Matches(tail);
             if (matches.Count == 0) continue;
             var last = matches[matches.Count - 1];
-            bool inWorld = last.Groups[2].Value == "1";
+            bool inWorld = last.Groups[3].Value == "1";
 
             if (!inWorld)
             {
@@ -2176,13 +2205,12 @@ internal partial class MainWindow : Window
                 continue;
             }
 
-            // ── Item-action hard-lock while STILL rendering (fps>0) ──────────
-            // The fps=0 rule below misses this: AC refuses every item action
-            // (combat-mode, casts, opens) on an orphaned pending-action state
-            // while the render loop keeps running. The plugin's combat-mode
-            // retry counter is the proof; >5 min stuck = a relog-only lock the
-            // engine busy watchdog can't clear. No hold timer — the logged
-            // duration is already the dwell.
+            // ── Item-action hard-lock while the engine threads keep ticking ──
+            // AC refuses every item action (combat-mode, casts, opens) on an
+            // orphaned pending-action state. The plugin's combat-mode retry
+            // counter is the proof; >5 min stuck = a relog-only lock the engine
+            // busy watchdog can't clear. No hold timer — the logged duration is
+            // already the dwell.
             int stanceStuckSec = 0;
             foreach (System.Text.RegularExpressions.Match sm in StanceStuckRegex.Matches(tail))
                 if (int.TryParse(sm.Groups[1].Value, out int s) && s > stanceStuckSec)
@@ -2194,11 +2222,16 @@ internal partial class MainWindow : Window
                 continue;
             }
 
-            // ── fps=0 OR main-thread queue backing up = AC main thread wedged ─
-            bool fpsZero = last.Groups[1].Value == "0";
-            int qd = (last.Groups[3].Success && int.TryParse(last.Groups[3].Value, out int q)) ? q : 0;
+            // ── render dead OR pump dead OR queue backing up = wedged ─────────
+            // Minimized clients were exempted above, so fps=0 here = a VISIBLE
+            // client that stopped rendering (a healthy visible client renders
+            // tens of fps); plug=0 = the plugin pump itself died.
+            bool fpsZero  = last.Groups[1].Value == "0";
+            bool pumpDead = last.Groups[2].Value == "0";
+            int qd = (last.Groups[4].Success && int.TryParse(last.Groups[4].Value, out int q)) ? q : 0;
             string? wedgeReason =
-                fpsZero ? "fps=0 with login=1"
+                fpsZero ? "fps=0 with login=1 (render dead)"
+                : pumpDead ? "plugin pump dead (plug=0/s) with login=1"
                 : qd > QueueWedgeDepth ? $"main-thread queue backing up (qd={qd}, login=1)"
                 : null;
 
@@ -2219,7 +2252,7 @@ internal partial class MainWindow : Window
                 continue;
 
             KillWedgedClient(process, pid, activeContexts, activeSessions,
-                $"{wedgeReason} for >{holdSec}s (heartbeat alive — AC main thread wedged)");
+                $"{wedgeReason} for >{holdSec}s (heartbeat alive — AC main thread/pump wedged)");
         }
     }
 
