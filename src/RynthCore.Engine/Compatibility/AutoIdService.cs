@@ -83,6 +83,9 @@ internal static class AutoIdService
         _sent.TryRemove(objectId, out _);
     }
 
+    // Last target we issued a priority appraisal for (fires once per target change).
+    private static uint _lastPriorityTarget;
+
     private static void DrainTick(object? state)
     {
         try
@@ -91,13 +94,30 @@ internal static class AutoIdService
                 return;
 
             int sent = 0;
+
+            // Combat-target priority: when the selected target CHANGES, appraise it
+            // immediately — enqueued ahead of the create-order backlog so a fast kill
+            // still gets its max-HP appraisal out first instead of waiting behind the
+            // whole spawn. Fires once per change (guarded), so no per-tick re-appraisal.
+            uint target = SelectedTargetHooks.ReadCurrentSelectedId();
+            if (target != 0 && target != _lastPriorityTarget)
+            {
+                _lastPriorityTarget = target;
+                uint playerId = ClientHelperHooks.GetPlayerId();
+                if (target != playerId && AcMainThreadQueue.EnqueueRequestId(target))
+                    sent++;
+            }
+
             while (sent < MaxPerTick && _queue.TryDequeue(out uint objectId))
             {
                 // Object may have been destroyed between enqueue and drain
                 if (objectId == 0)
                     continue;
 
-                ClientActionHooks.RequestId(objectId);
+                // Marshal onto AC's main thread (EndScene drain) — the Timer thread must
+                // not call the native 0xC8 send directly (off-thread heap alloc + non-atomic
+                // UI-counter increment). EnqueueRequestId is the marshalled path.
+                AcMainThreadQueue.EnqueueRequestId(objectId);
                 sent++;
             }
         }

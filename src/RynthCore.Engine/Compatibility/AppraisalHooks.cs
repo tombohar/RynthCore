@@ -228,6 +228,15 @@ internal static class AppraisalHooks
             try { RynthLog.Compat($"Compat: appraisal spell cache error guid=0x{guid:X8} - {ex.GetType().Name}: {ex.Message}"); } catch { }
         }
 
+        try
+        {
+            CacheCreatureVitals(guid, profilePtr);
+        }
+        catch (Exception ex)
+        {
+            try { RynthLog.Compat($"Compat: appraisal creature-vitals error guid=0x{guid:X8} - {ex.GetType().Name}: {ex.Message}"); } catch { }
+        }
+
         return result;
     }
 
@@ -403,6 +412,86 @@ internal static class AppraisalHooks
             _spellIdCache[guid] = ids;
 
         RynthLog.Verbose($"Compat: cached {mNum} spell ID(s) for guid=0x{guid:X8}");
+    }
+
+    // Rate-limit counter for the creature-vitals diagnostic log line.
+    private static int _creatureVitalsLogCount;
+    // Guids already logged with a [FAILED-ROLL] line (dedupe; guarded by _cacheLock).
+    private static readonly HashSet<uint> _failedRollLogged = new();
+
+    /// <summary>
+    /// Reads the creature sub-profile (AppraisalProfile+0x08 → CreatureAppraisalProfile) for
+    /// absolute Health/MaxHealth/Stamina/Mana and publishes them to ObjectQualityCache (polled
+    /// via RynthCoreHost.TryGetTargetVitals) and to plugins (OnUpdateHealth push, e.g. RynthAi's
+    /// CreatureProfileStore / RynthJuice numbers).
+    ///
+    /// This is the ONLY opcode that carries a monster's *absolute* max HP — the 0xC9 appraisal
+    /// CreatureProfile. The 0x01C0 combat stream is ratio-only (ACE divides Current/MaxValue
+    /// server-side). This hook (CM_Examine::SendNotice_SetAppraiseInfo @ 0x006B05B0) is the live
+    /// appraisal seam on ACE; the older wire-parse in CombatActionHooks.TryParseIdentifyResponse
+    /// is dead (its InnerDispatcher caller is disabled and the SmartBox caller was removed).
+    ///
+    /// Offsets verified from CreatureAppraisalProfile::InqAttribute2nd (decompile 0x005B6ED0):
+    ///   MaxHealth=+0x28  Health=+0x1C  MaxStamina=+0x2C  Stamina=+0x20  MaxMana=+0x30  Mana=+0x24.
+    /// The +0x08 pointer is non-null only when the appraisal carried a CreatureProfile (creatures
+    /// that are not NPCLooksLikeObject); items/hooks leave it 0 (AppraisalProfile::Clear layout).
+    /// It is the engine's own live struct for this dispatch frame, so the read is safe under the
+    /// same try/catch the sibling Cache* helpers use — no native call, no AC mutation.
+    ///
+    /// Crucially this captures max even on a FAILED assess roll: ACE assigns Health/HealthMax
+    /// before the success gate (CreatureProfile.cs), so no AssessCreature skill is required.
+    /// </summary>
+    private static void CacheCreatureVitals(uint guid, IntPtr profilePtr)
+    {
+        if (profilePtr == IntPtr.Zero)
+            return;
+
+        // AppraisalProfile._creatureProfile* is at offset +0x08.
+        IntPtr creaturePtr = Marshal.ReadIntPtr(profilePtr + 0x08);
+        if (creaturePtr == IntPtr.Zero)
+            return; // non-creature appraisal (item / hook) — no vitals present
+
+        uint maxHealth = unchecked((uint)Marshal.ReadInt32(creaturePtr + 0x28));
+        if (maxHealth == 0 || maxHealth >= 1_000_000)
+            return; // unset / implausible — don't poison the cache
+
+        uint health = unchecked((uint)Marshal.ReadInt32(creaturePtr + 0x1C));
+        uint stamina = unchecked((uint)Marshal.ReadInt32(creaturePtr + 0x20));
+        uint maxStamina = unchecked((uint)Marshal.ReadInt32(creaturePtr + 0x2C));
+        uint mana = unchecked((uint)Marshal.ReadInt32(creaturePtr + 0x24));
+        uint maxMana = unchecked((uint)Marshal.ReadInt32(creaturePtr + 0x30));
+
+        if (health > maxHealth)
+            health = maxHealth; // clamp a transient over-read
+
+        ObjectQualityCache.SetCreatureVitals(guid,
+            new CreatureVitals(health, maxHealth, stamina, maxStamina, mana, maxMana));
+
+        float ratio = (float)health / maxHealth;
+        Plugins.PluginManager.QueueUpdateHealth(guid, ratio, health, maxHealth);
+
+        // ShowAttributes (wire flag 0x8) is CLEAR on a FAILED assess roll; CreatureAppraisalProfile::UnPack
+        // (decompile 0x005B7240, lines 31-42) then EXPLICITLY zeroes stamina/mana/attributes — so
+        // (maxStamina==0 && maxMana==0) is a reliable failed-roll signal, while Health/MaxHealth are written
+        // unconditionally. A failed-roll line therefore PROVES the un-gated capture (max obtained with no
+        // attributes). Failed rolls are rare (most mobs have Deception==0 → success forced) and are the whole
+        // point of this hook, so log them ALWAYS (greppable [FAILED-ROLL] tag); rate-limit the common success case.
+        if (maxStamina == 0 && maxMana == 0)
+        {
+            // Failed roll. Dedupe per guid — the combat target gets re-appraised ~1/0.75s, which would
+            // otherwise spam the log (and bloat it over a grind). Log the first capture per mob only.
+            bool firstForGuid;
+            lock (_cacheLock)
+                firstForGuid = _failedRollLogged.Add(guid);
+            if (firstForGuid)
+                RynthLog.Compat($"Compat: appraisal creature vitals [FAILED-ROLL] guid=0x{guid:X8} hp={health}/{maxHealth} (stam/mana withheld — max captured anyway)");
+        }
+        else
+        {
+            int log = Interlocked.Increment(ref _creatureVitalsLogCount);
+            if (log <= 50)
+                RynthLog.Compat($"Compat: appraisal creature vitals guid=0x{guid:X8} hp={health}/{maxHealth} stam={stamina}/{maxStamina} mana={mana}/{maxMana}");
+        }
     }
 
     /// <summary>
