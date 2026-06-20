@@ -1175,8 +1175,8 @@ internal static partial class RadarPanel
         col.Children.Add(MakeCheck("Show gold rim",
             "Toggle the gold-on-black radar frame. Off = canvas-only, no chrome.",
             () => state.ShowGoldRim, v => state.ShowGoldRim = v));
-        col.Children.Add(MakeCheck("Click-through (hold Ctrl to interact)",
-            "On: clicks pass through to the game; hold Ctrl to drag, gear, popout, or resize.\nOff: radar is always interactive.",
+        col.Children.Add(MakeCheck("Docked click-through (hold Ctrl to interact)",
+            "Applies to the DOCKED radar only — the undocked/popped-out radar is always interactive, like every other floating panel.\nOn: docked clicks pass through to the game; hold Ctrl to drag, gear, or resize.\nOff: docked radar is always interactive.",
             () => state.CtrlGatedClickThrough, v => state.CtrlGatedClickThrough = v));
 
         // Opacity affects the dark backdrop only — gold rim and world details

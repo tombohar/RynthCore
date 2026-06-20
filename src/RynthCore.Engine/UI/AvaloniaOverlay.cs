@@ -2114,10 +2114,16 @@ internal class RynthOverlayWindow : Window
                 // Radar and RynthAi manage redock through their own in-panel
                 // controls; disable the native LayeredWindow redock zone for them.
                 redockButtonWidthPx: (isRadarPopout || isRynthAiPopout) ? 0 : 30,
-                // Ctrl-gated click-through: radar popout window forwards mouse
-                // input to AC by default; Ctrl re-enables interaction with the
-                // gear/dock/resize/drag.
-                clickThroughWhenCtrlReleased: isRadarPopout);
+                // Undocked radar interacts like every other floating panel —
+                // always interactive. Ctrl-gated click-through is a docked-only
+                // option now (RadarSettingsStore.CtrlGatedClickThrough → the
+                // IsOverPanel _radarPanelRect branch). Gating the popout was a
+                // mistake: a floating window doesn't overlap the 3D world, so
+                // there's nothing to click "through" to. The _clickThroughGated
+                // plumbing (Tick gated branch, snapshot Gated flag) is left
+                // intact but dormant so a future "gate the undocked radar too"
+                // option can re-enable it here without rework.
+                clickThroughWhenCtrlReleased: false);
         }
         catch (Exception ex)
         {
