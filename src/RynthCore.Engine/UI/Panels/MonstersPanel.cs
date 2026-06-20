@@ -2,8 +2,9 @@
 //  RynthCore.Engine — UI/Panels/MonstersPanel.cs
 //  Avalonia replica of the ImGui Monsters tab (LegacyMonstersUi.cs).
 //
-//  Mirrors the 19-column ImGui table: F/B/G/I/Y/V/A/Bl/R/S toggles + Name +
-//  Priority + Damage type + Ex Vuln + Weapon + Offhand + PetDmg + [E] + Del.
+//  17-column Avalonia grid: F/B/G/I/Y/V/A/Bl/R/S toggles + Name + Priority +
+//  Damage type + Ex Vuln + PetDmg + [E] + Del. (Weapon/Offhand selection moved
+//  to the Damage tab — per-monster, learned-best default.)
 //  Categories collapsible. "Add Selected" pulls the current target name from
 //  the snapshot.
 //
@@ -470,8 +471,7 @@ internal static class MonstersPanel
         AddHeaderCell(grid, col++, "P");
         AddHeaderCell(grid, col++, "Dmg");
         AddHeaderCell(grid, col++, "ExVuln");
-        AddHeaderCell(grid, col++, "Weapon");
-        AddHeaderCell(grid, col++, "Offhand");
+        // Weapon/Offhand selection moved to the Damage tab (per-monster, learned-best default).
         AddHeaderCell(grid, col++, "PetDmg");
         AddHeaderCell(grid, col++, "E");
         AddHeaderCell(grid, col++, "X");
@@ -495,10 +495,11 @@ internal static class MonstersPanel
 
     private static ColumnDefinitions BuildColumnDefs()
     {
-        // 10 toggles (18 each) + Name (*) + P(40) + Dmg(80) + ExVuln(80) + Wep(140) + Off(140) + Pet(70) + E(28) + X(28)
+        // 10 toggles (18 each) + Name (*) + P(40) + Dmg(80) + ExVuln(80) + Pet(70) + E(28) + X(28)
+        // (Weapon/Offhand columns removed — that selection now lives on the Damage tab.)
         var widths = new List<string>();
         for (int i = 0; i < Toggles.Length; i++) widths.Add("18");
-        widths.AddRange(new[] { "*", "40", "80", "80", "140", "140", "70", "28", "28" });
+        widths.AddRange(new[] { "*", "40", "80", "80", "70", "28", "28" });
         return new ColumnDefinitions(string.Join(',', widths));
     }
 
@@ -544,7 +545,7 @@ internal static class MonstersPanel
     private delegate void ShowPickerDelegate(Button anchor, string[] items, int selected, Action<int> onPick);
     private delegate void AttachTipDelegate(Control c, string text);
 
-    // ── Rule row: 19 columns ────────────────────────────────────────────────
+    // ── Rule row: 17 columns ────────────────────────────────────────────────
     private static Control BuildRuleRow(State state, Rule rule, int index, bool altRow,
                                         Action onChanged, Action onDelete, Action onToggleExpr,
                                         ShowPickerDelegate showPicker, AttachTipDelegate attachTip)
@@ -647,34 +648,9 @@ internal static class MonstersPanel
         Grid.SetColumn(exVulnBtn, col++);
         grid.Children.Add(exVulnBtn);
 
-        // Weapon picker
-        string[] weaponLabels = BuildItemLabels(state.Data.Items);
-        int weaponIdx = FindItemIndex(state.Data.Items, rule.WeaponId);
-        var weaponBtn = BuildPickerButton(weaponLabels[weaponIdx]);
-        weaponBtn.Click += (_, _) =>
-            showPicker(weaponBtn, weaponLabels, weaponIdx, idx =>
-            {
-                rule.WeaponId = idx == 0 ? 0 : state.Data.Items[idx - 1].Id;
-                SetButtonText(weaponBtn, weaponLabels[idx]);
-                onChanged();
-            });
-        attachTip(weaponBtn, "Weapon to wield against this monster (<AUTO> = let combat rules choose)");
-        Grid.SetColumn(weaponBtn, col++);
-        grid.Children.Add(weaponBtn);
-
-        // Offhand picker
-        int offhandIdx = FindItemIndex(state.Data.Items, rule.OffhandId);
-        var offhandBtn = BuildPickerButton(weaponLabels[offhandIdx]);
-        offhandBtn.Click += (_, _) =>
-            showPicker(offhandBtn, weaponLabels, offhandIdx, idx =>
-            {
-                rule.OffhandId = idx == 0 ? 0 : state.Data.Items[idx - 1].Id;
-                SetButtonText(offhandBtn, weaponLabels[idx]);
-                onChanged();
-            });
-        attachTip(offhandBtn, "Offhand to wield against this monster");
-        Grid.SetColumn(offhandBtn, col++);
-        grid.Children.Add(offhandBtn);
+        // Weapon + Offhand pickers moved to the Damage tab (per-monster, learned-best
+        // default). rule.WeaponId/OffhandId remain in the model but are no longer edited
+        // here — combat reads the weapon from the Damage tab (per-wcid override/best).
 
         // PetDmg picker
         var petBtn = BuildPickerButton(rule.PetDamage);
@@ -821,21 +797,6 @@ internal static class MonstersPanel
         if (!Equals(btn.Content as string, s)) btn.Content = s;
     }
 
-    private static string[] BuildItemLabels(List<ItemRef> items)
-    {
-        var labels = new string[items.Count + 1];
-        labels[0] = "<AUTO>";
-        for (int i = 0; i < items.Count; i++) labels[i + 1] = items[i].Name;
-        return labels;
-    }
-
-    private static int FindItemIndex(List<ItemRef> items, int id)
-    {
-        if (id == 0) return 0;
-        for (int i = 0; i < items.Count; i++)
-            if (items[i].Id == id) return i + 1;
-        return 0;
-    }
 
     // ── Inline expression editor row ────────────────────────────────────────
     private static Control BuildExpressionEditor(Rule rule, Action onApply, Action onCancel)
