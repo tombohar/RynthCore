@@ -111,6 +111,11 @@ internal static partial class StatusReader
                     St = bot.PlayerStamina, MaxSt = bot.PlayerMaxStamina,
                     Mn = bot.PlayerMana, MaxMn = bot.PlayerMaxMana,
                 };
+                cs.Deaths = bot.Deaths;
+                cs.VitaePct = bot.VitaePct;
+                cs.KillsPerHour = bot.KillsPerHour;
+                cs.XpPerHour = bot.XpPerHour;
+                cs.LuminancePerHour = bot.LuminancePerHour;
             }
 
             clients.Add(cs);
