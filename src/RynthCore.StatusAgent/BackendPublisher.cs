@@ -1,6 +1,5 @@
 using System.Net.Http;
-using System.Text;
-using System.Text.Json;
+using System.Net.Http.Headers;
 
 namespace RynthCore.StatusAgent;
 
@@ -24,12 +23,10 @@ internal sealed class BackendPublisher : IDisposable
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(Math.Max(1, cfg.TimeoutSeconds)) };
     }
 
-    public async Task<bool> PublishAsync(AggregatePayload payload, CancellationToken ct)
+    public async Task<bool> PublishAsync(byte[] jsonUtf8, int clientCount, CancellationToken ct)
     {
         if (!_enabled)
             return false;
-
-        string json = JsonSerializer.Serialize(payload, AgentJsonContext.Default.AggregatePayload);
 
         const int maxAttempts = 3;
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
@@ -38,8 +35,9 @@ internal sealed class BackendPublisher : IDisposable
             {
                 using var req = new HttpRequestMessage(HttpMethod.Post, _cfg.Endpoint)
                 {
-                    Content = new StringContent(json, Encoding.UTF8, "application/json")
+                    Content = new ByteArrayContent(jsonUtf8)
                 };
+                req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
                 if (!string.IsNullOrWhiteSpace(_cfg.AuthHeaderName) &&
                     !string.IsNullOrWhiteSpace(_cfg.AuthHeaderValue))
                 {
@@ -49,7 +47,7 @@ internal sealed class BackendPublisher : IDisposable
                 using HttpResponseMessage resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
                 if (resp.IsSuccessStatusCode)
                 {
-                    AgentLog.Debug($"POST {(int)resp.StatusCode} {resp.ReasonPhrase} ({payload.ClientCount} clients).");
+                    AgentLog.Debug($"POST {(int)resp.StatusCode} {resp.ReasonPhrase} ({clientCount} clients).");
                     return true;
                 }
 

@@ -49,6 +49,26 @@ if (publisher.Enabled)
 else
     AgentLog.Info("No endpoint configured -> LOCAL PRINT-ONLY mode (nothing is sent anywhere).");
 
+// Opt-in pull endpoint: an app can fetch status with no backend.
+LocalStatusServer? server = null;
+if (cfg.ServeHttp)
+{
+    server = new LocalStatusServer(cfg.ServePrefix, cfg.ServeToken);
+    if (server.TryStart(out string serveErr))
+    {
+        AgentLog.Info($"Serving status at {cfg.ServePrefix}status (GET){(string.IsNullOrEmpty(cfg.ServeToken) ? "" : ", token required")}.");
+    }
+    else
+    {
+        AgentLog.Warn($"Could not start status server on {cfg.ServePrefix} ({serveErr}).");
+        AgentLog.Warn("For a LAN/Tailscale bind (http://+:PORT/) run elevated once, or add a netsh urlacl.");
+        server.Dispose();
+        server = null;
+    }
+}
+
+string aggregatePath = Path.Combine(cfg.StatusDirectory, "aggregate.json");
+
 if (opts.DryRun)
     AgentLog.Info("--dry-run: status will be printed but never POSTed.");
 
@@ -73,12 +93,27 @@ try
                 Clients = clients,
             };
 
+            // Serialize once; reuse the bytes for serve / file / POST.
+            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(payload, AgentJsonContext.Default.AggregatePayload);
+
             AgentLog.Info(Summarize(clients));
             if (opts.Verbose)
-                AgentLog.Debug(JsonSerializer.Serialize(payload, AgentJsonContext.Default.AggregatePayload));
+                AgentLog.Debug(System.Text.Encoding.UTF8.GetString(bytes));
+
+            server?.UpdateLatest(bytes);
+
+            if (cfg.WriteAggregateFile)
+            {
+                try
+                {
+                    Directory.CreateDirectory(cfg.StatusDirectory);
+                    File.WriteAllBytes(aggregatePath, bytes);
+                }
+                catch (Exception ex) { AgentLog.Debug($"aggregate.json write failed: {ex.Message}"); }
+            }
 
             if (publisher.Enabled && !opts.DryRun)
-                await publisher.PublishAsync(payload, cts.Token);
+                await publisher.PublishAsync(bytes, payload.ClientCount, cts.Token);
         }
         catch (OperationCanceledException) { break; }
         catch (Exception ex)
@@ -95,6 +130,7 @@ try
 }
 finally
 {
+    server?.Dispose();
     AgentLog.Info("RynthCore.StatusAgent stopped.");
 }
 
