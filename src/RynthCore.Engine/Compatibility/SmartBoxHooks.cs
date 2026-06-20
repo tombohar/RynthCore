@@ -248,8 +248,32 @@ internal static class SmartBoxHooks
                 }
                 break;
             }
+
+            case 0x01C7: // UseDone: [errorType u32] — server finished an action
+                         // (cast/use) with WeenieError.None(0) = completed, or an
+                         // error (0x1D = YoureTooBusy). Read-only observation: bump
+                         // a monotonic counter so the plugin can pace combat casts
+                         // on real server completion instead of a blind interval.
+                         // This is the authoritative ACE Player.IsBusy lifecycle
+                         // signal — it never touches client m_cBusy.
+            {
+                uint err = size >= 8 ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4))) : 0;
+                int seq = System.Threading.Interlocked.Increment(ref _useDoneSeq);
+                if (_useDoneLogCount < 25)
+                {
+                    _useDoneLogCount++;
+                    RynthLog.Compat($"UseDone seq={seq} err=0x{err:X}");
+                }
+                break;
+            }
         }
     }
+
+    // Monotonic count of inbound UseDone (0x1C7) events. The plugin records this
+    // at cast time and re-reads it to detect the server finishing the cast.
+    private static int _useDoneSeq;
+    private static int _useDoneLogCount;
+    public static int GetUseDoneSeq() => System.Threading.Volatile.Read(ref _useDoneSeq);
 
     // AttackerNotification (0x01B1) / DefenderNotification (0x01B2). Payload at
     // data+4: string16 name, u32 damageType, f64 percent, u32 damage,

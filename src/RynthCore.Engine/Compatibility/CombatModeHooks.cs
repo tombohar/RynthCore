@@ -105,6 +105,8 @@ internal static class CombatModeHooks
     }
 
     private static int _fires;
+    private static int _lastLoggedMode = int.MinValue;
+    private static long _lastLogTicks;
 
     private static void SetCombatModeDetour(IntPtr thisPtr, int newCombatMode, int playerRequested)
     {
@@ -114,8 +116,20 @@ internal static class CombatModeHooks
         MainThreadGuard.RecordIfFirst();
 
         RecursionGuard.Tick("CombatModeHooks.SetCombatMode");
-        if (++_fires <= 3)
+        // This detour fires on the INBOUND server echo (RecvNotice_SetCombatMode ->
+        // ClientCombatSystem::SetCombatMode), so it reflects what the SERVER decided,
+        // not what the plugin requested. The old `_fires <= 3` lifetime cap went dark
+        // hours before any wedge, hiding the diagnosis. Log every distinct mode plus
+        // repeats throttled to 1/s, so a wand-stance wedge (server re-echoing
+        // NonCombat=1 against repeated Magic requests) is visible instead of silent.
+        // See rynthai_combat_busy_wedge ADDENDUM 5.
+        long nowTicks = Environment.TickCount64;
+        if (++_fires <= 3 || newCombatMode != _lastLoggedMode || (nowTicks - _lastLogTicks) >= 1000)
+        {
+            _lastLoggedMode = newCombatMode;
+            _lastLogTicks = nowTicks;
             RynthLog.Compat($"CombatModeHooks: SetCombatMode fired #{_fires} mode={newCombatMode} requested={playerRequested} (main TID = {MainThreadGuard.MainThreadId})");
+        }
 
         try
         {
