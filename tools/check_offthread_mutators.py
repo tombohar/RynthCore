@@ -60,6 +60,14 @@ MUTATOR_DELEGATES = {
 GATE = "MainThreadGuard.IsOnMainThread"
 ENQUEUE = "AcMainThreadQueue.Enqueue"
 
+# Pure off-thread PRODUCERS: Timer/pump callbacks that ONLY enqueue (never call an
+# AC mutator directly), so they legitimately lack the dual-mode IsOnMainThread gate.
+# The marshalled AC call always runs on the main thread in AcMainThreadQueue.Drain*.
+# (file, method) pairs, each verified to do no off-thread AC mutation.
+ENQUEUE_PRODUCER_ALLOW = {
+    ("AutoIdService.cs", "DrainTick"),   # appraisal: enqueues 0xC8, sent on main thread in DrainRequestIds
+}
+
 # Methods that run on AC's main thread BY CONSTRUCTION and may call mutators
 # without a gate: the [UnmanagedCallersOnly] detour bodies (invoked by AC on its
 # own thread) and the hook install/probe/resolve scaffolding. Matched by name
@@ -135,8 +143,9 @@ def main():
             gated = GATE in body
             allowed = is_allowed(name, attrs) or is_queue
 
-            # CHECK A: calls Enqueue but lacks the gate.
-            if (ENQUEUE in body) and not gated and not is_queue:
+            # CHECK A: calls Enqueue but lacks the gate (unless it's a known pure producer).
+            if (ENQUEUE in body) and not gated and not is_queue \
+               and (fn, name) not in ENQUEUE_PRODUCER_ALLOW:
                 checked_a += 1
                 violations.append((fn, line, name, "calls AcMainThreadQueue.Enqueue* without a MainThreadGuard gate"))
 
