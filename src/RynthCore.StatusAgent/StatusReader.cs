@@ -111,12 +111,13 @@ internal static partial class StatusReader
                     St = bot.PlayerStamina, MaxSt = bot.PlayerMaxStamina,
                     Mn = bot.PlayerMana, MaxMn = bot.PlayerMaxMana,
                 };
-                cs.Deaths = bot.Deaths;
-                cs.VitaePct = bot.VitaePct;
-                cs.KillsPerHour = bot.KillsPerHour;
-                cs.XpPerHour = bot.XpPerHour;
-                cs.LuminancePerHour = bot.LuminancePerHour;
+                cs.KillsPerHour = bot.KillsPerHour;   // bot-derived (kill counter)
             }
+            // Engine-written player stats live at the top level of the status file, not in bot.
+            cs.Deaths = model.Deaths;
+            cs.VitaePct = model.VitaePct;
+            cs.XpPerHour = model.XpPerHour;
+            cs.LuminancePerHour = model.LuminancePerHour;
 
             clients.Add(cs);
             seenPids.Add(pid);

@@ -145,6 +145,12 @@ internal static class StatusSnapshotWriter
         }
     }
 
+    // Per-process session baselines for the per-hour rates (status-export). Each client is its
+    // own process, so these naturally reset per launch; we also reset on an XP drop (relog/char swap).
+    private static long _xpBaseline = -1;
+    private static long _lumBaseline = -1;
+    private static DateTime _statsSessionStartUtc = DateTime.UtcNow;
+
     private static byte[] BuildJson(
         long uptimeSeconds, int fps, int pluginTicksPerSec, long workingSetMb,
         bool inWorld, long queueDropped, long reconciles, long forceClears, string? botJson)
@@ -170,6 +176,20 @@ internal static class StatusSnapshotWriter
             w.WriteNumber("queueDropped", queueDropped);
             w.WriteNumber("reconciles", reconciles);
             w.WriteNumber("forceClears", forceClears);
+
+            // Player stats, read on the main thread by PrefetchPlayerStats and served here off-thread
+            // (the plugin pump can't read these live). deaths all-time; rates = whole-session averages.
+            ClientObjectHooks.TryGetPlayerStats(out long xp, out long lum, out int deaths, out float vitae);
+            double vitaePct = Math.Clamp((1.0 - vitae) * 100.0, 0.0, 100.0);
+            if (xp > 0 && (_xpBaseline < 0 || xp < _xpBaseline)) { _xpBaseline = xp; _statsSessionStartUtc = DateTime.UtcNow; }
+            if (lum > 0 && (_lumBaseline < 0 || lum < _lumBaseline)) _lumBaseline = lum;
+            double hours = (DateTime.UtcNow - _statsSessionStartUtc).TotalHours;
+            double xpPerHour  = (hours > 1.0 / 3600.0 && _xpBaseline  >= 0 && xp  >= _xpBaseline)  ? (xp  - _xpBaseline)  / hours : 0;
+            double lumPerHour = (hours > 1.0 / 3600.0 && _lumBaseline >= 0 && lum >= _lumBaseline) ? (lum - _lumBaseline) / hours : 0;
+            w.WriteNumber("deaths", deaths);
+            w.WriteNumber("vitaePct", Math.Round(vitaePct, 1));
+            w.WriteNumber("xpPerHour", Math.Round(xpPerHour));
+            w.WriteNumber("luminancePerHour", Math.Round(lumPerHour));
 
             if (botJson != null)
             {

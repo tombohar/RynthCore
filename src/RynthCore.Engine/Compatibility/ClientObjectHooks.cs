@@ -147,6 +147,19 @@ internal static class ClientObjectHooks
     private static bool _loggedSkillCacheServe;
     private const int PlayerSkillPrefetchThrottleMs = 1000;
 
+    // Main-thread player-stats snapshot (XP / luminance / deaths / vitae) — same off-thread-safe
+    // pattern as the skill cache. These are all main-thread-only Inq* reads, so the off-thread
+    // plugin pump (and StatusSnapshotWriter) can't read them live; snapshot here on the EndScene
+    // path and serve the cache. [status-export]
+    private static readonly object _playerStatsCacheLock = new();
+    private static long _cachedTotalXp;
+    private static long _cachedLuminance;
+    private static int _cachedDeaths;
+    private static float _cachedVitae = 1.0f;
+    private static uint _playerStatsCacheOwner;
+    private static DateTime _lastPlayerStatsPrefetchUtc = DateTime.MinValue;
+    private const int PlayerStatsPrefetchThrottleMs = 1000;
+
     // Main-thread known-spell (spellbook) snapshot — same off-thread-safe
     // pattern as the skill cache above. AC's spellbook is a PackableHashTable
     // at [CACQualities+0x6C] (buckets +0x0C, count +0x10, node key +0x00,
@@ -1087,6 +1100,64 @@ internal static class ClientObjectHooks
         catch (Exception ex)
         {
             RynthLog.Compat($"PrefetchPlayerSkills exception: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Snapshots the player's XP / luminance / deaths / vitae on AC's main thread (driven
+    /// from the EndScene path, same as PrefetchPlayerSkills) into a cache the off-thread
+    /// plugin pump and StatusSnapshotWriter can read. These are all main-thread-only Inq*
+    /// reads. Throttled; fully defensive. [status-export]
+    /// </summary>
+    public static void PrefetchPlayerStats()
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        if ((DateTime.UtcNow - _lastPlayerStatsPrefetchUtc).TotalMilliseconds < PlayerStatsPrefetchThrottleMs)
+            return;
+        _lastPlayerStatsPrefetchUtc = DateTime.UtcNow;
+
+        uint playerId = ClientHelperHooks.GetPlayerId();
+        if (playerId == 0)
+            return;
+
+        try
+        {
+            // Read AC on this (main) thread, then publish under the lock so the off-thread
+            // reader never sees a torn 64-bit value (x86 long writes aren't atomic).
+            bool sameOwner = playerId == _playerStatsCacheOwner;
+            long xp = sameOwner ? _cachedTotalXp : 0;
+            long lum = sameOwner ? _cachedLuminance : 0;
+            int deaths = sameOwner ? _cachedDeaths : 0;
+            float vitae = sameOwner ? _cachedVitae : 1.0f;
+
+            if (TryGetObjectQuadProperty(playerId, 1u, out long x) && x > 0) xp = x;     // PropertyInt64.TotalExperience
+            if (TryGetObjectQuadProperty(playerId, 6u, out long l) && l > 0) lum = l;    // PropertyInt64.AvailableLuminance
+            if (TryGetObjectIntProperty(playerId, 43u, out int d)) deaths = d;           // PropertyInt.NumDeaths
+            if (TryGetVitae(playerId, out float v)) vitae = v;
+
+            lock (_playerStatsCacheLock)
+            {
+                _cachedTotalXp = xp; _cachedLuminance = lum; _cachedDeaths = deaths; _cachedVitae = vitae;
+                _playerStatsCacheOwner = playerId;
+            }
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"PrefetchPlayerStats exception: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Off-thread-safe: serve the cached player-stats snapshot (XP / luminance / deaths /
+    /// vitae multiplier, 1.0 = no penalty). Returns false until the cache is populated.
+    /// </summary>
+    public static bool TryGetPlayerStats(out long totalXp, out long luminance, out int deaths, out float vitae)
+    {
+        lock (_playerStatsCacheLock)
+        {
+            totalXp = _cachedTotalXp; luminance = _cachedLuminance; deaths = _cachedDeaths; vitae = _cachedVitae;
+            return _playerStatsCacheOwner != 0;
         }
     }
 

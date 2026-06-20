@@ -22,6 +22,12 @@ internal sealed class StatusFileModel
     [JsonPropertyName("queueDropped")]      public long QueueDropped { get; set; }
     [JsonPropertyName("reconciles")]        public long Reconciles { get; set; }
     [JsonPropertyName("forceClears")]       public long ForceClears { get; set; }
+    // Player stats written by the engine (PrefetchPlayerStats) — top-level, not in the bot blob,
+    // because the off-thread plugin pump can't read them. kills/hour stays bot-derived below.
+    [JsonPropertyName("deaths")]            public int Deaths { get; set; }
+    [JsonPropertyName("vitaePct")]          public double VitaePct { get; set; }
+    [JsonPropertyName("xpPerHour")]         public double XpPerHour { get; set; }
+    [JsonPropertyName("luminancePerHour")]  public double LuminancePerHour { get; set; }
     [JsonPropertyName("bot")]               public BotSnapshot? Bot { get; set; }
 }
 
@@ -47,11 +53,7 @@ internal sealed class BotSnapshot
     [JsonPropertyName("playerMaxStamina")]  public uint PlayerMaxStamina { get; set; }
     [JsonPropertyName("playerMana")]        public uint PlayerMana { get; set; }
     [JsonPropertyName("playerMaxMana")]     public uint PlayerMaxMana { get; set; }
-    [JsonPropertyName("deaths")]            public int Deaths { get; set; }
-    [JsonPropertyName("vitaePct")]          public double VitaePct { get; set; }
     [JsonPropertyName("killsPerHour")]      public double KillsPerHour { get; set; }
-    [JsonPropertyName("xpPerHour")]         public double XpPerHour { get; set; }
-    [JsonPropertyName("luminancePerHour")]  public double LuminancePerHour { get; set; }
 }
 
 // ── Outgoing: the rolled-up payload posted to the user's backend ────────────
