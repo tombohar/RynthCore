@@ -72,10 +72,12 @@ string aggregatePath = Path.Combine(cfg.StatusDirectory, "aggregate.json");
 if (opts.DryRun)
     AgentLog.Info("--dry-run: status will be printed but never POSTed.");
 
-// Ctrl+C / SIGTERM -> graceful stop.
-using var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-AppDomain.CurrentDomain.ProcessExit += (_, _) => cts.Cancel();
+// Ctrl+C / SIGTERM -> graceful stop. Not disposed: ProcessExit fires during
+// shutdown and would otherwise hit a disposed CTS (ObjectDisposedException ->
+// nonzero exit). The process is ending anyway, so there's nothing to leak.
+var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) => { e.Cancel = true; try { cts.Cancel(); } catch (ObjectDisposedException) { } };
+AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { cts.Cancel(); } catch (ObjectDisposedException) { } };
 
 try
 {
