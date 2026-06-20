@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace RynthCore.Injector;
@@ -12,9 +13,19 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        // Headless modes never prompt — safe to call from scripts / a test
+        // harness with no interactive console.
+        bool headless = args.Any(a =>
+            string.Equals(a, "--launch", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(a, "--no-prompt", StringComparison.OrdinalIgnoreCase));
+
         try
         {
             LogToFile("Injector starting.");
+
+            if (args.Any(a => string.Equals(a, "--launch", StringComparison.OrdinalIgnoreCase)))
+                return LaunchCommand.Run(args, LogToFile);
+
             return Run(args);
         }
         catch (Exception ex)
@@ -28,9 +39,12 @@ internal static class Program
         }
         finally
         {
-            Console.WriteLine();
-            Console.WriteLine("Press any key to exit...");
-            Console.ReadKey(true);
+            if (!headless)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Press any key to exit...");
+                try { Console.ReadKey(true); } catch { /* no interactive console */ }
+            }
         }
     }
 
