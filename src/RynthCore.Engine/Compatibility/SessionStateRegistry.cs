@@ -11,6 +11,14 @@ internal static class SessionStateRegistry
     private static bool _initialized;
     private static bool _loginRecorded;
 
+    // [status-export] Last-recorded session identity, exposed in-memory so the
+    // status writer can label this client without re-parsing any file (re-reading
+    // the session record here can recurse through DatFileShareHooks — see the
+    // long comment in TryWriteLoginState). Empty until LoginComplete records.
+    internal static string LastAccountName { get; private set; } = string.Empty;
+    internal static string LastCharacterName { get; private set; } = string.Empty;
+    internal static string LastServerName { get; private set; } = string.Empty;
+
     public static void Initialize()
     {
         if (_initialized)
@@ -107,6 +115,11 @@ internal static class SessionStateRegistry
             SessionStateStore.WriteForProcess(Environment.ProcessId, record);
             if (!string.IsNullOrWhiteSpace(accountName) && !string.IsNullOrWhiteSpace(characterName))
                 CharacterCacheStore.UpsertCharacter(accountName, serverName, characterName);
+
+            // [status-export] Cache identity in-memory for the status writer.
+            LastAccountName = accountName;
+            LastCharacterName = characterName;
+            LastServerName = serverName;
 
             _loginRecorded = true;
             RynthLog.Info($"SessionState: recorded login session for PID {Environment.ProcessId} account='{accountName}' character='{characterName}' (IsLoggedIn=true).");

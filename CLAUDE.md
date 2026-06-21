@@ -172,6 +172,10 @@ Both default to `true` if the field is missing. Avalonia floating panels and all
 
 Picked up on next AC launch. Hot-reload via the **RL** button doesn't help when the bar is hidden — relaunch the client.
 
+## Remote status export (opt-in, default OFF)
+
+`EngineSettings.EnableStatusExport` (engine.json, default **false**; env override `RYNTHCORE_STATUS_EXPORT=1`) makes the heartbeat also write a small **local** JSON per client to `Logs\status\RynthCore.<pid>.status.json` (heartbeat fields + the RynthAi bot snapshot). **The engine never networks** — it only writes a local file. A separate operator-side app, `src/RynthCore.StatusAgent/` (console, not injected, not in the installer), reads those files and POSTs a rolled-up payload to a user-configured endpoint (e.g. for a phone dashboard); it sends nothing until you set `Endpoint` in `%APPDATA%\RynthCore\statusagent.json`. Designed so shipping RynthCore to others changes nothing unless they opt in. All engine touch points are tagged `[status-export]`. Full design, payload contract, and removal steps: `docs/STATUS_AGENT.md`.
+
 ## Logging
 
 Log directory: **`C:\Games\RynthCore\Logs\`**

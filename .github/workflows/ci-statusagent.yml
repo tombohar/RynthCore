@@ -1,0 +1,59 @@
+name: CI — StatusAgent build
+
+# Builds on a Windows runner so the (otherwise Windows/NativeAOT-only) code is
+# actually compiled in CI, and publishes a standalone RynthCore.StatusAgent.exe
+# as a downloadable artifact. Runs on PRs that touch source + on manual dispatch.
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - '.github/workflows/ci-statusagent.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 10
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    # ── Compile-check the engine-side changes (managed build; no ILC/AOT link,
+    #    no RynthSuite needed — this just verifies the C# compiles). ──────────
+    - name: Compile-check RynthCore.Engine
+      shell: pwsh
+      run: |
+        dotnet build src/RynthCore.Engine/RynthCore.Engine.csproj -c Release
+        if ($LASTEXITCODE -ne 0) { throw "RynthCore.Engine failed to compile" }
+
+    # ── Build + publish the StatusAgent as a standalone single-file exe so it
+    #    runs on the gaming PC with no .NET install. ──────────────────────────
+    - name: Publish RynthCore.StatusAgent (self-contained win-x64)
+      shell: pwsh
+      run: |
+        dotnet publish src/RynthCore.StatusAgent/RynthCore.StatusAgent.csproj `
+          -c Release -r win-x64 --self-contained true `
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+          -o publish/StatusAgent
+        if ($LASTEXITCODE -ne 0) { throw "RynthCore.StatusAgent failed to publish" }
+        Get-ChildItem publish/StatusAgent | Format-Table Name,Length
+
+    - name: Smoke test (--once --dry-run)
+      shell: pwsh
+      run: |
+        # No status files / no AC running on the runner, so this just proves the
+        # exe starts, reads cleanly, and exits 0 in local print-only mode.
+        ./publish/StatusAgent/RynthCore.StatusAgent.exe --once --dry-run --verbose
+        if ($LASTEXITCODE -ne 0) { throw "StatusAgent smoke test exited $LASTEXITCODE" }
+
+    - name: Upload StatusAgent artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: RynthCore.StatusAgent-win-x64
+        path: publish/StatusAgent/**
+        if-no-files-found: error
