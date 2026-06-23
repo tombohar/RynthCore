@@ -67,6 +67,33 @@ internal sealed class AgentConfig
     /// Logs\status\aggregate.json — handy for file-sync delivery or debugging.</summary>
     [JsonPropertyName("WriteAggregateFile")] public bool WriteAggregateFile { get; set; } = true;
 
+    /// <summary>When true, the agent accepts <c>POST /command</c> and writes a command file the
+    /// RynthAi plugin polls + applies (toggle nav/combat, start/stop, switch profile, clear busy).
+    /// Default FALSE — read-only unless you opt in. POST honours <see cref="ServeToken"/> like GET.
+    /// Commands are written under <see cref="StatusDirectory"/>\commands.</summary>
+    [JsonPropertyName("EnableRemoteControl")] public bool EnableRemoteControl { get; set; } = false;
+
+    /// <summary>When true, the agent serves a live screen capture of an AC client window:
+    /// <c>GET /stream?pid=N</c> (MJPEG) and <c>GET /frame?pid=N</c> (single JPEG). Captures the
+    /// window's on-screen rectangle ONLY while a client is connected — no cost otherwise. Default
+    /// FALSE. Honours <see cref="ServeToken"/>. Only captures windows that are actually rendering
+    /// (visible/restored — a minimized client has no frame).</summary>
+    [JsonPropertyName("EnableScreenStream")] public bool EnableScreenStream { get; set; } = false;
+
+    /// <summary>JPEG quality (1–100) and target frame interval (ms) for the screen stream.</summary>
+    [JsonPropertyName("StreamQuality")] public int StreamQuality { get; set; } = 55;
+    [JsonPropertyName("StreamIntervalMs")] public int StreamIntervalMs { get; set; } = 400;
+
+    /// <summary>HD video mode (WebRTC H.264). Opt-in, default FALSE. Adds POST /webrtc/offer + /webrtc/stop
+    /// (token-gated); captures+encodes a pid's window ONLY while a viewer is connected. Heavier than the
+    /// MJPEG stream (a per-pid ffmpeg encoder) — leave off unless you want the low-latency "HD" view.</summary>
+    [JsonPropertyName("EnableVideoStream")] public bool EnableVideoStream { get; set; } = false;
+    /// <summary>HD video (ddagrab GPU capture): cap width (0 = native window size — sharper; lower it,
+    /// e.g. 1280, to favour hitting 60fps on a slower CPU), nominal fps, and target bitrate (kbps).</summary>
+    [JsonPropertyName("VideoMaxWidth")] public int VideoMaxWidth { get; set; } = 0;     // 0 = native (VideoToolbox has no level cap)
+    [JsonPropertyName("VideoFps")] public int VideoFps { get; set; } = 60;
+    [JsonPropertyName("VideoBitrateKbps")] public int VideoBitrateKbps { get; set; } = 12000;
+
     public static string DefaultConfigPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "RynthCore", "statusagent.json");

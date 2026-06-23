@@ -112,12 +112,38 @@ internal static partial class StatusReader
                     Mn = bot.PlayerMana, MaxMn = bot.PlayerMaxMana,
                 };
                 cs.KillsPerHour = bot.KillsPerHour;   // bot-derived (kill counter)
+                cs.SessionKills = bot.SessionKills;
+                cs.SecsSinceLastKill = bot.SecsSinceLastKill;
+                cs.FreeSlots = bot.FreeSlots;
+                cs.UiHidden = bot.UiHidden;
+                cs.Scarabs = bot.Scarabs;
+                cs.Tapers = bot.Tapers;
+                cs.ScarabsByType = bot.ScarabsByType;
+                cs.Equipment = bot.Equipment;
+                cs.RecentChat = bot.RecentChat;
+                cs.CombatEnabled = bot.CombatEnabled;
+                cs.BuffingEnabled = bot.BuffingEnabled;
+                cs.NavigationEnabled = bot.NavigationEnabled;
+                cs.LootingEnabled = bot.LootingEnabled;
+                cs.MetaEnabled = bot.MetaEnabled;
+                cs.NavProfiles = bot.NavProfiles;
+                cs.LootProfiles = bot.LootProfiles;
+                cs.MetaProfiles = bot.MetaProfiles;
+                cs.SelectedNavIdx = bot.SelectedNavIdx;
+                cs.SelectedLootIdx = bot.SelectedLootIdx;
+                cs.SelectedMetaIdx = bot.SelectedMetaIdx;
             }
             // Engine-written player stats live at the top level of the status file, not in bot.
             cs.Deaths = model.Deaths;
+            cs.DeathsSession = model.DeathsSession;
             cs.VitaePct = model.VitaePct;
             cs.XpPerHour = model.XpPerHour;
             cs.LuminancePerHour = model.LuminancePerHour;
+            cs.XpSession = model.XpSession;
+            cs.BurdenPct = model.BurdenPct;
+            cs.Area = model.Area;
+            cs.LastIssue = model.LastIssue;
+            cs.LastIssueAgeSec = model.LastIssueAgeSec;
 
             clients.Add(cs);
             seenPids.Add(pid);

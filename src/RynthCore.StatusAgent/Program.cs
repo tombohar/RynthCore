@@ -51,12 +51,27 @@ else
 
 // Opt-in pull endpoint: an app can fetch status with no backend.
 LocalStatusServer? server = null;
+WebRtcVideoService? video = null;   // HD WebRTC video mode (opt-in); disposed in finally
 if (cfg.ServeHttp)
 {
-    server = new LocalStatusServer(cfg.ServePrefix, cfg.ServeToken);
+    string? commandDir = cfg.EnableRemoteControl ? Path.Combine(cfg.StatusDirectory, "commands") : null;
+    VideoSocketService? videoSocket = null;
+    if (cfg.EnableVideoStream)
+    {
+        video = new WebRtcVideoService(cfg.VideoMaxWidth, cfg.VideoFps, cfg.VideoBitrateKbps);
+        videoSocket = new VideoSocketService(cfg.VideoMaxWidth, cfg.VideoFps, cfg.VideoBitrateKbps);
+    }
+    server = new LocalStatusServer(cfg.ServePrefix, cfg.ServeToken, commandDir,
+                                   cfg.EnableScreenStream, cfg.StreamQuality, cfg.StreamIntervalMs, video, videoSocket);
     if (server.TryStart(out string serveErr))
     {
         AgentLog.Info($"Serving status at {cfg.ServePrefix}status (GET){(string.IsNullOrEmpty(cfg.ServeToken) ? "" : ", token required")}.");
+        if (commandDir != null)
+            AgentLog.Info($"Remote control ENABLED: POST {cfg.ServePrefix}command -> {commandDir}.");
+        if (cfg.EnableScreenStream)
+            AgentLog.Info($"Screen stream ENABLED: GET {cfg.ServePrefix}stream?pid=N (MJPEG) / frame?pid=N.");
+        if (cfg.EnableVideoStream)
+            AgentLog.Info($"HD video ENABLED: GET {cfg.ServePrefix}video?pid=N (WS H.264 client-server) + POST webrtc/offer (same-LAN). {(cfg.VideoMaxWidth == 0 ? "native" : cfg.VideoMaxWidth + "w")}@{cfg.VideoFps}fps.");
     }
     else
     {
@@ -133,6 +148,7 @@ try
 finally
 {
     server?.Dispose();
+    video?.Dispose();
     AgentLog.Info("RynthCore.StatusAgent stopped.");
 }
 

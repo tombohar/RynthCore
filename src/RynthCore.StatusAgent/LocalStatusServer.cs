@@ -1,5 +1,7 @@
 using System.Net;
+using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 
 namespace RynthCore.StatusAgent;
 
@@ -14,6 +16,12 @@ internal sealed class LocalStatusServer : IDisposable
     private readonly HttpListener _listener = new();
     private readonly string? _token;
     private readonly string _prefix;
+    private readonly string? _commandDir;   // null = remote control disabled (no POST /command)
+    private readonly bool _enableStream;    // GET /frame + /stream (screen capture)
+    private readonly int _streamQuality;
+    private readonly int _streamIntervalMs;
+    private readonly WebRtcVideoService? _video;   // POST /webrtc/* (HD WebRTC mode; same-LAN); null = disabled
+    private readonly VideoSocketService? _videoSocket;   // GET /video (WS, H.264 client-server; works remotely)
     private volatile byte[] _latest =
         Encoding.UTF8.GetBytes("{\"schema\":\"rynthcore.status-agent/1\",\"clientCount\":0,\"clients\":[]}");
     private CancellationTokenSource? _cts;
@@ -21,10 +29,18 @@ internal sealed class LocalStatusServer : IDisposable
 
     public bool Running { get; private set; }
 
-    public LocalStatusServer(string prefix, string? token)
+    public LocalStatusServer(string prefix, string? token, string? commandDir = null,
+                             bool enableStream = false, int streamQuality = 55, int streamIntervalMs = 400,
+                             WebRtcVideoService? video = null, VideoSocketService? videoSocket = null)
     {
         _prefix = prefix.EndsWith('/') ? prefix : prefix + "/";
         _token = string.IsNullOrWhiteSpace(token) ? null : token;
+        _commandDir = string.IsNullOrWhiteSpace(commandDir) ? null : commandDir;
+        _enableStream = enableStream;
+        _streamQuality = Math.Clamp(streamQuality, 1, 100);
+        _streamIntervalMs = Math.Clamp(streamIntervalMs, 100, 2000);
+        _video = video;
+        _videoSocket = videoSocket;
         _listener.Prefixes.Add(_prefix);
     }
 
@@ -69,13 +85,132 @@ internal sealed class LocalStatusServer : IDisposable
             HttpListenerResponse res = ctx.Response;
             res.Headers["Access-Control-Allow-Origin"] = "*";
             string path = req.Url?.AbsolutePath?.TrimEnd('/').ToLowerInvariant() ?? "";
+            string method = req.HttpMethod ?? "GET";
+
+            // Diagnostic: log every /webrtc request + every CORS preflight, at the door (before any
+            // auth/route processing), so we can see whether the app's offer POST even reaches us.
+            if (path.StartsWith("/webrtc") || string.Equals(method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
+                AgentLog.Info($"[video] HTTP {method} {path} ua=\"{req.UserAgent}\"");
+
+            // CORS preflight for the POST /command path (a browser-hosted client may send it).
+            if (string.Equals(method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
+            {
+                res.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
+                res.Headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type";
+                Write(res, 204, "text/plain", Array.Empty<byte>());
+                return;
+            }
 
             if (path == "/healthz")
             {
                 Write(res, 200, "text/plain", "ok"u8.ToArray());
                 return;
             }
-            if (!string.Equals(req.HttpMethod, "GET", StringComparison.OrdinalIgnoreCase))
+
+            // ── Screen stream: GET /frame?pid=N (single JPEG) or /stream?pid=N (MJPEG) ──
+            if (path == "/frame" || path == "/stream")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                {
+                    Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray());
+                    return;
+                }
+                if (_token != null && !Authorized(req))
+                {
+                    Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray());
+                    return;
+                }
+                if (!_enableStream)
+                {
+                    Write(res, 503, "application/json", "{\"error\":\"screen stream disabled\"}"u8.ToArray());
+                    return;
+                }
+                int pid = int.TryParse(req.QueryString["pid"], out int p) ? p : 0;
+                if (pid <= 0)
+                {
+                    Write(res, 400, "application/json", "{\"error\":\"pid required\"}"u8.ToArray());
+                    return;
+                }
+                int quality = ClampQuery(req, "q", _streamQuality, 1, 100);
+                int maxWidth = ClampQuery(req, "w", 0, 0, 4096);                       // 0 = native size
+                int fps = ClampQuery(req, "fps", 0, 0, 30);
+                int intervalMs = fps > 0 ? Math.Clamp(1000 / fps, 33, 2000) : _streamIntervalMs;
+                if (path == "/frame") HandleFrame(res, pid, quality, maxWidth);
+                else HandleStream(res, pid, quality, maxWidth, intervalMs);
+                return;
+            }
+
+            // ── HD video (WebSocket H.264, client-server, works remotely): GET /video?pid=N (ws upgrade) ──
+            if (path == "/video")
+            {
+                if (_token != null && !Authorized(req)) { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
+                if (_videoSocket == null) { Write(res, 503, "application/json", "{\"error\":\"video stream disabled\"}"u8.ToArray()); return; }
+                int vpid = int.TryParse(req.QueryString["pid"], out int vv) ? vv : 0;
+                if (vpid <= 0) { Write(res, 400, "application/json", "{\"error\":\"pid required\"}"u8.ToArray()); return; }
+                if (!req.IsWebSocketRequest) { Write(res, 426, "application/json", "{\"error\":\"websocket required\"}"u8.ToArray()); return; }
+                AgentLog.Info($"[vsock] HTTP WS /video pid={vpid} ua=\"{req.UserAgent}\"");
+                _ = HandleVideoSocketAsync(ctx, vpid);
+                return;
+            }
+
+            // ── HD video (WebRTC): POST /webrtc/offer?pid=N {sdp} -> {sdp:answer}; POST /webrtc/stop?pid=N ──
+            if (path == "/webrtc/offer" || path == "/webrtc/stop" || path == "/webrtc/clientlog")
+            {
+                if (!string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase))
+                {
+                    Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray());
+                    return;
+                }
+                if (_token != null && !Authorized(req))
+                {
+                    Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray());
+                    return;
+                }
+                if (_video == null)
+                {
+                    Write(res, 503, "application/json", "{\"error\":\"video stream disabled\"}"u8.ToArray());
+                    return;
+                }
+                int pid = int.TryParse(req.QueryString["pid"], out int vp) ? vp : 0;
+                if (pid <= 0)
+                {
+                    Write(res, 400, "application/json", "{\"error\":\"pid required\"}"u8.ToArray());
+                    return;
+                }
+                if (path == "/webrtc/stop") { _video.Stop(pid); Write(res, 200, "application/json", "{\"ok\":true}"u8.ToArray()); return; }
+                if (path == "/webrtc/clientlog")   // diagnostic: WKWebView reports its WebRTC errors/states here
+                {
+                    try { using var sr = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8); AgentLog.Info($"[video] CLIENT pid={pid}: {sr.ReadToEnd()}"); } catch { }
+                    Write(res, 200, "application/json", "{\"ok\":true}"u8.ToArray());
+                    return;
+                }
+                HandleWebRtcOffer(req, res, pid);
+                return;
+            }
+
+            // ── Remote control: POST /command writes a command file the engine-plugin polls ──
+            if (path == "/command")
+            {
+                if (!string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase))
+                {
+                    Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray());
+                    return;
+                }
+                if (_token != null && !Authorized(req))
+                {
+                    Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray());
+                    return;
+                }
+                if (_commandDir == null)
+                {
+                    Write(res, 503, "application/json", "{\"error\":\"remote control disabled\"}"u8.ToArray());
+                    return;
+                }
+                HandleCommand(req, res);
+                return;
+            }
+
+            if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
             {
                 Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray());
                 return;
@@ -94,6 +229,214 @@ internal sealed class LocalStatusServer : IDisposable
             Write(res, 200, "application/json", _latest);
         }
         catch { /* a broken client connection must not take the agent down */ }
+    }
+
+    // Plugin actions (written as a command file the plugin polls). "closeClient" is handled by the
+    // agent directly (process kill), not the plugin — see HandleCommand.
+    private static readonly HashSet<string> KnownActions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "macro", "combat", "buffing", "navigation", "looting", "meta",
+        "navProfile", "lootProfile", "metaProfile", "settingsProfile",
+        "forceRebuff", "cancelRebuff", "clearBusy", "hideUi", "sendChat",
+        "moveStart", "moveStop",
+        "closeClient",
+    };
+
+    private void HandleCommand(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        try
+        {
+            string body;
+            using (var reader = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8))
+                body = reader.ReadToEnd();
+
+            int pid; string action; string value;
+            using (var doc = JsonDocument.Parse(body))
+            {
+                var root = doc.RootElement;
+                pid = root.TryGetProperty("pid", out var p) && p.TryGetInt32(out int pv) ? pv : 0;
+                action = root.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.String
+                    ? (a.GetString() ?? "") : "";
+                value = root.TryGetProperty("value", out var v)
+                    ? (v.ValueKind == JsonValueKind.String ? (v.GetString() ?? "") : v.ToString()) : "";
+            }
+
+            if (pid <= 0 || string.IsNullOrEmpty(action) || !KnownActions.Contains(action))
+            {
+                Write(res, 400, "application/json", "{\"error\":\"bad command\"}"u8.ToArray());
+                return;
+            }
+
+            // Close-client is an AGENT action (kill the process), not a plugin command — handle + return.
+            if (string.Equals(action, "closeClient", StringComparison.OrdinalIgnoreCase))
+            {
+                CloseClient(pid);
+                Write(res, 202, "application/json", "{\"ok\":true}"u8.ToArray());
+                return;
+            }
+
+            Directory.CreateDirectory(_commandDir!);
+            PruneStaleCommands();
+
+            // Ticks-prefixed name so the plugin applies commands in submit order; guid avoids collisions.
+            string name = $"RynthCore.{pid}.{DateTime.UtcNow.Ticks:D19}-{Guid.NewGuid():N}.cmd.json";
+            string dest = Path.Combine(_commandDir!, name);
+            string tmp = dest + ".tmp";
+            string payload = JsonSerializer.Serialize(
+                new CommandFile { Pid = pid, Action = action, Value = value, Ts = DateTimeOffset.UtcNow },
+                AgentJsonContext.Default.CommandFile);
+            File.WriteAllText(tmp, payload, Encoding.UTF8);
+            File.Move(tmp, dest, overwrite: true);
+
+            AgentLog.Info($"command queued: pid={pid} {action}={value}");
+            Write(res, 202, "application/json", "{\"ok\":true}"u8.ToArray());
+        }
+        catch (Exception ex)
+        {
+            AgentLog.Warn($"POST /command failed: {ex.GetType().Name}: {ex.Message}");
+            Write(res, 400, "application/json", "{\"error\":\"invalid request\"}"u8.ToArray());
+        }
+    }
+
+    // Drop any command file a client never consumed within 60s (e.g. issued to a box that's now down).
+    private void PruneStaleCommands()
+    {
+        try
+        {
+            DateTime cutoff = DateTime.UtcNow.AddSeconds(-60);
+            foreach (string f in Directory.GetFiles(_commandDir!, "*.cmd.json"))
+            {
+                try { if (File.GetLastWriteTimeUtc(f) < cutoff) File.Delete(f); } catch { }
+            }
+        }
+        catch { }
+    }
+
+    /// Close one AC client: try a graceful WM_CLOSE first (clean logout / save), and hard-kill after a
+    /// few seconds if it's still alive (covers a hung client whose message loop is wedged).
+    private static void CloseClient(int pid)
+    {
+        try
+        {
+            var proc = System.Diagnostics.Process.GetProcessById(pid);
+            // Defence-in-depth for a destructive op: only ever close an AC client, never some other
+            // process if a stale pid were somehow recycled between the feed and this call.
+            if (!string.Equals(proc.ProcessName, "acclient", StringComparison.OrdinalIgnoreCase))
+            {
+                AgentLog.Warn($"close client pid={pid} refused: not an acclient process ({proc.ProcessName}).");
+                try { proc.Dispose(); } catch { }
+                return;
+            }
+            try { proc.CloseMainWindow(); } catch { }
+            _ = Task.Run(async () =>
+            {
+                try { await Task.Delay(6000); if (!proc.HasExited) proc.Kill(); } catch { }
+                finally { try { proc.Dispose(); } catch { } }
+            });
+            AgentLog.Info($"close client requested: pid={pid} (graceful, kill fallback in 6s)");
+        }
+        catch (Exception ex) { AgentLog.Warn($"close client pid={pid} failed: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    private static int ClampQuery(HttpListenerRequest req, string key, int def, int lo, int hi)
+        => int.TryParse(req.QueryString[key], out int v) ? Math.Clamp(v, lo, hi) : def;
+
+    private void HandleFrame(HttpListenerResponse res, int pid, int quality, int maxWidth)
+    {
+        var r = ScreenCapture.TryCaptureJpeg(pid, quality, maxWidth, out byte[] jpeg);
+        if (r == ScreenCapture.Result.Ok)
+            Write(res, 200, "image/jpeg", jpeg);
+        else
+            Write(res, 503, "application/json",
+                Encoding.ASCII.GetBytes($"{{\"error\":\"{r.ToString().ToLowerInvariant()}\"}}"));
+    }
+
+    private static readonly byte[] CrLf = { 13, 10 };
+
+    /// MJPEG: push JPEG frames as multipart/x-mixed-replace until the client disconnects (the <img>
+    /// is removed app-side) or the window closes. Capture only happens while a client is connected.
+    private void HandleStream(HttpListenerResponse res, int pid, int quality, int maxWidth, int intervalMs)
+    {
+        try
+        {
+            res.StatusCode = 200;
+            res.SendChunked = true;
+            res.ContentType = "multipart/x-mixed-replace; boundary=frame";
+            res.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+            var os = res.OutputStream;
+            int misses = 0;
+            var sw = new System.Diagnostics.Stopwatch();
+            while (true)
+            {
+                sw.Restart();
+                var r = ScreenCapture.TryCaptureJpeg(pid, quality, maxWidth, out byte[] jpeg);
+                if (r != ScreenCapture.Result.Ok)
+                {
+                    // window gone for a while -> end the stream; minimized/transient -> wait + retry.
+                    if (r == ScreenCapture.Result.NotFound && ++misses > 6) break;
+                    Thread.Sleep(500);
+                    continue;
+                }
+                misses = 0;
+                byte[] header = Encoding.ASCII.GetBytes(
+                    $"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {jpeg.Length}\r\n\r\n");
+                os.Write(header, 0, header.Length);
+                os.Write(jpeg, 0, jpeg.Length);
+                os.Write(CrLf, 0, CrLf.Length);
+                os.Flush();                       // throws once the client (phone) disconnects
+                // Pace to the TARGET interval: sleep only the time left after capture+encode+send, so the
+                // achieved fps actually hits the target (up to the encode ceiling) instead of interval+capture.
+                int left = intervalMs - (int)sw.ElapsedMilliseconds;
+                if (left > 1) Thread.Sleep(left);
+            }
+        }
+        catch { /* client disconnected / write failed — stop capturing for this stream */ }
+        finally { try { res.OutputStream.Close(); } catch { } }
+    }
+
+    private async Task HandleVideoSocketAsync(HttpListenerContext ctx, int pid)
+    {
+        HttpListenerWebSocketContext wsCtx;
+        try { wsCtx = await ctx.AcceptWebSocketAsync(null); }
+        catch (Exception ex) { AgentLog.Warn($"[vsock] ws accept failed pid {pid}: {ex.Message}"); try { ctx.Response.StatusCode = 500; ctx.Response.Close(); } catch { } return; }
+        using var cts = new CancellationTokenSource();
+        try { await _videoSocket!.StreamAsync(wsCtx.WebSocket, pid, cts.Token); }
+        catch (Exception ex) { AgentLog.Debug($"[vsock] pid {pid}: {ex.Message}"); }
+        finally { try { wsCtx.WebSocket.Dispose(); } catch { } }
+    }
+
+    private void HandleWebRtcOffer(HttpListenerRequest req, HttpListenerResponse res, int pid)
+    {
+        string body;
+        using (var sr = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8))
+            body = sr.ReadToEnd();
+        string? offer = null;
+        try { offer = JsonDocument.Parse(body).RootElement.GetProperty("sdp").GetString(); } catch { }
+        if (string.IsNullOrEmpty(offer))
+        {
+            Write(res, 400, "application/json", "{\"error\":\"sdp required\"}"u8.ToArray());
+            return;
+        }
+        // Diagnostic: confirm the offer arrived + from which client (Safari vs Chrome), and what H.264
+        // profile-level-id(s) it can RECEIVE.
+        AgentLog.Info($"[video] OFFER pid={pid} ua=\"{req.UserAgent}\"");
+        foreach (var ln in offer.Split('\n'))
+            if (ln.StartsWith("m=video", StringComparison.Ordinal) || ln.Contains("profile-level-id", StringComparison.OrdinalIgnoreCase) || ln.Contains("candidate", StringComparison.OrdinalIgnoreCase))
+                AgentLog.Info($"[video] offer> {ln.Trim()}");
+        string? answer;
+        try { answer = _video!.CreateAnswerAsync(pid, offer).GetAwaiter().GetResult(); }
+        catch (Exception ex) { AgentLog.Warn($"[video] offer failed pid {pid}: {ex.Message}"); answer = null; }
+        if (answer == null)
+        {
+            Write(res, 409, "application/json", "{\"error\":\"no renderable window for that pid (minimized?) or negotiation failed\"}"u8.ToArray());
+            return;
+        }
+        // Diagnostic: log the answer's H.264 negotiation so we can compare payload type + profile-level-id
+        // against the client's offer (a mismatch makes Safari reject setRemoteDescription -> black).
+        foreach (var ln in answer.Split('\n'))
+            if (ln.StartsWith("m=video", StringComparison.Ordinal) || ln.Contains("profile-level-id", StringComparison.OrdinalIgnoreCase) || (ln.Contains("rtpmap", StringComparison.OrdinalIgnoreCase) && ln.Contains("H264", StringComparison.OrdinalIgnoreCase)))
+                AgentLog.Info($"[video] answer> {ln.Trim()}");
+        Write(res, 200, "application/json", JsonSerializer.SerializeToUtf8Bytes(new { sdp = answer }));
     }
 
     private bool Authorized(HttpListenerRequest req)

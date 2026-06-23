@@ -25,9 +25,15 @@ internal sealed class StatusFileModel
     // Player stats written by the engine (PrefetchPlayerStats) — top-level, not in the bot blob,
     // because the off-thread plugin pump can't read them. kills/hour stays bot-derived below.
     [JsonPropertyName("deaths")]            public int Deaths { get; set; }
+    [JsonPropertyName("deathsSession")]     public int DeathsSession { get; set; }
     [JsonPropertyName("vitaePct")]          public double VitaePct { get; set; }
     [JsonPropertyName("xpPerHour")]         public double XpPerHour { get; set; }
     [JsonPropertyName("luminancePerHour")]  public double LuminancePerHour { get; set; }
+    [JsonPropertyName("xpSession")]         public long XpSession { get; set; }
+    [JsonPropertyName("burdenPct")]         public double BurdenPct { get; set; }
+    [JsonPropertyName("area")]              public string Area { get; set; } = "";
+    [JsonPropertyName("lastIssue")]         public string? LastIssue { get; set; }
+    [JsonPropertyName("lastIssueAgeSec")]   public long LastIssueAgeSec { get; set; } = -1;
     [JsonPropertyName("bot")]               public BotSnapshot? Bot { get; set; }
 }
 
@@ -46,6 +52,13 @@ internal sealed class BotSnapshot
     [JsonPropertyName("navigationEnabled")] public bool NavigationEnabled { get; set; }
     [JsonPropertyName("lootingEnabled")]    public bool LootingEnabled { get; set; }
     [JsonPropertyName("metaEnabled")]       public bool MetaEnabled { get; set; }
+    // Profile lists + current selection, so a remote client can offer a profile picker.
+    [JsonPropertyName("navProfiles")]       public List<string>? NavProfiles { get; set; }
+    [JsonPropertyName("lootProfiles")]      public List<string>? LootProfiles { get; set; }
+    [JsonPropertyName("metaProfiles")]      public List<string>? MetaProfiles { get; set; }
+    [JsonPropertyName("selectedNavIdx")]    public int SelectedNavIdx { get; set; } = -1;
+    [JsonPropertyName("selectedLootIdx")]   public int SelectedLootIdx { get; set; } = -1;
+    [JsonPropertyName("selectedMetaIdx")]   public int SelectedMetaIdx { get; set; } = -1;
     [JsonPropertyName("targetLabel")]       public string TargetLabel { get; set; } = "";
     [JsonPropertyName("playerHealth")]      public uint PlayerHealth { get; set; }
     [JsonPropertyName("playerMaxHealth")]   public uint PlayerMaxHealth { get; set; }
@@ -54,6 +67,54 @@ internal sealed class BotSnapshot
     [JsonPropertyName("playerMana")]        public uint PlayerMana { get; set; }
     [JsonPropertyName("playerMaxMana")]     public uint PlayerMaxMana { get; set; }
     [JsonPropertyName("killsPerHour")]      public double KillsPerHour { get; set; }
+    [JsonPropertyName("sessionKills")]      public int SessionKills { get; set; }
+    [JsonPropertyName("secsSinceLastKill")] public int SecsSinceLastKill { get; set; } = -1;
+    [JsonPropertyName("freeSlots")]         public int FreeSlots { get; set; } = -1;
+    [JsonPropertyName("uiHidden")]          public bool UiHidden { get; set; }
+    [JsonPropertyName("scarabs")]           public int Scarabs { get; set; } = -1;
+    [JsonPropertyName("tapers")]            public int Tapers { get; set; } = -1;
+    [JsonPropertyName("scarabsByType")]     public List<ScarabCount>? ScarabsByType { get; set; }
+    [JsonPropertyName("equipment")]         public List<EquipItem>? Equipment { get; set; }
+    [JsonPropertyName("recentChat")]        public List<ChatLine>? RecentChat { get; set; }
+}
+
+/// <summary>One scarab tier and its inventory count.</summary>
+internal sealed class ScarabCount
+{
+    [JsonPropertyName("name")]  public string Name { get; set; } = "";
+    [JsonPropertyName("count")] public int Count { get; set; }
+}
+
+/// <summary>One captured chat line: text + AC chat-type (for colouring).</summary>
+internal sealed class ChatLine
+{
+    [JsonPropertyName("t")] public string Text { get; set; } = "";
+    [JsonPropertyName("c")] public int Type { get; set; }
+}
+
+/// <summary>One worn/wielded item with its full appraisal (Assess/Identify data).</summary>
+internal sealed class EquipItem
+{
+    [JsonPropertyName("name")]        public string Name { get; set; } = "";
+    [JsonPropertyName("id")]          public uint Id { get; set; }
+    [JsonPropertyName("slot")]        public int Slot { get; set; }
+    [JsonPropertyName("armorLevel")]  public int ArmorLevel { get; set; }
+    [JsonPropertyName("resist")]      public List<double>? Resist { get; set; }   // 7: slash,pierce,bludge,cold,fire,acid,electric
+    [JsonPropertyName("value")]       public int Value { get; set; }
+    [JsonPropertyName("burden")]      public int Burden { get; set; }
+    [JsonPropertyName("workmanship")] public int Workmanship { get; set; }
+    [JsonPropertyName("material")]    public int Material { get; set; }
+    [JsonPropertyName("maxMana")]     public int MaxMana { get; set; }
+    [JsonPropertyName("curMana")]     public int CurMana { get; set; }
+    [JsonPropertyName("damage")]      public int Damage { get; set; }
+    [JsonPropertyName("damageType")]  public int DamageType { get; set; }
+    [JsonPropertyName("weaponDef")]   public double WeaponDef { get; set; }
+    [JsonPropertyName("missileDef")]  public double MissileDef { get; set; }
+    [JsonPropertyName("magicDef")]    public double MagicDef { get; set; }
+    [JsonPropertyName("variance")]    public double Variance { get; set; }
+    [JsonPropertyName("elementalMod")]public double ElementalMod { get; set; }
+    [JsonPropertyName("spells")]      public List<string>? Spells { get; set; }
+    [JsonPropertyName("longDesc")]    public string? LongDesc { get; set; }
 }
 
 // ── Outgoing: the rolled-up payload posted to the user's backend ────────────
@@ -99,6 +160,20 @@ internal sealed class ClientStatus
     [JsonPropertyName("lootProfile")]       public string LootProfile { get; set; } = "";
     [JsonPropertyName("metaProfile")]       public string MetaProfile { get; set; } = "";
     [JsonPropertyName("target")]            public string Target { get; set; } = "";
+
+    // Control state (status-file clients): the five subsystem flags + profile lists/selection,
+    // so a remote client can show the current switch positions and offer a profile picker.
+    [JsonPropertyName("combatEnabled")]     public bool CombatEnabled { get; set; }
+    [JsonPropertyName("buffingEnabled")]    public bool BuffingEnabled { get; set; }
+    [JsonPropertyName("navigationEnabled")] public bool NavigationEnabled { get; set; }
+    [JsonPropertyName("lootingEnabled")]    public bool LootingEnabled { get; set; }
+    [JsonPropertyName("metaEnabled")]       public bool MetaEnabled { get; set; }
+    [JsonPropertyName("navProfiles")]       public List<string>? NavProfiles { get; set; }
+    [JsonPropertyName("lootProfiles")]      public List<string>? LootProfiles { get; set; }
+    [JsonPropertyName("metaProfiles")]      public List<string>? MetaProfiles { get; set; }
+    [JsonPropertyName("selectedNavIdx")]    public int SelectedNavIdx { get; set; } = -1;
+    [JsonPropertyName("selectedLootIdx")]   public int SelectedLootIdx { get; set; } = -1;
+    [JsonPropertyName("selectedMetaIdx")]   public int SelectedMetaIdx { get; set; } = -1;
     [JsonPropertyName("player")]            public Vitals? Player { get; set; }
 
     [JsonPropertyName("queueDropped")]      public long QueueDropped { get; set; }
@@ -106,10 +181,25 @@ internal sealed class ClientStatus
     [JsonPropertyName("forceClears")]       public long ForceClears { get; set; }
 
     [JsonPropertyName("deaths")]            public int Deaths { get; set; }
+    [JsonPropertyName("deathsSession")]     public int DeathsSession { get; set; }
     [JsonPropertyName("vitaePct")]          public double VitaePct { get; set; }
     [JsonPropertyName("killsPerHour")]      public double KillsPerHour { get; set; }
     [JsonPropertyName("xpPerHour")]         public double XpPerHour { get; set; }
     [JsonPropertyName("luminancePerHour")]  public double LuminancePerHour { get; set; }
+    [JsonPropertyName("xpSession")]         public long XpSession { get; set; }
+    [JsonPropertyName("burdenPct")]         public double BurdenPct { get; set; }
+    [JsonPropertyName("area")]              public string Area { get; set; } = "";
+    [JsonPropertyName("sessionKills")]      public int SessionKills { get; set; }
+    [JsonPropertyName("secsSinceLastKill")] public int SecsSinceLastKill { get; set; } = -1;
+    [JsonPropertyName("freeSlots")]         public int FreeSlots { get; set; } = -1;
+    [JsonPropertyName("uiHidden")]          public bool UiHidden { get; set; }
+    [JsonPropertyName("scarabs")]           public int Scarabs { get; set; } = -1;
+    [JsonPropertyName("tapers")]            public int Tapers { get; set; } = -1;
+    [JsonPropertyName("scarabsByType")]     public List<ScarabCount>? ScarabsByType { get; set; }
+    [JsonPropertyName("equipment")]         public List<EquipItem>? Equipment { get; set; }
+    [JsonPropertyName("recentChat")]        public List<ChatLine>? RecentChat { get; set; }
+    [JsonPropertyName("lastIssue")]         public string? LastIssue { get; set; }
+    [JsonPropertyName("lastIssueAgeSec")]   public long LastIssueAgeSec { get; set; } = -1;
 }
 
 internal sealed class AggregatePayload
@@ -122,8 +212,19 @@ internal sealed class AggregatePayload
     [JsonPropertyName("clients")]        public List<ClientStatus> Clients { get; set; } = new();
 }
 
+/// <summary>A remote-control command the agent writes for the plugin to poll + apply.</summary>
+internal sealed class CommandFile
+{
+    [JsonPropertyName("schema")] public string Schema { get; set; } = "rynthcore.command/1";
+    [JsonPropertyName("pid")]    public int Pid { get; set; }
+    [JsonPropertyName("action")] public string Action { get; set; } = "";
+    [JsonPropertyName("value")]  public string Value { get; set; } = "";
+    [JsonPropertyName("ts")]     public DateTimeOffset Ts { get; set; }
+}
+
 [JsonSourceGenerationOptions(WriteIndented = false, DefaultIgnoreCondition = JsonIgnoreCondition.Never)]
 [JsonSerializable(typeof(StatusFileModel))]
 [JsonSerializable(typeof(AggregatePayload))]
 [JsonSerializable(typeof(AgentConfig))]
+[JsonSerializable(typeof(CommandFile))]
 internal sealed partial class AgentJsonContext : JsonSerializerContext { }
