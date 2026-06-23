@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -26,6 +27,10 @@ internal sealed class LocalStatusServer : IDisposable
         Encoding.UTF8.GetBytes("{\"schema\":\"rynthcore.status-agent/1\",\"clientCount\":0,\"clients\":[]}");
     private CancellationTokenSource? _cts;
     private Task? _loop;
+    // Connected /statusfeed push clients — each value is a per-socket wake signal. UpdateLatest pulses
+    // them all; each socket's loop then sends the freshest _latest (coalescing rapid updates).
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _feedSignals = new();
+    private const int FeedKeepAliveMs = 20000;   // re-send _latest at least this often (keepalive + missed-pulse cover)
 
     public bool Running { get; private set; }
 
@@ -44,8 +49,18 @@ internal sealed class LocalStatusServer : IDisposable
         _listener.Prefixes.Add(_prefix);
     }
 
-    /// <summary>Replace the payload future requests will return (thread-safe).</summary>
-    public void UpdateLatest(byte[] jsonUtf8) => _latest = jsonUtf8;
+    /// <summary>Replace the payload future requests return AND push it to any connected /statusfeed
+    /// sockets (thread-safe).</summary>
+    public void UpdateLatest(byte[] jsonUtf8)
+    {
+        _latest = jsonUtf8;
+        // Pulse every feed loop; each sends the freshest _latest when it wakes (so rapid updates coalesce
+        // and a slow client can't back up the agent). A SemaphoreSlim(1,1) means extra pulses are no-ops.
+        foreach (var kv in _feedSignals)
+        {
+            try { if (kv.Value.CurrentCount == 0) kv.Value.Release(); } catch (SemaphoreFullException) { }
+        }
+    }
 
     public bool TryStart(out string error)
     {
@@ -150,6 +165,16 @@ internal sealed class LocalStatusServer : IDisposable
                 if (!req.IsWebSocketRequest) { Write(res, 426, "application/json", "{\"error\":\"websocket required\"}"u8.ToArray()); return; }
                 AgentLog.Info($"[vsock] HTTP WS /video pid={vpid} ua=\"{req.UserAgent}\"");
                 _ = HandleVideoSocketAsync(ctx, vpid);
+                return;
+            }
+
+            // ── Status push (WebSocket): GET /statusfeed — push the latest aggregate on every change ──
+            if (path == "/statusfeed")
+            {
+                if (_token != null && !Authorized(req)) { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
+                if (!req.IsWebSocketRequest) { Write(res, 426, "application/json", "{\"error\":\"websocket required\"}"u8.ToArray()); return; }
+                AgentLog.Info($"[feed] WS /statusfeed ua=\"{req.UserAgent}\"");
+                _ = HandleStatusFeedAsync(ctx);
                 return;
             }
 
@@ -403,6 +428,59 @@ internal sealed class LocalStatusServer : IDisposable
         try { await _videoSocket!.StreamAsync(wsCtx.WebSocket, pid, cts.Token); }
         catch (Exception ex) { AgentLog.Debug($"[vsock] pid {pid}: {ex.Message}"); }
         finally { try { wsCtx.WebSocket.Dispose(); } catch { } }
+    }
+
+    /// One /statusfeed client: send the current snapshot on connect, then push the freshest _latest
+    /// whenever UpdateLatest pulses us (and at least every FeedKeepAliveMs). Sends are serial on this
+    /// socket (no overlap); a slow/dead client only affects its own loop. The agent's shutdown token
+    /// ends every feed loop on Dispose.
+    private async Task HandleStatusFeedAsync(HttpListenerContext ctx)
+    {
+        HttpListenerWebSocketContext wsCtx;
+        try { wsCtx = await ctx.AcceptWebSocketAsync(null); }
+        catch (Exception ex) { AgentLog.Warn($"[feed] ws accept failed: {ex.Message}"); try { ctx.Response.StatusCode = 500; ctx.Response.Close(); } catch { } return; }
+
+        WebSocket ws = wsCtx.WebSocket;
+        CancellationToken ct = _cts?.Token ?? CancellationToken.None;
+        var id = Guid.NewGuid();
+        var signal = new SemaphoreSlim(1, 1);   // start signaled -> push the current snapshot immediately on connect
+        _feedSignals[id] = signal;
+        AgentLog.Info($"[feed] client connected ({_feedSignals.Count} total).");
+        try
+        {
+            Task recv = DrainReceiveAsync(ws, ct);   // background: notice the client closing
+            while (ws.State == WebSocketState.Open && !recv.IsCompleted)
+            {
+                await signal.WaitAsync(FeedKeepAliveMs, ct);   // wake on a pulse, the keepalive timeout, or shutdown
+                if (ws.State != WebSocketState.Open) break;
+                byte[] snapshot = _latest;                      // freshest at send time (coalesces missed pulses)
+                await ws.SendAsync(new ArraySegment<byte>(snapshot), WebSocketMessageType.Text, endOfMessage: true, ct);
+            }
+        }
+        catch (OperationCanceledException) { /* agent stopping */ }
+        catch { /* client gone / send failed */ }
+        finally
+        {
+            _feedSignals.TryRemove(id, out _);
+            try { signal.Dispose(); } catch { }
+            try { ws.Dispose(); } catch { }
+            AgentLog.Info($"[feed] client disconnected ({_feedSignals.Count} total).");
+        }
+    }
+
+    // Pump the receive side so we notice a client close/ping; payloads are ignored (the feed is server->client).
+    private static async Task DrainReceiveAsync(WebSocket ws, CancellationToken ct)
+    {
+        var buf = new byte[256];
+        try
+        {
+            while (ws.State == WebSocketState.Open)
+            {
+                WebSocketReceiveResult r = await ws.ReceiveAsync(new ArraySegment<byte>(buf), ct);
+                if (r.MessageType == WebSocketMessageType.Close) break;
+            }
+        }
+        catch { /* socket closed / cancelled */ }
     }
 
     private void HandleWebRtcOffer(HttpListenerRequest req, HttpListenerResponse res, int pid)

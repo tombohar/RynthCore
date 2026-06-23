@@ -94,65 +94,114 @@ var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; try { cts.Cancel(); } catch (ObjectDisposedException) { } };
 AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { cts.Cancel(); } catch (ObjectDisposedException) { } };
 
+// ── Event-driven status pump ────────────────────────────────────────────────
+// A FileSystemWatcher on the status dir wakes the loop within ~DebounceMs of a client writing its
+// snapshot, instead of waiting a fixed poll. IntervalSeconds is now the SAFETY FALLBACK (the max time
+// between cycles when no file events arrive) — it still drives the time-based work: dead-PID liveness +
+// DropDeadAfterSeconds pruning and the heartbeat-log fallback. Net: phone-visible status latency drops
+// from up to IntervalSeconds to ~DebounceMs after the write. Agent-side only — no game-client risk.
+const int DebounceMs = 50;
+int fallbackMs = Math.Max(1, cfg.IntervalSeconds) * 1000;
+using var dirty = new SemaphoreSlim(0, 1);
+FileSystemWatcher? watcher = opts.Once ? null : TryArmStatusWatcher(cfg.StatusDirectory, dirty);
+
 try
 {
     do
     {
-        try
-        {
-            List<ClientStatus> clients = StatusReader.ReadAll(cfg);
-            var payload = new AggregatePayload
-            {
-                Host = cfg.EffectiveHost,
-                AgentVersion = version,
-                GeneratedAtUtc = DateTimeOffset.UtcNow,
-                ClientCount = clients.Count,
-                Clients = clients,
-            };
-
-            // Serialize once; reuse the bytes for serve / file / POST.
-            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(payload, AgentJsonContext.Default.AggregatePayload);
-
-            AgentLog.Info(Summarize(clients));
-            if (opts.Verbose)
-                AgentLog.Debug(System.Text.Encoding.UTF8.GetString(bytes));
-
-            server?.UpdateLatest(bytes);
-
-            if (cfg.WriteAggregateFile)
-            {
-                try
-                {
-                    Directory.CreateDirectory(cfg.StatusDirectory);
-                    File.WriteAllBytes(aggregatePath, bytes);
-                }
-                catch (Exception ex) { AgentLog.Debug($"aggregate.json write failed: {ex.Message}"); }
-            }
-
-            if (publisher.Enabled && !opts.DryRun)
-                await publisher.PublishAsync(bytes, payload.ClientCount, cts.Token);
-        }
+        try { await RunCycleAsync(); }
         catch (OperationCanceledException) { break; }
-        catch (Exception ex)
-        {
-            AgentLog.Error($"cycle failed: {ex.GetType().Name}: {ex.Message}");
-        }
+        catch (Exception ex) { AgentLog.Error($"cycle failed: {ex.GetType().Name}: {ex.Message}"); }
 
         if (opts.Once) break;
 
-        try { await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, cfg.IntervalSeconds)), cts.Token); }
+        try
+        {
+            // Wake on a status-file change OR the safety-fallback interval, then debounce the burst of
+            // events that one atomic write (tmp create + rename + size change) produces into a single cycle.
+            await dirty.WaitAsync(fallbackMs, cts.Token);
+            await Task.Delay(DebounceMs, cts.Token);
+            while (dirty.Wait(0)) { }   // drain extra signals accrued during the debounce window
+        }
         catch (OperationCanceledException) { break; }
     }
     while (!cts.IsCancellationRequested);
 }
 finally
 {
+    watcher?.Dispose();
     server?.Dispose();
     video?.Dispose();
     AgentLog.Info("RynthCore.StatusAgent stopped.");
 }
 
 return 0;
+
+// One status cycle: read all client status, roll it up, and serve / file / POST it.
+async Task RunCycleAsync()
+{
+    List<ClientStatus> clients = StatusReader.ReadAll(cfg);
+    var payload = new AggregatePayload
+    {
+        Host = cfg.EffectiveHost,
+        AgentVersion = version,
+        GeneratedAtUtc = DateTimeOffset.UtcNow,
+        ClientCount = clients.Count,
+        Clients = clients,
+    };
+
+    // Serialize once; reuse the bytes for serve / file / POST.
+    byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(payload, AgentJsonContext.Default.AggregatePayload);
+
+    AgentLog.Info(Summarize(clients));
+    if (opts.Verbose)
+        AgentLog.Debug(System.Text.Encoding.UTF8.GetString(bytes));
+
+    server?.UpdateLatest(bytes);
+
+    if (cfg.WriteAggregateFile)
+    {
+        try
+        {
+            Directory.CreateDirectory(cfg.StatusDirectory);
+            File.WriteAllBytes(aggregatePath, bytes);
+        }
+        catch (Exception ex) { AgentLog.Debug($"aggregate.json write failed: {ex.Message}"); }
+    }
+
+    if (publisher.Enabled && !opts.DryRun)
+        await publisher.PublishAsync(bytes, payload.ClientCount, cts.Token);
+}
+
+// Arm a FileSystemWatcher that pulses `signal` whenever a per-client status file lands. Returns null
+// (and the loop falls back to interval polling) if the watcher can't be created.
+static FileSystemWatcher? TryArmStatusWatcher(string statusDir, SemaphoreSlim signal)
+{
+    try
+    {
+        Directory.CreateDirectory(statusDir);   // ensure it exists so the watcher can arm (the engine creates it too)
+        var w = new FileSystemWatcher(statusDir, "RynthCore.*.status.json")
+        {
+            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
+            InternalBufferSize = 64 * 1024,
+        };
+        // FSW dispatches events sequentially on its own thread; a SemaphoreSlim(0,1) coalesces a burst
+        // into one pending signal (extra Releases are swallowed).
+        void Pulse(object? _, FileSystemEventArgs __) { try { if (signal.CurrentCount == 0) signal.Release(); } catch (SemaphoreFullException) { } }
+        w.Created += Pulse;
+        w.Changed += Pulse;
+        w.Deleted += Pulse;
+        w.Renamed += (_, __) => { try { if (signal.CurrentCount == 0) signal.Release(); } catch (SemaphoreFullException) { } };
+        w.EnableRaisingEvents = true;
+        AgentLog.Info($"Status watcher armed on {statusDir} (event-driven; IntervalSeconds is the safety fallback).");
+        return w;
+    }
+    catch (Exception ex)
+    {
+        AgentLog.Warn($"Status watcher unavailable ({ex.GetType().Name}: {ex.Message}); falling back to interval polling.");
+        return null;
+    }
+}
 
 static string Summarize(List<ClientStatus> clients)
 {
