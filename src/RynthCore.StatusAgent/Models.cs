@@ -212,6 +212,45 @@ internal sealed class AggregatePayload
     [JsonPropertyName("clients")]        public List<ClientStatus> Clients { get; set; } = new();
 }
 
+// ── Run archive: one finished (or in-progress) play session per client ──────
+
+/// <summary>One AC client session — login→exit — with its final/last stats. The agent captures these
+/// as clients exit (or restart), so the player can review how past runs did. Schema "rynthcore.runs/1".</summary>
+internal sealed class RunRecord
+{
+    /// <summary>Stable per-session id: "&lt;pid&gt;-&lt;startUnixSec&gt;".</summary>
+    [JsonPropertyName("runId")]            public string RunId { get; set; } = "";
+    [JsonPropertyName("pid")]              public int Pid { get; set; }
+    [JsonPropertyName("account")]          public string Account { get; set; } = "";
+    [JsonPropertyName("character")]        public string Character { get; set; } = "";
+    [JsonPropertyName("server")]           public string Server { get; set; } = "";
+    [JsonPropertyName("startUtc")]         public DateTimeOffset StartUtc { get; set; }
+    /// <summary>Null while the run is still in progress.</summary>
+    [JsonPropertyName("endUtc")]           public DateTimeOffset? EndUtc { get; set; }
+    [JsonPropertyName("durationSec")]      public long DurationSec { get; set; }
+    [JsonPropertyName("kills")]            public int Kills { get; set; }
+    [JsonPropertyName("killsPerHour")]     public double KillsPerHour { get; set; }
+    [JsonPropertyName("xp")]               public long Xp { get; set; }
+    [JsonPropertyName("xpPerHour")]        public double XpPerHour { get; set; }
+    [JsonPropertyName("luminancePerHour")] public double LuminancePerHour { get; set; }
+    /// <summary>Deaths during this session (not all-time).</summary>
+    [JsonPropertyName("deaths")]           public int Deaths { get; set; }
+    [JsonPropertyName("vitaePct")]         public double VitaePct { get; set; }
+    [JsonPropertyName("area")]             public string Area { get; set; } = "";
+    /// <summary>True for the live, not-yet-finished run (shown at the top, updates each cycle).</summary>
+    [JsonPropertyName("ongoing")]          public bool Ongoing { get; set; }
+}
+
+/// <summary>The /runs payload: finished runs (newest first), with any in-progress run marked ongoing.</summary>
+internal sealed class RunsPayload
+{
+    [JsonPropertyName("schema")]         public string Schema { get; set; } = "rynthcore.runs/1";
+    [JsonPropertyName("host")]           public string Host { get; set; } = "";
+    [JsonPropertyName("generatedAtUtc")] public DateTimeOffset GeneratedAtUtc { get; set; }
+    [JsonPropertyName("count")]          public int Count { get; set; }
+    [JsonPropertyName("runs")]           public List<RunRecord> Runs { get; set; } = new();
+}
+
 /// <summary>A remote-control command the agent writes for the plugin to poll + apply.</summary>
 internal sealed class CommandFile
 {
@@ -227,4 +266,5 @@ internal sealed class CommandFile
 [JsonSerializable(typeof(AggregatePayload))]
 [JsonSerializable(typeof(AgentConfig))]
 [JsonSerializable(typeof(CommandFile))]
+[JsonSerializable(typeof(RunsPayload))]
 internal sealed partial class AgentJsonContext : JsonSerializerContext { }

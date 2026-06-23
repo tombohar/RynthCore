@@ -23,6 +23,7 @@ internal sealed class LocalStatusServer : IDisposable
     private readonly int _streamIntervalMs;
     private readonly WebRtcVideoService? _video;   // POST /webrtc/* (HD WebRTC mode; same-LAN); null = disabled
     private readonly VideoSocketService? _videoSocket;   // GET /video (WS, H.264 client-server; works remotely)
+    private readonly RunArchive? _runArchive;      // GET /runs (per-session play history); null = disabled
     private volatile byte[] _latest =
         Encoding.UTF8.GetBytes("{\"schema\":\"rynthcore.status-agent/1\",\"clientCount\":0,\"clients\":[]}");
     private CancellationTokenSource? _cts;
@@ -36,7 +37,8 @@ internal sealed class LocalStatusServer : IDisposable
 
     public LocalStatusServer(string prefix, string? token, string? commandDir = null,
                              bool enableStream = false, int streamQuality = 55, int streamIntervalMs = 400,
-                             WebRtcVideoService? video = null, VideoSocketService? videoSocket = null)
+                             WebRtcVideoService? video = null, VideoSocketService? videoSocket = null,
+                             RunArchive? runArchive = null)
     {
         _prefix = prefix.EndsWith('/') ? prefix : prefix + "/";
         _token = string.IsNullOrWhiteSpace(token) ? null : token;
@@ -46,6 +48,7 @@ internal sealed class LocalStatusServer : IDisposable
         _streamIntervalMs = Math.Clamp(streamIntervalMs, 100, 2000);
         _video = video;
         _videoSocket = videoSocket;
+        _runArchive = runArchive;
         _listener.Prefixes.Add(_prefix);
     }
 
@@ -232,6 +235,25 @@ internal sealed class LocalStatusServer : IDisposable
                     return;
                 }
                 HandleCommand(req, res);
+                return;
+            }
+
+            // ── Run history: GET /runs — per-session play stats (kills/XP/etc.), newest first ──
+            if (path == "/runs" || path == "/runs.json")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                {
+                    Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray());
+                    return;
+                }
+                if (_token != null && !Authorized(req))
+                {
+                    Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray());
+                    return;
+                }
+                byte[] runs = _runArchive?.BuildJsonBytes()
+                    ?? "{\"schema\":\"rynthcore.runs/1\",\"count\":0,\"runs\":[]}"u8.ToArray();
+                Write(res, 200, "application/json", runs);
                 return;
             }
 

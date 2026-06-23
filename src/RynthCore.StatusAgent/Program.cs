@@ -37,6 +37,10 @@ AgentLog.Info($"RynthCore.StatusAgent v{version} starting.");
 AgentLog.Info($"Config: {configPath}");
 AgentLog.Info($"Status dir: {cfg.StatusDirectory}");
 
+// Per-session run history (kills/XP/etc.), captured as clients exit. Persisted to runs.json so it
+// survives agent restarts; served at GET /runs for the app's Archive tab.
+var runArchive = new RunArchive(Path.Combine(cfg.StatusDirectory, "runs.json"), cfg.EffectiveHost);
+
 if (created)
 {
     AgentLog.Info("A fresh config template was written. The agent will run in");
@@ -62,7 +66,8 @@ if (cfg.ServeHttp)
         videoSocket = new VideoSocketService(cfg.VideoMaxWidth, cfg.VideoFps, cfg.VideoBitrateKbps);
     }
     server = new LocalStatusServer(cfg.ServePrefix, cfg.ServeToken, commandDir,
-                                   cfg.EnableScreenStream, cfg.StreamQuality, cfg.StreamIntervalMs, video, videoSocket);
+                                   cfg.EnableScreenStream, cfg.StreamQuality, cfg.StreamIntervalMs, video, videoSocket,
+                                   runArchive);
     if (server.TryStart(out string serveErr))
     {
         AgentLog.Info($"Serving status at {cfg.ServePrefix}status (GET){(string.IsNullOrEmpty(cfg.ServeToken) ? "" : ", token required")}.");
@@ -141,6 +146,7 @@ return 0;
 async Task RunCycleAsync()
 {
     List<ClientStatus> clients = StatusReader.ReadAll(cfg);
+    runArchive.Observe(clients);   // fold this cycle into per-session run history (started/updated/finished)
     var payload = new AggregatePayload
     {
         Host = cfg.EffectiveHost,
