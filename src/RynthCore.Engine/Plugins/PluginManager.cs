@@ -217,6 +217,9 @@ internal static class PluginManager
     private static GetBusyStateCallbackDelegate? _getBusyStateCallback;
     private static GetCastBusyStateCallbackDelegate? _getCastBusyStateCallback;
     private static GetUseDoneSeqCallbackDelegate? _getUseDoneSeqCallback;
+    private static GetEngineStatusJsonCallbackDelegate? _getEngineStatusJsonCallback;
+    private static GetPluginSnapshotJsonCallbackDelegate? _getPluginSnapshotJsonCallback;
+    private static SendPluginCommandCallbackDelegate? _sendPluginCommandCallback;
     private static ForceResetBusyCountCallbackDelegate? _forceResetBusyCountCallback;
     private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
     private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
@@ -232,6 +235,7 @@ internal static class PluginManager
     [ThreadStatic] private static IntPtr _accountNameScratchPtr;
     [ThreadStatic] private static IntPtr _worldNameScratchPtr;
     [ThreadStatic] private static IntPtr _objectNameScratchPtr;
+    [ThreadStatic] private static IntPtr _engineStatusJsonScratchPtr;
     private static string _pluginsDir = "";
     private static string _shadowRootDir = "";
 
@@ -1076,6 +1080,34 @@ internal static class PluginManager
         lock (PendingEnchantmentRemovedLock)
             _pendingEnchantmentRemoved.Clear();
         RynthLog.Info("ShutdownAll: post-queue-clears");
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+    /// <summary>
+    /// Resolve a named export on a loaded plugin's module, matched by display
+    /// name (substring, case-insensitive). Brokers cross-plugin calls so one
+    /// plugin never GetProcAddress-es a sibling directly — PluginManager owns the
+    /// module handles. Returns IntPtr.Zero if the plugin isn't loaded/ready or
+    /// doesn't export the symbol. Index-based scan; safe to call re-entrantly from
+    /// within TickAll (no enumerator, no mutation).
+    /// </summary>
+    private static IntPtr ResolvePluginExport(string pluginName, string exportName)
+    {
+        if (string.IsNullOrEmpty(pluginName) || string.IsNullOrEmpty(exportName))
+            return IntPtr.Zero;
+
+        for (int i = 0; i < _plugins.Count; i++)
+        {
+            var p = _plugins[i];
+            if (p.ModuleHandle == IntPtr.Zero || !p.Initialized || p.Failed)
+                continue;
+            if (!p.DisplayName.Contains(pluginName, StringComparison.OrdinalIgnoreCase))
+                continue;
+            return GetProcAddress(p.ModuleHandle, exportName);
+        }
+        return IntPtr.Zero;
     }
 
     private static void LogFromPlugin(IntPtr messageUtf8)
@@ -2319,6 +2351,9 @@ internal static class PluginManager
         _getObjectMotionOnCallback ??= GetObjectMotionOnAction;
         _getObjectStateCallback ??= GetObjectStateAction;
         _getObjectBitfieldCallback ??= GetObjectBitfieldAction;
+        _getEngineStatusJsonCallback ??= GetEngineStatusJsonAction;
+        _getPluginSnapshotJsonCallback ??= GetPluginSnapshotJsonAction;
+        _sendPluginCommandCallback ??= SendPluginCommandAction;
 
         _api.Version = PluginContractVersion.Current;
         _api.LogFn = Marshal.GetFunctionPointerForDelegate(_logCallback);
@@ -2425,6 +2460,9 @@ internal static class PluginManager
         _api.SetRadarSuppressedFn = Marshal.GetFunctionPointerForDelegate(_setRadarSuppressedCallback);
         _api.SetChatSuppressedFn = Marshal.GetFunctionPointerForDelegate(_setChatSuppressedCallback);
         _api.SetPowerbarSuppressedFn = Marshal.GetFunctionPointerForDelegate(_setPowerbarSuppressedCallback);
+        _api.GetEngineStatusJsonFn = Marshal.GetFunctionPointerForDelegate(_getEngineStatusJsonCallback);
+        _api.GetPluginSnapshotJsonFn = Marshal.GetFunctionPointerForDelegate(_getPluginSnapshotJsonCallback);
+        _api.SendPluginCommandFn = Marshal.GetFunctionPointerForDelegate(_sendPluginCommandCallback);
     }
 
     private static void ProbeClientHooks()
@@ -3035,6 +3073,81 @@ internal static class PluginManager
 
         _worldNameScratchPtr = Marshal.StringToHGlobalAnsi(name);
         return _worldNameScratchPtr;
+    }
+
+    // ─── Status export / cross-plugin bridges (v64) ─────────────────────────
+    // Additive, benign accessors so a plugin (RynthRemote) can own the remote
+    // status export + command drain while the public engine ships no remote
+    // feature itself. None of these network or mutate AC state.
+
+    private static IntPtr GetEngineStatusJsonAction()
+    {
+        try
+        {
+            string json = Compatibility.EngineStatusMetrics.BuildEngineStatusJson();
+            if (string.IsNullOrEmpty(json))
+                return IntPtr.Zero;
+
+            // [ThreadStatic] free-then-realloc, same discipline as the account/
+            // world-name pulls: the returned pointer is valid until this thread
+            // calls again; the consumer copies it immediately.
+            if (_engineStatusJsonScratchPtr != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(_engineStatusJsonScratchPtr);
+                _engineStatusJsonScratchPtr = IntPtr.Zero;
+            }
+            _engineStatusJsonScratchPtr = Marshal.StringToHGlobalAnsi(json);
+            return _engineStatusJsonScratchPtr;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    private static unsafe IntPtr GetPluginSnapshotJsonAction(IntPtr pluginNameAnsi)
+    {
+        try
+        {
+            string? name = pluginNameAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(pluginNameAnsi) : null;
+            if (string.IsNullOrEmpty(name))
+                return IntPtr.Zero;
+
+            IntPtr export = ResolvePluginExport(name, "RynthPluginGetSnapshotJson");
+            if (export == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            // The target plugin owns the returned buffer (kept valid until its
+            // next snapshot call); pass it straight through — the caller copies it.
+            return ((delegate* unmanaged[Cdecl]<IntPtr>)export)();
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    private static unsafe int SendPluginCommandAction(IntPtr pluginNameAnsi, IntPtr actionAnsi, IntPtr valueAnsi)
+    {
+        try
+        {
+            string? name = pluginNameAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(pluginNameAnsi) : null;
+            if (string.IsNullOrEmpty(name))
+                return 0;
+
+            IntPtr export = ResolvePluginExport(name, "RynthPluginApplyRemoteCommand");
+            if (export == IntPtr.Zero)
+                return 0;
+
+            // Forward the raw ANSI arg pointers; the receiving plugin copies them
+            // and enqueues for its own pump thread (never applies on this thread).
+            ((delegate* unmanaged[Cdecl]<IntPtr, IntPtr, void>)export)(actionAnsi, valueAnsi);
+            return 1;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     private static uint GetObjectWcidAction(uint objectId)

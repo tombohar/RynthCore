@@ -100,10 +100,9 @@ internal static class HeartbeatLogger
                     try { rec = BusyCountHooks.ReconcileCount; fcl = BusyCountHooks.ForceClearCount; } catch { }
                     RynthLog.Info($"hb #{tick} up={(nowMs - startMs) / 1000}s fps={fps} plug={pps}/s ws={wsMb}MB login={login} qd={dropped} rec={rec} fcl={fcl}");
 
-                    // [status-export] Opt-in (default OFF) LOCAL status file for the
-                    // out-of-process RynthCore.StatusAgent. No-ops when disabled and
-                    // never networks — see StatusSnapshotWriter for the full note.
-                    StatusSnapshotWriter.Write((nowMs - startMs) / 1000, fps, pps, wsMb,
+                    // Cache this client's live metrics so the GetEngineStatusJson host bridge can serve
+                    // them to a plugin (the RynthRemote status export). No file write, no networking.
+                    EngineStatusMetrics.UpdateMetrics((nowMs - startMs) / 1000, fps, pps, wsMb,
                         login == 1, dropped, rec, fcl);
                 }
                 catch { /* never let the heartbeat itself bring anything down */ }

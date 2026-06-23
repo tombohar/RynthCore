@@ -149,13 +149,16 @@ internal static class ClientObjectHooks
 
     // Main-thread player-stats snapshot (XP / luminance / deaths / vitae) — same off-thread-safe
     // pattern as the skill cache. These are all main-thread-only Inq* reads, so the off-thread
-    // plugin pump (and StatusSnapshotWriter) can't read them live; snapshot here on the EndScene
-    // path and serve the cache. [status-export]
+    // plugin pump (and the GetEngineStatusJson accessor) can't read them live; snapshot here on the
+    // EndScene path and serve the cache.
     private static readonly object _playerStatsCacheLock = new();
     private static long _cachedTotalXp;
     private static long _cachedLuminance;
     private static int _cachedDeaths;
     private static float _cachedVitae = 1.0f;
+    private static int _cachedEncVal;       // EncumbranceVal (current burden)
+    private static int _cachedEncCap;       // EncumbranceCapacity (max)
+    private static uint _cachedLandcell;    // player cell id (landblock = cell >> 16)
     private static uint _playerStatsCacheOwner;
     private static DateTime _lastPlayerStatsPrefetchUtc = DateTime.MinValue;
     private const int PlayerStatsPrefetchThrottleMs = 1000;
@@ -1106,8 +1109,8 @@ internal static class ClientObjectHooks
     /// <summary>
     /// Snapshots the player's XP / luminance / deaths / vitae on AC's main thread (driven
     /// from the EndScene path, same as PrefetchPlayerSkills) into a cache the off-thread
-    /// plugin pump and StatusSnapshotWriter can read. These are all main-thread-only Inq*
-    /// reads. Throttled; fully defensive. [status-export]
+    /// plugin pump and the GetEngineStatusJson accessor can read. These are all main-thread-only
+    /// Inq* reads. Throttled; fully defensive.
     /// </summary>
     public static void PrefetchPlayerStats()
     {
@@ -1130,15 +1133,26 @@ internal static class ClientObjectHooks
             long lum = sameOwner ? _cachedLuminance : 0;
             int deaths = sameOwner ? _cachedDeaths : 0;
             float vitae = sameOwner ? _cachedVitae : 1.0f;
+            int encVal = sameOwner ? _cachedEncVal : 0;
+            int encCap = sameOwner ? _cachedEncCap : 0;
+            uint cell = sameOwner ? _cachedLandcell : 0;
 
             if (TryGetObjectQuadProperty(playerId, 1u, out long x) && x > 0) xp = x;     // PropertyInt64.TotalExperience
             if (TryGetObjectQuadProperty(playerId, 6u, out long l) && l > 0) lum = l;    // PropertyInt64.AvailableLuminance
             if (TryGetObjectIntProperty(playerId, 43u, out int d)) deaths = d;           // PropertyInt.NumDeaths
             if (TryGetVitae(playerId, out float v)) vitae = v;
+            if (TryGetObjectIntProperty(playerId, 5u, out int ev)) encVal = ev;          // PropertyInt.EncumbranceVal (current burden)
+            // EncumbranceCapacity (PropertyInt 96) is a server-calculated value the retail client
+            // usually doesn't store in its queryable int table (AC's UI has no burden bar). When it's
+            // absent, derive capacity from buffed Strength using AC's formula (capacity = Strength*150).
+            if (TryGetObjectIntProperty(playerId, 96u, out int ec) && ec > 0) encCap = ec;
+            else if (TryGetObjectAttribute(playerId, 1u, 0, out uint str) && str > 0) encCap = (int)(str * 150u);
+            if (TryGetObjectPosition(playerId, out uint c, out _, out _, out _) && c != 0) cell = c;
 
             lock (_playerStatsCacheLock)
             {
                 _cachedTotalXp = xp; _cachedLuminance = lum; _cachedDeaths = deaths; _cachedVitae = vitae;
+                _cachedEncVal = encVal; _cachedEncCap = encCap; _cachedLandcell = cell;
                 _playerStatsCacheOwner = playerId;
             }
         }
@@ -1152,11 +1166,13 @@ internal static class ClientObjectHooks
     /// Off-thread-safe: serve the cached player-stats snapshot (XP / luminance / deaths /
     /// vitae multiplier, 1.0 = no penalty). Returns false until the cache is populated.
     /// </summary>
-    public static bool TryGetPlayerStats(out long totalXp, out long luminance, out int deaths, out float vitae)
+    public static bool TryGetPlayerStats(out long totalXp, out long luminance, out int deaths, out float vitae,
+                                         out int encumbranceVal, out int encumbranceCap, out uint landcell)
     {
         lock (_playerStatsCacheLock)
         {
             totalXp = _cachedTotalXp; luminance = _cachedLuminance; deaths = _cachedDeaths; vitae = _cachedVitae;
+            encumbranceVal = _cachedEncVal; encumbranceCap = _cachedEncCap; landcell = _cachedLandcell;
             return _playerStatsCacheOwner != 0;
         }
     }

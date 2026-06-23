@@ -300,7 +300,7 @@ internal static class EngineFrameController
             // Sampled every frame (positions are volatile), zero-alloc.
             Compatibility.ClientObjectHooks.PrefetchPositions();
             // Same main-thread guard: snapshot XP/luminance/deaths/vitae (main-thread-only
-            // Inq* reads) for the off-thread status feed (throttled internally). [status-export]
+            // Inq* reads) so the GetEngineStatusJson host bridge can serve them off-thread (throttled).
             Compatibility.ClientObjectHooks.PrefetchPlayerStats();
 
             // Cold-login object backfill on the SAME AC main thread as the

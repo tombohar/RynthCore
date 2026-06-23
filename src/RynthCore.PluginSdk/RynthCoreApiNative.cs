@@ -114,4 +114,7 @@ public struct RynthCoreApiNative
     // APPEND-AT-END (ABI): must mirror PluginContract.RynthCoreAPI order exactly. v62+.
     public IntPtr GiveObjectToFn;
     public IntPtr GetUseDoneSeqFn; // v63: monotonic count of inbound server UseDone (0x1C7)
+    public IntPtr GetEngineStatusJsonFn;   // v64: engine-side status fields as ANSI JSON (excludes bot)
+    public IntPtr GetPluginSnapshotJsonFn; // v64: broker a named plugin's RynthPluginGetSnapshotJson
+    public IntPtr SendPluginCommandFn;     // v64: forward (action,value) to a named plugin's command export
 }

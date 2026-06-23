@@ -1,3 +1,5 @@
+using System;
+
 namespace RynthCore.Engine;
 
 /// <summary>
@@ -56,11 +58,24 @@ internal static class RynthLog
     /// <summary>Always-on log for critical / uncategorised messages (INFO).</summary>
     internal static void Info(string msg) => Write(msg);
 
+    // Most recent WRN/ERR text + when, surfaced via the GetEngineStatusJson host bridge so a stuck box
+    // can be diagnosed remotely without reading the PC log.
+    internal static volatile string? LastIssue;
+    internal static DateTime LastIssueUtc;
+
     /// <summary>Always-on WARN line — a recoverable problem worth grepping for.</summary>
-    internal static void Warn(string msg) => EntryPoint.LogTagged("engine", msg, "WRN");
+    internal static void Warn(string msg)
+    {
+        LastIssue = msg; LastIssueUtc = DateTime.UtcNow;
+        EntryPoint.LogTagged("engine", msg, "WRN");
+    }
 
     /// <summary>Always-on ERROR line — a fault/crash/disable. Triage with grep "[ERR]".</summary>
-    internal static void Error(string msg) => EntryPoint.LogTagged("engine", msg, "ERR");
+    internal static void Error(string msg)
+    {
+        LastIssue = msg; LastIssueUtc = DateTime.UtcNow;
+        EntryPoint.LogTagged("engine", msg, "ERR");
+    }
 
     // ── Sink ─────────────────────────────────────────────────────────────
 

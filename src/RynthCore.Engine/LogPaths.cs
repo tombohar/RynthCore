@@ -50,27 +50,15 @@ internal static class LogPaths
     /// <summary>Full path to the shared launch/orchestration log.</summary>
     internal static string SharedLogFilePath => Path.Combine(LogDirectory, SharedLogFileName);
 
-    // [status-export] ───────────────────────────────────────────────────────
-    // Opt-in, default-OFF local status export (consumed by the out-of-process
-    // RynthCore.StatusAgent). LOCAL FILES ONLY — the engine never networks.
-    // Remove this whole region + StatusSnapshotWriter.cs to strip the feature.
+    // Per-client status log files (Logs\status\RynthCore.<pid>.status.json) are written by the private
+    // RynthRemote plugin; the engine only knows the directory + filename so the startup log-pruner below
+    // can clean up stale files left by crashed clients. The engine writes no status file and never networks.
 
-    /// <summary>Directory for per-client status JSON snapshots (Logs\status).</summary>
+    /// <summary>Directory for per-client status JSON files (Logs\status).</summary>
     internal static string StatusDirectory => Path.Combine(LogDirectory, "status");
 
-    /// <summary>Per-client status snapshot filename, keyed on this process's PID.</summary>
+    /// <summary>This process's per-PID status filename (so the pruner skips our own live file).</summary>
     internal static string StatusFileName => $"RynthCore.{Environment.ProcessId}.status.json";
-
-    /// <summary>Full path to this client's per-PID status snapshot file.</summary>
-    internal static string StatusFilePath => Path.Combine(StatusDirectory, StatusFileName);
-
-    /// <summary>Best-effort: create the status directory. Safe to call repeatedly. Never throws.</summary>
-    internal static void EnsureStatusDirectory()
-    {
-        try { Directory.CreateDirectory(StatusDirectory); }
-        catch { /* writer silently no-ops if the dir can't be created */ }
-    }
-    // [status-export] ─────────────────────────────────────────────────────────
 
     /// <summary>
     /// Best-effort: create the log directory. Safe to call repeatedly. Never throws.
@@ -155,10 +143,9 @@ internal static class LogPaths
                 catch { /* locked by a live client or already gone — skip */ }
             }
 
-            // [status-export] Stale status snapshots: a crashed client leaves its
-            // RynthCore.<pid>.status.json behind. The StatusAgent deletes dead-PID
-            // files itself, but prune here too so they never accumulate if the
-            // agent isn't running. Never touches our own current file.
+            // Stale status files: a crashed client leaves its RynthCore.<pid>.status.json behind. The
+            // StatusAgent deletes dead-PID files itself, but prune here too so they never accumulate if
+            // the agent isn't running. Never touches our own current file.
             string statusDir = StatusDirectory;
             if (Directory.Exists(statusDir))
             {

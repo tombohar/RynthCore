@@ -5,7 +5,7 @@ namespace RynthCore.PluginSdk;
 
 public readonly unsafe struct RynthCoreHost
 {
-    public const uint CurrentApiVersion = 63;
+    public const uint CurrentApiVersion = 64;
 
     private readonly RynthCoreApiNative _api;
 
@@ -112,6 +112,9 @@ public readonly unsafe struct RynthCoreHost
     public bool HasSetChatSuppressed     => _api.Version >= 55 && _api.SetChatSuppressedFn     != IntPtr.Zero;
     public bool HasSetPowerbarSuppressed => _api.Version >= 56 && _api.SetPowerbarSuppressedFn != IntPtr.Zero;
     public bool HasGiveObjectTo => _api.Version >= 62 && _api.GiveObjectToFn != IntPtr.Zero;
+    public bool HasGetEngineStatusJson   => _api.Version >= 64 && _api.GetEngineStatusJsonFn   != IntPtr.Zero;
+    public bool HasGetPluginSnapshotJson => _api.Version >= 64 && _api.GetPluginSnapshotJsonFn != IntPtr.Zero;
+    public bool HasSendPluginCommand     => _api.Version >= 64 && _api.SendPluginCommandFn     != IntPtr.Zero;
 
     // ─── Methods ────────────────────────────────────────────────────────────
 
@@ -1325,6 +1328,76 @@ public readonly unsafe struct RynthCoreHost
         {
             Marshal.FreeHGlobal(subIdsBuf);
             Marshal.FreeHGlobal(offsetsBuf);
+        }
+    }
+
+    // ─── Status export / cross-plugin bridges (v64) ─────────────────────────
+
+    /// <summary>
+    /// Returns the engine-side per-client status fields as a JSON object string
+    /// (everything in the status snapshot EXCEPT the bot sub-object), or null if
+    /// unavailable. A generic "here are my own metrics" accessor. The native
+    /// buffer is freed on the next call on this thread, so this copies it before
+    /// returning. Requires engine API v64+ (check <see cref="HasGetEngineStatusJson"/>).
+    /// </summary>
+    public string? GetEngineStatusJson()
+    {
+        if (_api.GetEngineStatusJsonFn == IntPtr.Zero)
+            return null;
+
+        IntPtr ptr = ((delegate* unmanaged[Cdecl]<IntPtr>)_api.GetEngineStatusJsonFn)();
+        return ptr == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(ptr);
+    }
+
+    /// <summary>
+    /// Returns the named plugin's snapshot JSON (its RynthPluginGetSnapshotJson
+    /// export), brokered by the engine so the caller never resolves a sibling
+    /// plugin's exports directly. Returns null when that plugin isn't loaded or
+    /// produced no snapshot. The native buffer is owned by the target plugin
+    /// (valid until its next snapshot call), so this copies it before returning.
+    /// Requires API v64+ (check <see cref="HasGetPluginSnapshotJson"/>).
+    /// </summary>
+    public string? GetPluginSnapshotJson(string pluginName)
+    {
+        if (_api.GetPluginSnapshotJsonFn == IntPtr.Zero || string.IsNullOrEmpty(pluginName))
+            return null;
+
+        IntPtr namePtr = Marshal.StringToHGlobalAnsi(pluginName);
+        try
+        {
+            IntPtr ptr = ((delegate* unmanaged[Cdecl]<IntPtr, IntPtr>)_api.GetPluginSnapshotJsonFn)(namePtr);
+            return ptr == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(ptr);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(namePtr);
+        }
+    }
+
+    /// <summary>
+    /// Forwards a (action,value) command to the named plugin via the engine
+    /// broker (its RynthPluginApplyRemoteCommand export). The receiving plugin
+    /// copies the args and applies them on its OWN pump/main thread. Returns true
+    /// if delivered. Requires API v64+ (check <see cref="HasSendPluginCommand"/>).
+    /// </summary>
+    public bool SendPluginCommand(string pluginName, string action, string value)
+    {
+        if (_api.SendPluginCommandFn == IntPtr.Zero || string.IsNullOrEmpty(pluginName) || string.IsNullOrEmpty(action))
+            return false;
+
+        IntPtr namePtr = Marshal.StringToHGlobalAnsi(pluginName);
+        IntPtr actionPtr = Marshal.StringToHGlobalAnsi(action);
+        IntPtr valuePtr = Marshal.StringToHGlobalAnsi(value ?? string.Empty);
+        try
+        {
+            return ((delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr, int>)_api.SendPluginCommandFn)(
+                namePtr, actionPtr, valuePtr) != 0;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(namePtr);
+            Marshal.FreeHGlobal(actionPtr);
+            Marshal.FreeHGlobal(valuePtr);
         }
     }
 }

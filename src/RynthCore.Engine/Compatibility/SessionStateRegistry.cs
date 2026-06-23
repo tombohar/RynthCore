@@ -11,8 +11,8 @@ internal static class SessionStateRegistry
     private static bool _initialized;
     private static bool _loginRecorded;
 
-    // [status-export] Last-recorded session identity, exposed in-memory so the
-    // status writer can label this client without re-parsing any file (re-reading
+    // Last-recorded session identity, exposed in-memory so the GetEngineStatusJson accessor
+    // can label this client without re-parsing any file (re-reading
     // the session record here can recurse through DatFileShareHooks — see the
     // long comment in TryWriteLoginState). Empty until LoginComplete records.
     internal static string LastAccountName { get; private set; } = string.Empty;
@@ -116,7 +116,7 @@ internal static class SessionStateRegistry
             if (!string.IsNullOrWhiteSpace(accountName) && !string.IsNullOrWhiteSpace(characterName))
                 CharacterCacheStore.UpsertCharacter(accountName, serverName, characterName);
 
-            // [status-export] Cache identity in-memory for the status writer.
+            // Cache identity in-memory for the GetEngineStatusJson accessor.
             LastAccountName = accountName;
             LastCharacterName = characterName;
             LastServerName = serverName;

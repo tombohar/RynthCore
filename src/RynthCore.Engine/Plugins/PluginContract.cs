@@ -555,6 +555,30 @@ internal struct RynthCoreAPI
     /// cast). Read-only observation; never touches client m_cBusy. Returns 0 when
     /// unavailable. Requires API v63+. APPENDED-AT-END for ABI safety.</summary>
     public IntPtr GetUseDoneSeqFn;
+
+    /// <summary>Function pointer: const char* GetEngineStatusJson()
+    /// Returns the engine-side per-client status fields (host/pid/account/character/server/
+    /// uptime/fps/pluginTicksPerSec/workingSet/inWorld/queueDropped/reconciles/forceClears/
+    /// deaths/vitae/xp+lum rates/burden/area/lastIssue) as an ANSI JSON object, EXCLUDING the
+    /// bot sub-object. A generic "here are my own metrics" accessor — benign, not a remote
+    /// feature. The returned pointer is valid until the next call on the same thread. Returns
+    /// IntPtr.Zero on failure. Requires API v64+. APPENDED-AT-END for ABI safety.</summary>
+    public IntPtr GetEngineStatusJsonFn;
+
+    /// <summary>Function pointer: const char* GetPluginSnapshotJson(const char* pluginName)
+    /// Brokers the named plugin's RynthPluginGetSnapshotJson export and returns its ANSI JSON
+    /// pointer (IntPtr.Zero if that plugin isn't loaded / produced no snapshot). Lets one plugin
+    /// read another's snapshot without GetProcAddress-ing it directly — PluginManager owns the
+    /// module handles. The returned buffer is owned by the target plugin (valid until its next
+    /// snapshot call); copy it immediately. Requires API v64+. APPENDED-AT-END for ABI safety.</summary>
+    public IntPtr GetPluginSnapshotJsonFn;
+
+    /// <summary>Function pointer: int SendPluginCommand(const char* pluginName, const char* action, const char* value)
+    /// Forwards a (action,value) command to the named plugin's RynthPluginApplyRemoteCommand
+    /// export. Returns 1 if delivered, 0 otherwise. The receiving plugin copies the args and
+    /// applies them on its OWN pump/main thread (never on the caller's thread). Requires API
+    /// v64+. APPENDED-AT-END for ABI safety.</summary>
+    public IntPtr SendPluginCommandFn;
 }
 
 
@@ -562,7 +586,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 63;
+    public const uint Current = 64;
 }
 
 internal static class ClientActionHookFlags
@@ -999,3 +1023,12 @@ internal delegate void SetPowerbarSuppressedCallbackDelegate(int enabled);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void SetChatSuppressedCallbackDelegate(int enabled);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate IntPtr GetEngineStatusJsonCallbackDelegate();
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate IntPtr GetPluginSnapshotJsonCallbackDelegate(IntPtr pluginNameAnsi);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int SendPluginCommandCallbackDelegate(IntPtr pluginNameAnsi, IntPtr actionAnsi, IntPtr valueAnsi);
