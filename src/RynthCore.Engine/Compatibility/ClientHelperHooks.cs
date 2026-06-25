@@ -406,6 +406,15 @@ internal static class ClientHelperHooks
         if (_moveItemExternal == null || !IsValidObjectId(objectId) || !IsValidContainerId(targetContainerId) || amount < 0)
             return false;
 
+        // P0 (2026-06-24): if the target is one of THIS player's OWN containers and it
+        // is full, the native PutItemInContainer slot-table walk (FUN_00588f70) AVs
+        // instead of failing. Fail CLOSED here. Non-owned targets (trade/give to
+        // another player, NPCs, world containers) are NOT gated — they pass through.
+        // Runs on the main thread (marshalled above) so the ownership/capacity/count
+        // reads are authoritative. See AutoCram crash deep-dive.
+        if (IsFullOwnedContainer(targetContainerId))
+            return false;
+
         try
         {
             // Stub ignores `this` — pass IntPtr.Zero to avoid depending on the
@@ -430,8 +439,23 @@ internal static class ClientHelperHooks
         if (slot < 0) return false;
         if (amount <= 0) return false;
 
+        // P0 (2026-06-24): fail CLOSED if the target is one of THIS player's OWN
+        // containers and it is full — the native slot-table walk (FUN_00588f70) AVs
+        // on a full owned pack rather than failing. Non-owned targets pass through.
+        if (IsFullOwnedContainer(targetContainerId))
+            return false;
+
         try
         {
+            // P0 (2026-06-24): defensively restore the whole-move split globals to
+            // their default 1/1 state before the send, so a leaked split state from a
+            // prior SplitStackInternal can never force the 0x55 specific-slot path
+            // (which honors `slot` and can target a populated slot). 1/1 == opcode 0x19
+            // (PutItemInContainer, first-empty-slot), which is what MoveItemInternal
+            // callers expect.
+            Marshal.WriteInt32(new IntPtr(_splitAmountAddr), 1);
+            Marshal.WriteInt32(new IntPtr(_totalStackAddr), 1);
+
             // Stub ignores `this` — pass IntPtr.Zero to avoid depending on the
             // uninitialized Decal plugin pointer at DAT_00871054.
             //
@@ -486,6 +510,17 @@ internal static class ClientHelperHooks
         catch
         {
             return false;
+        }
+        finally
+        {
+            // P0 (2026-06-24): restore the split globals to their default whole-move
+            // state (1/1). They were previously written above and never restored,
+            // leaving a leaked state that could push a later plain MoveItemInternal
+            // onto the 0x55 specific-slot path. DORMANT today (AutoStack uses
+            // MergeStackInternal) but fixed defensively. Writes are individually
+            // try/caught so a failed restore can't escape the finally.
+            try { Marshal.WriteInt32(new IntPtr(_splitAmountAddr), 1); } catch { }
+            try { Marshal.WriteInt32(new IntPtr(_totalStackAddr), 1); } catch { }
         }
     }
 
@@ -664,6 +699,64 @@ internal static class ClientHelperHooks
     private static bool IsValidContainerId(uint containerId)
     {
         return containerId != 0;
+    }
+
+    // P0 (2026-06-24): shared owned-container full-check used by MoveItemInternal AND
+    // MoveItemExternal. Returns true ONLY when `target` is a container owned by the
+    // local player (the main pack, or a sub-pack/foci that roots at the player) AND it
+    // is full / its capacity-or-count can't be resolved (fail CLOSED).
+    //
+    // For ANY non-owned target — another player (trade/give), an NPC, a corpse, a
+    // world/landscape container, or an un-resolvable object — this returns FALSE so the
+    // caller passes the move through UNCHANGED. Trade/give is therefore never blocked.
+    // The crash this guards (native PutItemInContainer slot-table walk FUN_00588f70
+    // AVing on a full pack) only ever happens on the player's OWN pack.
+    //
+    // MUST be called only after the caller has marshalled onto AC's main thread (both
+    // MoveItemInternal/External early-return-enqueue off-thread), so the PWD ownership
+    // read, ITEMS_CAPACITY read, and GetNumContainedItems walk are all authoritative
+    // and the off-thread read-AV class does not apply.
+    private static bool IsFullOwnedContainer(uint target)
+    {
+        uint player = GetPlayerId();
+        if (player == 0)
+            return false; // can't resolve self -> treat as NOT owned -> pass through (never block trade)
+
+        bool isMainPack = target == player;
+        bool owned = isMainPack;
+        if (!owned)
+        {
+            // One-hop ownership: AC inventory is two levels deep — the player holds
+            // loose items and sub-packs directly, so an owned sub-pack/foci has
+            // _containerID == player (or _wielderID == player for a wielded
+            // container). Read straight from the target's PublicWeenieDesc on the main
+            // thread (page-probed + try/caught: returns false, never AVs).
+            if (!ClientObjectHooks.TryGetObjectOwnershipInfo(target, out uint containerID, out uint wielderID, out _))
+                return false; // can't resolve target ownership -> NOT provably owned -> pass through
+            owned = containerID == player || wielderID == player;
+        }
+
+        if (!owned)
+            return false; // non-owned target (trade/give/NPC/world) -> NEVER gate
+
+        // Owned target: compute free = capacity - count, all on the main thread.
+        if (!ClientObjectHooks.TryGetObjectIntProperty(target, 6 /* ITEMS_CAPACITY */, out int capacity))
+            capacity = 0;
+        if (isMainPack && capacity <= 0)
+            capacity = 102; // main-pack PWD capacity may not reflect the 102 item-slot
+                            // cap; mirror the proven plugin constant so a cold/unresolved
+                            // read does NOT fail-close every main-pack move.
+        if (capacity <= 0)
+            return true; // sub-pack capacity unresolved -> fail CLOSED (don't risk the walk)
+
+        int count = ClientObjectHooks.GetNumContainedItems(target); // AC's own walk; -1 if unavailable
+        if (count < 0)
+            return true; // count unresolved -> fail CLOSED
+
+        // GetNumContainedItems can only ever OVER-count (if it includes nested packs)
+        // -> free UNDER-stated -> conservative/safe. It never under-counts its own
+        // container, so a genuinely full owned pack can never slip through.
+        return (capacity - count) < 1;
     }
 
     // Rate-limit + reentry guard for WriteToChat. AC's AddTextToScroll
