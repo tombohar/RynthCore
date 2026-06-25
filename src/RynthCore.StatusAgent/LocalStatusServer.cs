@@ -355,6 +355,7 @@ internal sealed class LocalStatusServer : IDisposable
         "navProfile", "lootProfile", "metaProfile", "settingsProfile",
         "forceRebuff", "cancelRebuff", "clearBusy", "hideUi", "sendChat",
         "moveStart", "moveStop",
+        "assess",   // request an Assess/Identify of one item (value = item id) — fills inventory appraisal
         "closeClient",
     };
 
