@@ -24,6 +24,8 @@ internal sealed class LocalStatusServer : IDisposable
     private readonly WebRtcVideoService? _video;   // POST /webrtc/* (HD WebRTC mode; same-LAN); null = disabled
     private readonly VideoSocketService? _videoSocket;   // GET /video (WS, H.264 client-server; works remotely)
     private readonly RunArchive? _runArchive;      // GET /runs (per-session play history); null = disabled
+    private readonly string? _statusDir;           // GET /inventory reads RynthCore.<pid>.inventory.json from here
+    private readonly IconService? _icons;          // GET /icon?did=N (portal.dat → PNG); null = disabled
     private volatile byte[] _latest =
         Encoding.UTF8.GetBytes("{\"schema\":\"rynthcore.status-agent/1\",\"clientCount\":0,\"clients\":[]}");
     private CancellationTokenSource? _cts;
@@ -38,7 +40,8 @@ internal sealed class LocalStatusServer : IDisposable
     public LocalStatusServer(string prefix, string? token, string? commandDir = null,
                              bool enableStream = false, int streamQuality = 55, int streamIntervalMs = 400,
                              WebRtcVideoService? video = null, VideoSocketService? videoSocket = null,
-                             RunArchive? runArchive = null)
+                             RunArchive? runArchive = null, string? statusDirectory = null,
+                             IconService? icons = null)
     {
         _prefix = prefix.EndsWith('/') ? prefix : prefix + "/";
         _token = string.IsNullOrWhiteSpace(token) ? null : token;
@@ -49,6 +52,8 @@ internal sealed class LocalStatusServer : IDisposable
         _video = video;
         _videoSocket = videoSocket;
         _runArchive = runArchive;
+        _statusDir = string.IsNullOrWhiteSpace(statusDirectory) ? null : statusDirectory;
+        _icons = icons;
         _listener.Prefixes.Add(_prefix);
     }
 
@@ -257,6 +262,70 @@ internal sealed class LocalStatusServer : IDisposable
                 return;
             }
 
+            // ── Inventory: GET /inventory?pid=N — that client's full read-only inventory (icons/slots/appraisal) ──
+            if (path == "/inventory" || path == "/inventory.json")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                {
+                    Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray());
+                    return;
+                }
+                if (_token != null && !Authorized(req))
+                {
+                    Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray());
+                    return;
+                }
+                int ipid = int.TryParse(req.QueryString["pid"], out int ip) ? ip : 0;
+                if (ipid <= 0)
+                {
+                    Write(res, 400, "application/json", "{\"error\":\"pid required\"}"u8.ToArray());
+                    return;
+                }
+                // Serve the plugin-written file verbatim (already in the app's schema); empty payload if
+                // that client isn't exporting inventory yet, so the app can always parse a response.
+                Write(res, 200, "application/json", ReadInventoryBytes(ipid));
+                return;
+            }
+
+            // ── Item icon: GET /icon?did=N — decode a portal.dat texture to PNG (read-only inventory view) ──
+            if (path == "/icon")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                {
+                    Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray());
+                    return;
+                }
+                if (_token != null && !Authorized(req))
+                {
+                    Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray());
+                    return;
+                }
+                uint did = uint.TryParse(req.QueryString["did"], out uint dv) ? dv : 0u;
+                if (did == 0)
+                {
+                    Write(res, 400, "application/json", "{\"error\":\"did required\"}"u8.ToArray());
+                    return;
+                }
+                // Icons are immutable per DID → strong ETag + long immutable cache; honour If-None-Match.
+                string etag = "\"" + did.ToString("X8") + "\"";
+                if (string.Equals(req.Headers["If-None-Match"], etag, StringComparison.Ordinal))
+                {
+                    res.Headers["ETag"] = etag;
+                    Write(res, 304, "image/png", Array.Empty<byte>());
+                    return;
+                }
+                byte[]? png = _icons?.GetPng(did);
+                if (png == null)
+                {
+                    Write(res, 404, "application/json", "{\"error\":\"icon unavailable\"}"u8.ToArray());
+                    return;
+                }
+                res.Headers["Cache-Control"] = "public, max-age=31536000, immutable";
+                res.Headers["ETag"] = etag;
+                Write(res, 200, "image/png", png);
+                return;
+            }
+
             if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
             {
                 Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray());
@@ -383,6 +452,26 @@ internal sealed class LocalStatusServer : IDisposable
             AgentLog.Info($"close client requested: pid={pid} (graceful, kill fallback in 6s)");
         }
         catch (Exception ex) { AgentLog.Warn($"close client pid={pid} failed: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    private static readonly byte[] EmptyInventory =
+        "{\"schema\":\"rynthcore.inventory/1\",\"version\":0,\"itemCount\":0,\"containers\":[],\"items\":[]}"u8.ToArray();
+
+    /// Read RynthCore.<pid>.inventory.json (written atomically by the RynthRemote plugin) and return its
+    /// bytes. Returns an empty-but-valid payload when the file is absent (client not exporting yet) or on
+    /// any read error — so the app always gets parseable JSON. The plugin's atomic write means a concurrent
+    /// read never sees a torn file.
+    private byte[] ReadInventoryBytes(int pid)
+    {
+        if (_statusDir == null) return EmptyInventory;
+        try
+        {
+            string path = Path.Combine(_statusDir, $"RynthCore.{pid}.inventory.json");
+            if (!File.Exists(path)) return EmptyInventory;
+            byte[] bytes = File.ReadAllBytes(path);
+            return bytes.Length >= 2 ? bytes : EmptyInventory;
+        }
+        catch { return EmptyInventory; }
     }
 
     private static int ClampQuery(HttpListenerRequest req, string key, int def, int lo, int hi)

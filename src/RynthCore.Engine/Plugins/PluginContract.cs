@@ -579,6 +579,23 @@ internal struct RynthCoreAPI
     /// applies them on its OWN pump/main thread (never on the caller's thread). Requires API
     /// v64+. APPENDED-AT-END for ABI safety.</summary>
     public IntPtr SendPluginCommandFn;
+
+    /// <summary>Function pointer: int GetObjectDataIdProperty(uint objectId, uint stype, uint* value)
+    /// Reads a STypeDID property that lives in the object's PublicWeenieDesc (currently Icon=8 →
+    /// _iconID). Read directly from the embedded PWD struct — network-populated, so it works on
+    /// UNequipped/never-appraised pack items with no qualities pointer and no main-thread native
+    /// call. Returns 1 on success (value = the DataID, e.g. 0x06xxxxxx), 0 otherwise. Requires API
+    /// v65+. APPENDED-AT-END for ABI safety.</summary>
+    public IntPtr GetObjectDataIdPropertyFn;
+
+    /// <summary>Function pointer: const char* GetPluginExportJson(const char* pluginName, const char* exportName)
+    /// Generic sibling of GetPluginSnapshotJson: brokers ANY parameterless JSON-getter export on the named
+    /// plugin (by convention RynthPluginGet*Json — takes no args, returns const char*). Lets one plugin read
+    /// another's secondary JSON surfaces (e.g. RynthRemote pulling RynthAi's RynthPluginGetInventoryJson)
+    /// without GetProcAddress-ing it directly — PluginManager owns the module handles. The returned buffer is
+    /// owned by the target plugin (valid until its next call on that export); copy it immediately. Requires
+    /// API v66+. APPENDED-AT-END for ABI safety.</summary>
+    public IntPtr GetPluginExportJsonFn;
 }
 
 
@@ -586,7 +603,7 @@ internal struct RynthCoreAPI
 /// <summary>Current API version. Bump when adding fields to RynthCoreAPI.</summary>
 internal static class PluginContractVersion
 {
-    public const uint Current = 64;
+    public const uint Current = 66;
 }
 
 internal static class ClientActionHookFlags
@@ -1032,3 +1049,9 @@ internal delegate IntPtr GetPluginSnapshotJsonCallbackDelegate(IntPtr pluginName
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int SendPluginCommandCallbackDelegate(IntPtr pluginNameAnsi, IntPtr actionAnsi, IntPtr valueAnsi);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int GetObjectDataIdPropertyCallbackDelegate(uint objectId, uint stype, uint* value);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate IntPtr GetPluginExportJsonCallbackDelegate(IntPtr pluginNameAnsi, IntPtr exportNameAnsi);

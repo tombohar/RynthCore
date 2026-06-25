@@ -1848,7 +1848,13 @@ internal static class ClientObjectHooks
 
                 int pwdBase = _weeniePhysicsObjOffset + 4;
                 IntPtr fieldAddr = weeniePtr + pwdBase + pwdFieldOffset;
-                if (!IsReadablePointer(fieldAddr))
+                // Page-probe BOTH ends of the 4-byte read span (mirrors
+                // TryGetObjectOwnershipInfo's dual-end probe): a freed-but-decommitted
+                // weenie whose field straddles a committed/decommitted page boundary is
+                // an uncatchable AV under NativeAOT; the catch below only covers
+                // null-page faults. All stypes served here are Marshal.ReadInt32
+                // (4 bytes), so the span is [fieldAddr, fieldAddr+3].
+                if (!IsReadablePointer(fieldAddr) || !IsReadablePointer(fieldAddr + 3))
                     return false;
 
                 value = Marshal.ReadInt32(fieldAddr);
@@ -1898,6 +1904,63 @@ internal static class ClientObjectHooks
                 return true;
 
             return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads a STypeDID property that lives in PublicWeenieDesc directly from the
+    /// embedded PWD struct, mirroring the <see cref="TryGetObjectIntProperty"/> PWD
+    /// fast-path. DataID properties otherwise go through a qualities table that is
+    /// null for inventory/pack items (InqDataID would fail), so we bypass it. PWD is
+    /// network-populated, so this works on UNequipped items with no qualities pointer
+    /// and no appraisal — no main-thread native call (the weenie ptr is served from
+    /// the off-thread double-buffered snapshot when not on AC's main thread).
+    /// Supported stype: Icon=8 (PWD._iconID at +16). Layout per the _type reader
+    /// above: WeenieDesc(4) + _name(4) + _plural_name(4) + _wcid(4) = 16 → _iconID.
+    /// (Generic switch so _iconOverlayID(+20) / _iconUnderlayID(+24) can extend it
+    /// later without a new bridge.)
+    /// </summary>
+    public static bool TryGetObjectDataIdProperty(uint objectId, uint stype, out uint dataId)
+    {
+        dataId = 0;
+
+        int pwdFieldOffset = stype switch
+        {
+            8 => 16,    // PropertyDataId.Icon → _iconID
+            _ => -1,
+        };
+        if (pwdFieldOffset < 0)
+            return false;
+
+        if (_getWeenieObject == null)
+        {
+            if (!Probe() || _getWeenieObject == null)
+                return false;
+        }
+        if (_weeniePhysicsObjOffset < 0)
+            return false;
+
+        try
+        {
+            IntPtr weeniePtr = _getWeenieObject(objectId);
+            if (weeniePtr == IntPtr.Zero)
+                return false;
+
+            int pwdBase = _weeniePhysicsObjOffset + 4;
+            IntPtr fieldAddr = weeniePtr + pwdBase + pwdFieldOffset;
+            // Page-probe BOTH ends of the 4-byte read span (mirrors the int PWD
+            // fast-path): a freed-but-decommitted weenie whose field straddles a
+            // committed/decommitted page boundary is an uncatchable AV under
+            // NativeAOT; the catch below only covers null-page faults.
+            if (!IsReadablePointer(fieldAddr) || !IsReadablePointer(fieldAddr + 3))
+                return false;
+
+            dataId = (uint)Marshal.ReadInt32(fieldAddr);
+            return true;
         }
         catch
         {

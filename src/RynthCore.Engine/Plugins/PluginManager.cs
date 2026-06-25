@@ -220,6 +220,8 @@ internal static class PluginManager
     private static GetEngineStatusJsonCallbackDelegate? _getEngineStatusJsonCallback;
     private static GetPluginSnapshotJsonCallbackDelegate? _getPluginSnapshotJsonCallback;
     private static SendPluginCommandCallbackDelegate? _sendPluginCommandCallback;
+    private static GetObjectDataIdPropertyCallbackDelegate? _getObjectDataIdPropertyCallback;
+    private static GetPluginExportJsonCallbackDelegate? _getPluginExportJsonCallback;
     private static ForceResetBusyCountCallbackDelegate? _forceResetBusyCountCallback;
     private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
     private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
@@ -2354,6 +2356,8 @@ internal static class PluginManager
         _getEngineStatusJsonCallback ??= GetEngineStatusJsonAction;
         _getPluginSnapshotJsonCallback ??= GetPluginSnapshotJsonAction;
         _sendPluginCommandCallback ??= SendPluginCommandAction;
+        _getObjectDataIdPropertyCallback ??= GetObjectDataIdPropertyAction;
+        _getPluginExportJsonCallback ??= GetPluginExportJsonAction;
 
         _api.Version = PluginContractVersion.Current;
         _api.LogFn = Marshal.GetFunctionPointerForDelegate(_logCallback);
@@ -2463,6 +2467,8 @@ internal static class PluginManager
         _api.GetEngineStatusJsonFn = Marshal.GetFunctionPointerForDelegate(_getEngineStatusJsonCallback);
         _api.GetPluginSnapshotJsonFn = Marshal.GetFunctionPointerForDelegate(_getPluginSnapshotJsonCallback);
         _api.SendPluginCommandFn = Marshal.GetFunctionPointerForDelegate(_sendPluginCommandCallback);
+        _api.GetObjectDataIdPropertyFn = Marshal.GetFunctionPointerForDelegate(_getObjectDataIdPropertyCallback);
+        _api.GetPluginExportJsonFn = Marshal.GetFunctionPointerForDelegate(_getPluginExportJsonCallback);
     }
 
     private static void ProbeClientHooks()
@@ -2570,6 +2576,15 @@ internal static class PluginManager
     private static unsafe int GetObjectIntPropertyAction(uint objectId, uint stype, int* value)
     {
         if (!ClientObjectHooks.TryGetObjectIntProperty(objectId, stype, out int v))
+            return 0;
+
+        *value = v;
+        return 1;
+    }
+
+    private static unsafe int GetObjectDataIdPropertyAction(uint objectId, uint stype, uint* value)
+    {
+        if (!ClientObjectHooks.TryGetObjectDataIdProperty(objectId, stype, out uint v))
             return 0;
 
         *value = v;
@@ -3120,6 +3135,35 @@ internal static class PluginManager
             // The target plugin owns the returned buffer (kept valid until its
             // next snapshot call); pass it straight through — the caller copies it.
             return ((delegate* unmanaged[Cdecl]<IntPtr>)export)();
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    private static unsafe IntPtr GetPluginExportJsonAction(IntPtr pluginNameAnsi, IntPtr exportNameAnsi)
+    {
+        try
+        {
+            string? name = pluginNameAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(pluginNameAnsi) : null;
+            string? export = exportNameAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(exportNameAnsi) : null;
+            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(export))
+                return IntPtr.Zero;
+
+            // Safety: only broker the parameterless JSON-getter convention (no-arg, returns const char*).
+            // Calling an export with a different signature as <IntPtr>() would corrupt the stack.
+            if (!export.StartsWith("RynthPluginGet", StringComparison.Ordinal) ||
+                !export.EndsWith("Json", StringComparison.Ordinal))
+                return IntPtr.Zero;
+
+            IntPtr fn = ResolvePluginExport(name, export);
+            if (fn == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            // The target plugin owns the returned buffer (valid until its next call on that export);
+            // pass it straight through — the caller copies it immediately.
+            return ((delegate* unmanaged[Cdecl]<IntPtr>)fn)();
         }
         catch
         {

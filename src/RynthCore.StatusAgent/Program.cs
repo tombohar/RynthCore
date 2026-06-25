@@ -56,6 +56,7 @@ else
 // Opt-in pull endpoint: an app can fetch status with no backend.
 LocalStatusServer? server = null;
 WebRtcVideoService? video = null;   // HD WebRTC video mode (opt-in); disposed in finally
+IconService? icons = null;          // item-icon decoder (GET /icon); disposed in finally
 if (cfg.ServeHttp)
 {
     string? commandDir = cfg.EnableRemoteControl ? Path.Combine(cfg.StatusDirectory, "commands") : null;
@@ -65,9 +66,11 @@ if (cfg.ServeHttp)
         video = new WebRtcVideoService(cfg.VideoMaxWidth, cfg.VideoFps, cfg.VideoBitrateKbps);
         videoSocket = new VideoSocketService(cfg.VideoMaxWidth, cfg.VideoFps, cfg.VideoBitrateKbps);
     }
+    // Item-icon decoder (lazy-opens portal.dat on the first /icon request; harmless if the file is absent).
+    icons = new IconService(cfg.IconDatPath);
     server = new LocalStatusServer(cfg.ServePrefix, cfg.ServeToken, commandDir,
                                    cfg.EnableScreenStream, cfg.StreamQuality, cfg.StreamIntervalMs, video, videoSocket,
-                                   runArchive);
+                                   runArchive, cfg.StatusDirectory, icons);
     if (server.TryStart(out string serveErr))
     {
         AgentLog.Info($"Serving status at {cfg.ServePrefix}status (GET){(string.IsNullOrEmpty(cfg.ServeToken) ? "" : ", token required")}.");
@@ -137,6 +140,7 @@ finally
     watcher?.Dispose();
     server?.Dispose();
     video?.Dispose();
+    icons?.Dispose();
     AgentLog.Info("RynthCore.StatusAgent stopped.");
 }
 

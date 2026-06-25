@@ -94,6 +94,11 @@ internal sealed class AgentConfig
     [JsonPropertyName("VideoFps")] public int VideoFps { get; set; } = 60;
     [JsonPropertyName("VideoBitrateKbps")] public int VideoBitrateKbps { get; set; } = 12000;
 
+    /// <summary>portal.dat used to decode item icons for GET /icon (read-only inventory viewer). Defaults to
+    /// the RynthCore client's private copy. If the file is absent (e.g. an agent running off the game box)
+    /// /icon 404s and the app falls back to text rows — no other feature is affected.</summary>
+    [JsonPropertyName("IconDatPath")] public string IconDatPath { get; set; } = @"C:\Games\RynthCore\AcClient\client_portal.dat";
+
     public static string DefaultConfigPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "RynthCore", "statusagent.json");

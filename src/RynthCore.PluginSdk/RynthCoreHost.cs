@@ -5,7 +5,7 @@ namespace RynthCore.PluginSdk;
 
 public readonly unsafe struct RynthCoreHost
 {
-    public const uint CurrentApiVersion = 64;
+    public const uint CurrentApiVersion = 66;
 
     private readonly RynthCoreApiNative _api;
 
@@ -115,6 +115,8 @@ public readonly unsafe struct RynthCoreHost
     public bool HasGetEngineStatusJson   => _api.Version >= 64 && _api.GetEngineStatusJsonFn   != IntPtr.Zero;
     public bool HasGetPluginSnapshotJson => _api.Version >= 64 && _api.GetPluginSnapshotJsonFn != IntPtr.Zero;
     public bool HasSendPluginCommand     => _api.Version >= 64 && _api.SendPluginCommandFn     != IntPtr.Zero;
+    public bool HasGetObjectDataIdProperty => _api.Version >= 65 && _api.GetObjectDataIdPropertyFn != IntPtr.Zero;
+    public bool HasGetPluginExportJson     => _api.Version >= 66 && _api.GetPluginExportJsonFn     != IntPtr.Zero;
 
     // ─── Methods ────────────────────────────────────────────────────────────
 
@@ -798,6 +800,24 @@ public readonly unsafe struct RynthCoreHost
         }
     }
 
+    /// <summary>
+    /// Reads a STypeDID property that lives in the object's PublicWeenieDesc — currently
+    /// Icon=8 (→ _iconID, e.g. 0x06xxxxxx). Works on UNequipped/never-appraised pack items
+    /// (PWD is network-populated; no qualities pointer or appraisal required). Returns false
+    /// when the engine predates API v65 or the read fails.
+    /// </summary>
+    public bool TryGetObjectDataIdProperty(uint objectId, uint stype, out uint value)
+    {
+        value = 0;
+        if (_api.GetObjectDataIdPropertyFn == IntPtr.Zero)
+            return false;
+
+        fixed (uint* valuePtr = &value)
+        {
+            return ((delegate* unmanaged[Cdecl]<uint, uint, uint*, int>)_api.GetObjectDataIdPropertyFn)(objectId, stype, valuePtr) != 0;
+        }
+    }
+
     public bool TryGetObjectBoolProperty(uint objectId, uint stype, out bool value)
     {
         value = false;
@@ -1371,6 +1391,32 @@ public readonly unsafe struct RynthCoreHost
         finally
         {
             Marshal.FreeHGlobal(namePtr);
+        }
+    }
+
+    /// <summary>
+    /// Generic sibling of <see cref="GetPluginSnapshotJson"/>: brokers a parameterless JSON-getter
+    /// export (convention RynthPluginGet*Json) on the named plugin and returns its JSON. Used to pull
+    /// a plugin's secondary surfaces (e.g. RynthAi's RynthPluginGetInventoryJson) without GetProcAddress.
+    /// The target owns the returned buffer (valid until its next call on that export), so this copies it.
+    /// Returns null pre-v66 or on failure. Requires API v66+ (check <see cref="HasGetPluginExportJson"/>).
+    /// </summary>
+    public string? GetPluginExportJson(string pluginName, string exportName)
+    {
+        if (_api.GetPluginExportJsonFn == IntPtr.Zero || string.IsNullOrEmpty(pluginName) || string.IsNullOrEmpty(exportName))
+            return null;
+
+        IntPtr namePtr = Marshal.StringToHGlobalAnsi(pluginName);
+        IntPtr exportPtr = Marshal.StringToHGlobalAnsi(exportName);
+        try
+        {
+            IntPtr ptr = ((delegate* unmanaged[Cdecl]<IntPtr, IntPtr, IntPtr>)_api.GetPluginExportJsonFn)(namePtr, exportPtr);
+            return ptr == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(ptr);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(namePtr);
+            Marshal.FreeHGlobal(exportPtr);
         }
     }
 
