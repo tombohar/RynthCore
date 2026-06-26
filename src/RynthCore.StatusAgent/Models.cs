@@ -71,6 +71,7 @@ internal sealed class BotSnapshot
     [JsonPropertyName("secsSinceLastKill")] public int SecsSinceLastKill { get; set; } = -1;
     [JsonPropertyName("freeSlots")]         public int FreeSlots { get; set; } = -1;
     [JsonPropertyName("uiHidden")]          public bool UiHidden { get; set; }
+    [JsonPropertyName("isMinimized")]       public bool IsMinimized { get; set; }
     [JsonPropertyName("scarabs")]           public int Scarabs { get; set; } = -1;
     [JsonPropertyName("tapers")]            public int Tapers { get; set; } = -1;
     [JsonPropertyName("scarabsByType")]     public List<ScarabCount>? ScarabsByType { get; set; }
@@ -193,6 +194,7 @@ internal sealed class ClientStatus
     [JsonPropertyName("secsSinceLastKill")] public int SecsSinceLastKill { get; set; } = -1;
     [JsonPropertyName("freeSlots")]         public int FreeSlots { get; set; } = -1;
     [JsonPropertyName("uiHidden")]          public bool UiHidden { get; set; }
+    [JsonPropertyName("isMinimized")]       public bool IsMinimized { get; set; }
     [JsonPropertyName("scarabs")]           public int Scarabs { get; set; } = -1;
     [JsonPropertyName("tapers")]            public int Tapers { get; set; } = -1;
     [JsonPropertyName("scarabsByType")]     public List<ScarabCount>? ScarabsByType { get; set; }

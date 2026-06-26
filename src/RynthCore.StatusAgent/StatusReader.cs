@@ -144,6 +144,9 @@ internal static partial class StatusReader
             cs.Area = model.Area;
             cs.LastIssue = model.LastIssue;
             cs.LastIssueAgeSec = model.LastIssueAgeSec;
+            // Window state (for the app to show a "minimized — restore on PC" placeholder instead of a
+            // black stream). A minimized D3D9 window can't be captured by anything; flag it proactively.
+            try { cs.IsMinimized = alive && ScreenCapture.IsClientMinimized(pid); } catch { }
 
             clients.Add(cs);
             seenPids.Add(pid);

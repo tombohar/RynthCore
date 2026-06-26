@@ -110,32 +110,45 @@ internal static class ScreenCapture
         return ms.ToArray();
     }
 
-    /// Pick the game window for this pid: the largest visible, non-minimized top-level window,
-    /// preferring one whose class name contains "acclient" (over the smaller Avalonia overlay windows).
+    /// True when the client's game window exists but is minimized (so capture would only get black).
+    public static bool IsClientMinimized(int pid)
+    {
+        EnsureDpiAware();
+        TryFindWindow(pid, out _, out bool minimized);
+        return minimized;
+    }
+
+    /// Pick the game window for this pid: the largest visible, non-minimized acclient-class window. The
+    /// acclient (D3D9) window is the only one worth capturing — the process's other top-level windows are
+    /// the separate Avalonia overlay panels (excluded by design). Crucially, if the acclient window is
+    /// MINIMIZED we report minimized=true rather than falling back to a non-game window and capturing a
+    /// black frame (the old bug). Falls back to the largest visible window only when the pid has no
+    /// acclient-class window at all (defensive — keeps capture working if the class ever differs).
     private static bool TryFindWindow(int pid, out IntPtr best, out bool minimized)
     {
-        IntPtr found = IntPtr.Zero;
-        long bestScore = 0;
-        bool anyMinimized = false;
+        IntPtr acWin = IntPtr.Zero; long acArea = 0;     // best non-minimized acclient window
+        IntPtr anyWin = IntPtr.Zero; long anyArea = 0;   // best non-minimized window of any class (fallback)
+        bool acMinimized = false;                        // an acclient window exists but is minimized
         var sb = new StringBuilder(64);
         EnumWindows((h, l) =>
         {
             if (GetWindowThreadProcessId(h, out uint wpid) == 0 || wpid != (uint)pid) return true;
             if (!IsWindowVisible(h)) return true;
-            if (IsIconic(h)) { anyMinimized = true; return true; }
-            if (!GetWindowRect(h, out RECT r)) return true;
-            long area = (long)Math.Max(0, r.Right - r.Left) * Math.Max(0, r.Bottom - r.Top);
-            if (area < 64) return true;
             sb.Clear();
             GetClassName(h, sb, sb.Capacity);
             bool isAc = sb.ToString().IndexOf("acclient", StringComparison.OrdinalIgnoreCase) >= 0;
-            long score = isAc ? area + 4_000_000_000 : area;
-            if (score > bestScore) { bestScore = score; found = h; }
+            if (IsIconic(h)) { if (isAc) acMinimized = true; return true; }
+            if (!GetWindowRect(h, out RECT r)) return true;
+            long area = (long)Math.Max(0, r.Right - r.Left) * Math.Max(0, r.Bottom - r.Top);
+            if (area < 64) return true;
+            if (isAc) { if (area > acArea) { acArea = area; acWin = h; } }
+            else if (area > anyArea) { anyArea = area; anyWin = h; }
             return true;
         }, IntPtr.Zero);
-        best = found;
-        minimized = found == IntPtr.Zero && anyMinimized;
-        return found != IntPtr.Zero;
+
+        if (acWin != IntPtr.Zero) { best = acWin; minimized = false; return true; }       // got the game window
+        if (acMinimized)          { best = IntPtr.Zero; minimized = true; return false; }  // game window is minimized
+        best = anyWin; minimized = false; return anyWin != IntPtr.Zero;                    // no acclient window at all
     }
 
     private static bool TryGetBounds(IntPtr hwnd, out int x, out int y, out int w, out int h)
