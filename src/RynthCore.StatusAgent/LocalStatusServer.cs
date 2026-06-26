@@ -423,6 +423,7 @@ internal sealed class LocalStatusServer : IDisposable
         "forceRebuff", "cancelRebuff", "clearBusy", "hideUi", "sendChat",
         "moveStart", "moveStop",
         "setSetting",   // change ONE advanced setting (value = {"key":..,"value":..}); RynthAi clamps + persists
+        "click",        // mouse click in the stream (value = {"u":..,"v":..,"button":..}); handled by the agent (PostMessage)
 
         "assess",   // request an Assess/Identify of one item (value = item id) — fills inventory appraisal
         "closeClient",
@@ -458,6 +459,29 @@ internal sealed class LocalStatusServer : IDisposable
             {
                 CloseClient(pid);
                 Write(res, 202, "application/json", "{\"ok\":true}"u8.ToArray());
+                return;
+            }
+
+            // Click is an AGENT action too: PostMessage a mouse click straight to the acclient window at the
+            // tapped point. value = {"u":0..1,"v":0..1,"button":"left"|"right"} normalized to the client area.
+            if (string.Equals(action, "click", StringComparison.OrdinalIgnoreCase))
+            {
+                double u = 0, v = 0; string button = "left";
+                try
+                {
+                    using var vd = JsonDocument.Parse(string.IsNullOrWhiteSpace(value) ? "{}" : value);
+                    var vr = vd.RootElement;
+                    if (vr.ValueKind == JsonValueKind.Object)
+                    {
+                        if (vr.TryGetProperty("u", out var ue) && ue.ValueKind == JsonValueKind.Number) u = ue.GetDouble();
+                        if (vr.TryGetProperty("v", out var vv) && vv.ValueKind == JsonValueKind.Number) v = vv.GetDouble();
+                        if (vr.TryGetProperty("button", out var be) && be.ValueKind == JsonValueKind.String) button = be.GetString() ?? "left";
+                    }
+                }
+                catch { }
+                bool clicked = ScreenCapture.TryClick(pid, u, v, button);
+                Write(res, clicked ? 202 : 503, "application/json",
+                    clicked ? "{\"ok\":true}"u8.ToArray() : "{\"error\":\"click failed (window missing or minimized)\"}"u8.ToArray());
                 return;
             }
 

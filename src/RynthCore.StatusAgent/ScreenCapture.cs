@@ -118,6 +118,33 @@ internal static class ScreenCapture
         return minimized;
     }
 
+    /// PostMessage a mouse click to the acclient window at normalized (u,v) of its CLIENT area — the exact
+    /// area the stream captures. acclient reads clicks from window messages (verified in the decompile:
+    /// Device::WndProc dispatches WM_LBUTTONDOWN/etc by lParam, never GetCursorPos), so this drives both the
+    /// 2D UI and 3D-world hit-test WITHOUT moving the real cursor or stealing focus, even when the window is
+    /// backgrounded/occluded — multibox-safe. Returns false if the window is missing or minimized.
+    public static bool TryClick(int pid, double u, double v, string? button)
+    {
+        EnsureDpiAware();
+        if (!TryFindWindow(pid, out IntPtr hwnd, out bool minimized) || minimized || hwnd == IntPtr.Zero) return false;
+        if (!GetClientRect(hwnd, out RECT cr)) return false;
+        int cw = cr.Right - cr.Left, ch = cr.Bottom - cr.Top;
+        if (cw < 2 || ch < 2) return false;
+        int x = (int)Math.Round(Math.Clamp(u, 0, 1) * (cw - 1));
+        int y = (int)Math.Round(Math.Clamp(v, 0, 1) * (ch - 1));
+        IntPtr lParam = (IntPtr)unchecked((uint)((y << 16) | (x & 0xFFFF)));
+        bool right = string.Equals(button, "right", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            PostMessage(hwnd, WM_MOUSEMOVE, IntPtr.Zero, lParam);
+            PostMessage(hwnd, right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN, (IntPtr)(right ? 0x0002 : 0x0001), lParam);
+            System.Threading.Thread.Sleep(80);   // brief down→up so AC registers a click, not a drag
+            PostMessage(hwnd, right ? WM_RBUTTONUP : WM_LBUTTONUP, IntPtr.Zero, lParam);
+            return true;
+        }
+        catch { return false; }
+    }
+
     /// Pick the game window for this pid: the largest visible, non-minimized acclient-class window. The
     /// acclient (D3D9) window is the only one worth capturing — the process's other top-level windows are
     /// the separate Avalonia overlay panels (excluded by design). Crucially, if the acclient window is
@@ -169,6 +196,8 @@ internal static class ScreenCapture
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
     private const uint PW_RENDERFULLCONTENT = 0x00000002;   // capture D3D/GPU content (Win8.1+)
     [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    private const uint WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205;
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
