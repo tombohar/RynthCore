@@ -142,6 +142,8 @@ internal static partial class StatusReader
             cs.XpSession = model.XpSession;
             cs.BurdenPct = model.BurdenPct;
             cs.Area = model.Area;
+            cs.Landblock = model.Landblock; cs.Indoor = model.Indoor;   // [status-export] live map-dot
+            cs.Wx = model.Wx; cs.Wy = model.Wy; cs.Pz = model.Pz;
             cs.LastIssue = model.LastIssue;
             cs.LastIssueAgeSec = model.LastIssueAgeSec;
             // Window state (for the app to show a "minimized — restore on PC" placeholder instead of a

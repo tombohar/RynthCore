@@ -159,6 +159,7 @@ internal static class ClientObjectHooks
     private static int _cachedEncVal;       // EncumbranceVal (current burden)
     private static int _cachedEncCap;       // EncumbranceCapacity (max)
     private static uint _cachedLandcell;    // player cell id (landblock = cell >> 16)
+    private static float _cachedPx, _cachedPy, _cachedPz;   // [status-export] player cell-local position (for the live map dot)
     private static uint _playerStatsCacheOwner;
     private static DateTime _lastPlayerStatsPrefetchUtc = DateTime.MinValue;
     private const int PlayerStatsPrefetchThrottleMs = 1000;
@@ -1136,6 +1137,7 @@ internal static class ClientObjectHooks
             int encVal = sameOwner ? _cachedEncVal : 0;
             int encCap = sameOwner ? _cachedEncCap : 0;
             uint cell = sameOwner ? _cachedLandcell : 0;
+            float px = sameOwner ? _cachedPx : 0f, py = sameOwner ? _cachedPy : 0f, pz = sameOwner ? _cachedPz : 0f;
 
             if (TryGetObjectQuadProperty(playerId, 1u, out long x) && x > 0) xp = x;     // PropertyInt64.TotalExperience
             if (TryGetObjectQuadProperty(playerId, 6u, out long l) && l > 0) lum = l;    // PropertyInt64.AvailableLuminance
@@ -1147,12 +1149,14 @@ internal static class ClientObjectHooks
             // absent, derive capacity from buffed Strength using AC's formula (capacity = Strength*150).
             if (TryGetObjectIntProperty(playerId, 96u, out int ec) && ec > 0) encCap = ec;
             else if (TryGetObjectAttribute(playerId, 1u, 0, out uint str) && str > 0) encCap = (int)(str * 150u);
-            if (TryGetObjectPosition(playerId, out uint c, out _, out _, out _) && c != 0) cell = c;
+            if (TryGetObjectPosition(playerId, out uint c, out float fx, out float fy, out float fz) && c != 0)
+            { cell = c; px = fx; py = fy; pz = fz; }   // [status-export] cell-local position for the live map dot
 
             lock (_playerStatsCacheLock)
             {
                 _cachedTotalXp = xp; _cachedLuminance = lum; _cachedDeaths = deaths; _cachedVitae = vitae;
                 _cachedEncVal = encVal; _cachedEncCap = encCap; _cachedLandcell = cell;
+                _cachedPx = px; _cachedPy = py; _cachedPz = pz;
                 _playerStatsCacheOwner = playerId;
             }
         }
@@ -1167,12 +1171,14 @@ internal static class ClientObjectHooks
     /// vitae multiplier, 1.0 = no penalty). Returns false until the cache is populated.
     /// </summary>
     public static bool TryGetPlayerStats(out long totalXp, out long luminance, out int deaths, out float vitae,
-                                         out int encumbranceVal, out int encumbranceCap, out uint landcell)
+                                         out int encumbranceVal, out int encumbranceCap, out uint landcell,
+                                         out float px, out float py, out float pz)
     {
         lock (_playerStatsCacheLock)
         {
             totalXp = _cachedTotalXp; luminance = _cachedLuminance; deaths = _cachedDeaths; vitae = _cachedVitae;
             encumbranceVal = _cachedEncVal; encumbranceCap = _cachedEncCap; landcell = _cachedLandcell;
+            px = _cachedPx; py = _cachedPy; pz = _cachedPz;
             return _playerStatsCacheOwner != 0;
         }
     }

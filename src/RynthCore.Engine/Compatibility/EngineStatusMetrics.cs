@@ -104,7 +104,8 @@ internal static class EngineStatusMetrics
         // Player stats, read on the main thread by PrefetchPlayerStats and served here off-thread
         // (the plugin pump can't read these live). deaths all-time; rates/session = whole-session.
         ClientObjectHooks.TryGetPlayerStats(out long xp, out long lum, out int deaths, out float vitae,
-                                            out int encVal, out int encCap, out uint landcell);
+                                            out int encVal, out int encCap, out uint landcell,
+                                            out float px, out float py, out float pz);
         double vitaePct = Math.Clamp((1.0 - vitae) * 100.0, 0.0, 100.0);
         // Lazy baselines; reset on an XP drop (relog / char change).
         if (xp > 0 && (_xpBaseline < 0 || xp < _xpBaseline))
@@ -127,6 +128,21 @@ internal static class EngineStatusMetrics
         w.WriteNumber("xpSession", xpSession);
         w.WriteNumber("burdenPct", burdenPct);
         w.WriteString("area", landcell != 0 ? (landcell >> 16).ToString("X4") : "");
+        // [status-export] live map-dot position. wx/wy are ABSOLUTE world coords (cell-local origin + the
+        // landblock grid offset) because the baked dungeon map's bounds are absolute (DungeonLOS adds the
+        // same gx/gy per vertex). The app maps these straight to map pixels.
+        uint lb = landcell != 0 ? (landcell >> 16) : 0u;
+        bool indoor = lb != 0 && (landcell & 0xFFFF) >= 0x0100;   // indoor EnvCells are 0x0100+; outdoor = 0
+        w.WriteString("landblock", lb != 0 ? lb.ToString("X8") : "");   // matches the .bin filename {lb:X8}
+        w.WriteBoolean("indoor", indoor);
+        if (indoor)
+        {
+            double wx = px + ((lb >> 8) & 0xFF) * 192.0;
+            double wy = py + (lb & 0xFF) * 192.0;
+            w.WriteNumber("wx", Math.Round(wx, 2));
+            w.WriteNumber("wy", Math.Round(wy, 2));
+            w.WriteNumber("pz", Math.Round(pz, 2));   // raw local Z — floor-label / fallback hint
+        }
         // Last engine warning/error (truncated) + age, for remote diagnosis of a stuck box.
         string? li = RynthLog.LastIssue;
         if (!string.IsNullOrEmpty(li))

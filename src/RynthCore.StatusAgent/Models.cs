@@ -32,6 +32,11 @@ internal sealed class StatusFileModel
     [JsonPropertyName("xpSession")]         public long XpSession { get; set; }
     [JsonPropertyName("burdenPct")]         public double BurdenPct { get; set; }
     [JsonPropertyName("area")]              public string Area { get; set; } = "";
+    [JsonPropertyName("landblock")]         public string Landblock { get; set; } = "";   // [status-export] live map-dot
+    [JsonPropertyName("indoor")]            public bool Indoor { get; set; }
+    [JsonPropertyName("wx")]                public double Wx { get; set; }
+    [JsonPropertyName("wy")]                public double Wy { get; set; }
+    [JsonPropertyName("pz")]                public double Pz { get; set; }
     [JsonPropertyName("lastIssue")]         public string? LastIssue { get; set; }
     [JsonPropertyName("lastIssueAgeSec")]   public long LastIssueAgeSec { get; set; } = -1;
     [JsonPropertyName("bot")]               public BotSnapshot? Bot { get; set; }
@@ -190,6 +195,11 @@ internal sealed class ClientStatus
     [JsonPropertyName("xpSession")]         public long XpSession { get; set; }
     [JsonPropertyName("burdenPct")]         public double BurdenPct { get; set; }
     [JsonPropertyName("area")]              public string Area { get; set; } = "";
+    [JsonPropertyName("landblock")]         public string Landblock { get; set; } = "";   // [status-export] live map-dot
+    [JsonPropertyName("indoor")]            public bool Indoor { get; set; }
+    [JsonPropertyName("wx")]                public double Wx { get; set; }
+    [JsonPropertyName("wy")]                public double Wy { get; set; }
+    [JsonPropertyName("pz")]                public double Pz { get; set; }
     [JsonPropertyName("sessionKills")]      public int SessionKills { get; set; }
     [JsonPropertyName("secsSinceLastKill")] public int SecsSinceLastKill { get; set; } = -1;
     [JsonPropertyName("freeSlots")]         public int FreeSlots { get; set; } = -1;
