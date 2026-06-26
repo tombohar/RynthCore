@@ -26,6 +26,7 @@ internal sealed class LocalStatusServer : IDisposable
     private readonly RunArchive? _runArchive;      // GET /runs (per-session play history); null = disabled
     private readonly string? _statusDir;           // GET /inventory reads RynthCore.<pid>.inventory.json from here
     private readonly IconService? _icons;          // GET /icon?did=N (portal.dat → PNG); null = disabled
+    private readonly MapService? _maps;            // GET /maps + /map?lb&layer (baked dungeon .bin → PNG); null = disabled
     private volatile byte[] _latest =
         Encoding.UTF8.GetBytes("{\"schema\":\"rynthcore.status-agent/1\",\"clientCount\":0,\"clients\":[]}");
     private CancellationTokenSource? _cts;
@@ -41,7 +42,7 @@ internal sealed class LocalStatusServer : IDisposable
                              bool enableStream = false, int streamQuality = 55, int streamIntervalMs = 400,
                              WebRtcVideoService? video = null, VideoSocketService? videoSocket = null,
                              RunArchive? runArchive = null, string? statusDirectory = null,
-                             IconService? icons = null)
+                             IconService? icons = null, MapService? maps = null)
     {
         _prefix = prefix.EndsWith('/') ? prefix : prefix + "/";
         _token = string.IsNullOrWhiteSpace(token) ? null : token;
@@ -54,6 +55,7 @@ internal sealed class LocalStatusServer : IDisposable
         _runArchive = runArchive;
         _statusDir = string.IsNullOrWhiteSpace(statusDirectory) ? null : statusDirectory;
         _icons = icons;
+        _maps = maps;
         _listener.Prefixes.Add(_prefix);
     }
 
@@ -262,6 +264,28 @@ internal sealed class LocalStatusServer : IDisposable
                 return;
             }
 
+            // ── Dungeon maps: GET /maps — list baked floor-plan maps (landblock + layer + raster bounds) ──
+            if (path == "/maps" || path == "/maps.json")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                { Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray()); return; }
+                if (_token != null && !Authorized(req))
+                { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
+                var entries = _maps?.List() ?? (IReadOnlyList<MapService.MapEntry>)Array.Empty<MapService.MapEntry>();
+                var payload = new MapsListPayload { Count = entries.Count };
+                foreach (var e in entries)
+                    payload.Maps.Add(new MapEntryDto
+                    {
+                        Landblock = e.Landblock.ToString("X8"),
+                        Layer = e.Layer, Bytes = e.Bytes, Mtime = e.MtimeUtc,
+                        W = e.W, H = e.H, XMin = e.XMin, YMin = e.YMin,
+                        Name = "Dungeon " + (e.Landblock & 0xFFFF).ToString("X4"),
+                    });
+                Write(res, 200, "application/json",
+                    JsonSerializer.SerializeToUtf8Bytes(payload, AgentJsonContext.Default.MapsListPayload));
+                return;
+            }
+
             // ── Inventory: GET /inventory?pid=N — that client's full read-only inventory (icons/slots/appraisal) ──
             if (path == "/inventory" || path == "/inventory.json")
             {
@@ -323,6 +347,35 @@ internal sealed class LocalStatusServer : IDisposable
                 res.Headers["Cache-Control"] = "public, max-age=31536000, immutable";
                 res.Headers["ETag"] = etag;
                 Write(res, 200, "image/png", png);
+                return;
+            }
+
+            // ── Dungeon map image: GET /map?lb=XXXXXXXX&layer=N — baked .bin re-encoded to PNG ──
+            if (path == "/map")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                { Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray()); return; }
+                if (_token != null && !Authorized(req))
+                { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
+                if (!uint.TryParse(req.QueryString["lb"], System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture, out uint lb)
+                    || !int.TryParse(req.QueryString["layer"], out int layer))
+                { Write(res, 400, "application/json", "{\"error\":\"lb (hex) and layer required\"}"u8.ToArray()); return; }
+                var r = _maps?.GetPng(lb, layer);
+                if (r == null)
+                { Write(res, 404, "application/json", "{\"error\":\"map unavailable\"}"u8.ToArray()); return; }
+                var (mapPng, meta) = r.Value;
+                // Re-baked as the bot explores, so the ETag tracks file mtime+size (NOT immutable like /icon).
+                string mapEtag = "\"" + meta.MtimeUtc.Ticks + "-" + meta.Bytes + "\"";
+                if (string.Equals(req.Headers["If-None-Match"], mapEtag, StringComparison.Ordinal))
+                { res.Headers["ETag"] = mapEtag; Write(res, 304, "image/png", Array.Empty<byte>()); return; }
+                res.Headers["Cache-Control"] = "public, max-age=60";
+                res.Headers["ETag"] = mapEtag;
+                res.Headers["X-Map-XMin"] = meta.XMin.ToString();
+                res.Headers["X-Map-YMin"] = meta.YMin.ToString();
+                res.Headers["X-Map-W"] = meta.W.ToString();
+                res.Headers["X-Map-H"] = meta.H.ToString();
+                Write(res, 200, "image/png", mapPng);
                 return;
             }
 

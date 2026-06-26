@@ -99,6 +99,11 @@ internal sealed class AgentConfig
     /// /icon 404s and the app falls back to text rows — no other feature is affected.</summary>
     [JsonPropertyName("IconDatPath")] public string IconDatPath { get; set; } = @"C:\Games\RynthCore\AcClient\client_portal.dat";
 
+    /// <summary>Directory of RynthAi's baked dungeon floor-plan maps ({landblock:X8}_{layer}.bin), served as
+    /// PNGs via GET /map for the app's dungeon-map viewer. If the folder is absent (agent off the game box)
+    /// /maps returns an empty list and /map 404s — no other feature is affected.</summary>
+    [JsonPropertyName("MapsDirectory")] public string MapsDirectory { get; set; } = @"C:\Games\RynthSuite\RynthAi\Maps";
+
     public static string DefaultConfigPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "RynthCore", "statusagent.json");

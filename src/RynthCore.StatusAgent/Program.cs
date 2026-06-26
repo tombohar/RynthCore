@@ -68,9 +68,11 @@ if (cfg.ServeHttp)
     }
     // Item-icon decoder (lazy-opens portal.dat on the first /icon request; harmless if the file is absent).
     icons = new IconService(cfg.IconDatPath);
+    // Dungeon floor-plan maps (re-encodes RynthAi's baked .bin rasters to PNG; harmless if the folder is absent).
+    MapService maps = new MapService(cfg.MapsDirectory);
     server = new LocalStatusServer(cfg.ServePrefix, cfg.ServeToken, commandDir,
                                    cfg.EnableScreenStream, cfg.StreamQuality, cfg.StreamIntervalMs, video, videoSocket,
-                                   runArchive, cfg.StatusDirectory, icons);
+                                   runArchive, cfg.StatusDirectory, icons, maps);
     if (server.TryStart(out string serveErr))
     {
         AgentLog.Info($"Serving status at {cfg.ServePrefix}status (GET){(string.IsNullOrEmpty(cfg.ServeToken) ? "" : ", token required")}.");

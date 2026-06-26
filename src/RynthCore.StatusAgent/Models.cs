@@ -253,6 +253,28 @@ internal sealed class RunsPayload
     [JsonPropertyName("runs")]           public List<RunRecord> Runs { get; set; } = new();
 }
 
+/// <summary>One baked dungeon floor-plan map available via GET /map (landblock + Z-layer + raster bounds).</summary>
+internal sealed class MapEntryDto
+{
+    [JsonPropertyName("landblock")] public string Landblock { get; set; } = "";   // "0000002B" (matches the .bin filename)
+    [JsonPropertyName("layer")]     public int Layer { get; set; }
+    [JsonPropertyName("bytes")]     public long Bytes { get; set; }
+    [JsonPropertyName("mtime")]     public DateTimeOffset Mtime { get; set; }
+    [JsonPropertyName("w")]         public int W { get; set; }
+    [JsonPropertyName("h")]         public int H { get; set; }
+    [JsonPropertyName("xMin")]      public int XMin { get; set; }   // grid-cell units, ABSOLUTE world frame
+    [JsonPropertyName("yMin")]      public int YMin { get; set; }
+    [JsonPropertyName("name")]      public string Name { get; set; } = "";   // friendly label (hex for now)
+}
+
+/// <summary>The /maps payload: every baked dungeon floor-plan the agent can serve.</summary>
+internal sealed class MapsListPayload
+{
+    [JsonPropertyName("schema")] public string Schema { get; set; } = "rynthcore.maps/1";
+    [JsonPropertyName("count")]  public int Count { get; set; }
+    [JsonPropertyName("maps")]   public List<MapEntryDto> Maps { get; set; } = new();
+}
+
 /// <summary>A remote-control command the agent writes for the plugin to poll + apply.</summary>
 internal sealed class CommandFile
 {
@@ -269,4 +291,5 @@ internal sealed class CommandFile
 [JsonSerializable(typeof(AgentConfig))]
 [JsonSerializable(typeof(CommandFile))]
 [JsonSerializable(typeof(RunsPayload))]
+[JsonSerializable(typeof(MapsListPayload))]
 internal sealed partial class AgentJsonContext : JsonSerializerContext { }
