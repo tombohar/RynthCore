@@ -311,6 +311,20 @@ internal sealed class LocalStatusServer : IDisposable
                 return;
             }
 
+            // ── Settings: GET /settings?pid=N — that client's full advanced-settings bridge (for the Control form) ──
+            if (path == "/settings" || path == "/settings.json")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                { Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray()); return; }
+                if (_token != null && !Authorized(req))
+                { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
+                int spid = int.TryParse(req.QueryString["pid"], out int sp) ? sp : 0;
+                if (spid <= 0)
+                { Write(res, 400, "application/json", "{\"error\":\"pid required\"}"u8.ToArray()); return; }
+                Write(res, 200, "application/json", ReadSettingsBytes(spid));
+                return;
+            }
+
             // ── Item icon: GET /icon?did=N — decode a portal.dat texture to PNG (read-only inventory view) ──
             if (path == "/icon")
             {
@@ -408,6 +422,8 @@ internal sealed class LocalStatusServer : IDisposable
         "navProfile", "lootProfile", "metaProfile", "settingsProfile",
         "forceRebuff", "cancelRebuff", "clearBusy", "hideUi", "sendChat",
         "moveStart", "moveStop",
+        "setSetting",   // change ONE advanced setting (value = {"key":..,"value":..}); RynthAi clamps + persists
+
         "assess",   // request an Assess/Identify of one item (value = item id) — fills inventory appraisal
         "closeClient",
     };
@@ -526,6 +542,21 @@ internal sealed class LocalStatusServer : IDisposable
             return bytes.Length >= 2 ? bytes : EmptyInventory;
         }
         catch { return EmptyInventory; }
+    }
+
+    /// Read RynthCore.<pid>.settings.json (written atomically by the RynthRemote plugin = RynthAi's advanced
+    /// settings bridge). Returns an empty object when absent/unreadable so the app always parses valid JSON.
+    private byte[] ReadSettingsBytes(int pid)
+    {
+        if (_statusDir == null) return "{}"u8.ToArray();
+        try
+        {
+            string path = Path.Combine(_statusDir, $"RynthCore.{pid}.settings.json");
+            if (!File.Exists(path)) return "{}"u8.ToArray();
+            byte[] bytes = File.ReadAllBytes(path);
+            return bytes.Length >= 2 ? bytes : "{}"u8.ToArray();
+        }
+        catch { return "{}"u8.ToArray(); }
     }
 
     private static int ClampQuery(HttpListenerRequest req, string key, int def, int lo, int hi)
