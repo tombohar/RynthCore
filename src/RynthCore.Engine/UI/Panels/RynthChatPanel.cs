@@ -203,8 +203,21 @@ internal static class RynthChatPanel
     private static TextBlock?    _flashLabel;
     private static DispatcherTimer? _flashTimer;
 
-    private static readonly IBrush SelectionBrush =
-        new SolidColorBrush(Color.FromArgb(0x66, 0x3A, 0x6E, 0xA5));
+    // ⚠ Lazy, NOT eager. These construct Avalonia SolidColorBrush objects.
+    // If they were eager static initializers, the first *static* touch of this
+    // class (EntryPoint.InitWorker calls RynthChatPanel.EnsureSettingsLoaded()
+    // to apply persisted "hide retail chat" at login) would run the static
+    // ctor on the InitWorker thread — constructing Avalonia objects BEFORE
+    // AvaloniaOverlay.Start() sets up the Win32 platform. That prematurely
+    // creates Dispatcher.UIThread with the non-controlled fallback impl, so the
+    // overlay thread's Dispatcher.MainLoop later throws PlatformNotSupportedException
+    // ("Operation is not supported on this platform") — the entire overlay dies
+    // and no RynthCore/plugin UI renders while the game + plugin pump run fine.
+    // Lazy init keeps the static ctor Avalonia-free; the brushes build on first
+    // access, which only ever happens on the Avalonia UI thread (panel render).
+    private static IBrush? _selectionBrush;
+    private static IBrush SelectionBrush =>
+        _selectionBrush ??= new SolidColorBrush(Color.FromArgb(0x66, 0x3A, 0x6E, 0xA5));
 
     // ── Chat logging (Avalonia UI thread only) ────────────────────────────
     private static bool         _logEnabled;
@@ -226,8 +239,13 @@ internal static class RynthChatPanel
         _          => Color.FromArgb(0xFF, 0xAA, 0xAA, 0xAA),
     };
 
-    private static readonly IBrush TabActiveBrush   = new SolidColorBrush(Color.FromArgb(0xFF, 0x26, 0x4C, 0x59));
-    private static readonly IBrush TabInactiveBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x0F, 0x1F, 0x2E));
+    // Lazy — see the SelectionBrush note above: eager Avalonia-object static
+    // initializers here would poison Dispatcher.UIThread when EnsureSettingsLoaded
+    // triggers the static ctor off the Avalonia thread before platform init.
+    private static IBrush? _tabActiveBrush;
+    private static IBrush TabActiveBrush   => _tabActiveBrush   ??= new SolidColorBrush(Color.FromArgb(0xFF, 0x26, 0x4C, 0x59));
+    private static IBrush? _tabInactiveBrush;
+    private static IBrush TabInactiveBrush => _tabInactiveBrush ??= new SolidColorBrush(Color.FromArgb(0xFF, 0x0F, 0x1F, 0x2E));
 
     // ── Panel construction ────────────────────────────────────────────────
 

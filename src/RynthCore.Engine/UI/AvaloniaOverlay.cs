@@ -626,7 +626,17 @@ internal static class AvaloniaOverlay
         }
         catch (Exception ex)
         {
-            RynthLog.UI($"AvaloniaOverlay: Thread error: {ex.Message}");
+            // The custom Skia bridge is pure raster (no GPU/ANGLE calls that
+            // throw), so a PlatformNotSupportedException here originates deep in
+            // Avalonia/Skia framework code during first render. Logging only
+            // ex.Message ("Operation is not supported on this platform") hid the
+            // throw site and made the intermittent no-overlay class un-diagnosable.
+            // Emit the full type + stack + inner-exception chain so the framework
+            // frame that throws is identifiable from the per-pid log.
+            RynthLog.UI($"AvaloniaOverlay: Thread error: {ex.GetType().FullName}: {ex.Message}");
+            RynthLog.UI($"AvaloniaOverlay: Thread error FULL:\n{ex}");
+            for (Exception? inner = ex.InnerException; inner != null; inner = inner.InnerException)
+                RynthLog.UI($"AvaloniaOverlay: Thread error INNER: {inner.GetType().FullName}: {inner.Message}\n{inner.StackTrace}");
         }
     }
 
