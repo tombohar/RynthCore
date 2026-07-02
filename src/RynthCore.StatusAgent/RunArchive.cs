@@ -200,6 +200,7 @@ internal sealed class RunArchive
         public string Server = "";
         public int Kills;
         public double KillsPerHour;
+        public double CastsPerKill;   // D6: latest offensive casts-per-kill seen this run
         public long Xp;
         public double XpPerHour;
         public double LuminancePerHour;
@@ -218,6 +219,7 @@ internal sealed class RunArchive
             if (c.XpSession > Xp) Xp = c.XpSession;
             if (c.DeathsSession > Deaths) Deaths = c.DeathsSession;
             if (c.KillsPerHour > 0) KillsPerHour = c.KillsPerHour;
+            if (c.CastsPerKill > 0) CastsPerKill = c.CastsPerKill;   // latest non-zero; an orphan run trends this up
             if (c.XpPerHour > 0) XpPerHour = c.XpPerHour;
             if (c.LuminancePerHour > 0) LuminancePerHour = c.LuminancePerHour;
             if (c.VitaePct > 0) VitaePct = c.VitaePct;
@@ -236,6 +238,7 @@ internal sealed class RunArchive
             DurationSec = Math.Max(MaxUptimeSec, (long)(now - StartUtc).TotalSeconds),
             Kills = Kills,
             KillsPerHour = KillsPerHour,
+            CastsPerKill = CastsPerKill,
             Xp = Xp,
             XpPerHour = XpPerHour,
             LuminancePerHour = LuminancePerHour,

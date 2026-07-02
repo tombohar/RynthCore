@@ -115,6 +115,13 @@ internal static partial class StatusReader
                 cs.SessionKills = bot.SessionKills;
                 cs.SecsSinceLastKill = bot.SecsSinceLastKill;
                 cs.FreeSlots = bot.FreeSlots;
+                cs.ScanTotal = bot.ScanTotal;                 // D2 three-tier target telemetry
+                cs.ScanRing = bot.ScanRing;
+                cs.ScanPossible = bot.ScanPossible;
+                cs.ScanLosBlocked = bot.ScanLosBlocked;
+                cs.SessionAttackCasts = bot.SessionAttackCasts; // D6 attack-cast/kill ratio
+                cs.CastsSinceLastKill = bot.CastsSinceLastKill;
+                cs.CastsPerKill = bot.CastsPerKill;
                 cs.UiHidden = bot.UiHidden;
                 cs.Scarabs = bot.Scarabs;
                 cs.Tapers = bot.Tapers;

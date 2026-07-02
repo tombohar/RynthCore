@@ -721,6 +721,25 @@ public static class EntryPoint
                         // Regex filter-rule editor — its own panel (opened from
                         // the chat panel's Filters button or the bar).
                         OverlayHost.RegisterPanel("ChatFilters", RynthChatFiltersPanel.Create);
+                        // Apply persisted RynthChat settings (incl. "Hide retail chat" ->
+                        // ChatHooks.SuppressOriginalChat) at init so suppression takes effect
+                        // on login without the user having to open the Chat panel first.
+                        //
+                        // ⚠ INVARIANT: this is the ONLY place that invokes a panel's static
+                        // method BEFORE AvaloniaOverlay.Start() (below) sets up the Win32
+                        // platform. Doing so runs that panel's static ctor on THIS (InitWorker)
+                        // thread. A panel whose static ctor eagerly constructs Avalonia objects
+                        // (SolidColorBrush etc.) would then create Dispatcher.UIThread with the
+                        // wrong (non-controlled) impl → the overlay thread's Dispatcher.MainLoop
+                        // throws PlatformNotSupportedException → the ENTIRE overlay dies and no
+                        // RynthCore/plugin UI renders (game + plugin pump still run). This bit us
+                        // 2026-06-30; fixed by making RynthChatPanel's brush statics LAZY.
+                        // Before adding any EnsureSettingsLoaded-style early call for another
+                        // panel, confirm that panel's static ctor constructs NO Avalonia objects
+                        // (make its brushes lazy), OR move the settings-load off the panel class.
+                        // OverlayHost.RegisterPanel above is safe: a method-group does NOT trigger
+                        // the static ctor. See rynthcore memory "overlay no-UI = dispatcher poison".
+                        RynthChatPanel.EnsureSettingsLoaded();
                     }
                     else
                         RynthLog.Info("InitWorker: RynthChat panel skipped — DLL not in engine.json PluginPaths.");

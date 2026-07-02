@@ -2133,7 +2133,11 @@ internal class RynthOverlayWindow : Window
                 // plumbing (Tick gated branch, snapshot Gated flag) is left
                 // intact but dormant so a future "gate the undocked radar too"
                 // option can re-enable it here without rework.
-                clickThroughWhenCtrlReleased: false);
+                clickThroughWhenCtrlReleased: false,
+                // Radar + RynthAi render smoothly via custom draw / live
+                // snapshots and depend on the per-frame RTT re-render — exempt
+                // them from the dirty gate so they keep full-rate rendering.
+                alwaysRender: isRadarPopout || isRynthAiPopout);
         }
         catch (Exception ex)
         {
@@ -3845,6 +3849,35 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     private int _logCount;
     private bool _ownerApplied;
     private readonly bool _clickThroughGated;
+    // Radar + RynthAi animate smoothly via custom Render / live snapshots and
+    // depend on the per-frame RTT re-render; exempt them from the dirty gate so
+    // they keep full-rate rendering (their existing behaviour, no regression).
+    private readonly bool _alwaysRender;
+
+    // ── Dirty-gate (fix: undocked panels were re-rasterizing their full Border
+    // subtree to an RTT + blitting the whole surface every 16ms unconditionally
+    // — a continuous full-subtree Skia raster on the UI thread even when idle,
+    // the dominant reason a popped-out panel is far laggier/flashier than a
+    // docked one, whose capture is gated on _captureDirty). Gate the heavy
+    // render on an ACTUAL change:
+    //   • _dirty is set by user input (ForwardInput) and layout changes
+    //     (PanelBorder/PanelContent.LayoutUpdated — fires on MetaPanel rebuilds,
+    //     list/text updates, resizes), so interaction repaints next tick.
+    //   • A low-frequency heartbeat still repaints so a render-only change with
+    //     no layout pass (rare) can never leave a stale frame for >HeartbeatMs.
+    //   • Gated panels (radar) animate via custom Render + InvalidateVisual with
+    //     NO layout pass and possibly no input, so they stay full-rate (the gate
+    //     is skipped for them) — zero change to radar behaviour.
+    // All of _dirty/_lastRender* are touched only on the Avalonia UI thread
+    // (Tick, ForwardInput-via-Invoke, LayoutUpdated); volatile is defensive.
+    private volatile bool _dirty = true;
+    private int _forceRenderFrames = 4;          // always render the first frames after creation
+    private long _lastRenderTick;
+    private double _lastRenderBoundsW = -1, _lastRenderBoundsH = -1;
+    private const long HeartbeatMs = 200;
+
+    /// <summary>Force the next Tick() to re-render this floating panel.</summary>
+    public void MarkDirty() => _dirty = true;
 
     public FloatingPanelHost(
         RynthOverlayWindow owner,
@@ -3862,18 +3895,26 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         int captionRightInset,
         int closeButtonWidthPx = 30,
         int redockButtonWidthPx = 30,
-        bool clickThroughWhenCtrlReleased = false)
+        bool clickThroughWhenCtrlReleased = false,
+        bool alwaysRender = false)
     {
         _owner = owner;
         Title = title;
         RootControl = rootControl;
         PanelBorder = panelBorder;
         PanelContent = panelContent;
+        // Any layout change in the panel subtree marks it dirty so the gated
+        // Tick() re-renders on the next frame (catches MetaPanel rebuilds,
+        // list/text updates, resizes). Render-only changes with no layout pass
+        // are covered by the heartbeat in Tick().
+        panelBorder.LayoutUpdated += (_, _) => _dirty = true;
+        panelContent.LayoutUpdated += (_, _) => _dirty = true;
         _logicalWidth = Math.Max(logicalWidth, 1);
         _logicalHeight = Math.Max(logicalHeight, 1);
         OffBoundsCanvasX = offBoundsCanvasX;
         OffBoundsCanvasY = offBoundsCanvasY;
         _clickThroughGated = clickThroughWhenCtrlReleased;
+        _alwaysRender = alwaysRender;
 
         float scale = AvaloniaOverlay.InputScale > 0 ? AvaloniaOverlay.InputScale : 1f;
         int pxW = Math.Max(1, (int)Math.Round(_logicalWidth * scale));
@@ -4032,6 +4073,24 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         _logicalWidth = w;
         _logicalHeight = h;
 
+        // ── Dirty gate ─────────────────────────────────────────────────────
+        // Skip the heavy full-subtree raster + full-surface blit below unless
+        // something actually changed. Gated panels (radar) draw via custom
+        // Render + InvalidateVisual with no layout pass, so keep them full-rate.
+        // The heartbeat floor guarantees a render-only change can't leave a
+        // stale frame for longer than HeartbeatMs; input/layout/size changes
+        // repaint on the very next tick.
+        long nowTick = Environment.TickCount64;
+        bool sizeChanged = w != _lastRenderBoundsW || h != _lastRenderBoundsH;
+        bool heartbeat = nowTick - _lastRenderTick >= HeartbeatMs;
+        if (!_alwaysRender && !_clickThroughGated && _forceRenderFrames <= 0 && !_dirty && !sizeChanged && !heartbeat)
+            return;
+        if (_forceRenderFrames > 0) _forceRenderFrames--;
+        _dirty = false;
+        _lastRenderTick = nowTick;
+        _lastRenderBoundsW = w;
+        _lastRenderBoundsH = h;
+
         float scale = AvaloniaOverlay.InputScale > 0 ? AvaloniaOverlay.InputScale : 1f;
         int pxW = Math.Max(1, (int)Math.Round(w * scale));
         int pxH = Math.Max(1, (int)Math.Round(h * scale));
@@ -4121,6 +4180,10 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
 
     private void ForwardInput(uint msg, IntPtr wParam, IntPtr lParam, int layeredClientX, int layeredClientY)
     {
+        // Any forwarded input may change the panel's visuals (press/hover
+        // states, scroll, focus) — repaint on the next tick.
+        _dirty = true;
+
         // Radar's overlay buttons sit inside the panel content. Avalonia's
         // WM_LBUTTONDOWN dispatch routes events to the AvaloniaHwnd but
         // doesn't deliver them to controls on panels parked off-canvas

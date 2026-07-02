@@ -81,6 +81,14 @@ internal sealed class BotSnapshot
     [JsonPropertyName("tapers")]            public int Tapers { get; set; } = -1;
     [JsonPropertyName("scarabsByType")]     public List<ScarabCount>? ScarabsByType { get; set; }
     [JsonPropertyName("equipment")]         public List<EquipItem>? Equipment { get; set; }
+    // D2 three-tier target telemetry + D6 attack-cast/kill ratio (orphan early-warning).
+    [JsonPropertyName("scanTotal")]          public int ScanTotal { get; set; } = -1;
+    [JsonPropertyName("scanRing")]           public int ScanRing { get; set; } = -1;
+    [JsonPropertyName("scanPossible")]       public int ScanPossible { get; set; } = -1;
+    [JsonPropertyName("scanLosBlocked")]     public int ScanLosBlocked { get; set; } = -1;
+    [JsonPropertyName("sessionAttackCasts")] public int SessionAttackCasts { get; set; }
+    [JsonPropertyName("castsSinceLastKill")] public int CastsSinceLastKill { get; set; }
+    [JsonPropertyName("castsPerKill")]       public double CastsPerKill { get; set; }
     [JsonPropertyName("recentChat")]        public List<ChatLine>? RecentChat { get; set; }
 }
 
@@ -209,6 +217,14 @@ internal sealed class ClientStatus
     [JsonPropertyName("tapers")]            public int Tapers { get; set; } = -1;
     [JsonPropertyName("scarabsByType")]     public List<ScarabCount>? ScarabsByType { get; set; }
     [JsonPropertyName("equipment")]         public List<EquipItem>? Equipment { get; set; }
+    // D2 three-tier target telemetry + D6 attack-cast/kill ratio (orphan early-warning).
+    [JsonPropertyName("scanTotal")]          public int ScanTotal { get; set; } = -1;
+    [JsonPropertyName("scanRing")]           public int ScanRing { get; set; } = -1;
+    [JsonPropertyName("scanPossible")]       public int ScanPossible { get; set; } = -1;
+    [JsonPropertyName("scanLosBlocked")]     public int ScanLosBlocked { get; set; } = -1;
+    [JsonPropertyName("sessionAttackCasts")] public int SessionAttackCasts { get; set; }
+    [JsonPropertyName("castsSinceLastKill")] public int CastsSinceLastKill { get; set; }
+    [JsonPropertyName("castsPerKill")]       public double CastsPerKill { get; set; }
     [JsonPropertyName("recentChat")]        public List<ChatLine>? RecentChat { get; set; }
     [JsonPropertyName("lastIssue")]         public string? LastIssue { get; set; }
     [JsonPropertyName("lastIssueAgeSec")]   public long LastIssueAgeSec { get; set; } = -1;
@@ -242,6 +258,8 @@ internal sealed class RunRecord
     [JsonPropertyName("durationSec")]      public long DurationSec { get; set; }
     [JsonPropertyName("kills")]            public int Kills { get; set; }
     [JsonPropertyName("killsPerHour")]     public double KillsPerHour { get; set; }
+    /// <summary>Offensive attack casts per kill over the run — climbs when casts land no damage.</summary>
+    [JsonPropertyName("castsPerKill")]     public double CastsPerKill { get; set; }
     [JsonPropertyName("xp")]               public long Xp { get; set; }
     [JsonPropertyName("xpPerHour")]        public double XpPerHour { get; set; }
     [JsonPropertyName("luminancePerHour")] public double LuminancePerHour { get; set; }

@@ -76,7 +76,9 @@ internal static class SettingsPanel
         public bool SuppressRetailRadar { get; set; }
         public bool ShowRynthRadar { get; set; }
         public bool RadarClickThrough { get; set; }
-        public bool SuppressRetailChat { get; set; }
+        // NOTE: retail-chatbox suppression intentionally removed here — it is owned by the
+        // RynthChat plugin ("Hide retail chat" in the RynthChat panel's gear menu). Routing it
+        // through RynthAi's settings push fought that toggle and didn't work. See RynthChatPanel.
         public bool ShowRynthChat { get; set; }
         public bool ChatClickThrough { get; set; }
         public bool SuppressRetailPowerbar { get; set; }
@@ -477,9 +479,9 @@ internal static class SettingsPanel
 
         p.Children.Add(Spacer());
         p.Children.Add(SectionHeader("Chat"));
-        p.Children.Add(BoolRow("Get Rid of Retail Chatbox", state.Data.SuppressRetailChat,
-            v => { state.Data.SuppressRetailChat = v; Push(state); },
-            "Hide the game's built-in chat window.\nThe AC chat input still works underneath — your typed commands and tells function unchanged."));
+        // "Get Rid of Retail Chatbox" lives in the RynthChat panel's gear menu ("Hide retail chat"),
+        // which owns ChatHooks.SuppressOriginalChat directly. The old row here routed through RynthAi's
+        // settings push and was clobbered every tick, so it was removed.
         p.Children.Add(BoolRow("Show RynthChat", state.Data.ShowRynthChat,
             v => { state.Data.ShowRynthChat = v; Push(state); },
             "Render the custom chat viewer (scrollback + channel coloring)."));
