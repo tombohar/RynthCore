@@ -15,7 +15,12 @@ param(
     # -AcClient overrides the binary it checks (default: auto-detect the private
     # copy under $Destination\AcClient, else C:\Turbine\Asheron's Call).
     [switch]$SkipPatternCheck,
-    [string]$AcClient = ""
+    [string]$AcClient = "",
+    # Root of the sibling RynthSuite checkout that holds the real plugin
+    # sources. Left empty, it auto-resolves: a RynthSuite folder next to this
+    # repo first, then the legacy C:\Projects\RynthSuite. Pass it explicitly to
+    # deploy from a checkout in some other location.
+    [string]$RynthSuiteRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,14 +36,42 @@ $loaderProject = Join-Path $repoRoot "src\RynthCore.Loader\RynthCore.Loader.cspr
 # the launcher's "Add Plugin DLL" UI; the engine no longer relies on a
 # default Runtime\Plugins\ scan being populated by deploy.
 #
-# RynthAi's live source lives in a separate repo at C:\Projects\RynthSuite -
-# the rynthcore\Plugins\RynthCore.Plugin.RynthAi tree is a stub (~1 MB
-# published) that lacks Combat / Loot / Meta / Raycasting / LegacyUi.
-# Always source from the RynthSuite tree so the real ~8 MB plugin ships.
-$rynthAiSourceRoot     = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthAi"
-$rynthChatSourceRoot   = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthChat"
-$rynthVisionSourceRoot = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthVision"
-$rynthJuiceSourceRoot  = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthJuice"
+# RynthAi's live source lives in the sibling RynthSuite repo - the
+# rynthcore\Plugins\RynthCore.Plugin.RynthAi tree is a stub (~1 MB published)
+# that lacks Combat / Loot / Meta / Raycasting / LegacyUi. Always source from
+# the RynthSuite tree so the real ~8 MB plugin ships.
+#
+# Resolution order: -RynthSuiteRoot, then a sibling checkout, then the legacy
+# C:\Projects\RynthSuite. We hard-fail on a miss rather than falling through to
+# the stub, because a silent stub deploy looks like a successful deploy and
+# then behaves like a plugin with most of its features mysteriously absent.
+if ([string]::IsNullOrWhiteSpace($RynthSuiteRoot)) {
+    $candidates = @(
+        (Join-Path (Split-Path -Parent $repoRoot) "RynthSuite"),
+        "C:\Projects\RynthSuite"
+    )
+    $RynthSuiteRoot = $candidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ "Plugins") } | Select-Object -First 1
+    if (-not $RynthSuiteRoot) {
+        throw @"
+Could not locate the RynthSuite checkout that holds the plugin sources.
+Looked in:
+$($candidates | ForEach-Object { "  $_" } | Out-String)
+Clone RynthSuite beside this repo, or pass -RynthSuiteRoot <path>.
+"@
+    }
+}
+if (-not (Test-Path -LiteralPath (Join-Path $RynthSuiteRoot "Plugins"))) {
+    throw "RynthSuiteRoot '$RynthSuiteRoot' has no Plugins folder - wrong path?"
+}
+Write-Host "RynthSuite source root: $RynthSuiteRoot"
+
+$pluginSourceRoot      = Join-Path $RynthSuiteRoot "Plugins"
+$rynthAiSourceRoot     = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthAi"
+$rynthChatSourceRoot   = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthChat"
+$rynthVisionSourceRoot = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthVision"
+$rynthJuiceSourceRoot  = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthJuice"
+$rynthTrackerSourceRoot = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthTracker"
+$rynthNavSourceRoot    = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthNav"
 $pluginProjects = @(
     @{
         Project    = Join-Path $rynthAiSourceRoot "RynthCore.Plugin.RynthAi.csproj"
@@ -62,8 +95,8 @@ $pluginProjects = @(
         DestSubdir = "RynthVision"
     },
     @{
-        Project    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthTracker\RynthCore.Plugin.RynthTracker.csproj"
-        Publish    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthTracker\bin\Release\net10.0-windows\win-x86\publish"
+        Project    = Join-Path $rynthTrackerSourceRoot "RynthCore.Plugin.RynthTracker.csproj"
+        Publish    = Join-Path $rynthTrackerSourceRoot "bin\Release\net10.0-windows\win-x86\publish"
         DllName    = "RynthCore.Plugin.RynthTracker.dll"
         DestSubdir = "RynthTracker"
     },
@@ -79,7 +112,7 @@ $pluginProjects = @(
     # RynthNav also publishes straight to its deploy home via <PublishDir>.
     # It was missing from this list entirely, so full deploys never refreshed it.
     @{
-        Project    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthNav\RynthCore.Plugin.RynthNav.csproj"
+        Project    = Join-Path $rynthNavSourceRoot "RynthCore.Plugin.RynthNav.csproj"
         Publish    = Join-Path $PluginsDestination "RynthNav"
         DllName    = "RynthCore.Plugin.RynthNav.dll"
         DestSubdir = "RynthNav"
