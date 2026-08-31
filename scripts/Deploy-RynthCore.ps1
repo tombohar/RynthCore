@@ -15,7 +15,12 @@ param(
     # -AcClient overrides the binary it checks (default: auto-detect the private
     # copy under $Destination\AcClient, else C:\Turbine\Asheron's Call).
     [switch]$SkipPatternCheck,
-    [string]$AcClient = ""
+    [string]$AcClient = "",
+    # Root of the sibling RynthSuite checkout that holds the real plugin
+    # sources. Left empty, it auto-resolves: a RynthSuite folder next to this
+    # repo first, then the legacy C:\Projects\RynthSuite. Pass it explicitly to
+    # deploy from a checkout in some other location.
+    [string]$RynthSuiteRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,14 +36,42 @@ $loaderProject = Join-Path $repoRoot "src\RynthCore.Loader\RynthCore.Loader.cspr
 # the launcher's "Add Plugin DLL" UI; the engine no longer relies on a
 # default Runtime\Plugins\ scan being populated by deploy.
 #
-# RynthAi's live source lives in a separate repo at C:\Projects\RynthSuite -
-# the rynthcore\Plugins\RynthCore.Plugin.RynthAi tree is a stub (~1 MB
-# published) that lacks Combat / Loot / Meta / Raycasting / LegacyUi.
-# Always source from the RynthSuite tree so the real ~8 MB plugin ships.
-$rynthAiSourceRoot     = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthAi"
-$rynthChatSourceRoot   = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthChat"
-$rynthVisionSourceRoot = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthVision"
-$rynthJuiceSourceRoot  = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthJuice"
+# RynthAi's live source lives in the sibling RynthSuite repo - the
+# rynthcore\Plugins\RynthCore.Plugin.RynthAi tree is a stub (~1 MB published)
+# that lacks Combat / Loot / Meta / Raycasting / LegacyUi. Always source from
+# the RynthSuite tree so the real ~8 MB plugin ships.
+#
+# Resolution order: -RynthSuiteRoot, then a sibling checkout, then the legacy
+# C:\Projects\RynthSuite. We hard-fail on a miss rather than falling through to
+# the stub, because a silent stub deploy looks like a successful deploy and
+# then behaves like a plugin with most of its features mysteriously absent.
+if ([string]::IsNullOrWhiteSpace($RynthSuiteRoot)) {
+    $candidates = @(
+        (Join-Path (Split-Path -Parent $repoRoot) "RynthSuite"),
+        "C:\Projects\RynthSuite"
+    )
+    $RynthSuiteRoot = $candidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ "Plugins") } | Select-Object -First 1
+    if (-not $RynthSuiteRoot) {
+        throw @"
+Could not locate the RynthSuite checkout that holds the plugin sources.
+Looked in:
+$($candidates | ForEach-Object { "  $_" } | Out-String)
+Clone RynthSuite beside this repo, or pass -RynthSuiteRoot <path>.
+"@
+    }
+}
+if (-not (Test-Path -LiteralPath (Join-Path $RynthSuiteRoot "Plugins"))) {
+    throw "RynthSuiteRoot '$RynthSuiteRoot' has no Plugins folder - wrong path?"
+}
+Write-Host "RynthSuite source root: $RynthSuiteRoot"
+
+$pluginSourceRoot      = Join-Path $RynthSuiteRoot "Plugins"
+$rynthAiSourceRoot     = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthAi"
+$rynthChatSourceRoot   = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthChat"
+$rynthVisionSourceRoot = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthVision"
+$rynthJuiceSourceRoot  = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthJuice"
+$rynthTrackerSourceRoot = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthTracker"
+$rynthNavSourceRoot    = Join-Path $pluginSourceRoot "RynthCore.Plugin.RynthNav"
 $pluginProjects = @(
     @{
         Project    = Join-Path $rynthAiSourceRoot "RynthCore.Plugin.RynthAi.csproj"
@@ -62,8 +95,8 @@ $pluginProjects = @(
         DestSubdir = "RynthVision"
     },
     @{
-        Project    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthTracker\RynthCore.Plugin.RynthTracker.csproj"
-        Publish    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthTracker\bin\Release\net10.0-windows\win-x86\publish"
+        Project    = Join-Path $rynthTrackerSourceRoot "RynthCore.Plugin.RynthTracker.csproj"
+        Publish    = Join-Path $rynthTrackerSourceRoot "bin\Release\net10.0-windows\win-x86\publish"
         DllName    = "RynthCore.Plugin.RynthTracker.dll"
         DestSubdir = "RynthTracker"
     },
@@ -79,7 +112,7 @@ $pluginProjects = @(
     # RynthNav also publishes straight to its deploy home via <PublishDir>.
     # It was missing from this list entirely, so full deploys never refreshed it.
     @{
-        Project    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthNav\RynthCore.Plugin.RynthNav.csproj"
+        Project    = Join-Path $rynthNavSourceRoot "RynthCore.Plugin.RynthNav.csproj"
         Publish    = Join-Path $PluginsDestination "RynthNav"
         DllName    = "RynthCore.Plugin.RynthNav.dll"
         DestSubdir = "RynthNav"
@@ -233,6 +266,35 @@ New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
 if (-not $SkipLauncher) {
+    # Clear a previous SELF-CONTAINED launcher payload before laying down this
+    # framework-dependent one.
+    #
+    # Releases up to at least v0.23 shipped the launcher self-contained, which
+    # drops the whole runtime beside the exe (hostfxr.dll, hostpolicy.dll,
+    # coreclr.dll, ~180 framework assemblies). This script publishes
+    # framework-dependent, and copying over the top leaves that hostfxr.dll in
+    # place. An app-local hostfxr.dll makes the apphost treat $Destination as
+    # DOTNET_ROOT, so it searches $Destination\shared\Microsoft.NETCore.App
+    # instead of the machine's install and dies with
+    #   "You must install or update .NET to run this application."
+    # ...even though the correct runtime IS installed. The dialog sends users
+    # to download a runtime that never fixes it.
+    #
+    # Only the host binaries need to go: their presence is what flips the mode.
+    # Leaving the orphaned framework assemblies is harmless (they are simply
+    # never probed), and deleting the whole directory would take user data.
+    $selfContainedMarkers = @("hostfxr.dll", "hostpolicy.dll", "coreclr.dll", "clrjit.dll")
+    $stale = $selfContainedMarkers |
+        ForEach-Object { Join-Path $Destination $_ } |
+        Where-Object { Test-Path -LiteralPath $_ }
+    if ($stale) {
+        Write-Host "Clearing $($stale.Count) app-local host binaries from a previous self-contained install..."
+        foreach ($f in $stale) {
+            Remove-Item -LiteralPath $f -Force
+            Write-Host "  removed $(Split-Path -Leaf $f)"
+        }
+    }
+
     # Launcher payload to root, except the bootstrapper exe (renamed below).
     Copy-FilteredChildren -Source $launcherPublish -Target $Destination -ExcludeNames @("RynthCore.App.Avalonia.exe") -ExcludeExtensions @(".pdb")
 }
