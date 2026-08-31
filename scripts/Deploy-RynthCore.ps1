@@ -266,6 +266,35 @@ New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
 if (-not $SkipLauncher) {
+    # Clear a previous SELF-CONTAINED launcher payload before laying down this
+    # framework-dependent one.
+    #
+    # Releases up to at least v0.23 shipped the launcher self-contained, which
+    # drops the whole runtime beside the exe (hostfxr.dll, hostpolicy.dll,
+    # coreclr.dll, ~180 framework assemblies). This script publishes
+    # framework-dependent, and copying over the top leaves that hostfxr.dll in
+    # place. An app-local hostfxr.dll makes the apphost treat $Destination as
+    # DOTNET_ROOT, so it searches $Destination\shared\Microsoft.NETCore.App
+    # instead of the machine's install and dies with
+    #   "You must install or update .NET to run this application."
+    # ...even though the correct runtime IS installed. The dialog sends users
+    # to download a runtime that never fixes it.
+    #
+    # Only the host binaries need to go: their presence is what flips the mode.
+    # Leaving the orphaned framework assemblies is harmless (they are simply
+    # never probed), and deleting the whole directory would take user data.
+    $selfContainedMarkers = @("hostfxr.dll", "hostpolicy.dll", "coreclr.dll", "clrjit.dll")
+    $stale = $selfContainedMarkers |
+        ForEach-Object { Join-Path $Destination $_ } |
+        Where-Object { Test-Path -LiteralPath $_ }
+    if ($stale) {
+        Write-Host "Clearing $($stale.Count) app-local host binaries from a previous self-contained install..."
+        foreach ($f in $stale) {
+            Remove-Item -LiteralPath $f -Force
+            Write-Host "  removed $(Split-Path -Leaf $f)"
+        }
+    }
+
     # Launcher payload to root, except the bootstrapper exe (renamed below).
     Copy-FilteredChildren -Source $launcherPublish -Target $Destination -ExcludeNames @("RynthCore.App.Avalonia.exe") -ExcludeExtensions @(".pdb")
 }
