@@ -124,6 +124,8 @@ internal static unsafe class OverlayTextureRenderer
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int GetViewportD(IntPtr dev, D3DVIEWPORT9* vp);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int SetViewportD(IntPtr dev, D3DVIEWPORT9* vp);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int DrawPrimitiveUPD(IntPtr dev, uint primType, uint primCount, IntPtr pVtxData, uint vtxStride);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint ReleaseD(IntPtr pObj);
@@ -151,12 +153,14 @@ internal static unsafe class OverlayTextureRenderer
     private static SetPixelShaderD?     _setPixelShader;
     private static GetPixelShaderD?     _getPixelShader;
     private static GetViewportD?        _getViewport;
+    private static SetViewportD?        _setViewport;
     private static DrawPrimitiveUPD?    _drawPrimitiveUP;
     private static QueryInterfaceD?     _queryInterface;
 
     // ─── State ────────────────────────────────────────────────────────────
     private static IntPtr _texture;
     private static IntPtr _sharedTextureHandle;
+    private static bool   _loggedOverride;
     private static int    _texW;
     private static int    _texH;
     private static bool   _delegatesCached;
@@ -400,6 +404,56 @@ internal static unsafe class OverlayTextureRenderer
         float W = vp.Width;
         float H = vp.Height;
 
+        // ── Align the overlay with the coordinate space input arrives in ─────
+        //
+        // Avalonia renders the overlay at the CLIENT size, and pointer events
+        // are delivered to it in CLIENT coordinates. But AC's viewport can be
+        // INSET within that client area -- a letterboxed window gives e.g.
+        // viewport=(35,0,2955x1296) against client=3024x1296. Drawing the
+        // client-sized texture through that viewport squeezes it by
+        // vp.Width/clientWidth and shifts it right by vp.X, so what the user
+        // sees sits at  35 + 0.977*x  while hit-testing still happens at x.
+        // The visual and the hitbox cross over mid-screen and diverge toward
+        // both edges -- clicks land left of target on one side, right on the
+        // other.
+        //
+        // Fix: draw through a viewport that matches the client area, so texel
+        // and client pixel are 1:1 and the overlay covers the letterbox margins
+        // too (UI dragged into that dead space stays usable). Restored in the
+        // finally block below. If the device rejects it -- a backbuffer smaller
+        // than the client -- keep the old behaviour rather than not drawing.
+        bool viewportOverridden = false;
+        D3DVIEWPORT9 savedViewport = vp;
+        int clientW = AvaloniaOverlay.ClientPixelWidth;
+        int clientH = AvaloniaOverlay.ClientPixelHeight;
+        if (_setViewport != null && clientW > 0 && clientH > 0 &&
+            (vp.X != 0 || vp.Y != 0 || vp.Width != (uint)clientW || vp.Height != (uint)clientH))
+        {
+            D3DVIEWPORT9 full = vp;
+            full.X = 0; full.Y = 0;
+            full.Width = (uint)clientW;
+            full.Height = (uint)clientH;
+            if (_setViewport(pDevice, &full) >= 0)
+            {
+                viewportOverridden = true;
+                W = full.Width;
+                H = full.Height;
+            }
+        }
+
+        // One line, once per geometry change: the inset case is invisible from
+        // the outside and presents as "clicks land in the wrong place", so make
+        // it greppable rather than making the next person derive it again.
+        if (viewportOverridden && !_loggedOverride)
+        {
+            _loggedOverride = true;
+            RynthLog.D3D9(
+                $"OverlayTextureRenderer: AC viewport ({savedViewport.X},{savedViewport.Y}," +
+                $"{savedViewport.Width}x{savedViewport.Height}) is inset within the client " +
+                $"({clientW}x{clientH}); drawing the overlay through a client-sized viewport " +
+                $"so it stays aligned with pointer input.");
+        }
+
         // Tell the Avalonia thread what the current viewport size is so it can
         // keep the canvas sized correctly (prevents stretch/scale artifacts).
         int viewportWidth = (int)W;
@@ -502,6 +556,12 @@ internal static unsafe class OverlayTextureRenderer
             // Restore changed state. Anything we touched must be put back —
             // AC re-enters EndScene mid-frame for additional passes (post-fx,
             // particles, fog) and inherits whatever device state we left.
+            //
+            // The viewport goes back first: AC's 3D pass is rendered through
+            // its own inset viewport, and leaving ours in place would stretch
+            // the world render across the letterbox margins.
+            if (viewportOverridden)
+                _setViewport!(pDevice, &savedViewport);
             _setRenderState!(pDevice, D3DRS_ALPHABLENDENABLE, savedAlpha);
             _setRenderState!(pDevice, D3DRS_SRCBLEND,         savedSrcBlend);
             _setRenderState!(pDevice, D3DRS_DESTBLEND,        savedDstBlend);
@@ -581,6 +641,7 @@ internal static unsafe class OverlayTextureRenderer
         _setPixelShader  = Get<SetPixelShaderD>(vtable,     DeviceVTableIndex.SetPixelShader);
         _getPixelShader  = Get<GetPixelShaderD>(vtable,     DeviceVTableIndex.GetPixelShader);
         _getViewport     = Get<GetViewportD>(vtable,        DeviceVTableIndex.GetViewport);
+        _setViewport     = Get<SetViewportD>(vtable,        DeviceVTableIndex.SetViewport);
         _drawPrimitiveUP = Get<DrawPrimitiveUPD>(vtable,    DeviceVTableIndex.DrawPrimitiveUP);
         _queryInterface  = Get<QueryInterfaceD>(vtable,     0);
     }
