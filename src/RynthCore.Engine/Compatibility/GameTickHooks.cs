@@ -109,6 +109,15 @@ internal static class GameTickHooks
         try { AcMainThreadQueue.DrainCasts(); }
         catch { }
 
+        // Refresh TeleportStateHooks' main-thread cache every real game tick. This
+        // detour (unlike EndScene) fires on AC's true main thread in EVERY mode
+        // including Decal-coexistence (no D3D9 hook there) — without this,
+        // off-thread callers of IsPortaling in coexistence mode would see a
+        // perpetually stale cache since nothing else ever reads it on-thread.
+        // The getter itself does the guarded read + cache write; discard the value.
+        try { _ = TeleportStateHooks.IsPortaling; }
+        catch { }
+
         // Run AC's own game-logic + physics + animation pass.
         int result;
         try { result = _originalUseTime!(thisPtr); }

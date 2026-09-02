@@ -242,32 +242,47 @@ internal static class AppraisalHooks
 
     private static void CacheIntProps(uint guid, IntPtr profilePtr)
     {
-        if (profilePtr == IntPtr.Zero)
+        if (profilePtr == IntPtr.Zero || !ClientObjectHooks.IsReadablePointer(profilePtr))
             return;
 
         // AppraisalProfile._intStatsTable* is at offset +0x18
-        IntPtr intTablePtr = Marshal.ReadIntPtr(profilePtr + 0x18);
-        if (intTablePtr == IntPtr.Zero)
+        IntPtr intTableFieldAddr = profilePtr + 0x18;
+        if (!ClientObjectHooks.IsReadablePointer(intTableFieldAddr))
+            return;
+        IntPtr intTablePtr = Marshal.ReadIntPtr(intTableFieldAddr);
+        if (intTablePtr == IntPtr.Zero || !ClientObjectHooks.IsReadablePointer(intTablePtr))
             return;
 
         // PackableHashTable<uint,int>: bucket_array at +0x8, bucket_count at +0xC
-        IntPtr bucketArray = Marshal.ReadIntPtr(intTablePtr + 0x08);
-        int bucketCount = Marshal.ReadInt32(intTablePtr + 0x0C);
+        IntPtr bucketArrayFieldAddr = intTablePtr + 0x08;
+        IntPtr bucketCountFieldAddr = intTablePtr + 0x0C;
+        if (!ClientObjectHooks.IsReadablePointer(bucketArrayFieldAddr) || !ClientObjectHooks.IsReadablePointer(bucketCountFieldAddr))
+            return;
+        IntPtr bucketArray = Marshal.ReadIntPtr(bucketArrayFieldAddr);
+        int bucketCount = Marshal.ReadInt32(bucketCountFieldAddr);
 
-        if (bucketArray == IntPtr.Zero || bucketCount <= 0 || bucketCount > 65536)
+        if (bucketArray == IntPtr.Zero || bucketCount <= 0 || bucketCount > 65536 || !ClientObjectHooks.IsReadablePointer(bucketArray))
             return;
 
         var props = new Dictionary<uint, int>(8);
 
+        int totalGuard = 0;
         for (int i = 0; i < bucketCount; i++)
         {
-            IntPtr node = Marshal.ReadIntPtr(bucketArray + i * 4);
-            while (node != IntPtr.Zero)
+            IntPtr bucketSlotAddr = bucketArray + i * 4;
+            if (!ClientObjectHooks.IsReadablePointer(bucketSlotAddr)) continue;
+            IntPtr node = Marshal.ReadIntPtr(bucketSlotAddr);
+
+            int chainGuard = 0;
+            while (node != IntPtr.Zero && chainGuard++ < 4096 && totalGuard++ < 65536)
             {
+                if (!ClientObjectHooks.IsReadablePointer(node)) break;
                 uint key = (uint)Marshal.ReadInt32(node);
                 int val = Marshal.ReadInt32(node + 4);
                 props[key] = val;
-                node = Marshal.ReadIntPtr(node + 8);
+                IntPtr nextAddr = node + 8;
+                if (!ClientObjectHooks.IsReadablePointer(nextAddr)) break;
+                node = Marshal.ReadIntPtr(nextAddr);
             }
         }
 
@@ -284,32 +299,47 @@ internal static class AppraisalHooks
 
     private static void CacheBoolProps(uint guid, IntPtr profilePtr)
     {
-        if (profilePtr == IntPtr.Zero)
+        if (profilePtr == IntPtr.Zero || !ClientObjectHooks.IsReadablePointer(profilePtr))
             return;
 
         // AppraisalProfile._boolStatsTable* is at offset +0x20
-        IntPtr boolTablePtr = Marshal.ReadIntPtr(profilePtr + 0x20);
-        if (boolTablePtr == IntPtr.Zero)
+        IntPtr boolTableFieldAddr = profilePtr + 0x20;
+        if (!ClientObjectHooks.IsReadablePointer(boolTableFieldAddr))
+            return;
+        IntPtr boolTablePtr = Marshal.ReadIntPtr(boolTableFieldAddr);
+        if (boolTablePtr == IntPtr.Zero || !ClientObjectHooks.IsReadablePointer(boolTablePtr))
             return;
 
         // PackableHashTable: bucket_array at +0x8, bucket_count at +0xC
-        IntPtr bucketArray = Marshal.ReadIntPtr(boolTablePtr + 0x08);
-        int bucketCount = Marshal.ReadInt32(boolTablePtr + 0x0C);
+        IntPtr bucketArrayFieldAddr = boolTablePtr + 0x08;
+        IntPtr bucketCountFieldAddr = boolTablePtr + 0x0C;
+        if (!ClientObjectHooks.IsReadablePointer(bucketArrayFieldAddr) || !ClientObjectHooks.IsReadablePointer(bucketCountFieldAddr))
+            return;
+        IntPtr bucketArray = Marshal.ReadIntPtr(bucketArrayFieldAddr);
+        int bucketCount = Marshal.ReadInt32(bucketCountFieldAddr);
 
-        if (bucketArray == IntPtr.Zero || bucketCount <= 0 || bucketCount > 65536)
+        if (bucketArray == IntPtr.Zero || bucketCount <= 0 || bucketCount > 65536 || !ClientObjectHooks.IsReadablePointer(bucketArray))
             return;
 
         var props = new Dictionary<uint, bool>(4);
 
+        int totalGuard = 0;
         for (int i = 0; i < bucketCount; i++)
         {
-            IntPtr node = Marshal.ReadIntPtr(bucketArray + i * 4);
-            while (node != IntPtr.Zero)
+            IntPtr bucketSlotAddr = bucketArray + i * 4;
+            if (!ClientObjectHooks.IsReadablePointer(bucketSlotAddr)) continue;
+            IntPtr node = Marshal.ReadIntPtr(bucketSlotAddr);
+
+            int chainGuard = 0;
+            while (node != IntPtr.Zero && chainGuard++ < 4096 && totalGuard++ < 65536)
             {
+                if (!ClientObjectHooks.IsReadablePointer(node)) break;
                 uint key = (uint)Marshal.ReadInt32(node);
                 int val = Marshal.ReadInt32(node + 4);
                 props[key] = val != 0;
-                node = Marshal.ReadIntPtr(node + 8);
+                IntPtr nextAddr = node + 8;
+                if (!ClientObjectHooks.IsReadablePointer(nextAddr)) break;
+                node = Marshal.ReadIntPtr(nextAddr);
             }
         }
 
@@ -326,45 +356,65 @@ internal static class AppraisalHooks
 
     private static void CacheStringProps(uint guid, IntPtr profilePtr)
     {
-        if (profilePtr == IntPtr.Zero)
+        if (profilePtr == IntPtr.Zero || !ClientObjectHooks.IsReadablePointer(profilePtr))
             return;
 
         // AppraisalProfile._strStatsTable* is at offset +0x28
-        IntPtr strTablePtr = Marshal.ReadIntPtr(profilePtr + 0x28);
-        if (strTablePtr == IntPtr.Zero)
+        IntPtr strTableFieldAddr = profilePtr + 0x28;
+        if (!ClientObjectHooks.IsReadablePointer(strTableFieldAddr))
+            return;
+        IntPtr strTablePtr = Marshal.ReadIntPtr(strTableFieldAddr);
+        if (strTablePtr == IntPtr.Zero || !ClientObjectHooks.IsReadablePointer(strTablePtr))
             return;
 
         // PackableHashTable<uint, PStringBase<char>>: bucket_array at +0x8, bucket_count at +0xC
-        IntPtr bucketArray = Marshal.ReadIntPtr(strTablePtr + 0x08);
-        int bucketCount = Marshal.ReadInt32(strTablePtr + 0x0C);
+        IntPtr bucketArrayFieldAddr = strTablePtr + 0x08;
+        IntPtr bucketCountFieldAddr = strTablePtr + 0x0C;
+        if (!ClientObjectHooks.IsReadablePointer(bucketArrayFieldAddr) || !ClientObjectHooks.IsReadablePointer(bucketCountFieldAddr))
+            return;
+        IntPtr bucketArray = Marshal.ReadIntPtr(bucketArrayFieldAddr);
+        int bucketCount = Marshal.ReadInt32(bucketCountFieldAddr);
 
-        if (bucketArray == IntPtr.Zero || bucketCount <= 0 || bucketCount > 65536)
+        if (bucketArray == IntPtr.Zero || bucketCount <= 0 || bucketCount > 65536 || !ClientObjectHooks.IsReadablePointer(bucketArray))
             return;
 
         var props = new Dictionary<uint, string>(4);
 
+        int totalGuard = 0;
         for (int i = 0; i < bucketCount; i++)
         {
-            IntPtr node = Marshal.ReadIntPtr(bucketArray + i * 4);
-            while (node != IntPtr.Zero)
+            IntPtr bucketSlotAddr = bucketArray + i * 4;
+            if (!ClientObjectHooks.IsReadablePointer(bucketSlotAddr)) continue;
+            IntPtr node = Marshal.ReadIntPtr(bucketSlotAddr);
+
+            int chainGuard = 0;
+            while (node != IntPtr.Zero && chainGuard++ < 4096 && totalGuard++ < 65536)
             {
+                if (!ClientObjectHooks.IsReadablePointer(node)) break;
                 uint key = (uint)Marshal.ReadInt32(node);
 
                 // Node value at +4: PStringBase<char>.m_buffer (PSRefBuffer<char>*)
                 // PSRefBuffer<char> layout: vtable(4) + m_cRef(4) + m_len(4) + m_size(4) + m_hash(4) + m_data[]
                 IntPtr bufferPtr = Marshal.ReadIntPtr(node + 4);
-                if (bufferPtr != IntPtr.Zero)
+                if (bufferPtr != IntPtr.Zero && ClientObjectHooks.IsReadablePointer(bufferPtr))
                 {
-                    int len = Marshal.ReadInt32(bufferPtr + 8);
-                    if (len > 1)
+                    IntPtr lenFieldAddr = bufferPtr + 8;
+                    if (ClientObjectHooks.IsReadablePointer(lenFieldAddr))
                     {
-                        string? str = Marshal.PtrToStringAnsi(bufferPtr + 20, len - 1);
-                        if (!string.IsNullOrEmpty(str))
-                            props[key] = str;
+                        int len = Marshal.ReadInt32(lenFieldAddr);
+                        IntPtr strDataAddr = bufferPtr + 20;
+                        if (len > 1 && len < 4096 && ClientObjectHooks.IsReadablePointer(strDataAddr))
+                        {
+                            string? str = Marshal.PtrToStringAnsi(strDataAddr, len - 1);
+                            if (!string.IsNullOrEmpty(str))
+                                props[key] = str;
+                        }
                     }
                 }
 
-                node = Marshal.ReadIntPtr(node + 8);
+                IntPtr nextAddr = node + 8;
+                if (!ClientObjectHooks.IsReadablePointer(nextAddr)) break;
+                node = Marshal.ReadIntPtr(nextAddr);
             }
         }
 

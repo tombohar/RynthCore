@@ -28,6 +28,10 @@ public sealed class EngineInjectionService
     private const uint MemReserve = 0x2000;
     private const uint MemRelease = 0x8000;
     private const uint PageReadWrite = 0x04;
+    private const uint WaitObject0 = 0x00000000;
+    private const uint WaitTimeout = 0x00000102;
+    private const uint WaitFailed = 0xFFFFFFFF;
+    private const uint StillActive = 259;
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
@@ -248,8 +252,37 @@ public sealed class EngineInjectionService
                 uint loadLibResult;
                 try
                 {
-                    WaitForSingleObject(loadThread, 10000);
+                    // Deep-audit finding #6 (2026-06-18): the wait's return value was
+                    // discarded. On a timeout (WAIT_TIMEOUT, the thread still running
+                    // LoadLibraryA) GetExitCodeThread returns STILL_ACTIVE (259) — that
+                    // was then cast straight to remoteBase and handed to a second
+                    // CreateRemoteThread as a call target, i.e. jumping into address
+                    // 0x103 + rva inside the target process. Fail closed on anything
+                    // but a real WAIT_OBJECT_0 signal instead of falling through.
+                    uint waitResult = WaitForSingleObject(loadThread, 10000);
+                    if (waitResult != WaitObject0)
+                    {
+                        string reason = waitResult == WaitTimeout
+                            ? "timed out after 10s"
+                            : $"wait failed (result 0x{waitResult:X8}, error {Marshal.GetLastWin32Error()})";
+                        return InjectionResult.Failure(
+                            1,
+                            $"LoadLibraryA remote thread {reason} — aborting rather than treating an unfinished call as success.",
+                            dllPath,
+                            targetProcess.Id);
+                    }
                     GetExitCodeThread(loadThread, out loadLibResult);
+                    if (loadLibResult == StillActive)
+                    {
+                        // Belt-and-suspenders: even a WAIT_OBJECT_0 signal on a handle
+                        // that GetExitCodeThread still reports as STILL_ACTIVE must not
+                        // be treated as a valid module base.
+                        return InjectionResult.Failure(
+                            1,
+                            "LoadLibraryA remote thread signaled but exit code is STILL_ACTIVE — refusing to use it as a module base.",
+                            dllPath,
+                            targetProcess.Id);
+                    }
                 }
                 finally
                 {
@@ -283,8 +316,27 @@ public sealed class EngineInjectionService
                 uint initResult;
                 try
                 {
-                    WaitForSingleObject(initThread, 10000);
+                    uint waitResult = WaitForSingleObject(initThread, 10000);
+                    if (waitResult != WaitObject0)
+                    {
+                        string reason = waitResult == WaitTimeout
+                            ? "timed out after 10s"
+                            : $"wait failed (result 0x{waitResult:X8}, error {Marshal.GetLastWin32Error()})";
+                        return InjectionResult.Failure(
+                            1,
+                            $"{exportName} remote thread {reason} — the DLL is loaded but init did not confirm completion.",
+                            dllPath,
+                            targetProcess.Id);
+                    }
                     GetExitCodeThread(initThread, out initResult);
+                    if (initResult == StillActive)
+                    {
+                        return InjectionResult.Failure(
+                            1,
+                            $"{exportName} remote thread signaled but exit code is STILL_ACTIVE — refusing to trust the result.",
+                            dllPath,
+                            targetProcess.Id);
+                    }
                 }
                 finally
                 {

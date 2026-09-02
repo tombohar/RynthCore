@@ -76,6 +76,15 @@ internal static class AcMainThreadQueue
         // at acclient+0x60D1D (UIElement smart-ptr refcount writeback into
         // read-only .text, 5 captures in native-crash.log, two threads at once).
         SetSelectedObject,
+        // NativeAttack marshalled 2026-09-01 (deep-audit finding #15): the
+        // ClientCombatSystem StartAttackRequest/EndAttackRequest pair (plus the
+        // height-change notify) had no MainThreadGuard gate, unlike the sibling
+        // MeleeAttack/MissileAttack/ChangeCombatMode. UseNativeAttack defaults
+        // true, so CombatManager.FireAttack ran this un-marshalled every fight
+        // right after a correctly-marshalled SelectItem on the same pump thread.
+        // Carried as one entry (not split) so the whole ordered sequence executes
+        // atomically after the paired selection, per the audit's fix note.
+        NativeAttack,
     }
 
     // Four payload slots cover every routed action (the 4th was added for
@@ -186,6 +195,10 @@ internal static class AcMainThreadQueue
     public static bool EnqueueSetSelectedObject(uint objectId) =>
         Enqueue(ActionKind.SetSelectedObject, objectId, 0, 0);
 
+    public static bool EnqueueNativeAttack(int attackHeight, float power) =>
+        Enqueue(ActionKind.NativeAttack, unchecked((uint)attackHeight),
+                BitConverter.SingleToUInt32Bits(power), 0);
+
     // Latched by EngineLifecycle.Shutdown: once teardown begins, queued plugin
     // actions must NOT keep executing on AC's main thread — the detours stay
     // live until MH_DisableHook(ALL), so without this latch a marshalled
@@ -290,6 +303,13 @@ internal static class AcMainThreadQueue
                         // On the main thread now -> SetSelectedObjectId's gate is
                         // satisfied and it calls AC's SetSelectedObject directly.
                         ClientHelperHooks.SetSelectedObjectId(e.A);
+                        break;
+                    case ActionKind.NativeAttack:
+                        // On the main thread now -> NativeAttack's gate is
+                        // satisfied and it fires the real StartAttackRequest/
+                        // EndAttackRequest pair directly.
+                        ClientCombatHooks.NativeAttack(unchecked((int)e.A),
+                            BitConverter.UInt32BitsToSingle(e.B));
                         break;
                     case ActionKind.SetAutoRun:
                         CommandInterpreterHooks.SetAutoRun(e.A != 0);

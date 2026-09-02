@@ -168,6 +168,17 @@ internal static class ClientCombatHooks
             return false;
         }
 
+        // Deep-audit finding #15 (2026-06-18): this fires 4 AC combat-state
+        // mutators (height notify, SetRequestedAttackHeight, StartAttackRequest,
+        // EndAttackRequest) that must land in the SAME order as the paired
+        // SelectItem that precedes it. Reachable off-thread via the host API,
+        // and UseNativeAttack defaults true — so unlike this file's sibling
+        // MeleeAttack/MissileAttack, this ran un-marshalled every fight. Marshal
+        // as ONE queue entry (not split into four) so the sequence stays atomic
+        // relative to the drain loop's other actions.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueNativeAttack(attackHeight, power);
+
         try
         {
             IntPtr cs = _getCombatSystem();
@@ -177,6 +188,7 @@ internal static class ClientCombatHooks
                 if (globalPtr == IntPtr.Zero) return false;
                 cs = globalPtr;
             }
+            if (!ClientObjectHooks.IsReadablePointer(cs)) return false;
 
             // Notify client of height change via CM_Combat (same path as keyboard Del/End/PgDn)
             _sendAttackHeightChanged?.Invoke(attackHeight);
@@ -217,10 +229,18 @@ internal static class ClientCombatHooks
         if (_autoTarget == null || _getCombatSystem == null)
             return false;
 
+        // Same mutator class as NativeAttack (audit finding #15). Not currently
+        // exposed through the plugin SDK, so there's no live off-thread caller
+        // today — fail closed rather than queue, since queuing an unreachable
+        // path is dead-weight; revisit with an ActionKind if this is exposed.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+
         try
         {
             IntPtr cs = _getCombatSystem();
             if (cs == IntPtr.Zero) return false;
+            if (!ClientObjectHooks.IsReadablePointer(cs)) return false;
             _autoTarget(cs);
             return true;
         }

@@ -28,7 +28,10 @@ internal static class CombatModeHooks
     private static SetCombatModeDelegate? _setCombatModeDetour;
     private static IntPtr _targetAddress;
     private static string _statusMessage = "Not probed yet.";
-    private static int _lastObservedCombatMode;
+    // Defaults to NonCombat (not 0) so an off-thread reader that arrives before
+    // the first SetCombatMode detour fire still gets a sane value instead of an
+    // unnormalized 0.
+    private static int _lastObservedCombatMode = CombatActionHooks.CombatModeNonCombat;
 
     // ClientCombatSystem::s_pCombatSystem — pointer to the singleton in .data.
     // This is a DATA address (not code), so it can't be pattern-scanned in .text;
@@ -46,19 +49,33 @@ internal static class CombatModeHooks
     public static bool IsInstalled { get; private set; }
     public static string StatusMessage => _statusMessage;
 
+    // Deep-audit finding #4 (2026-06-18): this used to raw-dereference the
+    // ClientCombatSystem singleton unconditionally, including off AC's main
+    // thread — a teardown-window read (relog/portal, singleton being torn
+    // down) can land on a freed/mid-reassignment pointer, an uncatchable AV
+    // under NativeAOT. SetCombatModeDetour already runs ON the main thread
+    // (it's the inbound-echo hook) and maintains _lastObservedCombatMode as a
+    // main-thread-verified cache — off-thread callers get that instead of
+    // touching AC memory at all.
     public static unsafe int ReadCurrentCombatMode()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return Volatile.Read(ref _lastObservedCombatMode);
+
         try
         {
+            IntPtr combatSystemPtrAddr = (IntPtr)_combatSystemPtrAddr;
+            if (!ClientObjectHooks.IsReadablePointer(combatSystemPtrAddr))
+                return Volatile.Read(ref _lastObservedCombatMode);
             IntPtr combatSystem = *(IntPtr*)_combatSystemPtrAddr;
-            if (combatSystem == IntPtr.Zero)
+            if (combatSystem == IntPtr.Zero || !ClientObjectHooks.IsReadablePointer(combatSystem + CombatModeOffset))
                 return CombatActionHooks.CombatModeNonCombat;
             int raw = *(int*)(combatSystem + CombatModeOffset);
             return NormalizeCombatMode(raw);
         }
         catch
         {
-            return CombatActionHooks.CombatModeNonCombat;
+            return Volatile.Read(ref _lastObservedCombatMode);
         }
     }
 
