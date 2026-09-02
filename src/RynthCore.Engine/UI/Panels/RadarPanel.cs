@@ -298,6 +298,10 @@ internal static partial class RadarPanel
         public List<WallLayer> CachedWalls = new();
         public List<FillLayer> CachedFills = new();
 
+        // UI deep-dive finding P1-A (2026-07-02): last raw snapshot JSON,
+        // used to gate InvalidateVisual — see the timer tick below.
+        public string? LastRawJson;
+
         // User-controlled settings — driven by the gear popup. Loaded from
         // RadarSettingsStore on construction; Persist() writes back.
         public float Zoom;                   // wheel + slider; 0.5..6.0
@@ -583,7 +587,19 @@ internal static partial class RadarPanel
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
         timer.Tick += (_, _) =>
         {
-            if (TryFetch(state.CachedMapVersion, out Snapshot? fresh) && fresh != null)
+            // UI deep-dive finding P1-A (2026-07-02): this used to call
+            // RefreshButtonSnapshot + InvalidateVisual unconditionally every
+            // 33ms, even when TryFetch failed (nothing new at all) or
+            // succeeded with byte-identical JSON (player standing still —
+            // "nothing moved"). Either way the docked compositor still
+            // re-rastered at 30Hz for no visible change. Track whether
+            // anything actually changed this tick and skip the whole
+            // refresh+invalidate when it didn't.
+            bool fetched = TryFetch(state.CachedMapVersion, out Snapshot? fresh, out string? rawJson);
+            bool contentChanged = fetched && rawJson != null && rawJson != state.LastRawJson;
+            if (fetched && rawJson != null) state.LastRawJson = rawJson;
+
+            if (fetched && fresh != null)
             {
                 state.Live = fresh;
                 if (fresh.GeometryIncluded)
@@ -616,13 +632,21 @@ internal static partial class RadarPanel
             //   docked → [↗ popout, ⚙ gear]
             //   popped → [↙ redock, ⚙ gear]
             bool floating = IsFloatingNow?.Invoke() ?? false;
+            bool buttonsChanged = redockBtn.IsVisible != floating || popoutBtn.IsVisible != !floating;
             if (redockBtn.IsVisible != floating)  redockBtn.IsVisible  = floating;
             if (popoutBtn.IsVisible == floating)  popoutBtn.IsVisible  = !floating;
-            // Always refresh the snapshot from the timer tick — LayoutUpdated
-            // doesn't reliably fire for off-canvas panels in popout, so we
-            // can't depend on it alone.
+
+            // RefreshButtonSnapshot stays UNCONDITIONAL, same as before this
+            // fix — it's the backstop for LayoutUpdated not firing reliably
+            // for off-canvas popout panels, so a button POSITION drift with
+            // no visibility change still needs to be caught here, and the
+            // call itself is cheap (bounds math on 3 buttons, no
+            // JSON/allocation cost). Only the expensive part — the
+            // full-viewport InvalidateVisual repaint (finding P1-A) — is
+            // gated on whether anything visible actually changed this tick.
             RefreshButtonSnapshot();
-            surface.InvalidateVisual();
+            if (contentChanged || buttonsChanged)
+                surface.InvalidateVisual();
         };
         timer.Start();
         surface.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
@@ -1296,9 +1320,10 @@ internal static partial class RadarPanel
             _getRadarSnapshot = Marshal.GetDelegateForFunctionPointer<GetRadarSnapshotFn>(p1);
     }
 
-    private static bool TryFetch(uint engineKnownVersion, out Snapshot? snapshot)
+    private static bool TryFetch(uint engineKnownVersion, out Snapshot? snapshot, out string? rawJson)
     {
         snapshot = null;
+        rawJson = null;
         if (_getRadarSnapshot == null) TryBind();
         if (_getRadarSnapshot == null) return false;
         try
@@ -1308,6 +1333,7 @@ internal static partial class RadarPanel
             string? json = Marshal.PtrToStringAnsi(ptr);
             if (string.IsNullOrEmpty(json) || json == "{}") return false;
             snapshot = JsonSerializer.Deserialize(json, RadarJsonContext.Default.Snapshot);
+            rawJson = json;
             return snapshot != null;
         }
         catch

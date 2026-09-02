@@ -1107,22 +1107,24 @@ internal sealed unsafe class LayeredWindow : IDisposable
             // thread (see FloatingPanelHost ctor's RunOnGameThread wrap), so
             // marshal the teardown there too. Without this, redocking left
             // the original floating window visible but orphaned ("frozen
-            // duplicate"). RunOnGameThread inlines if we're already on the
-            // game thread, so this is safe for any caller.
+            // duplicate").
+            //
+            // UI deep-dive finding P0-1 (2026-07-02): this used to block via
+            // RunOnGameThread (a synchronous SendMessage) — Dispose is often
+            // called from the Avalonia UI thread (e.g. redocking a panel),
+            // and blocking it on the game thread's WndProc is part of the
+            // same AB-BA deadlock class the OnInput fix closes. Dispose
+            // doesn't need to observe the destroy completing, so post it
+            // instead — fire-and-forget, never blocks the caller.
             try
             {
-                RynthCore.Engine.ImGuiBackend.Win32Backend.RunOnGameThread(() =>
-                {
-                    bool destroyed = DestroyWindow(hwnd);
-                    int err = destroyed ? 0 : System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-                    RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: DestroyWindow(0x{hwnd.ToInt64():X}) = {destroyed} err={err} on thread=0x{GetCurrentThreadId():X}.");
-                });
+                RynthCore.Engine.ImGuiBackend.Win32Backend.PostDestroyWindow(hwnd);
             }
             catch (Exception ex)
             {
-                RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: cross-thread DestroyWindow threw {ex.GetType().Name}: {ex.Message}. Falling back to inline call on thread=0x{GetCurrentThreadId():X}.");
-                // Best-effort fallback if RunOnGameThread isn't available
-                // (e.g. early shutdown after Win32Backend already torn down).
+                RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: PostDestroyWindow threw {ex.GetType().Name}: {ex.Message}. Falling back to inline call on thread=0x{GetCurrentThreadId():X}.");
+                // Best-effort fallback if Win32Backend isn't available
+                // (e.g. early shutdown after it's already torn down).
                 bool destroyed = DestroyWindow(hwnd);
                 RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: fallback DestroyWindow(0x{hwnd.ToInt64():X}) = {destroyed}.");
             }

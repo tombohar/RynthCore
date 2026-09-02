@@ -70,6 +70,14 @@ internal static unsafe class Win32Backend
     /// HWNDs drop WM_LBUTTONDOWN on Win11 in some focus states).</summary>
     public const uint WM_RYNTH_RUN_ACTION = 0x8002;
 
+    /// <summary>UI deep-dive finding P0-1 belt-and-braces (2026-07-02):
+    /// posted (not sent) by LayeredWindow.Dispose to destroy an HWND on the
+    /// game thread without blocking the calling thread — DestroyWindow must
+    /// run on the owning thread, but the caller (often the Avalonia UI
+    /// thread, e.g. redocking a panel) doesn't need to wait for it to
+    /// finish. wParam carries the HWND to destroy.</summary>
+    public const uint WM_RYNTH_DESTROY_HWND = 0x8003;
+
     private const int VK_CONTROL = 0x11;
     private const int VK_SHIFT = 0x10;
     private const int VK_MENU = 0x12;  // Alt
@@ -137,6 +145,16 @@ internal static unsafe class Win32Backend
 
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    private const uint SMTO_NORMAL = 0x0000;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam,
+        uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyWindow(IntPtr hWnd);
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
@@ -283,7 +301,34 @@ internal static unsafe class Win32Backend
                 try { result = action(); }
                 catch (Exception ex) { caught = ex; }
             };
-            SendMessage(_gameHwnd, WM_RYNTH_RUN_ACTION, IntPtr.Zero, IntPtr.Zero);
+
+            // UI deep-dive finding P0-1 belt-and-braces (2026-07-02): a plain
+            // SendMessage here blocks with no visibility if the game thread's
+            // WndProc is ever stuck (the AB-BA class the OnInput fix above
+            // closes, or any future one). SendMessageTimeout with a 2s
+            // budget logs loudly the instant a stall crosses that threshold
+            // — a concrete timestamped log line to correlate against a user
+            // report, instead of silence.
+            //
+            // Deliberately does NOT retry the send on timeout: this shared
+            // single-slot design (_pendingGameThreadAction) has no way to
+            // tell a stale delivery from a fresh one, and Win32 doesn't
+            // guarantee a second SendMessage call coalesces with a still-
+            // pending first one rather than queuing a second delivery — a
+            // retry risks the action firing twice (e.g. creating a
+            // LayeredWindow, twice) once the game thread unblocks. Logging
+            // and returning the default result is a strictly better failure
+            // mode than today's silent, undiagnosed, permanent hang: if
+            // we're 2s+ into this wait, something is already badly wrong,
+            // and a caller getting a default/null result it can react to
+            // beats every thread being frozen with nothing in the log.
+            IntPtr sendResult = SendMessageTimeout(_gameHwnd, WM_RYNTH_RUN_ACTION, IntPtr.Zero, IntPtr.Zero,
+                SMTO_NORMAL, 2000, out _);
+            if (sendResult == IntPtr.Zero)
+            {
+                try { RynthLog.Info($"Win32Backend: RunOnGameThread stalled >2s waiting on game thread (hwnd=0x{_gameHwnd.ToInt64():X}) — giving up this wait; result will be default."); }
+                catch { }
+            }
             _pendingGameThreadAction = null;
             if (caught != null)
                 throw caught;
@@ -295,6 +340,38 @@ internal static unsafe class Win32Backend
     public static void RunOnGameThread(Action action)
     {
         RunOnGameThread<bool>(() => { action(); return true; });
+    }
+
+    /// <summary>
+    /// UI deep-dive finding P0-1 (2026-07-02): posts (does not block on) a
+    /// DestroyWindow for <paramref name="hwnd"/> onto the game thread.
+    /// DestroyWindow must run on the HWND's owning thread, but unlike
+    /// RunOnGameThread this never needs the caller to observe a result — so
+    /// it uses a dedicated PostMessage instead of the shared
+    /// RunOnGameThread action slot, avoiding any risk of blocking the
+    /// caller (e.g. LayeredWindow.Dispose called from the Avalonia UI
+    /// thread while redocking a panel) on the game thread's WndProc.
+    /// </summary>
+    public static void PostDestroyWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        if (_gameHwnd == IntPtr.Zero)
+        {
+            // No game thread to marshal to (e.g. very early/late in
+            // lifecycle) — best-effort inline as LayeredWindow.Dispose's own
+            // fallback already does for the RunOnGameThread-unavailable case.
+            DestroyWindow(hwnd);
+            return;
+        }
+
+        GetWindowThreadProcessId(_gameHwnd, out uint gameThreadId);
+        if (gameThreadId == GetCurrentThreadId())
+        {
+            DestroyWindow(hwnd);
+            return;
+        }
+
+        PostMessage(_gameHwnd, WM_RYNTH_DESTROY_HWND, hwnd, IntPtr.Zero);
     }
 
     /// <summary>Deactivates chat capture.  The game HWND retains focus throughout so no
@@ -589,6 +666,19 @@ internal static unsafe class Win32Backend
                     try { a(); }
                     catch (Exception ex) { RynthLog.Info($"Win32Backend: WM_RYNTH_RUN_ACTION threw {ex.GetType().Name}: {ex.Message}"); }
                 }
+                return IntPtr.Zero;
+            }
+
+            if (msg == WM_RYNTH_DESTROY_HWND)
+            {
+                IntPtr target = wParam;
+                try
+                {
+                    bool destroyed = DestroyWindow(target);
+                    int err = destroyed ? 0 : Marshal.GetLastWin32Error();
+                    RynthLog.Info($"Win32Backend: WM_RYNTH_DESTROY_HWND DestroyWindow(0x{target.ToInt64():X}) = {destroyed} err={err}.");
+                }
+                catch (Exception ex) { RynthLog.Info($"Win32Backend: WM_RYNTH_DESTROY_HWND threw {ex.GetType().Name}: {ex.Message}"); }
                 return IntPtr.Zero;
             }
 
@@ -1319,10 +1409,28 @@ internal static unsafe class Win32Backend
         _avHasNativeCapture = false;
     }
 
+    // UI deep-dive finding P0-2 / TL;DR #2 (2026-07-02): every mouse/key/
+    // focus message was enqueued here unconditionally, all session, but
+    // FlushQueuedInput only ever drains it from inside the ImGui NewFrame
+    // path (line ~599 above) — which never runs when EngineSettings.
+    // EnableImGuiBackend is false (the daily-driver config: "Avalonia-only"
+    // mode, bar + plugin ImGui hidden). Tens to hundreds of MB accumulate
+    // over a session on this stack's 32-bit VA budget. Guard on the backend
+    // actually running; cap regardless as defense-in-depth (e.g. a brief
+    // startup window before the flag is known, or a future caller).
+    private const int MaxPendingInput = 4096;
+
     private static void EnqueueInput(uint msg, IntPtr wParam, IntPtr lParam)
     {
+        if (!RynthCore.Engine.Plugins.EngineSettings.EnableImGuiBackend)
+            return;
+
         lock (_inputLock)
+        {
+            if (_pendingInput.Count >= MaxPendingInput)
+                _pendingInput.Dequeue(); // drop oldest — a stale mouse-move/key is harmless to lose
             _pendingInput.Enqueue(new QueuedInputMessage(msg, wParam, lParam));
+        }
     }
 
     private static void FlushQueuedInput(ImGuiIOPtr io)

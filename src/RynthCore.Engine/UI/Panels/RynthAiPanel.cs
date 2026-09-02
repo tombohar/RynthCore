@@ -574,6 +574,9 @@ internal static partial class RynthAiPanel
 
         var targetBar = BuildSegmentedBar(out Rectangle[] targetSegments);
         vitalsStack.Children.Add(targetBar);
+        // UI deep-dive TL;DR #4 / P1-A (2026-07-02): lit-count gate — see
+        // UpdateSegmentedBar. -1 sentinel forces the first real update to run.
+        int targetSegLastLit = -1;
 
         // Optional target ST/MN bars (only shown when ShowTargetStaminaMana)
         var targetStRow = BuildCompactBar(out Rectangle targetStFill, out TextBlock targetStLabel, ColGreen);
@@ -828,7 +831,7 @@ internal static partial class RynthAiPanel
             string label = string.IsNullOrWhiteSpace(snap.TargetLabel) ? "NO TARGET" : snap.TargetLabel.ToUpperInvariant();
             SetText(targetLabel, Truncate(label, 32));
             SetText(targetHp,    snap.TargetHealthDisplay);
-            UpdateSegmentedBar(targetSegments, snap.TargetHealthPercent);
+            UpdateSegmentedBar(targetSegments, snap.TargetHealthPercent, ref targetSegLastLit);
 
             bool showTargetSubBars = snap.ShowTargetStaminaMana && snap.TargetMaxStamina > 0;
             targetStRow.IsVisible = showTargetSubBars;
@@ -1053,16 +1056,49 @@ internal static partial class RynthAiPanel
         return grid;
     }
 
-    private static void UpdateSegmentedBar(Rectangle[] segments, float pct)
+    // UI deep-dive finding TL;DR #4 / P1-A (2026-07-02): "the one
+    // unconditional invalidator" — this ran every ~33ms tick regardless of
+    // whether the target's health % had actually changed, allocating a
+    // FRESH SolidColorBrush per lit segment every single call (up to 15
+    // allocations/tick) and re-setting every Rectangle.Fill even when
+    // nothing changed. Each Fill assignment is a fresh reference even when
+    // the color is unchanged, which invalidates the visual and keeps the
+    // ENTIRE docked compositor re-rastering at 30Hz (3× ~5.5MB full-viewport
+    // copies per frame, per finding TL;DR #5) even on an idle client.
+    // Fixed two ways: (1) BarSegmentBrushes below is computed ONCE — segCount
+    // is always 15 (BuildSegmentedBar's const), so every possible `t` value
+    // is a fixed, known set; no more per-call allocation. (2) lastLitCount
+    // gate — segment fill only changes at 15 discrete lit-count boundaries,
+    // so skip the whole loop (and every Fill touch) unless the lit count
+    // actually moved since the last call.
+    private const int SegCount = 15;
+    private static readonly IBrush[] BarSegmentBrushes = BuildSegmentBrushes();
+
+    private static IBrush[] BuildSegmentBrushes()
+    {
+        var brushes = new IBrush[SegCount];
+        for (int i = 0; i < SegCount; i++)
+        {
+            float t = (float)i / (SegCount - 1);
+            brushes[i] = GradientBrush(t);
+        }
+        return brushes;
+    }
+
+    private static void UpdateSegmentedBar(Rectangle[] segments, float pct, ref int lastLitCount)
     {
         float clamped = Math.Clamp(pct, 0f, 1f);
         int n = segments.Length;
+        int litCount = 0;
         for (int i = 0; i < n; i++)
-        {
-            float t = (float)i / (n - 1);
-            bool lit = (float)i / n <= clamped;
-            segments[i].Fill = lit ? GradientBrush(t) : ColBarBg;
-        }
+            if ((float)i / n <= clamped) litCount++;
+
+        if (litCount == lastLitCount)
+            return; // nothing crossed a segment boundary since the last call — skip entirely
+
+        lastLitCount = litCount;
+        for (int i = 0; i < n; i++)
+            segments[i].Fill = i < litCount ? BarSegmentBrushes[i] : ColBarBg;
     }
 
     private static IBrush GradientBrush(float t)

@@ -3964,8 +3964,22 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         // OnCloseClicked; the user redocks or toggles the bar button.
         _layered.CloseButtonWidthPx = closeButtonWidthPx;
         _layered.RedockButtonWidthPx = redockButtonWidthPx;
+        // UI deep-dive finding P0-1 / TL;DR #1 (2026-07-02): this was
+        // Dispatcher.UIThread.Invoke (blocking) — the WndProc that fires
+        // OnInput runs on AC's game thread, and a raw dispatcher-Invoke wait
+        // does NOT pump this thread's own Win32 message queue while
+        // blocked. If the UI thread is concurrently inside
+        // Win32Backend.RunOnGameThread (a synchronous SendMessage to this
+        // same game HWND — e.g. to create a floating panel's HWND), that
+        // SendMessage can't complete until the game thread's WndProc
+        // services it, which can't happen until this Invoke returns, which
+        // can't happen until the UI thread's dispatcher runs — which is
+        // blocked inside that same SendMessage. Classic AB-BA deadlock, and
+        // even without deadlocking it stalls the game thread on every hover
+        // mousemove over any popout. Post is fire-and-forget: it queues the
+        // job and returns immediately, never blocking the game thread.
         _layered.OnInput = (uint msg, IntPtr wp, IntPtr lp, int cx, int cy) =>
-            Dispatcher.UIThread.Invoke(() => ForwardInput(msg, wp, lp, cx, cy));
+            Dispatcher.UIThread.Post(() => ForwardInput(msg, wp, lp, cx, cy));
         _layered.OnMoved = (x, y) =>
             Dispatcher.UIThread.Invoke(() => OnLayeredMoved(x, y));
         // Invoke (synchronous), NOT Post. This is deliberate: the WndProc runs
@@ -3996,10 +4010,13 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         // hit-test drops forwarded clicks at canvas X past AC client
         // (the panel chrome lives at canvas X = FloatingOffBoundsX),
         // so we resolve those buttons at the WndProc level instead.
+        // Same AB-BA deadlock class as OnInput above (finding P0-1) —
+        // neither of these needs the OS-modal-loop frame-pacing that
+        // OnResized's Invoke below is deliberately kept for.
         _layered.OnRedockClicked = () =>
-            Dispatcher.UIThread.Invoke(() => _owner.RequestRedock(title));
+            Dispatcher.UIThread.Post(() => _owner.RequestRedock(title));
         _layered.OnCloseClicked = () =>
-            Dispatcher.UIThread.Invoke(() => _owner.RequestCloseFloating(title));
+            Dispatcher.UIThread.Post(() => _owner.RequestCloseFloating(title));
 
         if (ownerHwnd != IntPtr.Zero)
             ImGuiBackend.Win32Backend.RunOnGameThread(() => _layered.Show());
