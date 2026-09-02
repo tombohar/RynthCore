@@ -384,6 +384,9 @@ internal static class AcMainThreadQueue
         // Off-thread WriteToChat strings drain here too (same main-thread window).
         DrainChat();
 
+        // Off-thread ChatCommandDispatcher.Dispatch calls drain here too (own queue above).
+        DrainChatCommands();
+
         // AutoIdService appraisal (0xC8) sends marshalled here too (own queue below).
         DrainRequestIds();
     }
@@ -470,6 +473,55 @@ internal static class AcMainThreadQueue
                 item = _chatQueue.Dequeue();
             }
             try { ClientHelperHooks.WriteToChat(item.Text, item.ChatType); }
+            catch { }
+        }
+    }
+
+    // ── Chat COMMAND slot (full ChatCommandDispatcher.Dispatch lines) ────────────
+    // Deep-audit finding #4 (2026-06-18): ChatCommandDispatcher.Dispatch is not
+    // network-only — it runs arbitrary plugin OnChatBarEnter handlers,
+    // constructs/destructs AC's native PStringBase<char> (alloc/free in AC's
+    // heap), and calls Event_Talk/Event_Emote/etc. directly against AC's live
+    // chat-manager, all of which assumed (incorrectly) "safe from any thread".
+    // Off-thread callers exist today: OnLoginCommandRunner (ThreadPool via
+    // Task.Run), ChatFileDispatcher (FileSystemWatcher thread), and
+    // Host.InvokeChatParser (plugin export, any thread). Gating inside
+    // Dispatch() itself (rather than at each caller) covers all three at once.
+    // A full command line can't ride the uint Entry ring, so it gets its own
+    // string queue, same shape as the WriteToChat slot above.
+    private static readonly System.Collections.Generic.Queue<string> _chatCommandQueue = new();
+    private static readonly object _chatCommandLock = new();
+    private const int MaxChatCommandQueue = 64;
+
+    // Off-thread enqueue. Drops (returns false) if the queue is full.
+    public static bool EnqueueChatCommand(string text)
+    {
+        lock (_chatCommandLock)
+        {
+            if (_chatCommandQueue.Count >= MaxChatCommandQueue)
+            {
+                Interlocked.Increment(ref _dropped);
+                return false;
+            }
+            _chatCommandQueue.Enqueue(text);
+            return true;
+        }
+    }
+
+    // Single-consumer drain on AC's main thread. Re-invokes Dispatch, whose
+    // IsOnMainThread gate is satisfied here so it runs the full body directly
+    // instead of re-enqueuing.
+    private static void DrainChatCommands()
+    {
+        while (true)
+        {
+            string text;
+            lock (_chatCommandLock)
+            {
+                if (_chatCommandQueue.Count == 0) return;
+                text = _chatCommandQueue.Dequeue();
+            }
+            try { ChatCommandDispatcher.Dispatch(text); }
             catch { }
         }
     }

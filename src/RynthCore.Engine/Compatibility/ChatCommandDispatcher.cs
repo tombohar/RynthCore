@@ -111,6 +111,23 @@ internal static unsafe class ChatCommandDispatcher
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
+        // Deep-audit finding #4 (2026-06-18): this whole function is not
+        // network-only — it runs arbitrary plugin OnChatBarEnter handlers,
+        // constructs/destructs AC's native PStringBase<char> in AC's heap,
+        // and calls Event_Talk/Event_Emote/etc. directly against AC's live
+        // chat-manager. The old inline comment claiming this was "thread-safe"
+        // was an inherited Decal/VTank assumption that contradicts the
+        // engine's own AcMainThreadQueue design (see the documented
+        // 0x00460D1D chat-buffer write-AV class). Gating here (rather than at
+        // each call site) covers every off-thread caller at once:
+        // OnLoginCommandRunner (ThreadPool), ChatFileDispatcher
+        // (FileSystemWatcher thread), and Host.InvokeChatParser (plugin
+        // export, any thread). The queued call re-invokes this same method
+        // from the drain, where IsOnMainThread is satisfied and the body
+        // below runs directly — so there's only one code path to keep in sync.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueChatCommand(text);
+
         try
         {
             string trimmed = text.Trim();
@@ -303,27 +320,38 @@ internal static unsafe class ChatCommandDispatcher
     /// </summary>
     private static bool SimulateChatInput(string command)
     {
-        // Enter → opens chat input. The WM_CHAR '\r' is required here to complete
-        // AC's chat-bar open transition.
-        IntPtr enterDown = MakeKeyLParam(0x1C, false);
-        IntPtr enterUp = MakeKeyLParam(0x1C, true);
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr('\r'), enterDown);
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYUP, new IntPtr(VK_RETURN), enterUp);
+        // Deep-audit finding #18 (2026-06-18): SendToGameWndProc drives
+        // CallWindowProcA directly into AC's WndProc — calling that off the
+        // window-owning thread is a cross-thread WndProc re-entry. Dispatch()
+        // gating (finding #4) already closes the two known off-thread paths
+        // into this method, but wrap here too per the fix note ("protect
+        // future callers"): RunOnGameThread inlines with zero overhead when
+        // already on the game thread (the common case, post-#4) and marshals
+        // synchronously otherwise.
+        return ImGuiBackend.Win32Backend.RunOnGameThread(() =>
+        {
+            // Enter → opens chat input. The WM_CHAR '\r' is required here to complete
+            // AC's chat-bar open transition.
+            IntPtr enterDown = MakeKeyLParam(0x1C, false);
+            IntPtr enterUp = MakeKeyLParam(0x1C, true);
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr('\r'), enterDown);
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYUP, new IntPtr(VK_RETURN), enterUp);
 
-        // Type each character
-        foreach (char c in command)
-            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr(c), IntPtr.Zero);
+            // Type each character
+            foreach (char c in command)
+                ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr(c), IntPtr.Zero);
 
-        // Enter → submit. NO trailing WM_CHAR '\r' here: the WM_KEYDOWN submits and
-        // closes the bar; a '\r' arriving on the now-closed bar re-opens it (the
-        // "lone '\r'" behavior the chat-capture path also guards against), leaving the
-        // bar open so the NEXT command's open-Enter submits an empty bar instead and
-        // the command is lost — the "works once then stops" symptom.
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYUP, new IntPtr(VK_RETURN), enterUp);
+            // Enter → submit. NO trailing WM_CHAR '\r' here: the WM_KEYDOWN submits and
+            // closes the bar; a '\r' arriving on the now-closed bar re-opens it (the
+            // "lone '\r'" behavior the chat-capture path also guards against), leaving the
+            // bar open so the NEXT command's open-Enter submits an empty bar instead and
+            // the command is lost — the "works once then stops" symptom.
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYUP, new IntPtr(VK_RETURN), enterUp);
 
-        return true;
+            return true;
+        });
     }
 
     private static IntPtr MakeKeyLParam(byte scanCode, bool keyUp)
