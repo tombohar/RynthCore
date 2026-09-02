@@ -213,6 +213,18 @@ internal static class SettingsPanel
         public Settings Data = new();
         public int SelectedTab;
         public bool Dirty;
+        // UI deep-dive finding TL;DR #9 (2026-07-02): raw JSON from the last
+        // poll that actually rebuilt content — see the timer.Tick JSON gate.
+        public string? LastJson;
+        // Companion fix (SettingsPanel.cs:501 finding): visibility-gating
+        // controls (EnableFPSLimit, UseArcs, meleeAuto, missileAuto,
+        // OpenDoors, MovementMode, EnableMissileCrafting, LootJumpEnabled)
+        // call this right after Push() so their dependent rows appear/
+        // disappear immediately instead of waiting up to 5s for the poll —
+        // required once the poll itself is gated (JSON diff + focus guard
+        // above), since the poll was previously the ONLY thing that ever
+        // rebuilt these rows.
+        public Action? Rebuild;
     }
 
     // ── Picker overlay state (shared across tab renders) ─────────────────────
@@ -385,6 +397,8 @@ internal static class SettingsPanel
             sidebarStack.Children.Add(btn);
         }
 
+        state.Rebuild = () => RebuildContent(state, contentStack, picker);
+
         // ── Initial data load ─────────────────────────────────────────────────
         if (TryFetch(out var initial)) state.Data = initial;
         picker.Root = root;
@@ -397,7 +411,24 @@ internal static class SettingsPanel
         {
             if (_getSettingsJson == null) TryBind();
             if (state.Dirty) return;
-            if (!TryFetch(out var fresh)) return;
+            // UI deep-dive finding TL;DR #9 (2026-07-02): state.Dirty was
+            // declared, checked, and reset — but never actually SET true
+            // anywhere in this file, making the guard above dead code. This
+            // rebuild ran unconditionally every 5s, clobbering whatever the
+            // user was doing in ANY field (in-progress typing, an open
+            // picker, a slider mid-drag) with a fresh copy from the plugin.
+            // Real guards: (1) AvaloniaTextInputActive is already wired by
+            // every TextBox in this panel (GotFocus/LostFocus below) — reuse
+            // it directly as a focus guard instead of the dead Dirty flag.
+            // (2) A raw-JSON diff — the full payload (all settings including
+            // any gating toggles) is compared, so a rebuild still fires
+            // whenever a toggle that would reveal/hide conditional rows
+            // actually changes; nothing is excluded from this gate the way
+            // PayloadSig deliberately excludes fields elsewhere.
+            if (Win32Backend.AvaloniaTextInputActive) return;
+            if (!TryFetch(out var fresh, out string? rawJson)) return;
+            if (rawJson != null && rawJson == state.LastJson) return;
+            state.LastJson = rawJson;
             state.Data = fresh;
             RebuildContent(state, contentStack, picker);
         };
@@ -499,7 +530,7 @@ internal static class SettingsPanel
     private static void BuildMiscTab(PanelState state, StackPanel p, PickerState picker)
     {
         p.Children.Add(BoolRow("Enable FPS Limit", state.Data.EnableFPSLimit,
-            v => { state.Data.EnableFPSLimit = v; Push(state); }));
+            v => { state.Data.EnableFPSLimit = v; Push(state); state.Rebuild?.Invoke(); }));
         if (state.Data.EnableFPSLimit)
         {
             p.Children.Add(IntRow("Focused FPS", state.Data.TargetFPSFocused, 10, 240, 1,
@@ -526,7 +557,7 @@ internal static class SettingsPanel
         p.Children.Add(Spacer());
         p.Children.Add(SectionHeader("Missile Arc Velocities (m/s)"));
         p.Children.Add(BoolRow("Use Arcs for Missile LoS", state.Data.UseArcs,
-            v => { state.Data.UseArcs = v; Push(state); },
+            v => { state.Data.UseArcs = v; Push(state); state.Rebuild?.Invoke(); },
             "When off, all missile LoS checks are linear (eye-to-eye)."));
         if (state.Data.UseArcs)
         {
@@ -597,6 +628,7 @@ internal static class SettingsPanel
         {
             state.Data.MeleeAttackPower = v ? -1 : 100;
             Push(state);
+            state.Rebuild?.Invoke();
         }));
         if (!meleeAuto)
         {
@@ -612,6 +644,7 @@ internal static class SettingsPanel
         {
             state.Data.MissileAttackPower = v ? -1 : 100;
             Push(state);
+            state.Rebuild?.Invoke();
         }));
         if (!missileAuto)
         {
@@ -705,7 +738,7 @@ internal static class SettingsPanel
         p.Children.Add(Spacer());
         p.Children.Add(SectionHeader("Doors"));
         p.Children.Add(BoolRow("Open Doors While Navigating", state.Data.OpenDoors,
-            v => { state.Data.OpenDoors = v; Push(state); },
+            v => { state.Data.OpenDoors = v; Push(state); state.Rebuild?.Invoke(); },
             "Automatically open doors encountered during navigation."));
         if (state.Data.OpenDoors)
         {
@@ -719,7 +752,7 @@ internal static class SettingsPanel
         p.Children.Add(Spacer());
         p.Children.Add(SectionHeader("Movement Engine"));
         p.Children.Add(ComboRow("Mode", MovementModes, state.Data.MovementMode,
-            v => { state.Data.MovementMode = v; Push(state); }, picker,
+            v => { state.Data.MovementMode = v; Push(state); state.Rebuild?.Invoke(); }, picker,
             "Legacy: SetAutorun + smooth heading servo (TurnToHeading)\nTier 1: SetAutorun + CM_Movement turn commands (DoMovement)\nTier 2: Client physics MoveToPosition (not built yet — falls back to Legacy)"));
 
         p.Children.Add(Spacer());
@@ -788,7 +821,7 @@ internal static class SettingsPanel
     {
         p.Children.Add(SectionHeader("Missile Ammo Crafting"));
         p.Children.Add(BoolRow("Enable Missile Crafting", state.Data.EnableMissileCrafting,
-            v => { state.Data.EnableMissileCrafting = v; Push(state); },
+            v => { state.Data.EnableMissileCrafting = v; Push(state); state.Rebuild?.Invoke(); },
             "Auto-manage missile ammo when the ammo slot is empty or low."));
 
         if (!state.Data.EnableMissileCrafting)
@@ -835,7 +868,7 @@ internal static class SettingsPanel
         p.Children.Add(BoolRow("Loot Only Rare Corpses", state.Data.LootOnlyRareCorpses,
             v => { state.Data.LootOnlyRareCorpses = v; Push(state); }));
         p.Children.Add(BoolRow("Jump When Looting", state.Data.LootJumpEnabled,
-            v => { state.Data.LootJumpEnabled = v; Push(state); }));
+            v => { state.Data.LootJumpEnabled = v; Push(state); state.Rebuild?.Invoke(); }));
         if (state.Data.LootJumpEnabled)
         {
             p.Children.Add(IntRow("Jump Height", state.Data.LootJumpHeight, 1, 100, 5,
@@ -1283,9 +1316,12 @@ internal static class SettingsPanel
         }
     }
 
-    private static bool TryFetch(out Settings settings)
+    private static bool TryFetch(out Settings settings) => TryFetch(out settings, out _);
+
+    private static bool TryFetch(out Settings settings, out string? rawJson)
     {
         settings = new Settings();
+        rawJson = null;
         if (_getSettingsJson == null) return false;
         try
         {
@@ -1296,6 +1332,7 @@ internal static class SettingsPanel
             var parsed = JsonSerializer.Deserialize(json, SettingsPanelJsonContext.Default.Settings);
             if (parsed == null) return false;
             settings = parsed;
+            rawJson = json;
             return true;
         }
         catch { return false; }

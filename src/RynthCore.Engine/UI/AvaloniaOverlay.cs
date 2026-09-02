@@ -14,6 +14,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -1070,6 +1071,27 @@ internal class RynthOverlayWindow : Window
         Topmost = true;
 
         Content = BuildRoot();
+
+        // UI deep-dive finding P0-7 (2026-07-02): MonstersPanel (5 TextBoxes)
+        // and MetaPanel (3 TextBoxes) never wired Win32Backend.
+        // AvaloniaTextInputActive at all — unlike SettingsPanel/other panels
+        // that hand-wire GotFocus/LostFocus on each of their own TextBoxes.
+        // Without it, keystrokes typed into those specific boxes leak
+        // through to the game underneath (per Win32Backend's key-routing
+        // gate on this flag). Rather than hand-wire the missing ones (and
+        // risk the next new TextBox anywhere repeating the same bug),
+        // GotFocusEvent/LostFocusEvent bubble by default in Avalonia, so one
+        // window-level handler here covers every TextBox in every panel,
+        // present and future — the per-panel hand-wiring elsewhere becomes
+        // redundant-but-harmless (same flag, same value) rather than wrong.
+        AddHandler(InputElement.GotFocusEvent, (_, e) =>
+        {
+            if (e.Source is TextBox) Win32Backend.AvaloniaTextInputActive = true;
+        }, RoutingStrategies.Bubble);
+        AddHandler(InputElement.LostFocusEvent, (_, e) =>
+        {
+            if (e.Source is TextBox) Win32Backend.AvaloniaTextInputActive = false;
+        }, RoutingStrategies.Bubble);
 
         Opened += (s, e) =>
         {

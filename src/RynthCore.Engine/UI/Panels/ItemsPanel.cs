@@ -317,10 +317,24 @@ internal static class ItemsPanel
                                   || state.Data.ManaTapMinMana     != fresh.ManaTapMinMana
                                   || state.Data.ManaStoneKeepCount != fresh.ManaStoneKeepCount;
 
-            state.Data = fresh;
-
+            // UI deep-dive finding P0-4 (2026-07-02): state.Data = fresh used
+            // to run unconditionally, EVERY poll tick, even when the
+            // comparison above found nothing relevant different. Row edit
+            // handlers (the Element picker, etc.) mutate the SAME objects
+            // already living in state.Data.Weapons/Consumables in place —
+            // swapping in a brand-new (but content-equivalent) object graph
+            // on a "nothing changed" tick discarded that in-place edit
+            // anyway if it hadn't yet round-tripped through PushChanges'
+            // fire-and-forget Send + a later poll picking up the plugin's
+            // still-stale response. Only swap when something is ACTUALLY
+            // different — the same case that already triggers Refresh()
+            // (which rebuilds the rows and orphans their old closures
+            // regardless, so there's no additional cost to swapping there).
             if (weaponsChanged || consumablesChanged || manaChanged)
+            {
+                state.Data = fresh;
                 Refresh();
+            }
         };
         timer.Start();
         // Stop with the visual tree — a running DispatcherTimer roots the closed
