@@ -88,7 +88,19 @@ internal static partial class RynthAiPanel
     private static readonly IBrush ColHp        = new SolidColorBrush(Color.FromRgb(0xD9, 0x33, 0x33));
     private static readonly IBrush ColMana      = new SolidColorBrush(Color.FromRgb(0x26, 0x8C, 0xF2));
     private static readonly IBrush ColShellBg   = new SolidColorBrush(Color.FromRgb(0x0A, 0x0F, 0x14));
-    private static readonly IBrush ColPanelBg   = new SolidColorBrush(Color.FromRgb(0x0A, 0x12, 0x1A));
+    // Live-testing finding 2026-09-02: the header +/- opacity chips call the
+    // plugin's RynthPluginAdjustOpacity export correctly (it mutates and
+    // persists LegacyDashboardRenderer._bgOpacity, which flows into the
+    // snapshot's bgOpacity field), but this Avalonia panel never actually
+    // READ that field back and applied it anywhere — the buttons did
+    // something on the plugin side that nothing ever displayed. Mirrors the
+    // ImGui-era behavior (PushStyleColor(ImGuiCol.WindowBg, ..., _bgOpacity))
+    // as closely as the Avalonia structure allows: this is a concrete
+    // SolidColorBrush (not IBrush) so its .Color can be mutated in place —
+    // every control sharing this instance updates immediately, no per-
+    // control plumbing needed. Alpha is set from snap.BgOpacity in the
+    // 33ms snapshot tick below.
+    private static readonly SolidColorBrush ColPanelBg = new(Color.FromRgb(0x0A, 0x12, 0x1A));
     private static readonly IBrush ColBarBg     = new SolidColorBrush(Color.FromRgb(0x14, 0x1F, 0x29));
     private static readonly IBrush ColBtnFill   = new SolidColorBrush(Color.FromRgb(0x0F, 0x1F, 0x2E));
     private static readonly IBrush ColBtnBord   = new SolidColorBrush(Color.FromRgb(0x26, 0x40, 0x59));
@@ -130,6 +142,31 @@ internal static partial class RynthAiPanel
     /// tick now that alwaysRender is dropped for RynthAi — see PopOutPanel.</summary>
     internal static Action? MarkDirty { get; set; }
 
+    /// <summary>
+    /// Live-testing finding 2026-09-02: overlay → resize the DOCKED wrapping
+    /// panel's height to targetHeight, and move its MinHeight floor to
+    /// newMinHeight (SetPanelSize clamps to the wrapping panel's own
+    /// MinHeight, so the floor has to move with the preset or a shrink
+    /// request would just get clamped back to the old floor). Wired only
+    /// for the docked path today — the floating/popped-out LayeredWindow
+    /// resize path has a documented history of fragility (modal-loop + DIB
+    /// churn crashes, see rynthcore_floating_panel_resize) and isn't
+    /// touched here without live verification; toggling minimize while
+    /// popped out currently only hides/shows content, same as before this fix.
+    /// </summary>
+    internal static Action<double, double>? RequestDockedResize { get; set; }
+
+    // Fixed preset heights for the minimize toggle (2026-09-02): Expanded
+    // matches the wrapping panel's existing default MinHeight (260,
+    // AvaloniaOverlay.cs); Minimized is a much shorter floor — title +
+    // chips + the always-visible combat summary, no header/launcher/footer
+    // rows. MinHeightFloor pairs are the new MinHeight to apply alongside
+    // each target so the wrapping panel's own clamp doesn't fight it.
+    private const double ExpandedHeightPreset   = 260;
+    private const double ExpandedMinHeightFloor  = 260;
+    private const double MinimizedHeightPreset  = 110;
+    private const double MinimizedMinHeightFloor = 46;
+
     // Last-known good vitals — persists across panel recreates AND across
     // engine hot-reloads (saved to disk). After a reload the plugin's vital
     // cache is cold for a tick or two; without this the panel shows 0/0,
@@ -148,6 +185,18 @@ internal static partial class RynthAiPanel
     // been built out yet, so the panel just blanked.
     private static bool _avaloniaMinimized;
     private static bool _avaloniaMinimizedLoaded;
+
+    /// <summary>
+    /// Live-testing finding 2026-09-02: lets the overlay pick the right
+    /// initial MinHeight floor when (re)docking the panel, so a saved small
+    /// (minimized) height from a previous session isn't immediately
+    /// re-clamped back up to the expanded floor. Loads on first access if
+    /// not already loaded, same as the panel's own Create() does.
+    /// </summary>
+    internal static bool IsAvaloniaMinimized
+    {
+        get { LoadAvaloniaMinimized(); return _avaloniaMinimized; }
+    }
 
     private static string VitalCachePath =>
         System.IO.Path.Combine(
@@ -330,6 +379,12 @@ internal static partial class RynthAiPanel
             ClosePicker();
             _avaloniaMinimized = !_avaloniaMinimized;
             SaveAvaloniaMinimized();
+            // Live-testing finding 2026-09-02: reducing used to hide content
+            // rows but leave the window's own size untouched. Actually
+            // resize to the preset for the mode just switched to.
+            RequestDockedResize?.Invoke(
+                _avaloniaMinimized ? MinimizedHeightPreset : ExpandedHeightPreset,
+                _avaloniaMinimized ? MinimizedMinHeightFloor : ExpandedMinHeightFloor);
         };
         dockChip.Click  += (_, _) =>
         {
@@ -792,6 +847,14 @@ internal static partial class RynthAiPanel
 
             snap = ReadSnapshot();
 
+            // Live-testing finding 2026-09-02: apply the opacity the header
+            // +/- chips set (see ColPanelBg's declaration above). Same 0.1
+            // floor as the plugin-side clamp so the panel can never fade to
+            // fully invisible/unclickable-looking.
+            byte bgAlpha = (byte)Math.Clamp(Math.Round(snap.BgOpacity * 255f), 25.5, 255);
+            if (ColPanelBg.Color.A != bgAlpha)
+                ColPanelBg.Color = new Color(bgAlpha, ColPanelBg.Color.R, ColPanelBg.Color.G, ColPanelBg.Color.B);
+
             SetText(lockChip, snap.IsLocked ? "Unlk" : "Lock");
             SetText(minChip,  _avaloniaMinimized ? "^" : "_");
             SetText(dockChip, IsFloatingNow?.Invoke() == true ? "↙" : "↗");
@@ -810,6 +873,13 @@ internal static partial class RynthAiPanel
             // combatBorder stays visible in both modes — bug fix from prior
             // build that hid it and made the panel appear blank.
             combatBorder.IsVisible = true;
+            // Live-testing finding 2026-09-02: this MinHeight (142) was fixed
+            // regardless of minimized state, which put a floor under how far
+            // the whole panel could shrink even in minimized mode (compounding
+            // the wrapping-panel MinHeight fix in AvaloniaOverlay.cs). Lower
+            // it while minimized — combatBorder's minimized content is just
+            // the target line + segmented bar, not the full toggle grid.
+            combatBorder.MinHeight = minimized ? 46 : 142;
 
             // Mirror the macro button state into the minimized variant so
             // both buttons reflect the same toggle.

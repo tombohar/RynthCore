@@ -65,6 +65,9 @@ internal static class AvaloniaOverlay
     // separately. Clicks inside the popup are always interactive (even with
     // Ctrl-gated click-through enabled) so the user can toggle settings.
     private static PhysicalRect? _radarSettingsPopupRect;
+    // Same slot pattern as radar, for chat's own Ctrl-gated click-through
+    // option (live-testing finding 2026-09-02).
+    private static PhysicalRect? _chatPanelRect;
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
@@ -105,6 +108,13 @@ internal static class AvaloniaOverlay
     /// can read it without taking a dependency on the panel namespace.
     /// </summary>
     internal static volatile bool RadarCtrlGatedClickThrough;
+
+    /// <summary>
+    /// Live-testing finding 2026-09-02: same mechanism as
+    /// RadarCtrlGatedClickThrough, for the chat panel — see RynthChatPanel's
+    /// click-through checkbox and IsOverPanel below.
+    /// </summary>
+    internal static volatile bool ChatCtrlGatedClickThrough;
 
     internal static IntPtr AvaloniaHwnd { get; private set; }
     internal static volatile int AvaloniaWindowLeft;
@@ -233,6 +243,12 @@ internal static class AvaloniaOverlay
             // radar is always interactive like any other panel.
             if (_radarPanelRect.HasValue && _radarPanelRect.Value.Contains(gameClientX, gameClientY))
                 return !RadarCtrlGatedClickThrough || IsCtrlHeld();
+
+            // Chat: same Ctrl-gated click-through option as Radar (live-testing
+            // finding 2026-09-02) — off by default, so this is a no-op unless
+            // the user opts in via the chat panel's gear menu.
+            if (_chatPanelRect.HasValue && _chatPanelRect.Value.Contains(gameClientX, gameClientY))
+                return !ChatCtrlGatedClickThrough || IsCtrlHeld();
         }
 
         return false;
@@ -364,6 +380,30 @@ internal static class AvaloniaOverlay
             }
             var r = rect.Value;
             _radarPanelRect = new PhysicalRect(
+                (int)Math.Round(r.Left),
+                (int)Math.Round(r.Top),
+                (int)Math.Round(r.Left + r.Width),
+                (int)Math.Round(r.Top + r.Height));
+        }
+    }
+
+    /// <summary>
+    /// Publish the docked chat panel's physical bounds for Ctrl-gated
+    /// click-through (live-testing finding 2026-09-02). Pass null to clear
+    /// (chat closed or popped out — popout uses the layered window's own
+    /// WM_NCHITTEST / HTTRANSPARENT path). Mirrors PublishRadarPanelRect.
+    /// </summary>
+    internal static void PublishChatPanelRect((double Left, double Top, double Width, double Height)? rect)
+    {
+        lock (HitTestLock)
+        {
+            if (rect == null)
+            {
+                _chatPanelRect = null;
+                return;
+            }
+            var r = rect.Value;
+            _chatPanelRect = new PhysicalRect(
                 (int)Math.Round(r.Left),
                 (int)Math.Round(r.Top),
                 (int)Math.Round(r.Left + r.Width),
@@ -1455,12 +1495,18 @@ internal class RynthOverlayWindow : Window
             // it can be shrunk to a sliver.
             double defaultW = isRynthAi ? 296 : (isMonsters ? 1100 : (isRadar ? 320 : (isTracker ? 165 : 400)));
             double defaultH = isRynthAi ? 332 : (isMonsters ? 540  : (isRadar ? 320 : (isTracker ? 190 : 500)));
+            // Live-testing finding 2026-09-02: if RynthAi was left minimized
+            // last session, saved.Height is the small preset — but MinHeight
+            // clamps the effective render size regardless of how Height was
+            // set, so a hardcoded large floor here would silently re-expand
+            // it back to 260 on every reopen despite the smaller saved value.
+            bool rynthAiMinimized = isRynthAi && Panels.RynthAiPanel.IsAvaloniaMinimized;
             var windowFrame = new Border
             {
                 Width = hasSaved && saved.Width > 0 ? saved.Width : defaultW,
                 Height = hasSaved && saved.Height > 0 ? saved.Height : defaultH,
                 MinWidth  = isRynthAi ? 280 : (isRadar ? 120 : (isTracker ? 60  : 320)),
-                MinHeight = isRynthAi ? 260 : (isRadar ? 120 : (isTracker ? 20  : 240)),
+                MinHeight = isRynthAi ? (rynthAiMinimized ? 46 : 260) : (isRadar ? 120 : (isTracker ? 20  : 240)),
                 // RynthAi panel matches the ImGui dashboard's WindowBg (0.04,
                 // 0.06, 0.08, 0.95) → #F20A0F14, with the ColBtnBord (0.15,
                 // 0.25, 0.35) → #264059 edge. Other panels keep the softer
@@ -1683,6 +1729,19 @@ internal class RynthOverlayWindow : Window
                     Panels.RynthAiPanel.RequestRedock    = () => RedockPanel(title);
                     Panels.RynthAiPanel.IsFloatingNow    = () => _floatingPanels.ContainsKey(title);
                     Panels.RynthAiPanel.MarkDirty        = () => { if (_floatingPanels.TryGetValue(title, out var fp)) fp.MarkDirty(); };
+                    // Live-testing finding 2026-09-02: see RequestDockedResize's
+                    // doc comment — moves both the wrapping panel's actual
+                    // Height and its MinHeight floor together so a shrink
+                    // request isn't immediately clamped back up.
+                    Panels.RynthAiPanel.RequestDockedResize = (targetHeight, newMinHeight) =>
+                    {
+                        windowFrame.MinHeight = newMinHeight;
+                        SetPanelSize(windowFrame, windowFrame.Width, targetHeight);
+                        SetPanelPosition(windowFrame, GetCanvasLeft(windowFrame), GetCanvasTop(windowFrame));
+                        RefreshHitTestSnapshot();
+                        RequestFrameRefresh();
+                        PersistPanelState(title, windowFrame, open: true);
+                    };
                     try { panelContent = factory(); }
                     finally { Panels.RynthAiPanel.AttachDragHandle = null; }
                 }
@@ -1778,7 +1837,10 @@ internal class RynthOverlayWindow : Window
             var resizeGlyph = new TextBlock
             {
                 Text = "◢",
-                FontSize = isRadar ? 10 : 14,
+                // Live-testing finding 2026-09-02: non-radar size shrunk
+                // from 14/22 to 10/16 — was much too large relative to the
+                // other panel chrome. Matches LayeredWindow.GripPx.
+                FontSize = 10,
                 Foreground = isRadar ? new SolidColorBrush(Color.FromArgb(0xFF, 0xE6, 0xC7, 0x66)) : Brushes.Teal,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
@@ -1792,8 +1854,8 @@ internal class RynthOverlayWindow : Window
                 : new SolidColorBrush(Color.Parse("#5526C1A6"));
             var resizeGrip = new Border
             {
-                Width  = isRadar ? 14 : 22,
-                Height = isRadar ? 14 : 22,
+                Width  = isRadar ? 14 : 16,
+                Height = isRadar ? 14 : 16,
                 Background = resizeGripIdle,
                 BorderBrush = isRadar ? new SolidColorBrush(Color.FromArgb(0xFF, 0xE6, 0xC7, 0x66)) : Brushes.Teal,
                 BorderThickness = new Thickness(0, 1, 0, 0),
@@ -2370,10 +2432,12 @@ internal class RynthOverlayWindow : Window
 
         // Bottom-right grip is purely visual; HTBOTTOMRIGHT in the layered
         // window's WndProc gives the OS-level resize.
+        // Live-testing finding 2026-09-02: shrunk from 22x22/FontSize 14 to
+        // match LayeredWindow.GripPx (16) — was much too large.
         var resizeGlyph = new TextBlock
         {
             Text = "◢",
-            FontSize = 14,
+            FontSize = 10,
             Foreground = Brushes.Teal,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
@@ -2381,8 +2445,8 @@ internal class RynthOverlayWindow : Window
         };
         var resizeGrip = new Border
         {
-            Width = 22,
-            Height = 22,
+            Width = 16,
+            Height = 16,
             Background = new SolidColorBrush(Color.Parse("#2026C1A6")),
             BorderBrush = Brushes.Teal,
             BorderThickness = new Thickness(0, 1, 0, 0),
@@ -3059,10 +3123,13 @@ internal class RynthOverlayWindow : Window
     /// </summary>
     private Border BuildResizeGrip(string title, Border windowFrame)
     {
+        // Live-testing finding 2026-09-02: shrunk from 22x22/FontSize 14 —
+        // was much too large relative to the other panel chrome (close/
+        // redock buttons run ~14-20px). Matches LayeredWindow.GripPx.
         var resizeGlyph = new TextBlock
         {
             Text = "◢",
-            FontSize = 14,
+            FontSize = 10,
             Foreground = Brushes.Teal,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
@@ -3072,8 +3139,8 @@ internal class RynthOverlayWindow : Window
         var resizeGripHover = new SolidColorBrush(Color.Parse("#5526C1A6"));
         var resizeGrip = new Border
         {
-            Width = 22,
-            Height = 22,
+            Width = 16,
+            Height = 16,
             Background = resizeGripIdle,
             BorderBrush = Brushes.Teal,
             BorderThickness = new Thickness(0, 1, 0, 0),
@@ -3768,6 +3835,7 @@ internal class RynthOverlayWindow : Window
 
         var rects = new List<(double Left, double Top, double Width, double Height)>(_activePanels.Count);
         (double Left, double Top, double Width, double Height)? radarRect = null;
+        (double Left, double Top, double Width, double Height)? chatRect = null;
         foreach ((string title, Border panel) in _activePanels)
         {
             Point? origin = panel.TranslatePoint(default, _desktopCanvas);
@@ -3778,12 +3846,15 @@ internal class RynthOverlayWindow : Window
                 panel.Height * inputScale);
             if (string.Equals(title, "Radar", StringComparison.OrdinalIgnoreCase))
                 radarRect = rect;
+            else if (string.Equals(title, "Chat", StringComparison.OrdinalIgnoreCase))
+                chatRect = rect;
             else
                 rects.Add(rect);
         }
 
         AvaloniaOverlay.PublishPanelRects(rects.ToArray());
         AvaloniaOverlay.PublishRadarPanelRect(radarRect);
+        AvaloniaOverlay.PublishChatPanelRect(chatRect);
     }
 
     private void QueueCapture()

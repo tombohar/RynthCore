@@ -379,7 +379,13 @@ internal sealed unsafe class LayeredWindow : IDisposable
     private const int DragNone   = 0;
     private const int DragMove   = 1;
     private const int DragResize = 2;
-    private const int GripPx     = 22;   // bottom-right resize hot zone (matches WM_NCHITTEST grip below)
+    // Live-testing finding 2026-09-02: the resize grip was much too large
+    // relative to the rest of the panel chrome (close/redock buttons run
+    // ~14-20px). Shrunk from 22 to 16 here and in the three visual grip
+    // copies in AvaloniaOverlay.cs (BuildResizeGrip + the docked-panel and
+    // popped-out-panel inline copies) so the visible glyph and the actual
+    // clickable hot zone stay matched.
+    private const int GripPx     = 16;   // bottom-right resize hot zone (matches WM_NCHITTEST grip below)
     private const int MinDragW   = 80;   // floor so a resize can't shrink the HWND to nothing
     private const int MinDragH   = 40;
     private int  _dragMode;

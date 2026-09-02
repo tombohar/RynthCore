@@ -88,6 +88,11 @@ internal static class RynthChatPanel
     private static double _chatFontSize    = 10.0;
     private static byte   _backgroundAlpha = 0xF2;
     private static bool   _autoScroll      = true;
+    // Live-testing finding 2026-09-02: click-through toggle, mirrors
+    // RadarPanel.CtrlGatedClickThrough. Mirrored into
+    // AvaloniaOverlay.ChatCtrlGatedClickThrough (the actual hit-test gate)
+    // wherever this is set — see the checkbox handler and LoadSettings.
+    internal static bool  CtrlGatedClickThrough;
     // Runtime: true while the view is pinned to the newest line. Cleared when the
     // user scrolls up so incoming lines stop yanking the view back to the tail.
     private static bool   _stickToBottom   = true;
@@ -390,6 +395,25 @@ internal static class RynthChatPanel
         {
             _logEnabled = logChatCheck.IsChecked == true;
             if (!_logEnabled) CloseLog();
+            SaveSettings();
+        };
+
+        // Live-testing finding 2026-09-02: mirrors RadarPanel's own
+        // "Docked click-through (hold Ctrl to interact)" checkbox — chat had
+        // no such option at all before this.
+        var clickThroughCheck = new CheckBox
+        {
+            Content    = "Click-through (hold Ctrl to interact)",
+            IsChecked  = CtrlGatedClickThrough,
+            FontSize   = 9,
+            Foreground = Brushes.White,
+        };
+        ToolTip.SetTip(clickThroughCheck,
+            "Applies to the DOCKED chat panel only — the undocked/popped-out chat is always interactive, like every other floating panel.\nOn: docked clicks pass through to the game; hold Ctrl to interact with chat.\nOff: docked chat is always interactive (default).");
+        clickThroughCheck.IsCheckedChanged += (_, _) =>
+        {
+            CtrlGatedClickThrough = clickThroughCheck.IsChecked == true;
+            AvaloniaOverlay.ChatCtrlGatedClickThrough = CtrlGatedClickThrough;
             SaveSettings();
         };
 
@@ -1249,6 +1273,8 @@ internal static class RynthChatPanel
             _autoScroll      = dto.AutoScroll;
             ChatHooks.SuppressOriginalChat = dto.SuppressChat;
             _logEnabled      = dto.LogEnabled;
+            CtrlGatedClickThrough = dto.CtrlGatedClickThrough;
+            AvaloniaOverlay.ChatCtrlGatedClickThrough = CtrlGatedClickThrough;
 
             _customTabs.Clear();
             if (dto.CustomTabs != null)
@@ -1292,6 +1318,7 @@ internal static class RynthChatPanel
                 AutoScroll      = _autoScroll,
                 SuppressChat    = ChatHooks.SuppressOriginalChat,
                 LogEnabled      = _logEnabled,
+                CtrlGatedClickThrough = CtrlGatedClickThrough,
                 ActiveChannel   = _activeChannel,
                 CustomTabs      = _customTabs.ToArray(),
                 Filters         = _filters.Select(f => new RynthChatFilterDto
@@ -1375,6 +1402,11 @@ internal sealed class RynthChatSettingsDto
     [JsonPropertyName("autoScroll")]      public bool   AutoScroll      { get; set; } = true;
     [JsonPropertyName("suppressChat")]    public bool   SuppressChat    { get; set; }
     [JsonPropertyName("logEnabled")]      public bool   LogEnabled      { get; set; }
+    // Live-testing finding 2026-09-02: chat had no click-through option at
+    // all, unlike Radar's Ctrl-gated one — every docked panel except Radar
+    // is unconditionally interactive (AvaloniaOverlay.IsOverPanel). Mirrors
+    // RadarPanel's CtrlGatedClickThrough exactly.
+    [JsonPropertyName("ctrlGatedClickThrough")] public bool CtrlGatedClickThrough { get; set; }
     [JsonPropertyName("activeChannel")]   public string? ActiveChannel  { get; set; }
     [JsonPropertyName("customTabs")]      public string[]? CustomTabs   { get; set; }
     [JsonPropertyName("filters")]         public RynthChatFilterDto[]? Filters { get; set; }
