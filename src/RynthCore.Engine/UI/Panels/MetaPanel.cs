@@ -177,16 +177,66 @@ internal static class MetaPanel
         public HashSet<string> CollapsedStates = new();
         public HashSet<int> ExpandedRows = new();
         public string LastSig = "init_sig";   // content signature of the last Rebuild
+        // UI deep-dive Roadmap #4 (2026-07-02): one-shot reconcile timer for
+        // the optimistic-local-mutation pattern — see ScheduleReconcile.
+        public DispatcherTimer? ReconcileTimer;
+        // Roadmap #5 (2026-07-02): live references to the bottom-bar state
+        // button and the file-picker button, so the poll timer can update
+        // their displayed text in place once CurrentState/CurrentMetaPath
+        // are excluded from PayloadSig — see the timer.Tick body. Cleared/
+        // reset on every rebuild since these controls are recreated each time.
+        public Button? StateBtnRef;
+        public Button? FileBtnRef;
+    }
+
+    // Roadmap #4 (2026-07-02): enable/move/duplicate/delete used to be pure
+    // fire-and-forget Send() calls with no local mutation — the row buttons
+    // stayed dead until the next 2s poll rebuilt the list from the plugin's
+    // authoritative state. Two problems: (1) up to 2s of "did my click even
+    // register?" with no feedback, and (2) capturedGlobalIdx is captured at
+    // RENDER time — a second click on a stale row (e.g. rapid double-delete
+    // before the poll catches up) sends an index that no longer matches
+    // what the plugin thinks is at that position once the first command
+    // has already shifted subsequent rows, deleting/moving/toggling the
+    // WRONG rule. Fix: apply the same mutation locally to ps.Data.Rules
+    // immediately (so capturedGlobalIdx stays valid for anything queued
+    // behind it in the SAME rebuild), rebuild once (user-initiated, so a
+    // single rebuild here is acceptable — this isn't the poll-driven flash
+    // path), then reconcile with the plugin's authoritative state ~250ms
+    // later in case the local guess and the plugin's actual result diverged
+    // (e.g. a command that failed server-side).
+    private static void ScheduleReconcile(PanelState ps, Action rebuild)
+    {
+        ps.ReconcileTimer?.Stop();
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        t.Tick += (_, _) =>
+        {
+            t.Stop();
+            if (!TryFetch(out var fresh)) return;
+            ps.Data = fresh;
+            ps.LastSig = PayloadSig(fresh);
+            rebuild();
+        };
+        ps.ReconcileTimer = t;
+        t.Start();
     }
 
     // Cheap content signature — everything the list view shows EXCEPT the
     // per-tick LastFiredMs (excluded so an idle/botting panel stops flashing;
     // a structural change still triggers a rebuild).
+    //
+    // Roadmap #5 completion (2026-07-02): CurrentState and CurrentMetaPath
+    // used to be included here too — every bot state transition changed the
+    // sig and forced a full Rebuild() of the whole list view (flash; on
+    // undocked also a full RTT+ULW pass), and recreated the Save-As filename
+    // TextBox mid-typing (focus/caret loss) as collateral damage. Both are
+    // now updated IN PLACE from the poll timer instead (see StateBtnRef/
+    // FileBtnRef and the timer.Tick body) — display-only changes that don't
+    // need a structural rebuild.
     private static string PayloadSig(Payload p)
     {
         var sb = new System.Text.StringBuilder(256);
         sb.Append(p.EnableMeta ? '1' : '0').Append(p.MetaDebug ? '1' : '0')
-          .Append('|').Append(p.CurrentState).Append('|').Append(p.CurrentMetaPath)
           .Append('|').Append(p.SourceText?.Length ?? 0)
           .Append('|').Append(string.Join(",", p.Files.Select(f => f.Display)))
           .Append('|').Append(string.Join(",", p.States));
@@ -333,9 +383,40 @@ internal static class MetaPanel
             ps.Data = fresh;   // keep click-handlers on fresh data even if we skip the redraw
             if (ps.Mode == ViewMode.Source && string.IsNullOrEmpty(ps.SourceText))
                 ps.SourceText = fresh.SourceText;
+
+            // Roadmap #5 completion: CurrentState/CurrentMetaPath are no
+            // longer part of PayloadSig, so update their two display
+            // controls in place, every poll, regardless of whether the sig
+            // changed — property sets only, no layout churn, no rebuild.
+            if (ps.StateBtnRef != null) ps.StateBtnRef.Content = fresh.CurrentState;
+            if (ps.FileBtnRef != null)
+            {
+                string display = "-- None --";
+                if (!string.IsNullOrEmpty(fresh.CurrentMetaPath) && fresh.Files.Count > 1)
+                {
+                    var match = fresh.Files.FirstOrDefault(f => string.Equals(f.Path, fresh.CurrentMetaPath, StringComparison.OrdinalIgnoreCase));
+                    if (match != null) display = match.Display;
+                }
+                ps.FileBtnRef.Content = display;
+            }
             string sig = PayloadSig(fresh);
             if (sig == ps.LastSig) return;   // nothing visible changed → no rebuild → no flash
             ps.LastSig = sig;
+            // UI deep-dive P0-6 (2026-07-02): this early-return used to guard
+            // only ViewMode.Editor. In ViewMode.Source, any sig change (a
+            // CurrentState transition while botting, a file-list change, a
+            // plugin-side SourceText edit) called Rebuild() -> BuildSourceView,
+            // which constructs a BRAND-NEW TextEditor + TextDocument — discarding
+            // the user's caret, selection, scroll offset, undo stack, and
+            // keyboard focus mid-typing. Worse, the discarded editor's TextArea
+            // may have left Win32Backend.AvaloniaTextInputActive stuck true if
+            // LostFocus doesn't fire on subtree detach, swallowing game
+            // keystrokes until another editor gets focus. ps.Data/LastSig above
+            // still update in the background (cheap, no visual effect) so
+            // switching back to List always shows current data via that click
+            // handler's own explicit rebuild() call — gating only the automatic
+            // poll-driven Rebuild() here is safe.
+            if (ps.Mode != ViewMode.List) return;
             Rebuild();
         };
         timer.Start();
@@ -494,7 +575,13 @@ internal static class MetaPanel
                 enBtn.Click += (_, e) =>
                 {
                     e.Handled = true;
-                    Send(new MetaCmd { Op = "set_rule_enabled", Index = capturedGlobalIdx, Value = (!rule.Enabled).ToString().ToLowerInvariant() });
+                    bool newEnabled = !rule.Enabled;
+                    Send(new MetaCmd { Op = "set_rule_enabled", Index = capturedGlobalIdx, Value = newEnabled.ToString().ToLowerInvariant() });
+                    // Roadmap #4: optimistic local mutation + reconcile — see PanelState.
+                    if (capturedGlobalIdx >= 0 && capturedGlobalIdx < ps.Data.Rules.Count)
+                        ps.Data.Rules[capturedGlobalIdx].Enabled = newEnabled;
+                    rebuild();
+                    ScheduleReconcile(ps, rebuild);
                 };
                 Grid.SetColumn(enBtn, 0);
                 row.Children.Add(enBtn);
@@ -534,7 +621,24 @@ internal static class MetaPanel
                     HorizontalContentAlignment = HorizontalAlignment.Center,
                     IsEnabled = gi > 0,
                 };
-                upBtn.Click += (_, e) => { e.Handled = true; Send(new MetaCmd { Op = "move_up", Index = capturedGlobalIdx }); };
+                upBtn.Click += (_, e) =>
+                {
+                    e.Handled = true;
+                    Send(new MetaCmd { Op = "move_up", Index = capturedGlobalIdx });
+                    // Roadmap #4: optimistic local mutation — swap with the
+                    // previous row WITHIN THIS STATE GROUP (stateRules is in
+                    // the same display order the plugin's move_up/move_down
+                    // reorders within), using its real global index.
+                    if (capturedGi > 0)
+                    {
+                        int otherGlobalIdx = stateRules[capturedGi - 1].GlobalIdx;
+                        if (capturedGlobalIdx < ps.Data.Rules.Count && otherGlobalIdx < ps.Data.Rules.Count)
+                            (ps.Data.Rules[capturedGlobalIdx], ps.Data.Rules[otherGlobalIdx]) =
+                                (ps.Data.Rules[otherGlobalIdx], ps.Data.Rules[capturedGlobalIdx]);
+                    }
+                    rebuild();
+                    ScheduleReconcile(ps, rebuild);
+                };
                 Grid.SetColumn(upBtn, 2);
                 row.Children.Add(upBtn);
 
@@ -549,7 +653,21 @@ internal static class MetaPanel
                     HorizontalContentAlignment = HorizontalAlignment.Center,
                     IsEnabled = gi < stateRules.Count - 1,
                 };
-                dnBtn.Click += (_, e) => { e.Handled = true; Send(new MetaCmd { Op = "move_down", Index = capturedGlobalIdx }); };
+                dnBtn.Click += (_, e) =>
+                {
+                    e.Handled = true;
+                    Send(new MetaCmd { Op = "move_down", Index = capturedGlobalIdx });
+                    // Roadmap #4: optimistic local mutation — mirrors upBtn above.
+                    if (capturedGi < stateRules.Count - 1)
+                    {
+                        int otherGlobalIdx = stateRules[capturedGi + 1].GlobalIdx;
+                        if (capturedGlobalIdx < ps.Data.Rules.Count && otherGlobalIdx < ps.Data.Rules.Count)
+                            (ps.Data.Rules[capturedGlobalIdx], ps.Data.Rules[otherGlobalIdx]) =
+                                (ps.Data.Rules[otherGlobalIdx], ps.Data.Rules[capturedGlobalIdx]);
+                    }
+                    rebuild();
+                    ScheduleReconcile(ps, rebuild);
+                };
                 Grid.SetColumn(dnBtn, 3);
                 row.Children.Add(dnBtn);
 
@@ -564,7 +682,18 @@ internal static class MetaPanel
                     HorizontalContentAlignment = HorizontalAlignment.Center,
                 };
                 ToolTip.SetTip(dupBtn, "Duplicate rule");
-                dupBtn.Click += (_, e) => { e.Handled = true; Send(new MetaCmd { Op = "duplicate_rule", Index = capturedGlobalIdx, Rule = CloneRule(rule) }); };
+                dupBtn.Click += (_, e) =>
+                {
+                    e.Handled = true;
+                    var clone = CloneRule(rule);
+                    Send(new MetaCmd { Op = "duplicate_rule", Index = capturedGlobalIdx, Rule = clone });
+                    // Roadmap #4: optimistic local mutation — insert right after
+                    // the original, matching the natural duplicate convention.
+                    int insertAt = Math.Clamp(capturedGlobalIdx + 1, 0, ps.Data.Rules.Count);
+                    ps.Data.Rules.Insert(insertAt, CloneRule(rule));
+                    rebuild();
+                    ScheduleReconcile(ps, rebuild);
+                };
                 Grid.SetColumn(dupBtn, 4);
                 row.Children.Add(dupBtn);
 
@@ -579,7 +708,20 @@ internal static class MetaPanel
                     CornerRadius = new CornerRadius(2), FontSize = 9,
                     HorizontalContentAlignment = HorizontalAlignment.Center,
                 };
-                delBtn.Click += (_, e) => { e.Handled = true; Send(new MetaCmd { Op = "delete_rule", Index = capturedGlobalIdx }); };
+                delBtn.Click += (_, e) =>
+                {
+                    e.Handled = true;
+                    Send(new MetaCmd { Op = "delete_rule", Index = capturedGlobalIdx });
+                    // Roadmap #4 (the finding's headline bug): local RemoveAt
+                    // closes the stale-index delete window — a rapid second
+                    // delete click now indexes into the ALREADY-shortened
+                    // local list (rebuilt synchronously below), instead of a
+                    // list that's stale until the next 2s poll.
+                    if (capturedGlobalIdx >= 0 && capturedGlobalIdx < ps.Data.Rules.Count)
+                        ps.Data.Rules.RemoveAt(capturedGlobalIdx);
+                    rebuild();
+                    ScheduleReconcile(ps, rebuild);
+                };
                 Grid.SetColumn(delBtn, 5);
                 row.Children.Add(delBtn);
 
@@ -709,6 +851,11 @@ internal static class MetaPanel
     private static void BuildLoadSaveBar(StackPanel content, PanelState ps, PickerState picker, Action rebuild)
     {
         var d = ps.Data;
+        // Roadmap #5: cleared here (not just set on creation below) since the
+        // save-input branch below doesn't create fileBtn at all this render —
+        // a stale reference from a previous render would update a control
+        // that's no longer in the visual tree.
+        ps.FileBtnRef = null;
 
         if (ps.ShowSaveInput)
         {
@@ -773,6 +920,7 @@ internal static class MetaPanel
         };
         Grid.SetColumn(fileBtn, 0);
         bar.Children.Add(fileBtn);
+        ps.FileBtnRef = fileBtn; // Roadmap #5: poll-timer in-place update target
 
         var refreshBtn = MakeSmallBtn("↺");
         ToolTip.SetTip(refreshBtn, "Refresh file list");
@@ -830,6 +978,7 @@ internal static class MetaPanel
         };
         Grid.SetColumn(stateBtn, 1);
         bar.Children.Add(stateBtn);
+        ps.StateBtnRef = stateBtn; // Roadmap #5: poll-timer in-place update target
 
         var newRuleBtn = new Button
         {

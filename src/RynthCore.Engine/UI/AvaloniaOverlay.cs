@@ -3354,13 +3354,23 @@ internal class RynthOverlayWindow : Window
         }
     }
 
+    // UI deep-dive finding TL;DR #8 (2026-07-02): BringPanelToFront used to
+    // Remove then re-Add the panel's Border in _desktopCanvas.Children on
+    // EVERY docked-panel click — a full detach/reattach of the whole panel
+    // subtree, which drops TextBox focus and forces a full layout pass for
+    // everything in it, stacking on top of any MetaPanel rebuild the same
+    // click triggers. ZIndex controls paint/hit-test order without touching
+    // the Children collection at all — no detach, no focus loss, no layout
+    // churn. A simple ever-increasing counter keeps "most recently clicked"
+    // on top exactly like the old Remove+Add did.
+    private int _nextPanelZIndex = 1;
+
     private void BringPanelToFront(string title, Border panel)
     {
         if (!_desktopCanvas.Children.Contains(panel))
             return;
 
-        _desktopCanvas.Children.Remove(panel);
-        _desktopCanvas.Children.Add(panel);
+        panel.ZIndex = _nextPanelZIndex++;
 
         if (_activePanels.Remove(title))
             _activePanels[title] = panel;
