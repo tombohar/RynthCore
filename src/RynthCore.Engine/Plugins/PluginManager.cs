@@ -64,6 +64,18 @@ internal static class PluginManager
     private static readonly HashSet<uint> _liveObjects = new();
     private static readonly object LiveObjectsLock = new();
     private static readonly List<LoadedPlugin> _plugins = new();
+    // Deep-audit finding #20 (2026-06-18): RenderAll (AC render thread)
+    // iterates _plugins directly while RescanPlugins -> UnloadAllPlugins/
+    // LoadPluginsFromDisk (pump thread, via the RL/rescan button) does
+    // Clear()/Add() with no lock — a torn List can throw
+    // ArgumentOutOfRangeException mid-ImGui-frame. TickAll and every other
+    // _plugins.Count/indexer call site run serialized with rescan on the
+    // SAME pump thread, so only RenderAll (the one cross-thread reader)
+    // needs this. Mirrors Nav3DRenderer's atomic double-buffer: mutators
+    // publish a fresh array via Volatile.Write after every Clear()/Add(),
+    // RenderAll snapshots the reference once and iterates that.
+    private static LoadedPlugin[] _pluginsRenderSnapshot = Array.Empty<LoadedPlugin>();
+    private static void PublishPluginsRenderSnapshot() => System.Threading.Volatile.Write(ref _pluginsRenderSnapshot, _plugins.ToArray());
     private static readonly Queue<PendingIncomingChat> _pendingIncomingChats = new();
     private static readonly Queue<PendingBusyCountIncremented> _pendingBusyCountIncremented = new();
     private static readonly Queue<PendingBusyCountDecremented> _pendingBusyCountDecremented = new();
@@ -995,9 +1007,13 @@ internal static class PluginManager
         if (!_loginCompleteObserved)
             return;
 
-        for (int i = 0; i < _plugins.Count; i++)
+        // Snapshot once (finding #20) instead of iterating _plugins directly —
+        // this runs on AC's render thread while RescanPlugins mutates _plugins
+        // on the pump thread.
+        LoadedPlugin[] plugins = System.Threading.Volatile.Read(ref _pluginsRenderSnapshot);
+        for (int i = 0; i < plugins.Length; i++)
         {
-            var plugin = _plugins[i];
+            var plugin = plugins[i];
             if (!plugin.Initialized || plugin.Failed || plugin.Render == null)
                 continue;
 
@@ -2093,6 +2109,8 @@ internal static class PluginManager
             if (plugin != null)
                 _plugins.Add(plugin);
         }
+
+        PublishPluginsRenderSnapshot();
     }
 
     private static void InitializeLoadedPlugins()
@@ -2167,6 +2185,7 @@ internal static class PluginManager
         }
 
         _plugins.Clear();
+        PublishPluginsRenderSnapshot();
     }
 
     private static void DispatchUIInitializedToLoadedPlugins()

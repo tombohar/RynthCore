@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using RynthCore.Engine.Hooking;
 
 namespace RynthCore.Engine.Compatibility;
@@ -33,9 +34,28 @@ internal static class TimeSyncHooks
     private static IntPtr _originalHandleTimeSynch;
     private static bool _initialized;
 
-    // Server-time / wall-clock reference pair, updated each time sync arrives.
-    private static double _lastServerTime;
-    private static long _lastWallClockTicks;
+    // Deep-audit finding #19 (2026-06-18): these used to be two plain fields
+    // (double + long) written on the net thread and read on the pump thread
+    // with no atomicity — on x86 a 64-bit load/store isn't atomic, so a
+    // reader could observe a torn _lastWallClockTicks (worst case a
+    // mis-timed rebuff from a wildly wrong elapsed time). Publishing both as
+    // one immutable snapshot object, swapped via Volatile.Write/Read, fixes
+    // that AND the subtler cross-field issue a per-field Interlocked fix
+    // wouldn't: a reader can no longer see a NEW _lastServerTime paired with
+    // the OLD _lastWallClockTicks (or vice versa) — the reference swap is
+    // all-or-nothing.
+    private sealed class TimeSyncSnapshot
+    {
+        public readonly double ServerTime;
+        public readonly long WallClockTicks;
+        public TimeSyncSnapshot(double serverTime, long wallClockTicks)
+        {
+            ServerTime = serverTime;
+            WallClockTicks = wallClockTicks;
+        }
+    }
+
+    private static TimeSyncSnapshot? _snapshot;
 
     public static bool IsInitialized => _initialized;
 
@@ -45,12 +65,12 @@ internal static class TimeSyncHooks
     /// </summary>
     public static double GetCurrentServerTime()
     {
-        long wallTicks = _lastWallClockTicks;
-        if (wallTicks == 0)
+        TimeSyncSnapshot? snap = Volatile.Read(ref _snapshot);
+        if (snap == null || snap.WallClockTicks == 0)
             return 0;
 
-        double elapsed = (DateTime.UtcNow.Ticks - wallTicks) / (double)TimeSpan.TicksPerSecond;
-        return _lastServerTime + elapsed;
+        double elapsed = (DateTime.UtcNow.Ticks - snap.WallClockTicks) / (double)TimeSpan.TicksPerSecond;
+        return snap.ServerTime + elapsed;
     }
 
     public static void Initialize()
@@ -98,8 +118,7 @@ internal static class TimeSyncHooks
                 double serverTime = BitConverter.Int64BitsToDouble(bits);
                 if (serverTime > 0)
                 {
-                    _lastServerTime = serverTime;
-                    _lastWallClockTicks = DateTime.UtcNow.Ticks;
+                    Volatile.Write(ref _snapshot, new TimeSyncSnapshot(serverTime, DateTime.UtcNow.Ticks));
                 }
             }
         }
