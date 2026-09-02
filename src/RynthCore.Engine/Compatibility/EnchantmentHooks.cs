@@ -152,12 +152,33 @@ internal static class EnchantmentHooks
         if (DbCacheTeardownHooks.TeardownActive)
             return -1;
 
+        // Deep-audit finding #23 (2026-06-18): ReadObjectEnchantments (the
+        // other caller of this method) validates the qualities pointer's own
+        // vtable-in-module before ever reaching here; the player path used to
+        // skip straight to walking the registry off a cached pointer with no
+        // such check. KnownPlayerQualitiesPtr is zeroed on logout and
+        // TeardownActive covers the dominant relog race, but a
+        // committed-but-stale pointer surviving both (mainly a
+        // Decal-coexistence exposure) would otherwise be walked as if it
+        // were still a real CACQualities object — a use-after-free read.
+        // Reuses the same canonical-vtable check the skill-read path already
+        // relies on instead of a fresh page-probe-only check.
+        if (!SmartBoxLocator.IsMemoryReadable(qualPtr, 4) || !ClientObjectHooks.IsCacQualitiesObject(qualPtr))
+            return -1;
+
         IntPtr regAddr = qualPtr + QualitiesRegistryOffset;
         if (!SmartBoxLocator.IsMemoryReadable(regAddr, 4))
             return -1;
         IntPtr registryPtr = Marshal.ReadIntPtr(regAddr);
 
         if (registryPtr == IntPtr.Zero) return 0;
+
+        // Validate the registry's own vtable too, mirroring ReadObjectEnchantments.
+        if (!SmartBoxLocator.IsMemoryReadable(registryPtr, 4))
+            return -1;
+        IntPtr registryVtable = Marshal.ReadIntPtr(registryPtr);
+        if (!SmartBoxLocator.IsPointerInModule(registryVtable))
+            return -1;
 
         int count = 0;
         count = WalkEnchantList(registryPtr + RegistryMultListOffset,     spellIds, expiryTimes, maxCount, count);

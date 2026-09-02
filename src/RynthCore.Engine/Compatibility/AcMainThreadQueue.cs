@@ -255,6 +255,20 @@ internal static class AcMainThreadQueue
     public static void Drain()
     {
         if (_disarmed) return;
+
+        // Deep-audit finding #22 (2026-06-18): these three queues are
+        // documented as deliberately separate from the gesture-gated action
+        // ring below specifically so appraisals/chat "can never get
+        // gesture-deferred" — but the gesture-defer early-return further
+        // down used to run BEFORE these calls, so a non-empty action ring
+        // sitting behind an in-flight gesture silently stalled chat output
+        // and 0xC8 appraisal sends too, contradicting that invariant. Each
+        // drains only while ITS OWN queue is non-empty, so moving them here
+        // costs nothing when they're empty (the common case).
+        DrainChat();
+        DrainChatCommands();
+        DrainRequestIds();
+
         int head = _head;                       // only the main thread writes _head
         int tail = Volatile.Read(ref _tail);
 
@@ -380,15 +394,6 @@ internal static class AcMainThreadQueue
 
             tail = Volatile.Read(ref _tail);
         }
-
-        // Off-thread WriteToChat strings drain here too (same main-thread window).
-        DrainChat();
-
-        // Off-thread ChatCommandDispatcher.Dispatch calls drain here too (own queue above).
-        DrainChatCommands();
-
-        // AutoIdService appraisal (0xC8) sends marshalled here too (own queue below).
-        DrainRequestIds();
     }
 
     // ── RequestId slot (0xC8 appraisal sends from AutoIdService) ──────────────────

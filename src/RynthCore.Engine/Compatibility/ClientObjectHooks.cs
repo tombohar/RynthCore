@@ -477,8 +477,12 @@ internal static class ClientObjectHooks
     /// CACQualities vtable. Falls back to permissive vtable-in-module
     /// check until we've observed a known-good qualities pointer to learn
     /// the canonical vtable.
+    /// Internal (not private): EnchantmentHooks.ReadEnchantmentsFromQualities
+    /// reuses this exact check (deep-audit finding #23) rather than keeping
+    /// a second, divergent vtable-cache of its own — there's only one
+    /// canonical CACQualities vtable for the whole engine to learn.
     /// </summary>
-    private static bool IsCacQualitiesObject(IntPtr ptr)
+    internal static bool IsCacQualitiesObject(IntPtr ptr)
     {
         if (!TryReadAcObjectVtable(ptr, out IntPtr vtable))
             return false;
@@ -1844,6 +1848,19 @@ internal static class ClientObjectHooks
             _   => -1,
         };
 
+        // Deep-audit finding #24 (2026-06-18): this PWD fast path used to run
+        // BEFORE the IsOnMainThread check below, dereferencing a weenie
+        // pointer captured on a <=100ms-stale main-thread walk with raw
+        // Marshal.ReadInt32. IsReadablePointer catches an unmapped page but
+        // not a freed-then-reallocated one (TOCTOU) — off-thread that risks
+        // feeding a garbage property value into loot/salvage logic. Hoisted
+        // the gate up here (same place the InqInt fallback already gates) so
+        // the fast path only ever runs on the main thread; off-thread
+        // callers fall through to the appraisal cache only (already checked
+        // above) rather than touching AC memory directly.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+
         if (pwdFieldOffset >= 0 && _weeniePhysicsObjOffset >= 0)
         {
             try
@@ -1873,10 +1890,7 @@ internal static class ClientObjectHooks
         }
 
         // Fall through to CBaseQualities::InqInt for stypes not in PWD.
-        // Off-thread: refuse the native fallback — racing with main-thread
-        // qualities teardown produces the Class A 0x67E779 AV.
-        if (!MainThreadGuard.IsOnMainThread())
-            return false;
+        // (IsOnMainThread already checked above, before the PWD fast path.)
         if (_inqInt == null)
         {
             if (!Probe() || _inqInt == null)
@@ -1990,6 +2004,16 @@ internal static class ClientObjectHooks
                 return false;
         }
 
+        // Deep-audit finding #24 (2026-06-18): same TOCTOU class as
+        // TryGetObjectIntProperty above — this PWD fast path used to run
+        // before the IsOnMainThread check, raw-dereferencing a
+        // possibly-stale weenie pointer off-thread. Hoisted the gate up
+        // before the fast path; no appraisal-cache fallback exists for this
+        // stype today, so off-thread callers now just get false instead of
+        // an unguarded read.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+
         // Fast path: ITEM_WORKMANSHIP (STypeFloat=280) → PublicWeenieDesc._workmanship (Single at PWD+152)
         if (stype == 280u && _weeniePhysicsObjOffset >= 0)
         {
@@ -2012,9 +2036,7 @@ internal static class ClientObjectHooks
             catch { return false; }
         }
 
-        // Off-thread: refuse the InqFloat native fallback (Class A guard).
-        if (!MainThreadGuard.IsOnMainThread())
-            return false;
+        // (IsOnMainThread already checked above, before the PWD fast path.)
         if (_inqFloat == null)
         {
             if (!Probe() || _inqFloat == null)

@@ -141,6 +141,12 @@ internal static class RynthCoreShell
 
         if (_showPacketSnifferWindow)
             RenderPacketSnifferWindow();
+
+        // Deep-audit finding #25: sync AFTER the render call (not before), since
+        // RenderPacketSnifferWindow's ImGui.Begin can flip _showPacketSnifferWindow
+        // false this same frame (the window's X button) — Track() should stop
+        // allocating the instant the panel closes, not one frame late.
+        RawOpcodeTracker.Active = _showPacketSnifferWindow;
     }
 
     private static void ApplyTheme()
