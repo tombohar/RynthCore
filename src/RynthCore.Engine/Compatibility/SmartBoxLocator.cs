@@ -60,9 +60,14 @@ internal static class SmartBoxLocator
         if ((mbi.Protect & READABLE_MASK) == 0)
             return false;
 
-        // Ensure the committed region covers the full requested range
-        int regionEnd = mbi.BaseAddress.ToInt32() + mbi.RegionSize.ToInt32();
-        int requestEnd = address.ToInt32() + size;
+        // Ensure the committed region covers the full requested range.
+        // Deep-audit finding #32 (2026-06-18): this used signed 32-bit
+        // arithmetic (ToInt32()) — acclient.exe is LARGE_ADDRESS_AWARE so
+        // addresses above 0x7FFFFFFF are reachable, and ToInt32() on those
+        // can wrap. Do the comparison in 64-bit (every caller passes a small
+        // compile-time size, so no overflow risk on that side).
+        long regionEnd = mbi.BaseAddress.ToInt64() + mbi.RegionSize.ToInt64();
+        long requestEnd = address.ToInt64() + size;
         return requestEnd <= regionEnd;
     }
 

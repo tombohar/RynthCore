@@ -1209,6 +1209,11 @@ internal static class PluginManager
         // watchdog/force-clear must not touch the freed singleton at char-select.
         Compatibility.BusyCountHooks.ResetSession();
 
+        // Clear the per-guid appraisal caches (finding #33) — guids don't
+        // survive a session, so leaving these unbounded across relogs is a
+        // slow but real leak on this stack's 32-bit VA budget.
+        Compatibility.AppraisalHooks.ClearSession();
+
         // Reset login observation so the next SendLoginCompleteNotification kicks
         // off a fresh login-complete cycle.
         for (int i = 0; i < _plugins.Count; i++)

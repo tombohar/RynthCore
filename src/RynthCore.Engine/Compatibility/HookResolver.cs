@@ -57,29 +57,46 @@ internal static class HookResolver
             int firstMatch = PatternScanner.FindPattern(text.Bytes, pattern);
             if (firstMatch >= 0)
             {
+                // Deep-audit finding #30 (2026-06-18): this used to find only
+                // the first and the immediately-next match, so a 3rd+
+                // occurrence was never considered and the multimatch log
+                // claimed to have examined only 2 of N. Not reachable on the
+                // current shipped binary (all patterns verified unique) —
+                // this is a defensive fallback for future binary drift, but
+                // "examined 2 of N and picked wrong" is exactly the failure
+                // mode a defensive fallback shouldn't have. Enumerate every
+                // match and keep the global-nearest to the fallback VA.
+                int fallbackOff = fallbackVa - text.TextBaseVa;
                 int chosen = firstMatch;
+                int bestDist = Math.Abs(firstMatch - fallbackOff);
+                int matchCount = 1;
                 string detail;
 
-                int next = PatternScanner.FindPatternInRegion(
-                    text.Bytes, pattern, firstMatch + 1, text.Bytes.Length);
-                if (next < 0)
+                if (bestDist != 0) // exact-VA short-circuit — no other match can beat this
+                {
+                    int searchFrom = firstMatch + 1;
+                    while (true)
+                    {
+                        int next = PatternScanner.FindPatternInRegion(text.Bytes, pattern, searchFrom, text.Bytes.Length);
+                        if (next < 0) break;
+                        matchCount++;
+                        int dist = Math.Abs(next - fallbackOff);
+                        if (dist < bestDist) { bestDist = dist; chosen = next; }
+                        if (bestDist == 0) break;
+                        searchFrom = next + 1;
+                    }
+                }
+
+                if (matchCount == 1)
                 {
                     detail = "pattern-unique";
                 }
                 else
                 {
-                    // Multiple matches — pick the one nearest the fallback VA.
-                    // If the fallback VA itself is one of the matches, prefer it;
-                    // otherwise our recorded VA is the best disambiguator.
-                    int fallbackOff = fallbackVa - text.TextBaseVa;
-                    int distFirst = Math.Abs(firstMatch - fallbackOff);
-                    int distNext = Math.Abs(next - fallbackOff);
-                    chosen = distFirst <= distNext ? firstMatch : next;
-                    detail = $"pattern-multimatch(near-fallback {chosen:X})";
+                    detail = $"pattern-multimatch(near-fallback {chosen:X}, {matchCount} matches)";
                     RynthLog.Compat(
-                        $"HookResolver[{functionName}]: pattern matched MULTIPLE locations " +
-                        $"(first=0x{text.TextBaseVa + firstMatch:X8}, next=0x{text.TextBaseVa + next:X8}) — " +
-                        $"chose nearest to fallback 0x{fallbackVa:X8}.");
+                        $"HookResolver[{functionName}]: pattern matched {matchCount} locations — " +
+                        $"chose 0x{text.TextBaseVa + chosen:X8} as nearest to fallback 0x{fallbackVa:X8}.");
                 }
 
                 IntPtr addr = new IntPtr(text.TextBaseVa + chosen);

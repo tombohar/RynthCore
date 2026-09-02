@@ -144,7 +144,10 @@ internal static class AccountHooks
                 if (bufferPtr != IntPtr.Zero && IsReadable(bufferPtr + PStringBufferDataOffset))
                 {
                     int len = Marshal.ReadInt32(bufferPtr + PStringBufferLenOffset);
-                    if (len > 1)
+                    // Clamp + length-aware check (finding #29): len comes from
+                    // AC's own heap, only floor-checked before — a corrupt/torn
+                    // value could otherwise drive a copy past the committed page.
+                    if (len > 1 && len <= 256 && IsReadable(bufferPtr + PStringBufferDataOffset, len - 1))
                     {
                         string? name = Marshal.PtrToStringAnsi(bufferPtr + PStringBufferDataOffset, len - 1);
                         if (!string.IsNullOrEmpty(name))
@@ -193,7 +196,9 @@ internal static class AccountHooks
                 return false;
 
             int len = Marshal.ReadInt32(bufferPtr + PStringBufferLenOffset);
-            if (len <= 1)
+            // Clamp + length-aware check (finding #29): same rationale as
+            // SendNoticeWorldNameDetour above.
+            if (len <= 1 || len > 256 || !IsReadable(bufferPtr + PStringBufferDataOffset, len - 1))
                 return false;
 
             string? str = Marshal.PtrToStringAnsi(bufferPtr + PStringBufferDataOffset, len - 1);
@@ -268,5 +273,24 @@ internal static class AccountHooks
         if (mbi.State != MEM_COMMIT) return false;
         if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return false;
         return true;
+    }
+
+    // Deep-audit finding #29 (2026-06-18): the single-arg IsReadable above
+    // only validates the START page. All three PtrToStringAnsi call sites in
+    // this file then do a len-driven copy (len from AC's own heap, only
+    // floor-checked at >1) that can cross into an uncommitted page if len is
+    // corrupt or torn — a length-aware check (mirroring CrashLogger's
+    // IsReadable(addr, bytes), which isn't accessible from here) is needed
+    // for the actual byte span being copied, not just its first byte.
+    private static bool IsReadable(IntPtr ptr, int bytes)
+    {
+        if (ptr == IntPtr.Zero || bytes <= 0) return false;
+        if (VirtualQuery(ptr, out var mbi, Marshal.SizeOf<MEMORY_BASIC_INFORMATION>()) == 0) return false;
+        if (mbi.State != MEM_COMMIT) return false;
+        if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) return false;
+
+        long endRequested = ptr.ToInt64() + bytes;
+        long endRegion = mbi.BaseAddress.ToInt64() + mbi.RegionSize.ToInt64();
+        return endRequested <= endRegion;
     }
 }

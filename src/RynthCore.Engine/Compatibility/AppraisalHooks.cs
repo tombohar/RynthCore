@@ -80,6 +80,32 @@ internal static class AppraisalHooks
     }
 
     /// <summary>
+    /// Deep-audit finding #33 (2026-06-18): these seven session-scoped
+    /// collections were populated per appraised guid and never cleared or
+    /// bounded — no ClearSession() existed, and this class was conspicuously
+    /// absent from DispatchPendingLogout's reset pipeline (contrast the peer
+    /// ObjectQualityCache, which has both MaxEntries and a logout
+    /// ClearSession()). Guids don't survive a session, so a daily
+    /// multi-boxer accumulates entries indefinitely across relogs — worth
+    /// closing given this stack's documented 32-bit VA-exhaustion
+    /// sensitivity even though growth itself is slow. Call from
+    /// DispatchPendingLogout alongside the other ResetSession() calls.
+    /// </summary>
+    public static void ClearSession()
+    {
+        lock (_cacheLock)
+        {
+            _appraisedGuids.Clear();
+            _lastIdTime.Clear();
+            _intCache.Clear();
+            _boolCache.Clear();
+            _stringCache.Clear();
+            _spellIdCache.Clear();
+            _failedRollLogged.Clear();
+        }
+    }
+
+    /// <summary>
     /// Returns the Unix timestamp (seconds) of when appraisal data was last received for this guid, or 0 if never.
     /// </summary>
     public static long GetLastIdTime(uint guid)

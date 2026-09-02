@@ -347,14 +347,26 @@ internal static class CharacterCaptureHooks
             }
 
             characters = new List<string>(characterCount);
+            // Deep-audit finding #28 (2026-06-18): this loop advanced offset
+            // (GUID, nameLen, name bytes, padding, timeout) and never compared
+            // it against blobSize — only nameLen itself was range-checked
+            // (1..127). A short/malformed blob (this server's own login
+            // response, so not adversarial, but still worth bounding) would
+            // walk past the buffer into whatever heap memory follows it.
+            // Bound every read against blobSize; break (not continue) on any
+            // overrun since offset is no longer trustworthy past that point.
             for (int i = 0; i < characterCount; i++)
             {
+                if (offset + 4 > blobSize) break; // GUID
                 offset += 4; // Skip Character GUID
+
+                if (offset + 2 > blobSize) break; // nameLen
                 short nameLen = Marshal.ReadInt16(IntPtr.Add(payloadPtr, offset));
                 offset += 2;
 
                 if (nameLen > 0 && nameLen < 128)
                 {
+                    if (offset + nameLen > blobSize) break; // name bytes
                     byte[] nameBytes = new byte[nameLen];
                     Marshal.Copy(IntPtr.Add(payloadPtr, offset), nameBytes, 0, nameLen);
                     string name = Encoding.Default.GetString(nameBytes);
@@ -365,6 +377,12 @@ internal static class CharacterCaptureHooks
                 if (offset % 4 != 0)
                     offset += 4 - (offset % 4);
                 offset += 4; // Skip Delete Timeout
+
+                if (offset > blobSize)
+                {
+                    offset = (int)blobSize; // cap so the slotCount read below can't overrun either
+                    break;
+                }
             }
 
             characters.Sort(StringComparer.OrdinalIgnoreCase);
