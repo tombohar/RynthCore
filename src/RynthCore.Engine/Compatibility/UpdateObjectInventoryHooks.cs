@@ -92,10 +92,18 @@ internal static class UpdateObjectInventoryHooks
     private static void UpdateObjectInventoryDetour(IntPtr thisPtr, uint objectId, IntPtr newInventory)
     {
         _originalUpdateObjectInventory!(thisPtr, objectId, newInventory);
-        if (objectId == 0)
-            return;
 
-        PluginManager.QueueUpdateObjectInventory(objectId);
+        // Deep-audit finding #12 (2026-06-18): every sibling server-dispatch
+        // detour (UpdateObjectServerDispatchHooks, VectorUpdateServerDispatchHooks,
+        // SmartBoxHooks) wraps its queue call; this one didn't — an escaping
+        // throw here (e.g. OOM during the queue's lock+Enqueue) fail-fasts the
+        // client. Call-through stays outside the try, matching the fix note.
+        try
+        {
+            if (objectId != 0)
+                PluginManager.QueueUpdateObjectInventory(objectId);
+        }
+        catch { }
     }
 
     public static unsafe int GetContainerContents(uint containerId, uint* itemIds, int maxCount)

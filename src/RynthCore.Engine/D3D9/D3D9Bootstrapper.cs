@@ -132,18 +132,35 @@ internal static class D3D9Bootstrapper
 
     private static IntPtr Direct3DCreate9Detour(uint sdkVersion)
     {
+        // The call-through happens unconditionally, outside any try/catch —
+        // it must always run so the game gets its real IDirect3D9 regardless
+        // of what our own bootstrapping below does.
         IntPtr direct3D9 = _originalDirect3DCreate9!(sdkVersion);
 
-        if (sdkVersion != D3DSdkVersion)
-            RynthLog.D3D9($"D3D9Bootstrapper: Direct3DCreate9 called with SDK {sdkVersion} (expected {D3DSdkVersion}).");
-
-        if (direct3D9 == IntPtr.Zero)
+        // Deep-audit finding #11 (2026-06-18): everything past the
+        // call-through is a delegate-marshalled reverse-P/Invoke callback
+        // with no try/catch. TryHookCreateDevice can throw
+        // InvalidOperationException out of MinHook.HookCreate/Enable — an
+        // escaping exception here fail-fasts the whole client. Wrapped for
+        // parity even though the logging above it can't realistically throw.
+        try
         {
-            RynthLog.D3D9("D3D9Bootstrapper: Direct3DCreate9 returned null.");
-            return IntPtr.Zero;
-        }
+            if (sdkVersion != D3DSdkVersion)
+                RynthLog.D3D9($"D3D9Bootstrapper: Direct3DCreate9 called with SDK {sdkVersion} (expected {D3DSdkVersion}).");
 
-        TryHookCreateDevice(direct3D9);
+            if (direct3D9 == IntPtr.Zero)
+            {
+                RynthLog.D3D9("D3D9Bootstrapper: Direct3DCreate9 returned null.");
+                return direct3D9;
+            }
+
+            TryHookCreateDevice(direct3D9);
+        }
+        catch (Exception ex)
+        {
+            try { RynthLog.D3D9($"D3D9Bootstrapper: Direct3DCreate9Detour post-processing threw {ex.GetType().Name}: {ex.Message} — degrading to no CreateDevice hook."); }
+            catch { }
+        }
         return direct3D9;
     }
 
@@ -152,23 +169,35 @@ internal static class D3D9Bootstrapper
         if (_createDeviceHookInstalled)
             return;
 
-        IntPtr vtable = Marshal.ReadIntPtr(direct3D9);
-        _createDeviceTarget = Marshal.ReadIntPtr(vtable, D3D9VTableIndex.CreateDevice * IntPtr.Size);
-        if (_createDeviceTarget == IntPtr.Zero)
+        // Genuinely unguarded path per the audit: MinHook.HookCreate/Enable can
+        // throw InvalidOperationException. Log and swallow — the caller already
+        // has the real direct3D9 pointer from the call-through, so degrading to
+        // "no CreateDevice hook installed" is a safe no-op, not a crash.
+        try
         {
-            RynthLog.D3D9("D3D9Bootstrapper: IDirect3D9::CreateDevice pointer was null.");
-            return;
+            IntPtr vtable = Marshal.ReadIntPtr(direct3D9);
+            _createDeviceTarget = Marshal.ReadIntPtr(vtable, D3D9VTableIndex.CreateDevice * IntPtr.Size);
+            if (_createDeviceTarget == IntPtr.Zero)
+            {
+                RynthLog.D3D9("D3D9Bootstrapper: IDirect3D9::CreateDevice pointer was null.");
+                return;
+            }
+
+            _createDeviceDetour = CreateDeviceDetour;
+            IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_createDeviceDetour);
+
+            _originalCreateDevice = Marshal.GetDelegateForFunctionPointer<CreateDeviceDelegate>(MinHook.HookCreate(_createDeviceTarget, detourPtr));
+            Thread.MemoryBarrier();
+            MinHook.Enable(_createDeviceTarget);
+            _createDeviceHookInstalled = true;
+
+            RynthLog.D3D9($"D3D9Bootstrapper: Hooked IDirect3D9::CreateDevice @ 0x{_createDeviceTarget:X8}");
         }
-
-        _createDeviceDetour = CreateDeviceDetour;
-        IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_createDeviceDetour);
-
-        _originalCreateDevice = Marshal.GetDelegateForFunctionPointer<CreateDeviceDelegate>(MinHook.HookCreate(_createDeviceTarget, detourPtr));
-        Thread.MemoryBarrier();
-        MinHook.Enable(_createDeviceTarget);
-        _createDeviceHookInstalled = true;
-
-        RynthLog.D3D9($"D3D9Bootstrapper: Hooked IDirect3D9::CreateDevice @ 0x{_createDeviceTarget:X8}");
+        catch (Exception ex)
+        {
+            try { RynthLog.D3D9($"D3D9Bootstrapper: TryHookCreateDevice threw {ex.GetType().Name}: {ex.Message} — CreateDevice hook not installed."); }
+            catch { }
+        }
     }
 
     private static void RemoveBootstrapHooks()
@@ -201,6 +230,8 @@ internal static class D3D9Bootstrapper
         IntPtr pPresentationParameters,
         out IntPtr ppDevice)
     {
+        // Call-through happens unconditionally, outside any try/catch, same
+        // rationale as Direct3DCreate9Detour above.
         int hr = _originalCreateDevice!(
             pD3D9,
             adapter,
@@ -210,16 +241,28 @@ internal static class D3D9Bootstrapper
             pPresentationParameters,
             out ppDevice);
 
-        if (hr >= 0 && ppDevice != IntPtr.Zero)
+        // Deep-audit finding #11: wrapped for parity with Direct3DCreate9Detour.
+        // This path is already pre-contained by InstallFromDevice ->
+        // InstallFromEndSceneAddress's own try/catch, but a throw from
+        // RemoveBootstrapHooks (MinHook calls) before that point was not.
+        try
         {
-            _realDeviceObserved = true;
-            RynthLog.D3D9($"D3D9Bootstrapper: Observed real device creation (device=0x{ppDevice:X8}, hwnd=0x{hFocusWindow:X8}, hr=0x{hr:X8}).");
-            RemoveBootstrapHooks();
-            EndSceneHook.InstallFromDevice(ppDevice);
+            if (hr >= 0 && ppDevice != IntPtr.Zero)
+            {
+                _realDeviceObserved = true;
+                RynthLog.D3D9($"D3D9Bootstrapper: Observed real device creation (device=0x{ppDevice:X8}, hwnd=0x{hFocusWindow:X8}, hr=0x{hr:X8}).");
+                RemoveBootstrapHooks();
+                EndSceneHook.InstallFromDevice(ppDevice);
+            }
+            else
+            {
+                RynthLog.D3D9($"D3D9Bootstrapper: CreateDevice returned hr=0x{hr:X8}, device=0x{ppDevice:X8}");
+            }
         }
-        else
+        catch (Exception ex)
         {
-            RynthLog.D3D9($"D3D9Bootstrapper: CreateDevice returned hr=0x{hr:X8}, device=0x{ppDevice:X8}");
+            try { RynthLog.D3D9($"D3D9Bootstrapper: CreateDeviceDetour post-processing threw {ex.GetType().Name}: {ex.Message}."); }
+            catch { }
         }
 
         return hr;
