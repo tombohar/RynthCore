@@ -85,6 +85,27 @@ internal static class AcMainThreadQueue
         // Carried as one entry (not split) so the whole ordered sequence executes
         // atomically after the paired selection, per the audit's fix note.
         NativeAttack,
+        // Jump trio marshalled 2026-09-02 (deep-audit finding #2): CommenceJump/
+        // DoJump/TapJump call native CommandInterpreter members through
+        // _boundCmdInterp with zero MainThreadGuard gate — unlike every sibling
+        // (SetAutoRun/SetMotion/StopCompletely/TurnToHeading), which all marshal
+        // via this queue. Live-exercised off-thread today via Jumper.cs's
+        // Decal-coexistence pump-thread tick. CommenceJump and the later
+        // DoJump/LaunchJumpWithMotion release land in separate queue entries
+        // (separate ticks, ~msToHoldDown apart) — that's fine, the ordering
+        // just needs to stay FIFO within this single-consumer queue, which it does.
+        CommenceJump,
+        TapJump,
+        DoJumpAutonomous,
+        // LaunchJumpWithMotion (PlayerPhysicsHooks.cs) is the more dangerous of
+        // the two release paths: it Marshal.WriteInt32's directly into
+        // CMotionInterp's forward/strafe/turn fields with NO thread gate at
+        // all (not even the thiscall-through-delegate try/catch the
+        // CommandInterpreter trio has) before calling DoJump. A torn write here
+        // racing AC's own motion-graph tick is exactly the CSequence corruption
+        // class. Carries the 5 hold-flags packed into A (bit0=shift, bit1=W,
+        // bit2=X, bit3=Z, bit4=C).
+        LaunchJumpWithMotion,
     }
 
     // Four payload slots cover every routed action (the 4th was added for
@@ -199,6 +220,17 @@ internal static class AcMainThreadQueue
         Enqueue(ActionKind.NativeAttack, unchecked((uint)attackHeight),
                 BitConverter.SingleToUInt32Bits(power), 0);
 
+    public static bool EnqueueCommenceJump() => Enqueue(ActionKind.CommenceJump, 0, 0, 0);
+    public static bool EnqueueTapJump() => Enqueue(ActionKind.TapJump, 0, 0, 0);
+    public static bool EnqueueDoJumpAutonomous(bool autonomous) =>
+        Enqueue(ActionKind.DoJumpAutonomous, autonomous ? 1u : 0u, 0, 0);
+
+    public static bool EnqueueLaunchJumpWithMotion(bool shift, bool holdW, bool holdX, bool holdZ, bool holdC)
+    {
+        uint flags = (shift ? 1u : 0u) | (holdW ? 2u : 0u) | (holdX ? 4u : 0u) | (holdZ ? 8u : 0u) | (holdC ? 16u : 0u);
+        return Enqueue(ActionKind.LaunchJumpWithMotion, flags, 0, 0);
+    }
+
     // Latched by EngineLifecycle.Shutdown: once teardown begins, queued plugin
     // actions must NOT keep executing on AC's main thread — the detours stay
     // live until MH_DisableHook(ALL), so without this latch a marshalled
@@ -310,6 +342,20 @@ internal static class AcMainThreadQueue
                         // EndAttackRequest pair directly.
                         ClientCombatHooks.NativeAttack(unchecked((int)e.A),
                             BitConverter.UInt32BitsToSingle(e.B));
+                        break;
+                    case ActionKind.CommenceJump:
+                        CommandInterpreterHooks.CommenceJump();
+                        break;
+                    case ActionKind.TapJump:
+                        CommandInterpreterHooks.TapJump();
+                        break;
+                    case ActionKind.DoJumpAutonomous:
+                        CommandInterpreterHooks.DoJump(e.A != 0);
+                        break;
+                    case ActionKind.LaunchJumpWithMotion:
+                        PlayerPhysicsHooks.LaunchJumpWithMotion(
+                            (e.A & 1u) != 0, (e.A & 2u) != 0, (e.A & 4u) != 0,
+                            (e.A & 8u) != 0, (e.A & 16u) != 0);
                         break;
                     case ActionKind.SetAutoRun:
                         CommandInterpreterHooks.SetAutoRun(e.A != 0);

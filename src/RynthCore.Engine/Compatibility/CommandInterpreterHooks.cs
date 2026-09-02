@@ -228,8 +228,16 @@ internal static class CommandInterpreterHooks
         }
     }
 
+    // Recovery triplet: unguarded like the jump trio, but only latent today
+    // (reached solely from the main-thread-gated ForceResetBusyCount) — public
+    // API surface though, so gate defensively rather than add queue plumbing
+    // for a currently-unreached off-thread path (revisit with an ActionKind if
+    // one of these is ever exposed to off-thread callers).
+
     public static bool PlayerTeleported()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (!TryBindDelegates() || _playerTeleported == null)
             return false;
 
@@ -246,6 +254,8 @@ internal static class CommandInterpreterHooks
 
     public static bool TakeControlFromServer()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (!TryBindDelegates() || _takeControlFromServer == null)
             return false;
 
@@ -262,6 +272,8 @@ internal static class CommandInterpreterHooks
 
     public static bool ClearAllCommands()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (!TryBindDelegates() || _clearAllCommands == null)
             return false;
 
@@ -276,8 +288,16 @@ internal static class CommandInterpreterHooks
         }
     }
 
+    // Jump trio marshalled 2026-09-02 (deep-audit finding #2): these called the
+    // native CommandInterpreter through _boundCmdInterp with zero
+    // MainThreadGuard gate, unlike every sibling (SetAutoRun/SetMotion/
+    // StopCompletely/TurnToHeading above), live-exercised off-thread via
+    // Jumper.cs's Decal-coexistence pump-thread tick.
+
     public static bool TapJump()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueTapJump();
         if (!TryBindDelegates())
             return false;
 
@@ -297,6 +317,8 @@ internal static class CommandInterpreterHooks
 
     public static bool CommenceJump()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueCommenceJump();
         if (!TryBindDelegates())
             return false;
 
@@ -313,6 +335,8 @@ internal static class CommandInterpreterHooks
 
     public static bool DoJump(bool autonomous)
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueDoJumpAutonomous(autonomous);
         if (!TryBindDelegates())
             return false;
 

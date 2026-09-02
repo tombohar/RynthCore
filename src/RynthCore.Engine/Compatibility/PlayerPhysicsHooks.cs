@@ -248,6 +248,16 @@ internal static class PlayerPhysicsHooks
     /// </summary>
     public static bool LaunchJumpWithMotion(bool shift, bool holdW, bool holdX, bool holdZ, bool holdC)
     {
+        // Deep-audit finding #2 (2026-06-18): this Marshal.WriteInt32's
+        // directly into CMotionInterp's forward/strafe/turn fields with NO
+        // thread gate at all — worse than the CommandInterpreterHooks jump
+        // trio (which at least goes through a thiscall try/catch), since a
+        // raw write racing AC's own motion-graph tick is a guaranteed torn
+        // write, not just an AV risk. Reachable off-thread via Jumper.cs's
+        // ReleaseJump on the Decal-coexistence pump thread.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueLaunchJumpWithMotion(shift, holdW, holdX, holdZ, holdC);
+
         if (!TryGetCMotionInterp(out IntPtr cmi))
         {
             RynthLog.Compat("LaunchJumpWithMotion: CMotionInterp unavailable");

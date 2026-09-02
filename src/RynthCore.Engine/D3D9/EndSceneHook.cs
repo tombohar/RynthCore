@@ -263,17 +263,38 @@ internal static class EndSceneHook
 
                 if (!match && actualEndScene != IntPtr.Zero)
                 {
+                    // Deep-audit finding #8 (2026-06-18): the old sequence
+                    // disabled+REMOVED the old hook (freeing the trampoline
+                    // _originalEndScene points at) BEFORE attempting the new
+                    // install. If the new MH_CreateHook then threw,
+                    // _originalEndScene was never reassigned — it still bound
+                    // the now-freed trampoline — yet the code force-set
+                    // _installed=true and this function's bottom called
+                    // through it: a use-after-free. Fixed order: only remove
+                    // the OLD hook after the NEW one is confirmed installed;
+                    // on failure, re-enable the OLD hook and keep using its
+                    // still-valid trampoline instead of a dangling one.
                     RynthLog.D3D9("EndSceneHook: Rehooking at the device's actual EndScene address.");
-                    MinHook.MH_DisableHook(_endSceneAddr);
-                    MinHook.MH_RemoveHook(_endSceneAddr);
-                    _installed = false;
+                    IntPtr oldAddr = _endSceneAddr;
+                    EndSceneDelegate? oldOriginal = _originalEndScene;
+                    MinHook.MH_DisableHook(oldAddr);
 
                     InstallFromEndSceneAddress(actualEndScene);
                     if (_installed)
+                    {
+                        // New hook confirmed live — safe to free the old
+                        // trampoline now.
+                        MinHook.MH_RemoveHook(oldAddr);
                         return _originalEndScene!(pDevice);
+                    }
 
-                    RynthLog.D3D9("EndSceneHook: Rehook failed — continuing with original hook.");
-                    // Restore state so we don't keep trying
+                    RynthLog.D3D9("EndSceneHook: Rehook failed — restoring original hook.");
+                    // New install failed (InstallFromEndSceneAddress leaves
+                    // _installed=false on failure). Restore the OLD hook
+                    // rather than trust a dangling delegate.
+                    _endSceneAddr = oldAddr;
+                    _originalEndScene = oldOriginal;
+                    MinHook.Enable(oldAddr);
                     _installed = true;
                 }
             }
