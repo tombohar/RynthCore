@@ -1660,6 +1660,7 @@ internal class RynthOverlayWindow : Window
                     Panels.RynthAiPanel.RequestPopOut    = () => PopOutPanel(title);
                     Panels.RynthAiPanel.RequestRedock    = () => RedockPanel(title);
                     Panels.RynthAiPanel.IsFloatingNow    = () => _floatingPanels.ContainsKey(title);
+                    Panels.RynthAiPanel.MarkDirty        = () => { if (_floatingPanels.TryGetValue(title, out var fp)) fp.MarkDirty(); };
                     try { panelContent = factory(); }
                     finally { Panels.RynthAiPanel.AttachDragHandle = null; }
                 }
@@ -1676,6 +1677,7 @@ internal class RynthOverlayWindow : Window
                             ClosePanel(title, docked);
                     };
                     Panels.RadarPanel.IsFloatingNow = () => _floatingPanels.ContainsKey(title);
+                    Panels.RadarPanel.MarkDirty     = () => { if (_floatingPanels.TryGetValue(title, out var fp)) fp.MarkDirty(); };
                     Panels.RadarPanel.AttachSettingsPopup = popup =>
                     {
                         // Tear down any popup left over from the previous radar
@@ -2134,10 +2136,16 @@ internal class RynthOverlayWindow : Window
                 // intact but dormant so a future "gate the undocked radar too"
                 // option can re-enable it here without rework.
                 clickThroughWhenCtrlReleased: false,
-                // Radar + RynthAi render smoothly via custom draw / live
-                // snapshots and depend on the per-frame RTT re-render — exempt
-                // them from the dirty gate so they keep full-rate rendering.
-                alwaysRender: isRadarPopout || isRynthAiPopout);
+                // UI deep-dive finding TL;DR #7 (2026-07-02): Radar + RynthAi
+                // used to be exempted from the dirty gate entirely
+                // (alwaysRender=true), rendering the popout at the
+                // compositor's ~60Hz Tick rate for data that only actually
+                // updates at their own ~30Hz snapshot-timer cadence — 2x the
+                // needed render cost. Both panels now call the newly-wired
+                // MarkDirty() from their own timer when new data arrives, so
+                // the normal dirty gate correctly paces them to ~30Hz
+                // instead of exempting them from it.
+                alwaysRender: false);
         }
         catch (Exception ex)
         {
@@ -3903,12 +3911,23 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         RootControl = rootControl;
         PanelBorder = panelBorder;
         PanelContent = panelContent;
-        // Any layout change in the panel subtree marks it dirty so the gated
-        // Tick() re-renders on the next frame (catches MetaPanel rebuilds,
-        // list/text updates, resizes). Render-only changes with no layout pass
-        // are covered by the heartbeat in Tick().
-        panelBorder.LayoutUpdated += (_, _) => _dirty = true;
-        panelContent.LayoutUpdated += (_, _) => _dirty = true;
+        // UI deep-dive finding (2026-07-02): this used to be
+        // panelBorder.LayoutUpdated / panelContent.LayoutUpdated. Avalonia's
+        // LayoutUpdated fires per-TopLevel after EVERY layout pass, not
+        // scoped to the subscribing control's own subtree — and docked
+        // panels + every popout share one Avalonia visual tree (popouts are
+        // just positioned off-canvas, not separate top-levels). So a single
+        // docked panel's rebuild (e.g. MetaPanel churn) re-dirtied EVERY
+        // popout at once, defeating the whole point of the gate during
+        // botting (near-60fps popout rendering came right back).
+        // PropertyChanged on BoundsProperty + SizeChanged genuinely scope to
+        // THIS control's own geometry changing. Content-only changes with no
+        // size/bounds delta (rare, but real — e.g. text swapped in a
+        // fixed-size row) still need the panel to call the existing
+        // MarkDirty() itself; the 200ms heartbeat below is the backstop for
+        // any that don't.
+        panelBorder.PropertyChanged += (_, e) => { if (e.Property == Visual.BoundsProperty) _dirty = true; };
+        panelContent.SizeChanged += (_, _) => _dirty = true;
         _logicalWidth = Math.Max(logicalWidth, 1);
         _logicalHeight = Math.Max(logicalHeight, 1);
         OffBoundsCanvasX = offBoundsCanvasX;
@@ -4033,6 +4052,13 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     public void Tick()
     {
         if (_disposed || _layered.Hwnd == IntPtr.Zero) return;
+
+        // UI deep-dive finding P1-B (2026-07-02): skip the whole raster+blit
+        // when the popout's native window isn't visible (minimized, or
+        // hidden behind another window's exclusive-fullscreen/etc) — there's
+        // nothing for the user to see, so every cost below this point is
+        // pure waste until it's visible again.
+        if (!_layered.IsVisible) return;
 
         // Late-binding owner: if we created the layered window before ImGui
         // had captured AC's HWND, retro-fit the owner relationship now.
@@ -4195,11 +4221,35 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     private Slider? _activeSlider;
     private ScrollViewer? _activeScroll;
 
+    // UI deep-dive finding P1-B (2026-07-02): WM_MOUSEMOVE marked this panel
+    // dirty unconditionally on every single hover message — at typical mouse
+    // poll rates that's 60-120+ Hz of forced repaints just for hovering a
+    // popout, even with no click and no real visual change most of the time
+    // (Avalonia's own :pointerover state repaints itself; this only needs to
+    // be often enough for the popout's separate RTT-capture to look
+    // responsive). Throttled to ~15Hz; every other message (clicks, wheel,
+    // focus) still marks dirty immediately, unthrottled, below.
+    private long _lastMouseMoveDirtyTick;
+    private const long MouseMoveDirtyIntervalMs = 66; // ~15Hz
+    private const uint WM_MOUSEMOVE_ForDirtyThrottle = 0x0200;
+
     private void ForwardInput(uint msg, IntPtr wParam, IntPtr lParam, int layeredClientX, int layeredClientY)
     {
         // Any forwarded input may change the panel's visuals (press/hover
         // states, scroll, focus) — repaint on the next tick.
-        _dirty = true;
+        if (msg == WM_MOUSEMOVE_ForDirtyThrottle)
+        {
+            long now = Environment.TickCount64;
+            if (now - _lastMouseMoveDirtyTick >= MouseMoveDirtyIntervalMs)
+            {
+                _lastMouseMoveDirtyTick = now;
+                _dirty = true;
+            }
+        }
+        else
+        {
+            _dirty = true;
+        }
 
         // Radar's overlay buttons sit inside the panel content. Avalonia's
         // WM_LBUTTONDOWN dispatch routes events to the AvaloniaHwnd but

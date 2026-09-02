@@ -172,6 +172,15 @@ internal sealed unsafe class LayeredWindow : IDisposable
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    /// <summary>UI deep-dive finding P1-B (2026-07-02): true iff this window's
+    /// native HWND is currently visible (not minimized/hidden). Used by
+    /// FloatingPanelHost.Tick to skip the whole per-tick raster+blit for a
+    /// popout the user can't see anyway.</summary>
+    public bool IsVisible => Hwnd != IntPtr.Zero && IsWindowVisible(Hwnd);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
 

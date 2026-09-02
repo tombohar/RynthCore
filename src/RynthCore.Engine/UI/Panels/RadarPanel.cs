@@ -165,6 +165,11 @@ internal static partial class RadarPanel
     // the popup relative to the radar and tears it down when the radar
     // closes / pops out.
     public static Action<Control>? AttachSettingsPopup;
+    // UI deep-dive finding TL;DR #7 (2026-07-02): overlay → this popout's
+    // FloatingPanelHost.MarkDirty(). Wired so the 33ms poll below can signal
+    // "new data" to the popout's own separate RTT-capture dirty gate now
+    // that alwaysRender is dropped for Radar/RynthAi — see PopOutPanel.
+    public static Action? MarkDirty;
 
     // Popout-mode click forwarders. Avalonia's WM_LBUTTONDOWN dispatch fails
     // for off-canvas panels (panels parked at canvas X ≈ 2500), so the
@@ -646,7 +651,13 @@ internal static partial class RadarPanel
             // gated on whether anything visible actually changed this tick.
             RefreshButtonSnapshot();
             if (contentChanged || buttonsChanged)
+            {
                 surface.InvalidateVisual();
+                // TL;DR #7: tell the popout host (if floating) new data
+                // arrived — its own dirty gate has no layout pass to key off
+                // since this renders via custom Render()/InvalidateVisual.
+                MarkDirty?.Invoke();
+            }
         };
         timer.Start();
         surface.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };

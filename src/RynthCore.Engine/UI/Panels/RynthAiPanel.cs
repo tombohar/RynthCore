@@ -125,6 +125,10 @@ internal static partial class RynthAiPanel
     internal static Action? RequestRedock { get; set; }
     /// <summary>Returns true while the panel is in a floating LayeredWindow.</summary>
     internal static Func<bool>? IsFloatingNow { get; set; }
+    /// <summary>UI deep-dive finding TL;DR #7 (2026-07-02): overlay → this
+    /// popout's FloatingPanelHost.MarkDirty(), called once per 33ms snapshot
+    /// tick now that alwaysRender is dropped for RynthAi — see PopOutPanel.</summary>
+    internal static Action? MarkDirty { get; set; }
 
     // Last-known good vitals — persists across panel recreates AND across
     // engine hot-reloads (saved to disk). After a reload the plugin's vital
@@ -778,6 +782,13 @@ internal static partial class RynthAiPanel
         timer.Tick += (_, _) =>
         {
             if (_getSnapshotJson == null) TryBind();
+
+            // TL;DR #7: signal the popout host (if floating) that a new
+            // snapshot arrived this 33ms tick. Unconditional (not gated on
+            // an exact content diff) — the point of this fix is bringing
+            // popout render rate down to the panel's own ~30Hz data cadence
+            // (was 60Hz via alwaysRender), not further gating below that.
+            MarkDirty?.Invoke();
 
             snap = ReadSnapshot();
 
