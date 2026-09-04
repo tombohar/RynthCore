@@ -92,13 +92,49 @@ internal static class CharacterManagementHooks
         => TryLogOnCharacter(targetCharacter, out matchedCharacter, out avatarId, out _, out status);
 
     /// <summary>
-    /// Same as the 4-arg overload, but also reports the matched character's
-    /// slot index in AC's native CharacterSet (-1 when no match was found).
-    /// The slot index is what the click fallback in CharacterCaptureHooks
-    /// needs to compute the y-offset for the character-list double-click.
+    /// Locates a character in AC's native CharacterSet without logging it on.
+    ///
+    /// Exists so the auto-login path can find the slot and then click it through
+    /// AC's own UI, rather than calling LogOnCharacter directly. Calling that
+    /// function ourselves logs the character in but leaves the client in a state
+    /// where it immediately begins a logoff it can never finish — see
+    /// CharacterCaptureHooks.
     /// </summary>
-    public static bool TryLogOnCharacter(string targetCharacter, out string matchedCharacter, out uint avatarId, out int slotIndex, out string status)
+    public static bool TryFindCharacterSlot(string targetCharacter, out string matchedCharacter,
+                                            out uint avatarId, out int slotIndex, out string status) =>
+        TryFindCharacterSlot(targetCharacter, out matchedCharacter, out avatarId, out slotIndex, out _, out status);
+
+    /// <summary>
+    /// As above, and also reports how many characters are actually drawn.
+    ///
+    /// That count is not GetNativeCharacterSetSlotCount: the native array
+    /// reports slots whose identity pointer is set, which includes entries that
+    /// carry no usable name and are never rendered. Using it to work out row
+    /// positions divides the list box by too many rows and every click below the
+    /// first lands short.
+    /// </summary>
+    public static bool TryFindCharacterSlot(string targetCharacter, out string matchedCharacter,
+                                            out uint avatarId, out int slotIndex, out int drawnCount, out string status)
     {
+        bool found = FindOrLogOn(targetCharacter, lookupOnly: true, out matchedCharacter, out avatarId, out slotIndex, out status, out List<string> drawn);
+        drawnCount = drawn.Count;
+        return found;
+    }
+
+    /// <summary>
+    /// Same as the 4-arg overload, but also reports the matched character's
+    /// slot index (-1 when no match was found).
+    ///
+    /// No longer used by the auto-login path, which clicks the character list
+    /// instead — calling this leaves the client logging itself back out. Kept
+    /// for callers that want the native call directly.
+    /// </summary>
+    public static bool TryLogOnCharacter(string targetCharacter, out string matchedCharacter, out uint avatarId, out int slotIndex, out string status) =>
+        FindOrLogOn(targetCharacter, lookupOnly: false, out matchedCharacter, out avatarId, out slotIndex, out status, out _);
+
+    private static bool FindOrLogOn(string targetCharacter, bool lookupOnly, out string matchedCharacter, out uint avatarId, out int slotIndex, out string status, out List<string> drawnCharacters)
+    {
+        drawnCharacters = [];
         matchedCharacter = string.Empty;
         avatarId = 0;
         slotIndex = -1;
@@ -133,7 +169,7 @@ internal static class CharacterManagementHooks
             return false;
         }
 
-        var availableCharacters = new List<string>();
+        List<string> availableCharacters = drawnCharacters;
         for (int index = 0; index < MaxCharacterSlots; index++)
         {
             IntPtr identityPtr = _characterSetGetIdentity!(charSetPtr, index);
@@ -147,6 +183,12 @@ internal static class CharacterManagementHooks
                 continue;
 
             availableCharacters.Add(candidateName);
+            // Position among *populated* slots, not the raw array index. The
+            // character list on screen is compacted — an empty native slot
+            // renders nothing — so a name at native index 1 behind an empty
+            // slot 0 is drawn as the first row. Clicking by raw index then
+            // lands one row low and selects nothing.
+            int visualIndex = availableCharacters.Count - 1;
             // Admin/staff character names render with a leading '+' in the AC
             // client UI but the cached/launcher-side name often lacks it (or the
             // server packet does). Match prefix-tolerantly so 'Buffi' matches
@@ -154,7 +196,20 @@ internal static class CharacterManagementHooks
             if (!CharacterNamesMatch(candidateName, targetCharacter))
                 continue;
 
-            slotIndex = index;
+            slotIndex = visualIndex;
+            matchedCharacter = candidateName;
+            avatarId = candidateAvatarId;
+
+            if (lookupOnly)
+            {
+                // Report both indices. They differ whenever a native slot is
+                // empty, and which one the click should use is exactly what has
+                // been ambiguous: the raw index addresses AC's array, the
+                // populated position addresses the row actually drawn.
+                status = $"Found '{candidateName}' (avatar 0x{candidateAvatarId:X8}) at native index {index}, " +
+                         $"drawn row {visualIndex}; populated so far [{string.Join(", ", availableCharacters)}].";
+                return true;
+            }
 
             IntPtr playerSystemPtr = GetPlayerSystemPointer();
             if (playerSystemPtr == IntPtr.Zero)
@@ -172,8 +227,6 @@ internal static class CharacterManagementHooks
                 return false;
             }
 
-            matchedCharacter = candidateName;
-            avatarId = candidateAvatarId;
             status = $"Issued LogOnCharacter for avatar 0x{candidateAvatarId:X8}.";
             return true;
         }
