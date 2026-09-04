@@ -28,6 +28,20 @@ internal static class CharacterCaptureHooks
     private const int XCharList = 121;
     private const int YTopOfBox = 209;
     private const int YBottomOfBox = 532;
+
+    /// <summary>
+    /// Rows the character list box is divided into, regardless of how many
+    /// characters exist. The grid is fixed: two characters are drawn in the top
+    /// two rows with empty space below, not spread across the box.
+    ///
+    /// Dividing by the character count instead put every row after the first in
+    /// the wrong place — with two characters it aimed at y=451, which is row 9
+    /// and empty. Solved from three observations: a click at y=249 selected the
+    /// character drawn in row 1, and 249 is that row's centre only if the box
+    /// holds 12 rows. The two failures at y=330 and y=451 land on rows 4 and 9,
+    /// both empty, which agrees.
+    /// </summary>
+    private const int CharacterListRows = 12;
     private const int AutoLoginDelayMs = 2000;
     private const int AutoLoginWindowWaitMs = 10000;
     private const int AutoLoginWindowPollMs = 250;
@@ -175,37 +189,53 @@ internal static class CharacterCaptureHooks
                     RynthLog.Info($"CharacterCapture: Char-select up — driving direct auto-login for '{targetCharacter}'.");
                 }
 
-                // Direct path: read AC's native CharacterSet and call LogOnCharacter.
-                // No packet required. Retries every tick if it didn't take.
-                if (CharacterManagementHooks.TryLogOnCharacter(
-                        targetCharacter, out string matched, out uint avatarId, out int slotIndex, out string status))
-                {
-                    if (!issuedDirect)
-                    {
-                        issuedDirect = true;
-                        RynthLog.Info($"CharacterCapture: Issued LogOnCharacter for '{matched}' (target '{targetCharacter}', avatar 0x{avatarId:X8}). Awaiting world entry.");
-                    }
-                    directFailCount = 0;
-                    // Keep looping — watch for LoginComplete/GamePlayUI. If the
-                    // issue didn't take, next ticks will re-issue.
-                }
-                else
+                // Find the slot, then click it through AC's own character list.
+                //
+                // Calling LogOnCharacter directly does log the character in, but
+                // the client then starts a logoff it can never complete: the
+                // world loads, "Logging off..." appears in the same millisecond,
+                // and repeats until the client is killed. Confirmed by disabling
+                // auto-login and logging in by hand, which is stable. The
+                // function reports failure while doing it, too, so its return
+                // value cannot be used to detect the problem.
+                //
+                // Clicking goes through the same path a player uses, which does
+                // whatever setup the direct call skips.
+                if (!CharacterManagementHooks.TryFindCharacterSlot(
+                        targetCharacter, out string matched, out uint avatarId, out int slotIndex,
+                        out int drawnCount, out string status))
                 {
                     directFailCount++;
-                    RynthLog.Verbose($"CharacterCapture: Direct auto-login attempt {directFailCount} for '{targetCharacter}' - {status}");
+                    RynthLog.Info($"CharacterCapture: Cannot locate '{targetCharacter}' yet (attempt {directFailCount}) - {status}");
+                    continue;
+                }
 
-                    // Direct keeps failing (native set not readable / name not
-                    // matched yet). Fall back to a char-list double-click, but
-                    // only when we know the slot — slotIndex is set when the
-                    // name matched in the native set; otherwise use the packet-
-                    // cached index is unavailable here so skip until known.
-                    if (directFailCount >= AutoLoginDirectFailsBeforeClick && slotIndex >= 0)
-                    {
-                        int slotCount = CharacterManagementHooks.GetNativeCharacterSetSlotCount();
-                        if (slotCount > 0)
-                            TryClickCharacterSlot(targetCharacter, slotIndex, slotCount);
-                        directFailCount = 0;
-                    }
+                if (drawnCount <= 0 || slotIndex < 0)
+                    continue;
+
+                if (!issuedDirect)
+                {
+                    issuedDirect = true;
+                    float rowHeight = (YBottomOfBox - YTopOfBox) / (float)CharacterListRows;
+                    int clickY = (int)(YTopOfBox + (rowHeight / 2.0f) + (rowHeight * slotIndex));
+                    RynthLog.Info(
+                        $"CharacterCapture: Clicking '{matched}' (target '{targetCharacter}', avatar 0x{avatarId:X8}) " +
+                        $"at drawn row {slotIndex} of {drawnCount} character(s) -> y={clickY} " +
+                        $"(box {YTopOfBox}..{YBottomOfBox} / {CharacterListRows} rows, rowHeight={rowHeight:F1}). {status}");
+                }
+
+                TryClickCharacterSlot(targetCharacter, slotIndex, CharacterListRows);
+
+                // Re-check before sleeping. The client can be in the world well
+                // inside one poll interval — 337ms in an observed case — and this
+                // loop must not still be poking at char-select when that happens.
+                if (LoginLifecycleHooks.HasObservedLoginComplete ||
+                    (CharacterManagementHooks.TryGetCurrentMode(out int postMode) &&
+                     postMode == GamePlayUIMode))
+                {
+                    RynthLog.Info($"CharacterCapture: '{targetCharacter}' reached the world — standing down.");
+                    Interlocked.Exchange(ref _autoLoginEverFired, 1);
+                    return;
                 }
 
                 if (charSelectFirstSeenTick != 0 &&
