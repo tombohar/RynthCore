@@ -13,7 +13,8 @@
 //  via Interlocked.Increment. Concurrent overwrites of the same slot are
 //  tolerated (rare at depth 256; we only need the rough recent sequence).
 //
-//  REMOVE once Class B is diagnosed and fixed.
+//  Every Record also goes to the flight recorder (Net/FlightRecorder.cs) as an
+//  engine-call marker; keep the call if this file goes.
 // ============================================================================
 
 using System;
@@ -48,6 +49,7 @@ internal static class AcActionTrace
         _slots[slot].Name  = name;
         _slots[slot].A     = a;
         _slots[slot].B     = b;
+        Net.FlightRecorder.EngineCall(name, a, b);
     }
 
     /// <summary>

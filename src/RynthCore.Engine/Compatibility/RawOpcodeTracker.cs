@@ -29,11 +29,23 @@ internal static class RawOpcodeTracker
     public static bool ShowKnown = false;
     public static bool ShowUnknown = true;
 
+    // Deep-audit finding #25 (2026-06-18): Track allocates a fresh byte[] for
+    // every non-zero-opcode blob of every inbound packet, called from
+    // RecvFromDetour (a reverse-P/Invoke detour) with no gate on whether the
+    // Packet Sniffer panel is even open — only Frozen. Sustained per-packet
+    // managed allocation on a reverse-P/Invoke transition is the documented
+    // RhpReversePInvokeAttachOrTrapThread2 fail-fast hazard; on a busy
+    // multibox it's constant GC churn for a diagnostic feature nobody is
+    // looking at. RynthCoreShell sets this to the panel's actual visibility
+    // every frame (open OR closed) — Track short-circuits before any
+    // allocation while it's false, which is the overwhelming common case.
+    public static volatile bool Active;
+
     public static bool IsKnown(ushort opcode) => KnownOpcodes.Contains(opcode);
 
     public static unsafe void Track(ushort opcode, byte* payload, int payloadLen)
     {
-        if (Frozen) return;
+        if (Frozen || !Active) return;
 
         int sampleLen = payloadLen < 16 ? payloadLen : 16;
         byte[] sample = new byte[sampleLen];

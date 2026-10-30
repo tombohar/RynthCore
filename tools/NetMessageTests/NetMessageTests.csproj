@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline replay tests for the server-message stream (plugin API v78):
+      - the engine's datagram walk, packet ring, fragment reassembler and interest sets
+        (src\RynthCore.Engine\Net\*, compiled in; pure code, no engine state);
+      - the SDK's typed parsers (src\RynthCore.PluginSdk\Net, by project reference);
+      - fragment edge cases: out of order, duplicate, retransmitted, missing (stale),
+        oversized, slot exhaustion, session reset, malformed datagrams;
+      - throughput and allocation numbers for the receive-side copy and the reassembly.
+    Fixtures are built by hand (WireBuilder.cs, plus one hex datagram written out byte by byte).
+    Extra arguments are .rnc captures from "/rc netmsg capture" to replay and summarise.
+    Nothing native: no AC, no engine.
+    Run: dotnet run -c Release [(double dash) capture.rnc ...]   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>NetMessageTests</RootNamespace>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Net\AcPacketWire.cs" Link="Engine\AcPacketWire.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\PacketRing.cs" Link="Engine\PacketRing.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\FragmentReassembler.cs" Link="Engine\FragmentReassembler.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\ServerMessageInterest.cs" Link="Engine\ServerMessageInterest.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\InventoryOrder.cs" Link="Engine\InventoryOrder.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\AelrynthVaultWire.cs" Link="Engine\AelrynthVaultWire.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\ChatOrigin.cs" Link="Engine\ChatOrigin.cs" />
+  </ItemGroup>
+
+</Project>

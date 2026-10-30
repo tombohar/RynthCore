@@ -1,0 +1,85 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    How much a longer RynthChat history costs (2026-10-11, the "Chat history" setting), and
+    a check of the ImGui scroll behaviour the chat's follow-the-newest-line fix relies on.
+    Measures, with the real classes compiled in:
+      - managed memory per 1,000 lines: the engine's ChatLine (+ its route) and RynthChat's
+        ring (the plugin's ChatBuffer), filled with realistic AC lines;
+      - per poll: the plugin's BuildJson for a few new lines (0.3.0 vs the 0.2.1 copy in
+        OldChatBuffer.cs) and the engine's merge into a new published array;
+      - the first read after a bind or reload (the whole ring as JSON, parsed and routed);
+      - re-routing every kept line when a rule changes, on the pump;
+      - the chat face's work: a tab or search rebuild, unread counts, the tops, and
+        measuring wrapped heights with the engine's own cimgui.dll;
+    at 500, 2,000, 5,000 and 10,000 lines.
+
+    x86 on purpose, like acclient (object sizes, the 32-bit address space). Needs the x86
+    .NET runtime (C:\Program Files (x86)\dotnet). RynthChat's files come from the sibling
+    RynthSuite checkout (..\..\..\RynthSuite, or -p:RynthSuiteDir=...); without it the
+    plugin-side numbers are skipped.
+    Run: dotnet run -c Release   (exit 0 = every check passed, 1 = one failed)
+
+    2026-10-11 (Tom's PC, x86, 8 cores; medians, run-to-run noise ~20%):
+      lines                                   500      2,000     5,000    10,000
+      memory, engine + plugin + face        0.9 MB    3.7 MB    9.1 MB    18 MB
+      plugin BuildJson, 3 new  0.2.1 / 0.3.0  19/4 us   50/6 us   82/5 us  136/4 us
+      engine merge per poll                  0.3 us    1.2 us    3.4 us    11 us
+      first read (bind / reload, once)       3.2 ms   14.6 ms   29.8 ms   58.5 ms
+      re-route all lines (rule edit)         2.4 ms    6.6 ms   17.1 ms   27.2 ms
+      face: tab rebuild / search rebuild    11/177 us 45/716 us 0.1/1.8 ms 0.7/3.6 ms
+      face: unread, full (was) / incremental 100/0.5 us 396/0.5 us 1.1ms/0.7us 4.1ms/0.5us
+      face: measure every wrapped line       0.6 ms    3.7 ms    6.7 ms   14.8 ms
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+    <RootNamespace>ChatHistoryBench</RootNamespace>
+    <RynthSuiteDir Condition="'$(RynthSuiteDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\RynthSuite</RynthSuiteDir>
+    <RynthChatDir>$(RynthSuiteDir)\Plugins\RynthCore.Plugin.RynthChat</RynthChatDir>
+    <DefineConstants Condition="Exists('$(RynthChatDir)\ChatBuffer.cs')">$(DefineConstants);HAVE_RYNTHCHAT</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatRouting.cs" Link="Engine\ChatRouting.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatHistory.cs" Link="Engine\ChatHistory.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatLineColors.cs" Link="Engine\ChatLineColors.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatRuleMatching.cs" Link="Engine\ChatRuleMatching.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatSettingsDto.cs" Link="Engine\ChatSettingsDto.cs" />
+    <!-- ChatRouting's standard filters (2026-10-28: the bench stopped building when ChatRouting
+         started calling RynthChatPresets; the same files as tools\ChatFilterTests). -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Panels\RynthChatPresets.cs" Link="Engine\RynthChatPresets.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatFilterPresets.cs" Link="Engine\ChatFilterPresets.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatRetailVerdict.cs" Link="Engine\ChatRetailVerdict.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\SharedFileWatch.cs" Link="Engine\SharedFileWatch.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('$(RynthChatDir)\ChatBuffer.cs')">
+    <Compile Include="$(RynthChatDir)\ChatBuffer.cs" Link="RynthChat\ChatBuffer.cs" />
+    <Compile Include="$(RynthChatDir)\ChatClassifier.cs" Link="RynthChat\ChatClassifier.cs" />
+    <Compile Include="$(RynthChatDir)\ChatLine.cs" Link="RynthChat\ChatLine.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="!Exists('$(RynthChatDir)\ChatBuffer.cs')">
+    <Compile Remove="OldChatBuffer.cs" />
+  </ItemGroup>
+
+  <!-- The engine's own cimgui.dll (x86, obsolete APIs compiled out), over the package's. -->
+  <Target Name="CopyEngineCimgui" AfterTargets="Build">
+    <Copy SourceFiles="..\..\src\RynthCore.Engine\Native\cimgui.dll" DestinationFolder="$(OutputPath)" />
+  </Target>
+
+</Project>

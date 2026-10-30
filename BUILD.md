@@ -9,6 +9,37 @@ RynthCore is the injection framework. RynthSuite (separate repo) contains the pl
 - Visual Studio 2022 Build Tools with the **.NET desktop** and **C++ desktop** workloads (required by the NativeAOT ILC linker)
 - Asheron's Call client installed
 
+## The unloadable engine (the default since 2026-09-29)
+
+The engine now runs on CoreCLR, and a hot reload really frees the old engine and its plugins
+(`docs/UNLOADABLE_ENGINE_PLAN.md`, Status section). What ships and deploys:
+
+```
+C:\Games\RynthCore\Runtime\
+├── RynthCore.Loader.dll      ← native loader (native\Loader, C/cl.exe): injection target, hosts CoreCLR once
+├── RynthCore.Shim.dll        ← the only RynthCore code in CoreCLR's default context
+├── RynthCore.Engine.dll(+pdb)← the engine, a managed assembly (-p:EngineHost=coreclr, ReadyToRun)
+├── Avalonia.*, ImGui.NET ... ← the engine's own dependencies (load and unload with each engine)
+├── cimgui, minhook, Skia ... ← native libraries (loaded once)
+└── dotnet\                   ← the app-local x86 .NET runtime (from the NuGet runtime pack)
+C:\Games\RynthSuite\<Plugin>\ ← each plugin as a managed assembly + its dependency DLLs
+```
+
+| Task | Command |
+|---|---|
+| Full local deploy (engine, loader, managed plugins, launcher) | `scripts\Deploy-RynthCore.ps1` (close every client first; `-SkipLauncher` while the launcher runs) |
+| Engine change, clients running | `scripts\Publish-EngineCoreClr.ps1 -EngineOnly` — each running client hot-reloads onto it by itself |
+| Loader/Shim change, clients running | `scripts\Publish-EngineCoreClr.ps1` — the in-use copies are renamed aside; new launches get the new ones |
+| Installer | `installer\Build-Installer.ps1` (release plugins stay NativeAOT: the new engine loads them) |
+| Hot-reload test on a local server | `scripts\Test-ClrWorld.ps1 -Reloads 3` (see its header) |
+| Every offline test (RynthCore, RynthSuite, RynthServers) | `scripts\Run-AllTests.ps1` (`-Only <folder>` for one); `installer\Publish-Update.ps1` runs it and won't publish if one fails |
+| RynthAi in game (buffing, a kill, looting, missile crafting) | `scripts\Run-GameTest.ps1` (logs a test character in, runs RynthSuite's `GameTests\RynthSelfTest.af`, prints PASS / FAIL / SKIP; see its header) |
+| Why didn't a generation unload? | `tools\AlcRoots <pid>` (build it: `dotnet build tools\AlcRoots -c Release`) |
+
+`-NativeAot` on `Deploy-RynthCore.ps1` and `Build-Installer.ps1` builds the old NativeAOT engine,
+loader and plugins; the sections below describe that path. The engine and plugins use the same
+source either way. Rules that keep an engine or plugin unloadable are in `CLAUDE.md` ("Unloadable engine").
+
 ## Projects
 
 | Project | Type | Output |
@@ -92,7 +123,7 @@ C:\Games\RynthCore\
     ├── RynthCore.Loader.dll         ← Loader (NativeAOT x86) — injection target
     ├── RynthCore.Engine.dll         ← Engine (NativeAOT x86)
     ├── minhook.x86.dll              ← MinHook (x86), preloaded by EntryPoint
-    ├── cimgui.dll                   ← ImGui C bindings (x86, docking branch)
+    ├── cimgui.dll                   ← ImGui C bindings (x86, docking branch; our build)
     └── Plugins\
         └── *.dll                    ← Built-in plugin directory
 
@@ -162,7 +193,7 @@ If AC is already running, click **RL** on the RynthCore overlay bar to hot-reloa
 | `Runtime\RynthCore.Loader.dll` | small (~1–2 MB) | NativeAOT didn't run — check for `Generating native code` in build output |
 | `Runtime\RynthCore.Engine.dll` | ~26 MB | NativeAOT didn't run — same diagnosis |
 | `RynthSuite\RynthAi\RynthCore.Plugin.RynthAi.dll` | ~7 MB | Built `dotnet build` instead of `dotnet publish` |
-| `Runtime\cimgui.dll` | ~1.5 MB | Must match ImGui.NET 1.91.6.1 |
+| `Runtime\cimgui.dll` | ~1.2 MB | Must be our build (`scripts\Build-Cimgui.ps1`); with ImGui on, the log shows `ImGuiSelfTest: OK` |
 
 To confirm NativeAOT actually ran, check that `.lib` and `.exp` files exist alongside the DLL in the publish output's `native\` directory.
 
@@ -235,6 +266,7 @@ If your AC client ever gets a real-world patch, apply it to both copies (or `rob
 - **Clean before plugin publish.** Incremental NativeAOT builds can silently reuse stale output. Delete `obj\Release` and `bin\Release` before every plugin publish to guarantee a fresh compile.
 - **Engine deploy path is `Runtime\`**, not `C:\Games\RynthCore\` directly. The injector resolves `Runtime\RynthCore.Loader.dll` (preferred) and `Runtime\RynthCore.Engine.dll` (legacy) by default.
 - **Close AC before redeploying Loader or Engine.** Both are loaded into `acclient.exe` and locked while the game is running. Plugins are shadow-copied so they can be hot-swapped without closing AC.
-- **cimgui.dll version must match ImGui.NET NuGet.** Post-1.90 struct layouts changed. A mismatched cimgui.dll causes `DisplaySize = <1, 1>` or font crashes on frame 2.
+- **cimgui.dll is built by us, not taken from NuGet.** `scripts\Build-Cimgui.ps1` fetches cimgui 1.91.6dock into `native\cimgui\_src` (git-ignored), builds it with MSVC (VS 2022 Build Tools, C++ workload) and writes `src\RynthCore.Engine\Native\cimgui.dll`, which is committed. The stock NuGet x86 DLL does not match ImGui.NET's structs (64-bit `ImTextureID`); the engine's `ImGuiSelfTest` refuses it and any other non-matching build. Only rerun the script when changing the cimgui build itself.
 - **vswhere.exe must be on PATH** for the NativeAOT link step. Add `C:\Program Files (x86)\Microsoft Visual Studio\Installer` to PATH if missing.
-- **Decal coexistence mode.** If `decal.dll`, `UBLoader.dll`, `Decal.Adapter.dll`, or `phatacd.dll` is loaded into acclient.exe, the engine skips the entire D3D9/ImGui path and runs plugins on a 30 Hz worker tick with Avalonia floating panels via `LayeredWindow` (GDI). This is intentional — two D3D9 hookers can't symmetrically save/restore render state. Check `RynthCore.log` for `D3D9: Decal coexistence` to confirm.
+- **Decal.** `src\RynthCore.DecalBridge` (net48) builds with the solution when Decal is installed (an empty assembly and a warning otherwise); every installer stages it (`Build-Installer.ps1` fails without Decal; `-SkipDecalBridge` for a dev build). The launcher registers it only for accounts set to "Decal + RynthCore (experimental)"; their choice is kept in `%APPDATA%\RynthCore\decal-accounts.json`, never in the shared `appsettings.json`. Bridge mode and in-game ImGui under Decal: `docs/DECAL_BRIDGE_PLAN.md`.
+- **Decal coexistence mode.** If `decal.dll`, `UBLoader.dll`, `Decal.Adapter.dll`, or `phatacd.dll` is loaded into acclient.exe and neither bridge mode nor `DecalInGameImGui` applies, the engine skips the entire D3D9/ImGui path and runs plugins on a 30 Hz worker tick with Avalonia floating panels via `LayeredWindow` (GDI). This is intentional — two D3D9 hookers can't symmetrically save/restore render state. Check `RynthCore.log` for `D3D9: Decal coexistence` to confirm.

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for spending experience (plugin API v79): the XpTable parser and the cost
+    arithmetic and raise / train checks (src\RynthCore.Engine\Compatibility\TrainingCosts.cs,
+    compiled in), against the XpTable of a real client_portal.dat read with the engine's own dat
+    reader (AcDatFile in UI\ScriptWindows\AcIconDecoder.cs, read only), plus the SDK's
+    RaiseResult numbers against the engine's. Nothing native: no AC, no engine state.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail); after the usual separator, an AC folder or a client_portal.dat.
+    Default dat: C:\Turbine\Asheron's Call\client_portal.dat.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>TrainingCostTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\TrainingCosts.cs" Link="Engine\TrainingCosts.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\ScriptWindows\AcIconDecoder.cs" Link="Engine\AcIconDecoder.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\Dat\DxtUtil.cs" Link="StatusAgent\DxtUtil.cs" />
+    <ProjectReference Include="..\..\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+  </ItemGroup>
+
+</Project>

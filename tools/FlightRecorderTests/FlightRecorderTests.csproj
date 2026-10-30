@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline tests for the flight recorder (src\RynthCore.Engine\Net\Flight*.cs, compiled in; pure
+    code, no engine state):
+      - the ring (order, wrap, truncation, concurrent writers against a reader);
+      - what is kept from client and server datagrams (filters, the player's id learned from
+        game events, objects the character used, position rate limit, retransmit dedupe,
+        resend-request markers);
+      - engine-call tagging ([eng] / [cli]) and folding of repeated calls;
+      - the stall detectors (use refusal, unanswered uses, "too busy") and the dump rate limit;
+      - decoding every recorded message type from hand-built bytes (WireBuilder.cs from
+        NetMessageTests), truncated and garbage input, and the dump file format;
+      - cost: no allocation and time per datagram on the hot path.
+    Extra arguments are .rnc captures from "/rc netmsg capture" (server datagrams): replayed through
+    the recorder and dumped to the console.
+    Nothing native: no AC, no engine.
+    Run: dotnet run -c Release [(double dash) capture.rnc ...]   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>FlightRecorderTests</RootNamespace>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Net\AcPacketWire.cs" Link="Engine\AcPacketWire.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\FlightRing.cs" Link="Engine\FlightRing.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\FlightCapture.cs" Link="Engine\FlightCapture.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\FlightFormat.cs" Link="Engine\FlightFormat.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\IdRequester.cs" Link="Engine\IdRequester.cs" />
+    <Compile Include="..\NetMessageTests\WireBuilder.cs" Link="WireBuilder.cs" />
+  </ItemGroup>
+
+</Project>

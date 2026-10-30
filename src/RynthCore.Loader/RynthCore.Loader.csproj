@@ -26,4 +26,13 @@
     <Optimize>false</Optimize>
   </PropertyGroup>
 
+  <!-- GC segment size (hex, 8 MB): reserves 16 MB of acclient's address space instead of 48. See RynthCore.Engine.csproj. -->
+  <ItemGroup>
+    <IlcArg Include="--runtimeopt:GCSegmentSize=800000" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file in RynthSuite Plugins\Shared. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+  </ItemGroup>
+
 </Project>

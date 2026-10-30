@@ -2,12 +2,10 @@
 //  RynthCore.Engine — UI/Panels/SettingsPanel.cs
 //  Avalonia replica of LegacyAdvancedSettingsUi (RynthSuite plugin).
 //
-//  11 tabs: Display | UI | Misc | Recharge | Melee Combat | Spell Combat |
-//           Ranges | Navigation | Buffing | Crafting | Looting
-//
-//  Plugin exports used:
-//    RynthPluginGetSettingsJson  → polled every 5s for external edits
-//    RynthPluginSetSettingsJson  → immediate write-back on any control change
+//  Tabs and rows come from SettingsSchema (UI/Data/SettingsData.cs), which
+//  the ImGui face draws too: add a setting there, not here. Data goes through
+//  UiDataHub (UiSources.Settings, SettingsCommands.Save), so the plugin's
+//  exports run on the pump thread instead of this UI thread.
 // ============================================================================
 
 using System;
@@ -25,26 +23,12 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using RynthCore.Engine.ImGuiBackend;
 using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI.Data;
 
 namespace RynthCore.Engine.UI.Panels;
 
-[JsonSerializable(typeof(SettingsPanel.Settings))]
-[JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true, WriteIndented = false, IncludeFields = false)]
-internal partial class SettingsPanelJsonContext : JsonSerializerContext { }
-
 internal static class SettingsPanel
 {
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate IntPtr GetSettingsJsonFn();
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void SetSettingsJsonFn(IntPtr ansiJson);
-
-    private static GetSettingsJsonFn? _getSettingsJson;
-    private static SetSettingsJsonFn? _setSettingsJson;
-
     // ── Color palette (shared with other panels) ─────────────────────────────
     private static readonly IBrush ColTeal      = new SolidColorBrush(Color.FromRgb(0x26, 0xD9, 0xE6));
     private static readonly IBrush ColAmber     = new SolidColorBrush(Color.FromRgb(0xE8, 0xB3, 0x33));
@@ -59,160 +43,21 @@ internal static class SettingsPanel
     private static readonly IBrush ColToggleOff = new SolidColorBrush(Color.FromRgb(0x33, 0x44, 0x55));
     private static readonly IBrush ColTabActive = new SolidColorBrush(Color.FromRgb(0x1A, 0x2E, 0x42));
 
-    private static readonly string[] Tabs =
-        { "Display", "UI", "Misc", "Recharge", "Melee Combat", "Spell Combat",
-          "Ranges", "Navigation", "Buffing", "Crafting", "Looting" };
-
-    private static readonly string[] AttackHeights   = { "Low", "Medium", "High" };
-    private static readonly string[] LootOwnershipModes = { "My Kills Only", "Fellowship Kills", "All Corpses" };
-    private static readonly string[] MovementModes   = { "Legacy (Autorun)", "Tier 1 (CM_Movement)", "Tier 2 (MoveToPosition)" };
-
-    // ── Settings mirror (matches SettingsBridgePayload on plugin side) ────────
-    internal sealed class Settings
-    {
-        // Display
-        public bool ShowTargetStaminaMana { get; set; }
-        // UI
-        public bool SuppressRetailRadar { get; set; }
-        public bool ShowRynthRadar { get; set; }
-        public bool RadarClickThrough { get; set; }
-        // NOTE: retail-chatbox suppression intentionally removed here — it is owned by the
-        // RynthChat plugin ("Hide retail chat" in the RynthChat panel's gear menu). Routing it
-        // through RynthAi's settings push fought that toggle and didn't work. See RynthChatPanel.
-        public bool ShowRynthChat { get; set; }
-        public bool ChatClickThrough { get; set; }
-        public bool SuppressRetailPowerbar { get; set; }
-        // Misc
-        public bool EnableFPSLimit { get; set; }
-        public int TargetFPSFocused { get; set; } = 60;
-        public int TargetFPSBackground { get; set; } = 30;
-        public bool EnableAutocram { get; set; }
-        public bool PeaceModeWhenIdle { get; set; }
-        public bool StartMacroOnLogin { get; set; }
-        public bool PatrolOnLogin { get; set; }
-        public bool EnableRaycasting { get; set; }
-        public bool UseArcs { get; set; }
-        public float BowArcVelocity { get; set; } = 25f;
-        public float CrossbowArcVelocity { get; set; } = 40f;
-        public float AtlatlArcVelocity { get; set; } = 22f;
-        public float MagicArcVelocity { get; set; } = 25f;
-        public int BlacklistAttempts { get; set; } = 3;
-        public int BlacklistTimeoutSec { get; set; } = 30;
-        public int TargetNoProgressTimeoutSec { get; set; }
-        public int GiveQueueIntervalMs { get; set; } = 150;
-        // Recharge
-        public int HealAt { get; set; } = 60;
-        public int RestamAt { get; set; } = 30;
-        public int GetManaAt { get; set; } = 40;
-        public int TopOffHP { get; set; } = 95;
-        public int TopOffStam { get; set; } = 95;
-        public int TopOffMana { get; set; } = 95;
-        public int HealOthersAt { get; set; } = 50;
-        public int RestamOthersAt { get; set; } = 10;
-        public int InfuseOthersAt { get; set; } = 10;
-        // Melee Combat
-        public bool UseRecklessness { get; set; }
-        public int MeleeAttackPower { get; set; } = -1;
-        public int MeleeAttackHeight { get; set; } = 1;
-        public int MissileAttackPower { get; set; } = -1;
-        public int MissileAttackHeight { get; set; } = 1;
-        public bool UseNativeAttack { get; set; } = true;
-        public bool SummonPets { get; set; }
-        public int PetMinMonsters { get; set; } = 1;
-        // Spell Combat
-        public int SpellCastIntervalMs { get; set; } = 400;
-        public int AttackSpellIntervalMs { get; set; } = 1500;
-        public bool CastDispelSelf { get; set; }
-        public int MinRingTargets { get; set; } = 4;
-        public int MinSkillLevelTier1 { get; set; } = 35;
-        public int MinSkillLevelTier2 { get; set; } = 85;
-        public int MinSkillLevelTier3 { get; set; } = 135;
-        public int MinSkillLevelTier4 { get; set; } = 185;
-        public int MinSkillLevelTier5 { get; set; } = 235;
-        public int MinSkillLevelTier6 { get; set; } = 285;
-        public int MinSkillLevelTier7 { get; set; } = 335;
-        public int MinSkillLevelTier8 { get; set; } = 435;
-        // Ranges
-        public int MonsterRange { get; set; } = 50;
-        public int RingRange { get; set; } = 5;
-        public int ApproachRange { get; set; } = 4;
-        public double CorpseApproachRangeMax { get; set; } = 10.0;
-        public double CorpseApproachRangeMin { get; set; } = 2.0;
-        // Navigation
-        public bool BoostNavPriority { get; set; }
-        public float FollowNavMin { get; set; } = 1.5f;
-        public float NavRingThickness { get; set; } = 6f;
-        public float NavLineThickness { get; set; } = 6f;
-        public float NavHeightOffset { get; set; } = 0.05f;
-        public float NavSlopeSink { get; set; } = 1.5f;
-        public bool ShowTerrainPassability { get; set; } = true;
-        public bool OpenDoors { get; set; }
-        public float OpenDoorRange { get; set; } = 5f;
-        public bool AutoUnlockDoors { get; set; }
-        public int MovementMode { get; set; }
-        public float NavStopTurnAngle { get; set; } = 20f;
-        public float NavResumeTurnAngle { get; set; } = 10f;
-        public float NavDeadZone { get; set; } = 4f;
-        public float NavSweepMult { get; set; } = 2.5f;
-        public float NavLookaheadYards { get; set; } = 4f;
-        public float NavTurnRateDegPerSec { get; set; } = 270f;
-        public float NavTier1TurnSpeed { get; set; } = 3f;
-        public float PostPortalDelaySec { get; set; } = 4f;
-        public float T2Speed { get; set; } = 1f;
-        public float T2WalkWithinYd { get; set; } = 5f;
-        public float T2DistanceTo { get; set; } = 0.5f;
-        public float T2ReissueMs { get; set; } = 2000f;
-        public float T2MaxRangeYd { get; set; } = 500f;
-        public int T2MaxLandblocks { get; set; } = 3;
-        // Buffing
-        public bool EnableBuffing { get; set; } = true;
-        public bool RebuffWhenIdle { get; set; }
-        public int RebuffSecondsRemaining { get; set; } = 300;
-        public int BuffMinSkillLevelTier1 { get; set; } = 35;
-        public int BuffMinSkillLevelTier2 { get; set; } = 85;
-        public int BuffMinSkillLevelTier3 { get; set; } = 135;
-        public int BuffMinSkillLevelTier4 { get; set; } = 185;
-        public int BuffMinSkillLevelTier5 { get; set; } = 235;
-        public int BuffMinSkillLevelTier6 { get; set; } = 285;
-        public int BuffMinSkillLevelTier7 { get; set; } = 335;
-        public int BuffMinSkillLevelTier8 { get; set; } = 435;
-        // Crafting
-        public bool EnableMissileCrafting { get; set; } = true;
-        public string MissileCraftingState { get; set; } = string.Empty;
-        public bool MissileCraftingActive { get; set; }
-        public string MissileCraftingStatus { get; set; } = string.Empty;
-        // Looting
-        public bool EnableLooting { get; set; }
-        public bool BoostLootPriority { get; set; }
-        public bool LootOnlyRareCorpses { get; set; }
-        public bool LootJumpEnabled { get; set; }
-        public int LootJumpHeight { get; set; } = 10;
-        public int LootOwnership { get; set; }
-        public bool EnableAutostack { get; set; } = true;
-        public bool EnableCombineSalvage { get; set; } = true;
-        public bool CombineBagsDuringSalvage { get; set; } = true;
-        public int LootInterItemDelayMs { get; set; } = 50;
-        public int LootContentSettleMs { get; set; } = 100;
-        public int LootEmptyCorpseMs { get; set; } = 300;
-        public int LootClosingDelayMs { get; set; } = 200;
-        public int LootAssessWindowMs { get; set; } = 200;
-        public int LootRetryTimeoutMs { get; set; } = 500;
-        public int LootOpenRetryMs { get; set; } = 1500;
-        public int LootCorpseTimeoutMs { get; set; } = 12000;
-        public int SalvageOpenDelayFirstMs { get; set; } = 400;
-        public int SalvageOpenDelayFastMs { get; set; } = 50;
-        public int SalvageAddDelayFirstMs { get; set; } = 600;
-        public int SalvageAddDelayFastMs { get; set; } = 50;
-        public int SalvageSalvageDelayMs { get; set; } = 50;
-        public int SalvageResultDelayFirstMs { get; set; } = 1000;
-        public int SalvageResultDelayFastMs { get; set; } = 250;
-    }
-
     private sealed class PanelState
     {
-        public Settings Data = new();
+        public RynthAiSettings Data = new();
         public int SelectedTab;
-        public bool Dirty;
+        // Hub snapshot version last applied (replaces the old raw-JSON gate).
+        public long SeenVersion = -1;
+        // Companion fix (SettingsPanel.cs:501 finding): visibility-gating
+        // controls (EnableFPSLimit, UseArcs, meleeAuto, missileAuto,
+        // OpenDoors, MovementMode, EnableMissileCrafting, LootJumpEnabled)
+        // call this right after Push() so their dependent rows appear/
+        // disappear immediately instead of waiting up to 5s for the poll —
+        // required once the poll itself is gated (JSON diff + focus guard
+        // above), since the poll was previously the ONLY thing that ever
+        // rebuilt these rows.
+        public Action? Rebuild;
     }
 
     // ── Picker overlay state (shared across tab renders) ─────────────────────
@@ -291,7 +136,6 @@ internal static class SettingsPanel
 
     public static Control Create()
     {
-        TryBind();
         var state = new PanelState();
 
         var root = new Border
@@ -357,12 +201,13 @@ internal static class SettingsPanel
 
         // ── Tab buttons ───────────────────────────────────────────────────────
         var tabButtons = new List<Button>();
-        for (int i = 0; i < Tabs.Length; i++)
+        SettingsTab[] tabs = SettingsSchema.Tabs;
+        for (int i = 0; i < tabs.Length; i++)
         {
             int idx = i;
             var btn = new Button
             {
-                Content = Tabs[i],
+                Content = tabs[i].Name,
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Left,
                 Background = ColBtnFill,
@@ -385,28 +230,45 @@ internal static class SettingsPanel
             sidebarStack.Children.Add(btn);
         }
 
-        // ── Initial data load ─────────────────────────────────────────────────
-        if (TryFetch(out var initial)) state.Data = initial;
+        state.Rebuild = () => RebuildContent(state, contentStack, picker);
+
+        // ── Data: the hub's settings snapshot ─────────────────────────────────
+        void ApplySnapshot()
+        {
+            var snap = UiSources.Settings.Current;
+            if (snap == null || snap.Version == state.SeenVersion) return;
+            state.SeenVersion = snap.Version;
+            state.Data = snap.Value.Clone();
+            RebuildContent(state, contentStack, picker);
+        }
+
         picker.Root = root;
         UpdateTabHighlight(tabButtons, 0);
         RebuildContent(state, contentStack, picker);
 
-        // ── Poll timer ────────────────────────────────────────────────────────
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        // Poll the snapshot (the hub fetches every 5 s while subscribed, and
+        // right after each save). Never while a field is being typed in: that
+        // used to clobber in-progress edits (UI deep-dive TL;DR #9).
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         timer.Tick += (_, _) =>
         {
-            if (_getSettingsJson == null) TryBind();
-            if (state.Dirty) return;
-            if (!TryFetch(out var fresh)) return;
-            state.Data = fresh;
-            RebuildContent(state, contentStack, picker);
+            if (Win32Backend.AvaloniaTextInputActive) return;
+            ApplySnapshot();
         };
-        timer.Start();
         // Stop with the visual tree — a running DispatcherTimer roots the closed
         // view forever (one immortal poller per open/close). RadarPanel idiom;
         // must restart on attach: drag/resize fires Detached→Attached.
-        root.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
-        root.DetachedFromVisualTree += (_, _) => timer.Stop();
+        root.AttachedToVisualTree += (_, _) =>
+        {
+            UiSources.Settings.Subscribe();
+            UiSources.Settings.RequestRefresh();
+            if (!timer.IsEnabled) timer.Start();
+        };
+        root.DetachedFromVisualTree += (_, _) =>
+        {
+            timer.Stop();
+            UiSources.Settings.Unsubscribe();
+        };
 
         return root;
     }
@@ -427,7 +289,7 @@ internal static class SettingsPanel
         // Tab header
         var header = new TextBlock
         {
-            Text = $"Advanced Settings > {Tabs[state.SelectedTab]}",
+            Text = $"Advanced Settings > {SettingsSchema.Tabs[state.SelectedTab].Name}",
             Foreground = ColTeal,
             FontSize = 11,
             FontWeight = Avalonia.Media.FontWeight.Bold,
@@ -436,451 +298,101 @@ internal static class SettingsPanel
         panel.Children.Add(header);
         panel.Children.Add(new Border { Height = 1, Background = ColBtnBord, Margin = new Thickness(0, 0, 0, 6) });
 
-        switch (state.SelectedTab)
+        foreach (SettingRow row in SettingsSchema.Tabs[state.SelectedTab].Rows)
         {
-            case 0: BuildDisplayTab(state, panel, picker); break;
-            case 1: BuildUITab(state, panel, picker); break;
-            case 2: BuildMiscTab(state, panel, picker); break;
-            case 3: BuildRechargeTab(state, panel, picker); break;
-            case 4: BuildMeleeCombatTab(state, panel, picker); break;
-            case 5: BuildSpellCombatTab(state, panel, picker); break;
-            case 6: BuildRangesTab(state, panel, picker); break;
-            case 7: BuildNavigationTab(state, panel, picker); break;
-            case 8: BuildBuffingTab(state, panel, picker); break;
-            case 9: BuildCraftingTab(state, panel, picker); break;
-            case 10: BuildLootingTab(state, panel, picker); break;
+            if (!row.IsVisible(state.Data)) continue;
+            Control? control = BuildRow(state, row, picker);
+            if (control != null) panel.Children.Add(control);
         }
     }
 
-    // =========================================================================
-    //  Tab content builders
-    // =========================================================================
-
-    private static void BuildDisplayTab(PanelState state, StackPanel p, PickerState picker)
+    /// <summary>One schema row as the Avalonia control it has always been.</summary>
+    private static Control? BuildRow(PanelState state, SettingRow row, PickerState picker)
     {
-        p.Children.Add(BoolRow("Show Target Stamina / Mana",
-            state.Data.ShowTargetStaminaMana,
-            v => { state.Data.ShowTargetStaminaMana = v; Push(state); },
-            "When enabled, displays stamina and mana bars for the selected target (requires appraisal data)."));
-    }
-
-    private static void BuildUITab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(SectionHeader("Radar"));
-        p.Children.Add(BoolRow("Get Rid of Retail Radar", state.Data.SuppressRetailRadar,
-            v => { state.Data.SuppressRetailRadar = v; Push(state); },
-            "Suppress the game's built-in radar (bezel, compass, coords, blips)."));
-        p.Children.Add(BoolRow("Show RynthRadar", state.Data.ShowRynthRadar,
-            v => { state.Data.ShowRynthRadar = v; Push(state); },
-            "Render the custom square radar widget (indoor walls + dot markers, works outdoors)."));
-        p.Children.Add(BoolRow("Radar Click-Through", state.Data.RadarClickThrough,
-            v => { state.Data.RadarClickThrough = v; Push(state); },
-            "Mouse events over the radar pass through to the game instead of the widget."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Chat"));
-        // "Get Rid of Retail Chatbox" lives in the RynthChat panel's gear menu ("Hide retail chat"),
-        // which owns ChatHooks.SuppressOriginalChat directly. The old row here routed through RynthAi's
-        // settings push and was clobbered every tick, so it was removed.
-        p.Children.Add(BoolRow("Show RynthChat", state.Data.ShowRynthChat,
-            v => { state.Data.ShowRynthChat = v; Push(state); },
-            "Render the custom chat viewer (scrollback + channel coloring)."));
-        p.Children.Add(BoolRow("Chat Click-Through", state.Data.ChatClickThrough,
-            v => { state.Data.ChatClickThrough = v; Push(state); },
-            "Mouse events over the chat pass through to the game. The gear button stays clickable."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Power Bar"));
-        p.Children.Add(BoolRow("Get Rid of Retail Power Bar", state.Data.SuppressRetailPowerbar,
-            v => { state.Data.SuppressRetailPowerbar = v; Push(state); },
-            "Hide the vanilla attack/magic power bar that appears under the cursor while charging.\nThe bar's underlying combat state still works — only the on-screen widget is hidden."));
-    }
-
-    private static void BuildMiscTab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(BoolRow("Enable FPS Limit", state.Data.EnableFPSLimit,
-            v => { state.Data.EnableFPSLimit = v; Push(state); }));
-        if (state.Data.EnableFPSLimit)
+        RynthAiSettings d = state.Data;
+        void Changed(double v)
         {
-            p.Children.Add(IntRow("Focused FPS", state.Data.TargetFPSFocused, 10, 240, 1,
-                v => { state.Data.TargetFPSFocused = v; Push(state); }));
-            p.Children.Add(IntRow("Background FPS", state.Data.TargetFPSBackground, 5, 60, 1,
-                v => { state.Data.TargetFPSBackground = v; Push(state); }));
-        }
-
-        p.Children.Add(Spacer());
-        p.Children.Add(BoolRow("Auto Cram", state.Data.EnableAutocram,
-            v => { state.Data.EnableAutocram = v; Push(state); },
-            "Automatically moves items from your main pack into side packs.\nNote: recently used weapons stay in the main pack."));
-        p.Children.Add(BoolRow("Peace Mode When Idle", state.Data.PeaceModeWhenIdle,
-            v => { state.Data.PeaceModeWhenIdle = v; Push(state); }));
-        p.Children.Add(BoolRow("Start Macro On Login", state.Data.StartMacroOnLogin,
-            v => { state.Data.StartMacroOnLogin = v; Push(state); },
-            "Automatically starts the macro when RynthAi loads."));
-        p.Children.Add(BoolRow("Patrol On Login", state.Data.PatrolOnLogin,
-            v => { state.Data.PatrolOnLogin = v; Push(state); },
-            "Automatically starts dungeon patrol when RynthAi loads."));
-        p.Children.Add(BoolRow("Enable Raycasting", state.Data.EnableRaycasting,
-            v => { state.Data.EnableRaycasting = v; Push(state); }));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Missile Arc Velocities (m/s)"));
-        p.Children.Add(BoolRow("Use Arcs for Missile LoS", state.Data.UseArcs,
-            v => { state.Data.UseArcs = v; Push(state); },
-            "When off, all missile LoS checks are linear (eye-to-eye)."));
-        if (state.Data.UseArcs)
-        {
-            p.Children.Add(FloatRow("Bow",      state.Data.BowArcVelocity,      10f, 60f, 0.5f, v => { state.Data.BowArcVelocity = v; Push(state); }, "Bow projectile speed (m/s). Lower = higher arc."));
-            p.Children.Add(FloatRow("Crossbow", state.Data.CrossbowArcVelocity, 10f, 80f, 0.5f, v => { state.Data.CrossbowArcVelocity = v; Push(state); }));
-            p.Children.Add(FloatRow("Atlatl",   state.Data.AtlatlArcVelocity,   10f, 60f, 0.5f, v => { state.Data.AtlatlArcVelocity = v; Push(state); }));
-            p.Children.Add(FloatRow("Magic Arc", state.Data.MagicArcVelocity,   10f, 60f, 0.5f, v => { state.Data.MagicArcVelocity = v; Push(state); }));
-        }
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Monster Blacklist"));
-        p.Children.Add(IntRow("Attempts Before Blacklist", state.Data.BlacklistAttempts, 1, 20, 1,
-            v => { state.Data.BlacklistAttempts = v; Push(state); },
-            "How many failed attack attempts on a mob before it gets blacklisted."));
-        p.Children.Add(IntRow("Blacklist Timeout (sec)", state.Data.BlacklistTimeoutSec, 5, 120, 5,
-            v => { state.Data.BlacklistTimeoutSec = v; Push(state); },
-            "How long a blacklisted mob is ignored before re-trying."));
-        p.Children.Add(IntRow("No Progress Timeout (sec)", state.Data.TargetNoProgressTimeoutSec, 0, 300, 10,
-            v => { state.Data.TargetNoProgressTimeoutSec = v; Push(state); },
-            "Blacklist a target after being engaged this many seconds without dealing damage.\n0 = disabled. Default 60s."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Give Queue"));
-        p.Children.Add(IntRow("Give Interval (ms)", state.Data.GiveQueueIntervalMs, 50, 2000, 50,
-            v => { state.Data.GiveQueueIntervalMs = v; Push(state); },
-            "Minimum delay between each item sent by /ra givea commands."));
-    }
-
-    private static void BuildRechargeTab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(SectionHeader("In Combat — target within Monster Range (%)"));
-        p.Children.Add(IntRow("Heal At",    state.Data.HealAt,   0, 100, 1, v => { state.Data.HealAt   = v; Push(state); },
-            "While a target is within Monster Range, cast Heal Self when HP < this %."));
-        p.Children.Add(IntRow("Re-stam At", state.Data.RestamAt, 0, 100, 1, v => { state.Data.RestamAt = v; Push(state); },
-            "While a target is within Monster Range, cast Revitalize Self when Stamina < this %."));
-        p.Children.Add(IntRow("Get Mana At", state.Data.GetManaAt, 0, 100, 1, v => { state.Data.GetManaAt = v; Push(state); },
-            "While a target is within Monster Range, cast Stamina to Mana Self when Mana < this % (needs stam > 15%)."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Idle Top-Off — no targets in range (%)"));
-        p.Children.Add(IntRow("Top HP",   state.Data.TopOffHP,   0, 100, 1, v => { state.Data.TopOffHP   = v; Push(state); },
-            "When no targets are within Monster Range, heal up to this HP %. Usually set higher than Heal At."));
-        p.Children.Add(IntRow("Top Stam", state.Data.TopOffStam, 0, 100, 1, v => { state.Data.TopOffStam = v; Push(state); },
-            "When no targets are within Monster Range, re-stam up to this %."));
-        p.Children.Add(IntRow("Top Mana", state.Data.TopOffMana, 0, 100, 1, v => { state.Data.TopOffMana = v; Push(state); },
-            "When no targets are within Monster Range, recharge mana up to this %."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Helper Settings (%) — NOT WIRED YET"));
-        p.Children.Add(IntRow("Heal Others",    state.Data.HealOthersAt,    0, 100, 1, v => { state.Data.HealOthersAt   = v; Push(state); },
-            "Intended: cast Heal Other on a fellow when their HP < this %. Not implemented yet — slider is inert."));
-        p.Children.Add(IntRow("Re-stam Others", state.Data.RestamOthersAt,  0, 100, 1, v => { state.Data.RestamOthersAt = v; Push(state); },
-            "Intended: cast Revitalize Other on a fellow when their Stamina < this %. Not implemented yet — slider is inert."));
-        p.Children.Add(IntRow("Infuse Others",  state.Data.InfuseOthersAt,  0, 100, 1, v => { state.Data.InfuseOthersAt = v; Push(state); },
-            "Intended: cast Infuse Mana Other on a fellow when their Mana < this %. Not implemented yet — slider is inert."));
-    }
-
-    private static void BuildMeleeCombatTab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(SectionHeader("Attack Power & Height"));
-        p.Children.Add(BoolRow("Use Recklessness", state.Data.UseRecklessness,
-            v => { state.Data.UseRecklessness = v; Push(state); },
-            "When enabled and Recklessness is trained, auto power uses 80% instead of 100%."));
-
-        p.Children.Add(Spacer());
-        bool meleeAuto = state.Data.MeleeAttackPower < 0;
-        p.Children.Add(BoolRow("Melee Auto Power", meleeAuto, v =>
-        {
-            state.Data.MeleeAttackPower = v ? -1 : 100;
+            row.Set!(state.Data, v);
             Push(state);
-        }));
-        if (!meleeAuto)
-        {
-            p.Children.Add(IntRow("Melee Power %", state.Data.MeleeAttackPower, 0, 100, 5,
-                v => { state.Data.MeleeAttackPower = v; Push(state); }));
-        }
-        p.Children.Add(ComboRow("Melee Attack Height", AttackHeights, state.Data.MeleeAttackHeight,
-            v => { state.Data.MeleeAttackHeight = v; Push(state); }, picker));
-
-        p.Children.Add(Spacer());
-        bool missileAuto = state.Data.MissileAttackPower < 0;
-        p.Children.Add(BoolRow("Missile Auto Power", missileAuto, v =>
-        {
-            state.Data.MissileAttackPower = v ? -1 : 100;
-            Push(state);
-        }));
-        if (!missileAuto)
-        {
-            p.Children.Add(IntRow("Missile Power %", state.Data.MissileAttackPower, 0, 100, 5,
-                v => { state.Data.MissileAttackPower = v; Push(state); }));
-        }
-        p.Children.Add(ComboRow("Missile Attack Height", AttackHeights, state.Data.MissileAttackHeight,
-            v => { state.Data.MissileAttackHeight = v; Push(state); }, picker));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(BoolRow("Use Native Attack", state.Data.UseNativeAttack,
-            v => { state.Data.UseNativeAttack = v; Push(state); },
-            "Uses the client's combat pipeline for attacks.\nThe client handles turn-to-face naturally (no backwards arrows)."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(BoolRow("Summon Pets", state.Data.SummonPets,
-            v => { state.Data.SummonPets = v; Push(state); }));
-        p.Children.Add(IntRow("Pet Min Monsters", state.Data.PetMinMonsters, 1, 20, 1,
-            v => { state.Data.PetMinMonsters = v; Push(state); }));
-    }
-
-    private static void BuildSpellCombatTab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(SectionHeader("War/Void Casting Settings"));
-        p.Children.Add(IntRow("Buff Spell Interval (ms)", state.Data.SpellCastIntervalMs, 100, 1500, 50,
-            v => { state.Data.SpellCastIntervalMs = v; Push(state); },
-            "Delay between BUFF / utility spell casts (not combat).\nLower = faster buff chains. 400ms is a good balance.\nBelow 200ms may cause fizzles or dropped casts on laggy servers."));
-        p.Children.Add(IntRow("Attack Spell Delay (ms)", state.Data.AttackSpellIntervalMs, 250, 5000, 50,
-            v => { state.Data.AttackSpellIntervalMs = v; Push(state); },
-            "Delay between offensive (war/void) COMBAT casts only.\nSpacing casts ~1-2s (1500ms default) stops back-to-back\n\"You're too busy!\" refusals that drop casts and cost kills.\nDoes NOT affect buffing speed."));
-        p.Children.Add(BoolRow("Cast Dispel Self", state.Data.CastDispelSelf,
-            v => { state.Data.CastDispelSelf = v; Push(state); }));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Ring Spell Override"));
-        p.Children.Add(IntRow("Min Ring Targets", state.Data.MinRingTargets, 1, 20, 1,
-            v => { state.Data.MinRingTargets = v; Push(state); },
-            "If this many monsters are within ring range, ring spells are used instead of arc/bolt/streak."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Spell Difficulty (Min Buffed Skill)"));
-        p.Children.Add(IntRow("Level 1", state.Data.MinSkillLevelTier1, 1,  500, 5, v => { state.Data.MinSkillLevelTier1 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 2", state.Data.MinSkillLevelTier2, 1,  500, 5, v => { state.Data.MinSkillLevelTier2 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 3", state.Data.MinSkillLevelTier3, 1,  500, 5, v => { state.Data.MinSkillLevelTier3 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 4", state.Data.MinSkillLevelTier4, 1,  500, 5, v => { state.Data.MinSkillLevelTier4 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 5", state.Data.MinSkillLevelTier5, 1,  500, 5, v => { state.Data.MinSkillLevelTier5 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 6", state.Data.MinSkillLevelTier6, 1,  500, 5, v => { state.Data.MinSkillLevelTier6 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 7", state.Data.MinSkillLevelTier7, 1,  500, 5, v => { state.Data.MinSkillLevelTier7 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 8", state.Data.MinSkillLevelTier8, 1,  500, 5, v => { state.Data.MinSkillLevelTier8 = v; Push(state); }));
-    }
-
-    private static void BuildRangesTab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(SectionHeader("Standard Ranges (Yards)"));
-        p.Children.Add(IntRow("Monster Range",  state.Data.MonsterRange,  1, 200, 1, v => { state.Data.MonsterRange  = v; Push(state); }));
-        p.Children.Add(IntRow("Ring Range",     state.Data.RingRange,     1,  50, 1, v => { state.Data.RingRange     = v; Push(state); }));
-        p.Children.Add(IntRow("Approach Range", state.Data.ApproachRange, 1,  50, 1, v => { state.Data.ApproachRange = v; Push(state); }));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Corpse Acquisition (Yards)"));
-        p.Children.Add(DoubleRow("Corpse Max (yd)", state.Data.CorpseApproachRangeMax, 0.5, 50.0, 0.5,
-            v => { state.Data.CorpseApproachRangeMax = v; Push(state); }));
-        p.Children.Add(DoubleRow("Corpse Min (yd)", state.Data.CorpseApproachRangeMin, 0.5, 20.0, 0.5,
-            v => { state.Data.CorpseApproachRangeMin = v; Push(state); }));
-    }
-
-    private static void BuildNavigationTab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(BoolRow("Boost Nav Priority", state.Data.BoostNavPriority,
-            v => { state.Data.BoostNavPriority = v; Push(state); }));
-        p.Children.Add(FloatRow("Follow/Nav Min (yd)", state.Data.FollowNavMin, 0.5f, 20f, 0.1f,
-            v => { state.Data.FollowNavMin = v; Push(state); },
-            "Arrival distance in yards. Also sets the nav marker ring radius."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Nav Marker Display"));
-        p.Children.Add(FloatRow("Ring Thickness", state.Data.NavRingThickness, 1f, 16f, 1f,
-            v => { state.Data.NavRingThickness = v; Push(state); }));
-        p.Children.Add(FloatRow("Line Thickness", state.Data.NavLineThickness, 1f, 16f, 1f,
-            v => { state.Data.NavLineThickness = v; Push(state); }));
-        p.Children.Add(FloatRow("Height Offset", state.Data.NavHeightOffset, -5f, 5f, 0.05f,
-            v => { state.Data.NavHeightOffset = v; Push(state); },
-            "Vertical offset for nav markers above the ground. Negative = lower."));
-        p.Children.Add(FloatRow("Slope Sink", state.Data.NavSlopeSink, 0f, 8f, 0.1f,
-            v => { state.Data.NavSlopeSink = v; Push(state); },
-            "Extra downward offset on slopes only, per unit of terrain steepness. 0 = off; flat ground is unaffected. ~1.5 cancels the float for a default-radius ring."));
-        p.Children.Add(BoolRow("Show Terrain Passability", state.Data.ShowTerrainPassability,
-            v => { state.Data.ShowTerrainPassability = v; Push(state); },
-            "Highlight impassable terrain triangles in red."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Doors"));
-        p.Children.Add(BoolRow("Open Doors While Navigating", state.Data.OpenDoors,
-            v => { state.Data.OpenDoors = v; Push(state); },
-            "Automatically open doors encountered during navigation."));
-        if (state.Data.OpenDoors)
-        {
-            p.Children.Add(FloatRow("Door Detection Range (yd)", state.Data.OpenDoorRange, 0.1f, 70f, 1f,
-                v => { state.Data.OpenDoorRange = v; Push(state); }));
-            p.Children.Add(BoolRow("Auto-Unlock Doors", state.Data.AutoUnlockDoors,
-                v => { state.Data.AutoUnlockDoors = v; Push(state); },
-                "If a door is locked, try to use a lockpick from your Consumable Items list."));
+            if (row.Gates) state.Rebuild?.Invoke();
         }
 
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Movement Engine"));
-        p.Children.Add(ComboRow("Mode", MovementModes, state.Data.MovementMode,
-            v => { state.Data.MovementMode = v; Push(state); }, picker,
-            "Legacy: SetAutorun + smooth heading servo (TurnToHeading)\nTier 1: SetAutorun + CM_Movement turn commands (DoMovement)\nTier 2: Client physics MoveToPosition (not built yet — falls back to Legacy)"));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Steering"));
-        p.Children.Add(FloatRow("Stop & Turn Angle", state.Data.NavStopTurnAngle, 1f, 90f, 1f,
-            v => { state.Data.NavStopTurnAngle = v; Push(state); },
-            "Stop forward motion and turn in place when heading error exceeds this."));
-        p.Children.Add(FloatRow("Resume Run Angle", state.Data.NavResumeTurnAngle, 1f, 45f, 1f,
-            v => { state.Data.NavResumeTurnAngle = v; Push(state); },
-            "Resume running once the turn-in-place error drops below this."));
-        p.Children.Add(FloatRow("Dead Zone", state.Data.NavDeadZone, 0.5f, 20f, 0.5f,
-            v => { state.Data.NavDeadZone = v; Push(state); },
-            "Ignore heading corrections smaller than this."));
-        p.Children.Add(FloatRow("Sweep Detect Mult", state.Data.NavSweepMult, 0.5f, 10f, 0.1f,
-            v => { state.Data.NavSweepMult = v; Push(state); },
-            "Closest-approach detection radius multiplier."));
-        p.Children.Add(FloatRow("Lookahead (yd)", state.Data.NavLookaheadYards, 0f, 30f, 0.5f,
-            v => { state.Data.NavLookaheadYards = MathF.Max(0f, v); Push(state); },
-            "Within this distance of a waypoint, blend the aim point toward the next one to cut corners smoothly. 0 = off."));
-        p.Children.Add(FloatRow("Turn Rate (deg/s)", state.Data.NavTurnRateDegPerSec, 30f, 720f, 15f,
-            v => { state.Data.NavTurnRateDegPerSec = v; Push(state); },
-            "Legacy / Mode 0 heading-servo max turn speed. Ignored by Tier 1 and Tier 2."));
-        p.Children.Add(FloatRow("Tier1 Turn Speed", state.Data.NavTier1TurnSpeed, 0.5f, 15f, 0.5f,
-            v => { state.Data.NavTier1TurnSpeed = v; Push(state); },
-            "Tier 1 (CM_Movement) turn-command speed = magnitude of the client turn_speed. Higher = snappier turns. Only used in Tier 1 mode."));
-        p.Children.Add(FloatRow("Post-Portal Delay (s)", state.Data.PostPortalDelaySec, 0f, 30f, 0.25f,
-            v => { state.Data.PostPortalDelaySec = MathF.Max(0f, v); Push(state); },
-            "Seconds to settle after any portal/recall teleport before nav resumes."));
-
-        if (state.Data.MovementMode == 2)
+        switch (row.Kind)
         {
-            p.Children.Add(Spacer());
-            p.Children.Add(SectionHeader("Tier 2 Tuning"));
-            p.Children.Add(FloatRow("Speed",               state.Data.T2Speed,       0.1f, 5f,    0.1f, v => { state.Data.T2Speed       = v; Push(state); }));
-            p.Children.Add(FloatRow("Walk Within (yd)",    state.Data.T2WalkWithinYd, 1f,  50f,   1f,   v => { state.Data.T2WalkWithinYd = v; Push(state); }));
-            p.Children.Add(FloatRow("Stop Distance (yd)",  state.Data.T2DistanceTo,  0.1f, 10f,   0.1f, v => { state.Data.T2DistanceTo   = v; Push(state); }));
-            p.Children.Add(FloatRow("Reissue Timeout (ms)",state.Data.T2ReissueMs,   100f, 10000f,100f,  v => { state.Data.T2ReissueMs    = v; Push(state); }));
-            p.Children.Add(FloatRow("Max Range (yd)",      state.Data.T2MaxRangeYd,   50f, 2000f,  50f, v => { state.Data.T2MaxRangeYd   = v; Push(state); }));
-            p.Children.Add(IntRow("Max Landblock Dist",    state.Data.T2MaxLandblocks, 1, 20, 1,         v => { state.Data.T2MaxLandblocks = v; Push(state); }));
-        }
-    }
-
-    private static void BuildBuffingTab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(BoolRow("Enable Buffing", state.Data.EnableBuffing,
-            v => { state.Data.EnableBuffing = v; Push(state); }));
-        p.Children.Add(BoolRow("Rebuff When Idle", state.Data.RebuffWhenIdle,
-            v => { state.Data.RebuffWhenIdle = v; Push(state); }));
-        p.Children.Add(IntRow("Rebuff With (seconds left)", state.Data.RebuffSecondsRemaining, 30, 1800, 30,
-            v => { state.Data.RebuffSecondsRemaining = v; Push(state); },
-            "Recast a self buff when its remaining duration drops below this value.\nDefault 300 (5 minutes). Lower values rebuff more eagerly."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Buff Difficulty (Min Buffed Skill)"));
-        p.Children.Add(IntRow("Level 1", state.Data.BuffMinSkillLevelTier1, 1, 500, 5, v => { state.Data.BuffMinSkillLevelTier1 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 2", state.Data.BuffMinSkillLevelTier2, 1, 500, 5, v => { state.Data.BuffMinSkillLevelTier2 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 3", state.Data.BuffMinSkillLevelTier3, 1, 500, 5, v => { state.Data.BuffMinSkillLevelTier3 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 4", state.Data.BuffMinSkillLevelTier4, 1, 500, 5, v => { state.Data.BuffMinSkillLevelTier4 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 5", state.Data.BuffMinSkillLevelTier5, 1, 500, 5, v => { state.Data.BuffMinSkillLevelTier5 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 6", state.Data.BuffMinSkillLevelTier6, 1, 500, 5, v => { state.Data.BuffMinSkillLevelTier6 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 7", state.Data.BuffMinSkillLevelTier7, 1, 500, 5, v => { state.Data.BuffMinSkillLevelTier7 = v; Push(state); }));
-        p.Children.Add(IntRow("Level 8", state.Data.BuffMinSkillLevelTier8, 1, 500, 5, v => { state.Data.BuffMinSkillLevelTier8 = v; Push(state); }));
-    }
-
-    private static void BuildCraftingTab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(SectionHeader("Missile Ammo Crafting"));
-        p.Children.Add(BoolRow("Enable Missile Crafting", state.Data.EnableMissileCrafting,
-            v => { state.Data.EnableMissileCrafting = v; Push(state); },
-            "Auto-manage missile ammo when the ammo slot is empty or low."));
-
-        if (!state.Data.EnableMissileCrafting)
-        {
-            p.Children.Add(new TextBlock { Text = "(Disabled)", Foreground = ColMute, FontSize = 11, Margin = new Thickness(0, 4, 0, 0) });
-            return;
-        }
-
-        p.Children.Add(Spacer());
-        if (!string.IsNullOrEmpty(state.Data.MissileCraftingState))
-        {
-            var stateRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 2, 0, 2) };
-            stateRow.Children.Add(new TextBlock { Text = "State:", Foreground = ColMute, FontSize = 11, VerticalAlignment = VerticalAlignment.Center });
-            stateRow.Children.Add(new TextBlock
-            {
-                Text = state.Data.MissileCraftingState,
-                Foreground = state.Data.MissileCraftingActive ? ColAmber : ColMute,
-                FontSize = 11,
-                FontWeight = Avalonia.Media.FontWeight.Bold,
-                VerticalAlignment = VerticalAlignment.Center,
-            });
-            p.Children.Add(stateRow);
-
-            if (!string.IsNullOrEmpty(state.Data.MissileCraftingStatus))
-            {
-                p.Children.Add(new TextBlock
+            case SettingKind.Bool:
+                return BoolRow(row.Label, row.Get!(d) != 0, v => Changed(v ? 1 : 0), row.Tooltip);
+            case SettingKind.Int:
+                return IntRow(row.Label, (int)row.Get!(d), (int)row.Min, (int)row.Max, (int)row.Step, v => Changed(v), row.Tooltip);
+            case SettingKind.Float:
+                return FloatRow(row.Label, (float)row.Get!(d), (float)row.Min, (float)row.Max, (float)row.Step, v => Changed(v), row.Tooltip);
+            case SettingKind.Double:
+                return DoubleRow(row.Label, row.Get!(d), row.Min, row.Max, row.Step, v => Changed(v), row.Tooltip);
+            case SettingKind.Combo:
+                return ComboRow(row.Label, row.CurrentItems, (int)row.Get!(d), v => Changed(v), picker, row.Tooltip);
+            case SettingKind.Section:
+                return SectionHeader(row.Label);
+            case SettingKind.Spacer:
+                return Spacer();
+            case SettingKind.Button:
+                return ButtonRow(row.Label, row.ButtonText ?? row.Label, () =>
                 {
-                    Text = state.Data.MissileCraftingStatus,
-                    Foreground = ColTextDim,
-                    FontSize = 10,
-                    TextWrapping = Avalonia.Media.TextWrapping.Wrap,
-                    Margin = new Thickness(0, 2, 0, 0),
+                    // A settings edit is pushed like a typed value; the tab is rebuilt so the
+                    // number boxes show the new values.
+                    if (row.Edit != null)
+                    {
+                        row.Edit(state.Data);
+                        Push(state);
+                        state.Rebuild?.Invoke();
+                    }
+                    row.Click?.Invoke();
+                }, row.Tooltip);
+            case SettingKind.TraceCategories:
+                return TraceCategoriesRow(state, row);
+            case SettingKind.Text:
+                return TextRow(row.Label, row.GetText?.Invoke(d) ?? string.Empty, row.Hint, v =>
+                {
+                    row.SetText?.Invoke(state.Data, v);
+                    Push(state);
+                }, row.Tooltip);
+            case SettingKind.Status:
+            {
+                string status = row.GetText?.Invoke(d) ?? string.Empty;
+                return status.Length == 0 ? null : new TextBlock
+                {
+                    Text = status, Foreground = ColTeal, FontSize = 11,
+                    TextWrapping = Avalonia.Media.TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 2),
+                };
+            }
+            case SettingKind.Note:
+                return new TextBlock
+                {
+                    Text = row.Label, Foreground = ColMute, FontSize = row.Label.StartsWith('(') ? 11 : 10,
+                    TextWrapping = Avalonia.Media.TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0),
+                };
+            case SettingKind.CraftingStatus:
+            {
+                var box = new StackPanel();
+                var stateRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 2, 0, 2) };
+                stateRow.Children.Add(new TextBlock { Text = row.Label, Foreground = ColMute, FontSize = 11, VerticalAlignment = VerticalAlignment.Center });
+                stateRow.Children.Add(new TextBlock
+                {
+                    Text = d.MissileCraftingState,
+                    Foreground = d.MissileCraftingActive ? ColAmber : ColMute,
+                    FontSize = 11,
+                    FontWeight = Avalonia.Media.FontWeight.Bold,
+                    VerticalAlignment = VerticalAlignment.Center,
                 });
+                box.Children.Add(stateRow);
+                if (!string.IsNullOrEmpty(d.MissileCraftingStatus))
+                    box.Children.Add(new TextBlock
+                    {
+                        Text = d.MissileCraftingStatus, Foreground = ColTextDim, FontSize = 10,
+                        TextWrapping = Avalonia.Media.TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0),
+                    });
+                return box;
             }
         }
-    }
-
-    private static void BuildLootingTab(PanelState state, StackPanel p, PickerState picker)
-    {
-        p.Children.Add(BoolRow("Enable Looting", state.Data.EnableLooting,
-            v => { state.Data.EnableLooting = v; Push(state); }));
-        p.Children.Add(BoolRow("Boost Loot Priority", state.Data.BoostLootPriority,
-            v => { state.Data.BoostLootPriority = v; Push(state); }));
-        p.Children.Add(BoolRow("Loot Only Rare Corpses", state.Data.LootOnlyRareCorpses,
-            v => { state.Data.LootOnlyRareCorpses = v; Push(state); }));
-        p.Children.Add(BoolRow("Jump When Looting", state.Data.LootJumpEnabled,
-            v => { state.Data.LootJumpEnabled = v; Push(state); }));
-        if (state.Data.LootJumpEnabled)
-        {
-            p.Children.Add(IntRow("Jump Height", state.Data.LootJumpHeight, 1, 100, 5,
-                v => { state.Data.LootJumpHeight = v; Push(state); }));
-        }
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Corpse Ownership"));
-        p.Children.Add(ComboRow("Loot From", LootOwnershipModes, state.Data.LootOwnership,
-            v => { state.Data.LootOwnership = v; Push(state); }, picker));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Inventory Management"));
-        p.Children.Add(BoolRow("Enable Autostack", state.Data.EnableAutostack,
-            v => { state.Data.EnableAutostack = v; Push(state); }));
-        p.Children.Add(BoolRow("Enable Autocram", state.Data.EnableAutocram,
-            v => { state.Data.EnableAutocram = v; Push(state); },
-            "Automatically moves items from your main pack into side packs.\nNote: recently used weapons stay in the main pack."));
-        p.Children.Add(BoolRow("Combine Salvage Bags", state.Data.EnableCombineSalvage,
-            v => { state.Data.EnableCombineSalvage = v; Push(state); },
-            "After the salvage queue empties, move same-name bags together so the server merges them."));
-        p.Children.Add(BoolRow("Combine Bags During Salvage", state.Data.CombineBagsDuringSalvage,
-            v => { state.Data.CombineBagsDuringSalvage = v; Push(state); },
-            "When salvaging an item, also add any under-full salvage bag of the same material to the salvage panel."));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Loot Timers (ms)"));
-        p.Children.Add(IntRow("Inter-Item Delay",   state.Data.LootInterItemDelayMs, 0, 5000, 25,  v => { state.Data.LootInterItemDelayMs  = v; Push(state); }));
-        p.Children.Add(IntRow("Content Settle",     state.Data.LootContentSettleMs,  0, 5000, 25,  v => { state.Data.LootContentSettleMs   = v; Push(state); }));
-        p.Children.Add(IntRow("Empty Corpse Wait",  state.Data.LootEmptyCorpseMs,    0, 5000, 25,  v => { state.Data.LootEmptyCorpseMs     = v; Push(state); }));
-        p.Children.Add(IntRow("Closing Delay",      state.Data.LootClosingDelayMs,   0, 5000, 25,  v => { state.Data.LootClosingDelayMs    = v; Push(state); }));
-        p.Children.Add(IntRow("Assess Window",      state.Data.LootAssessWindowMs,   0, 5000, 25,  v => { state.Data.LootAssessWindowMs    = v; Push(state); }));
-        p.Children.Add(IntRow("Loot Retry Timeout", state.Data.LootRetryTimeoutMs,   0, 10000, 100, v => { state.Data.LootRetryTimeoutMs   = v; Push(state); }));
-        p.Children.Add(IntRow("Corpse Open Retry",  state.Data.LootOpenRetryMs,      0, 10000, 100, v => { state.Data.LootOpenRetryMs      = v; Push(state); }));
-        p.Children.Add(IntRow("Corpse Timeout",     state.Data.LootCorpseTimeoutMs,  0, 60000, 500, v => { state.Data.LootCorpseTimeoutMs  = v; Push(state); }));
-
-        p.Children.Add(Spacer());
-        p.Children.Add(SectionHeader("Salvage Timers (ms) - First / Fast"));
-        p.Children.Add(IntRow("Open (First)",       state.Data.SalvageOpenDelayFirstMs,   0, 5000, 50, v => { state.Data.SalvageOpenDelayFirstMs   = v; Push(state); }));
-        p.Children.Add(IntRow("Open (Fast)",        state.Data.SalvageOpenDelayFastMs,    0, 2000, 25, v => { state.Data.SalvageOpenDelayFastMs    = v; Push(state); }));
-        p.Children.Add(IntRow("Add Item (First)",   state.Data.SalvageAddDelayFirstMs,    0, 5000, 50, v => { state.Data.SalvageAddDelayFirstMs    = v; Push(state); }));
-        p.Children.Add(IntRow("Add Item (Fast)",    state.Data.SalvageAddDelayFastMs,     0, 2000, 25, v => { state.Data.SalvageAddDelayFastMs     = v; Push(state); }));
-        p.Children.Add(IntRow("Salvage Click",      state.Data.SalvageSalvageDelayMs,     0, 2000, 25, v => { state.Data.SalvageSalvageDelayMs     = v; Push(state); }));
-        p.Children.Add(IntRow("Result (First)",     state.Data.SalvageResultDelayFirstMs, 0, 5000, 50, v => { state.Data.SalvageResultDelayFirstMs = v; Push(state); }));
-        p.Children.Add(IntRow("Result (Fast)",      state.Data.SalvageResultDelayFastMs,  0, 2000, 25, v => { state.Data.SalvageResultDelayFastMs  = v; Push(state); }));
+        return null;
     }
 
     // =========================================================================
@@ -932,6 +444,53 @@ internal static class SettingsPanel
         }
 
         return row;
+    }
+
+    /// <summary>Label above a full-width text box; commits on Enter or focus loss when the text changed.</summary>
+    private static Control TextRow(string label, string value, string? hint, Action<string> onChange, string? tooltip = null)
+    {
+        string committed = value;
+        var box = new StackPanel { Margin = new Thickness(0, 2, 0, 2) };
+        box.Children.Add(new TextBlock { Text = label, Foreground = ColTextDim, FontSize = 11, Margin = new Thickness(0, 0, 0, 2) });
+        var tb = new TextBox
+        {
+            Text = value,
+            Watermark = hint,
+            FontSize = 11,
+            Height = 22,
+            Padding = new Thickness(4, 2),
+            Background = ColPanelBg,
+            Foreground = ColAmber,
+            BorderBrush = ColBtnBord,
+            BorderThickness = new Thickness(1),
+            VerticalContentAlignment = VerticalAlignment.Center,
+        };
+        DisableInnerScroll(tb);
+        void Commit()
+        {
+            string text = tb.Text ?? string.Empty;
+            if (string.Equals(text, committed, StringComparison.Ordinal)) return;
+            committed = text;
+            onChange(text);
+        }
+        // Same keyboard gate as the number boxes: typed keys go to Avalonia, not the game.
+        tb.GotFocus += (_, _) => Win32Backend.AvaloniaTextInputActive = true;
+        tb.LostFocus += (_, _) =>
+        {
+            Win32Backend.AvaloniaTextInputActive = false;
+            Commit();
+        };
+        tb.KeyDown += (_, e) =>
+        {
+            if (e.Key == Avalonia.Input.Key.Enter) Commit();
+        };
+        box.Children.Add(tb);
+        if (tooltip != null)
+        {
+            ToolTip.SetTip(box, tooltip);
+            ToolTip.SetShowDelay(box, 400);
+        }
+        return box;
     }
 
     private static Control IntRow(string label, int value, int min, int max, int step, Action<int> onChange, string? tooltip = null)
@@ -1217,6 +776,95 @@ internal static class SettingsPanel
         return row;
     }
 
+    /// <summary>Label on the left, a single action button on the right.</summary>
+    private static Control ButtonRow(string label, string buttonText, Action onClick, string? tooltip = null)
+    {
+        var btn = new Button
+        {
+            Content = buttonText,
+            FontSize = 10,
+            Height = 20,
+            MinWidth = 160,
+            Padding = new Thickness(4, 1),
+            Background = ColBtnFill,
+            Foreground = ColTextDim,
+            BorderBrush = ColBtnBord,
+            BorderThickness = new Thickness(1),
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+        };
+        btn.Click += (_, _) => onClick();
+
+        var row = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Margin = new Thickness(0, 2, 0, 2),
+            Height = 22,
+        };
+        var lblBlock = new TextBlock { Text = label, Foreground = ColTextDim, FontSize = 11, VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(lblBlock, 0);
+        Grid.SetColumn(btn,      1);
+        row.Children.Add(lblBlock);
+        row.Children.Add(btn);
+
+        if (tooltip != null)
+        {
+            ToolTip.SetTip(row, tooltip);
+            ToolTip.SetShowDelay(row, 400);
+        }
+        return row;
+    }
+
+    /// <summary>
+    /// [All on] [All off] over a 3-column grid of toggles, one per RynthAi trace
+    /// category. Each change edits DiagCategories, saves, and rebuilds the tab so the grid redraws.
+    /// </summary>
+    private static Control TraceCategoriesRow(PanelState state, SettingRow row)
+    {
+        var cats = TraceCategoryLevels.Parse(state.Data.DiagCategories);
+        if (cats.Count == 0)
+            return new TextBlock { Text = "Waiting for RynthAi...", Foreground = ColMute, FontSize = 10, Margin = new Thickness(0, 2, 0, 0) };
+
+        void Save(string levels)
+        {
+            state.Data.DiagCategories = levels;
+            Push(state);
+            state.Rebuild?.Invoke();
+        }
+
+        Button Bulk(string text, Func<string> next)
+        {
+            var b = new Button
+            {
+                Content = text, FontSize = 10, Height = 20, Padding = new Thickness(6, 1),
+                Background = ColBtnFill, Foreground = ColTextDim, BorderBrush = ColBtnBord, BorderThickness = new Thickness(1),
+            };
+            b.Click += (_, _) => Save(next());
+            return b;
+        }
+
+        var box = new StackPanel { Margin = new Thickness(0, 2, 0, 2) };
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 0, 0, 4) };
+        buttons.Children.Add(Bulk("All on", () => TraceCategoryLevels.Set(state.Data.DiagCategories, "", true)));
+        buttons.Children.Add(Bulk("All off", () => TraceCategoryLevels.Set(state.Data.DiagCategories, "", false)));
+        if (row.Tooltip != null)
+        {
+            ToolTip.SetTip(buttons, row.Tooltip);
+            ToolTip.SetShowDelay(buttons, 400);
+        }
+        box.Children.Add(buttons);
+
+        var grid = new Avalonia.Controls.Primitives.UniformGrid { Columns = 3 };
+        foreach (var (name, level) in cats)
+        {
+            string catName = name;
+            bool on = level != TraceCategoryLevels.Off;
+            grid.Children.Add(BoolRow(TraceCategoryLevels.Label(name, level), on,
+                v => Save(TraceCategoryLevels.Set(state.Data.DiagCategories, catName, v))));
+        }
+        box.Children.Add(grid);
+        return box;
+    }
+
     // SimpleTheme wraps TextBox content in a ScrollViewer, and its vertical
     // scrollbar's up RepeatButton is a filled triangle Path. On these short
     // (Height=20) single-line numeric fields that scrollbar shows and the
@@ -1260,63 +908,8 @@ internal static class SettingsPanel
     private static Border Spacer() => new Border { Height = 6 };
 
     // =========================================================================
-    //  Plugin bridge
+    //  Save
     // =========================================================================
 
-    private static void TryBind()
-    {
-        var plugin = PluginManager.Plugins.FirstOrDefault(
-            p => p.DisplayName.Contains("RynthAi", StringComparison.OrdinalIgnoreCase));
-        if (plugin == null || plugin.ModuleHandle == IntPtr.Zero) return;
-
-        if (_getSettingsJson == null)
-        {
-            IntPtr p1 = GetProcAddress(plugin.ModuleHandle, "RynthPluginGetSettingsJson");
-            if (p1 != IntPtr.Zero)
-                _getSettingsJson = Marshal.GetDelegateForFunctionPointer<GetSettingsJsonFn>(p1);
-        }
-        if (_setSettingsJson == null)
-        {
-            IntPtr p2 = GetProcAddress(plugin.ModuleHandle, "RynthPluginSetSettingsJson");
-            if (p2 != IntPtr.Zero)
-                _setSettingsJson = Marshal.GetDelegateForFunctionPointer<SetSettingsJsonFn>(p2);
-        }
-    }
-
-    private static bool TryFetch(out Settings settings)
-    {
-        settings = new Settings();
-        if (_getSettingsJson == null) return false;
-        try
-        {
-            IntPtr ptr = _getSettingsJson();
-            if (ptr == IntPtr.Zero) return false;
-            string? json = Marshal.PtrToStringAnsi(ptr);
-            if (string.IsNullOrEmpty(json)) return false;
-            var parsed = JsonSerializer.Deserialize(json, SettingsPanelJsonContext.Default.Settings);
-            if (parsed == null) return false;
-            settings = parsed;
-            return true;
-        }
-        catch { return false; }
-    }
-
-    private static void Push(PanelState state)
-    {
-        if (_setSettingsJson == null) TryBind();
-        if (_setSettingsJson == null) return;
-        IntPtr ansi = IntPtr.Zero;
-        try
-        {
-            string json = JsonSerializer.Serialize(state.Data, SettingsPanelJsonContext.Default.Settings);
-            ansi = Marshal.StringToHGlobalAnsi(json);
-            _setSettingsJson(ansi);
-            state.Dirty = false;
-        }
-        catch { }
-        finally
-        {
-            if (ansi != IntPtr.Zero) Marshal.FreeHGlobal(ansi);
-        }
-    }
+    private static void Push(PanelState state) => SettingsCommands.Save(state.Data.Clone());
 }

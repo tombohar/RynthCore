@@ -87,7 +87,150 @@ internal static class PlayerPhysicsHooks
         return ready;
     }
 
+    // ── Player pose snapshot (2026-09-30 main-thread audit) ─────────────────────
+    // The plugin pump (RynthAi nav / radar / Jumper / meta, RynthLua), Nav3DRenderer's
+    // Clear/CommitFrame and UI threads read the player's pose and heading many times
+    // a second. Read live off-thread that walked the SmartBox player (unprobed vtable
+    // read), read cell and origin as separate loads (a landblock crossing could pair
+    // the new cell with the old x/y, ~192 m off for a tick) and called AC's
+    // CPhysicsObj::get_heading off-thread. The main thread now publishes one
+    // consistent copy per frame (MainThreadSnapshots.Tick) under a seqlock: the
+    // writer never waits and never allocates; readers retry a few times and fail
+    // closed. Main-thread callers (GameMatrixCapture, MonsterHud, PlateDebuffs,
+    // PlayerLifecycleLog) keep the live read.
+    private static int _poseSeq;            // odd while the main thread is writing
+    private static bool _poseValid;
+    private static bool _poseHeadingValid;
+    private static uint _poseCell;
+    private static float _poseX, _poseY, _poseZ, _poseQw, _poseQx, _poseQy, _poseQz, _poseHeading;
+    private static long _lastPosePublishTs;
+    private static long _nextHeadingBindAttemptMs;
+    private static readonly long PosePublishMinTicks = System.Diagnostics.Stopwatch.Frequency / 250; // <= 250 Hz
+
+    /// <summary>
+    /// Main thread only (MainThreadSnapshots.Tick). Reads the live pose and heading
+    /// once and publishes them together. An unreadable player (portal, logout,
+    /// char-select) publishes "invalid", so off-thread readers fail closed as the
+    /// live read did.
+    /// </summary>
+    internal static void PublishPoseSnapshot(bool smartBoxReady)
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        long ts = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (ts - _lastPosePublishTs < PosePublishMinTicks)
+            return; // UseTime and EndScene both call in; once per few ms is plenty
+        _lastPosePublishTs = ts;
+
+        uint cell = 0;
+        float x = 0, y = 0, z = 0, qw = 1f, qx = 0, qy = 0, qz = 0;
+        // Not located: publish "no pose" without TryGetPlayer (which would re-run
+        // the SmartBox probe's pattern scan on every call).
+        bool ok = smartBoxReady &&
+                  TryGetPlayerPoseLive(out cell, out x, out y, out z, out qw, out qx, out qy, out qz);
+        float heading = 0f;
+        bool headingOk = false;
+        if (ok)
+        {
+            // Bind the heading thunk at most every 5 s while it is missing: the bind
+            // runs a SmartBox probe + pattern resolve, far too heavy for every frame.
+            if (_getHeading == null)
+            {
+                long now = Environment.TickCount64;
+                if (now >= _nextHeadingBindAttemptMs)
+                {
+                    _nextHeadingBindAttemptMs = now + 5000;
+                    EnsurePhysicsDelegates();
+                }
+            }
+            if (_getHeading != null)
+                headingOk = TryGetPlayerHeadingLive(out heading);
+        }
+
+        System.Threading.Interlocked.Increment(ref _poseSeq); // odd: writing
+        _poseValid = ok;
+        _poseHeadingValid = headingOk;
+        _poseCell = cell;
+        _poseX = x; _poseY = y; _poseZ = z;
+        _poseQw = qw; _poseQx = qx; _poseQy = qy; _poseQz = qz;
+        _poseHeading = heading;
+        System.Threading.Interlocked.Increment(ref _poseSeq); // even: published
+    }
+
+    // Seqlock read. False when nothing valid is published, or (vanishingly rarely)
+    // when the writer kept the lock for every retry.
+    private static bool TryReadPoseSnapshot(out uint cell, out float x, out float y, out float z,
+                                            out float qw, out float qx, out float qy, out float qz,
+                                            out bool headingValid, out float heading)
+    {
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            int s1 = System.Threading.Volatile.Read(ref _poseSeq);
+            if ((s1 & 1) != 0)
+            {
+                System.Threading.Thread.SpinWait(8);
+                continue;
+            }
+            bool valid = _poseValid;
+            headingValid = _poseHeadingValid;
+            cell = _poseCell;
+            x = _poseX; y = _poseY; z = _poseZ;
+            qw = _poseQw; qx = _poseQx; qy = _poseQy; qz = _poseQz;
+            heading = _poseHeading;
+            System.Threading.Interlocked.MemoryBarrier();
+            if (System.Threading.Volatile.Read(ref _poseSeq) != s1)
+                continue;
+            if (!valid)
+                break;
+            return true;
+        }
+        cell = 0; x = y = z = 0; qw = 1f; qx = qy = qz = 0;
+        headingValid = false; heading = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// The per-frame main-thread pose copy (cell, cell-local origin, yaw quaternion
+    /// qw/qz and GetPlayerHeading's value, 0 = East, counter-clockwise: see HeadingMath),
+    /// read from any thread without calling into AC. headingValid is false while AC's
+    /// get_heading isn't bound. False when nothing valid is published. Against a map
+    /// bearing use <see cref="TryGetPlayerCompassSnapshot"/>.
+    /// </summary>
+    public static bool TryGetPlayerPoseSnapshot(out uint objCellId, out float x, out float y, out float z,
+                                                out float qw, out float qz, out bool headingValid, out float heading)
+        => TryReadPoseSnapshot(out objCellId, out x, out y, out z, out qw, out _, out _, out qz, out headingValid, out heading);
+
+    /// <summary>Your compass heading (0 = North, clockwise) from the pose snapshot's quaternion; any thread, no AC call.</summary>
+    public static bool TryGetPlayerCompassSnapshot(out float heading)
+    {
+        heading = 0;
+        if (!TryReadPoseSnapshot(out _, out _, out _, out _, out float qw, out _, out _, out float qz, out _, out _))
+            return false;
+        heading = HeadingMath.CompassFromYaw(qw, qz);
+        return true;
+    }
+
     public static bool TryGetPlayerPose(
+        out uint objCellId,
+        out float x,
+        out float y,
+        out float z,
+        out float qw,
+        out float qx,
+        out float qy,
+        out float qz)
+    {
+        // Off AC's main thread: the per-frame main-thread copy (one consistent
+        // cell/origin/quaternion set, at most a frame old).
+        if (!MainThreadGuard.IsOnMainThread())
+            return TryReadPoseSnapshot(out objCellId, out x, out y, out z, out qw, out qx, out qy, out qz, out _, out _);
+
+        return TryGetPlayerPoseLive(out objCellId, out x, out y, out z, out qw, out qx, out qy, out qz);
+    }
+
+    // Live pose read. Page-probes every field. Called on the main thread (the
+    // snapshot publisher and main-thread callers of TryGetPlayerPose).
+    private static bool TryGetPlayerPoseLive(
         out uint objCellId,
         out float x,
         out float y,
@@ -110,7 +253,27 @@ internal static class PlayerPhysicsHooks
 
         try
         {
+            // Deep-audit finding #3/#14/#15 pattern (2026-06-18): this is called
+            // off-thread (plugin/UI, e.g. RynthVision's InspectTerrain from the
+            // Avalonia UI thread) as well as from the main-thread render path, so
+            // a torn/freed player pointer must fail closed instead of risking an
+            // uncatchable NativeAOT AV. Probe every dereference with
+            // IsReadablePointer before reading it; try/catch alone is not enough.
             IntPtr pos = player + PhysicsPositionOffset;
+
+            if (!ClientObjectHooks.IsReadablePointer(pos + PositionObjCellIdOffset) ||
+                !ClientObjectHooks.IsReadablePointer(pos + PositionQwOffset) ||
+                !ClientObjectHooks.IsReadablePointer(pos + PositionQxOffset) ||
+                !ClientObjectHooks.IsReadablePointer(pos + PositionQyOffset) ||
+                !ClientObjectHooks.IsReadablePointer(pos + PositionQzOffset) ||
+                !ClientObjectHooks.IsReadablePointer(pos + PositionOriginXOffset) ||
+                !ClientObjectHooks.IsReadablePointer(pos + PositionOriginYOffset) ||
+                !ClientObjectHooks.IsReadablePointer(pos + PositionOriginZOffset))
+            {
+                _statusMessage = "Player position struct not readable.";
+                return false;
+            }
+
             objCellId = unchecked((uint)Marshal.ReadInt32(pos + PositionObjCellIdOffset));
             qw = ReadFloat(pos + PositionQwOffset);
             qx = ReadFloat(pos + PositionQxOffset);
@@ -133,7 +296,30 @@ internal static class PlayerPhysicsHooks
 
     public static bool TryGetPlayerHeading(out float headingDegrees)
     {
+        // Off AC's main thread (host GetPlayerHeadingFn on the pump: Jumper, radar,
+        // dungeon map, AutoVendor): the heading the main thread read with AC's own
+        // get_heading this frame. Never calls into AC from here.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            if (TryReadPoseSnapshot(out _, out _, out _, out _, out _, out _, out _, out _, out bool hv, out float h) && hv)
+            {
+                headingDegrees = h;
+                return true;
+            }
+            headingDegrees = 0;
+            return false;
+        }
+
+        return TryGetPlayerHeadingLive(out headingDegrees);
+    }
+
+    // Main thread only: AC's CPhysicsObj::get_heading on the SmartBox player.
+    private static bool TryGetPlayerHeadingLive(out float headingDegrees)
+    {
         headingDegrees = 0;
+
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
 
         if (!EnsurePhysicsDelegates())
             return false;
@@ -160,6 +346,12 @@ internal static class PlayerPhysicsHooks
 
     public static bool SetPlayerHeading(float headingDegrees)
     {
+        // CPhysicsObj::set_heading (with sendEvent) writes the live physics object
+        // and can send a movement event: main thread only. No callers today; an
+        // off-thread caller gets false (use TurnToHeading, which marshals).
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+
         if (!EnsurePhysicsDelegates() || _setHeading == null)
             return false;
 
@@ -197,6 +389,16 @@ internal static class PlayerPhysicsHooks
 
     public static bool SetPlayerHeadingDirect(float decalHeadingDeg)
     {
+        // Plugins reach this from the pump thread on every nav tick
+        // (Host.TurnToHeading -> ClientActionHooks.TurnToHeading). Two raw stores
+        // into the live quaternion there raced AC's physics integration (torn,
+        // non-unit orientation), and the SmartBox player walk ran off-thread too.
+        // Park the heading in the coalesced slot instead; AcMainThreadQueue.Drain
+        // calls back in here on the main thread (and falls back to the
+        // CommandInterpreter turn there when there is no player, as before).
+        if (AcMainThreadQueue.MustQueue(teardown: false))
+            return AcMainThreadQueue.EnqueueDirectHeading(decalHeadingDeg);
+
         int n = System.Threading.Interlocked.Increment(ref _setHeadingCalls);
         if (!SmartBoxLocator.TryGetPlayer(out IntPtr player, out _, out string failure))
         {
@@ -217,6 +419,17 @@ internal static class PlayerPhysicsHooks
             float newQz = (float)Math.Sin(physYawRad * 0.5);
 
             IntPtr pos = player + PhysicsPositionOffset;
+            // Probe both stores (they can straddle a page) so a player pointer that
+            // went stale between the SmartBox lookup and here fails closed rather
+            // than taking an uncatchable NativeAOT write AV.
+            if (!ClientObjectHooks.IsWritablePointer(pos + PositionQwOffset) ||
+                !ClientObjectHooks.IsWritablePointer(pos + PositionQzOffset))
+            {
+                _statusMessage = "Player position struct not writable.";
+                if (ShouldLogHeading(n))
+                    RynthLog.Compat($"Move: SetPlayerHeadingDirect({decalHeadingDeg:0.0}) #{n} — position not writable (player=0x{player.ToInt32():X8})");
+                return false;
+            }
             WriteFloat(pos + PositionQwOffset, newQw);
             WriteFloat(pos + PositionQzOffset, newQz);
 
@@ -248,6 +461,16 @@ internal static class PlayerPhysicsHooks
     /// </summary>
     public static bool LaunchJumpWithMotion(bool shift, bool holdW, bool holdX, bool holdZ, bool holdC)
     {
+        // Deep-audit finding #2 (2026-06-18): this Marshal.WriteInt32's
+        // directly into CMotionInterp's forward/strafe/turn fields with NO
+        // thread gate at all — worse than the CommandInterpreterHooks jump
+        // trio (which at least goes through a thiscall try/catch), since a
+        // raw write racing AC's own motion-graph tick is a guaranteed torn
+        // write, not just an AV risk. Reachable off-thread via Jumper.cs's
+        // ReleaseJump on the Decal-coexistence pump thread.
+        if (AcMainThreadQueue.MustQueue(teardown: false))
+            return AcMainThreadQueue.EnqueueLaunchJumpWithMotion(shift, holdW, holdX, holdZ, holdC);
+
         if (!TryGetCMotionInterp(out IntPtr cmi))
         {
             RynthLog.Compat("LaunchJumpWithMotion: CMotionInterp unavailable");
@@ -333,6 +556,13 @@ internal static class PlayerPhysicsHooks
     {
         inProgress = false;
 
+        // Main thread only: the SmartBox player -> MovementManager -> CMotionInterp
+        // hops are unprobed reads through objects AC frees at logout / char switch.
+        // Every caller (queue drain, busy watchdog, CastGate.Sample) is on the main
+        // thread; an off-thread caller gets "couldn't read" (no opinion) instead.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+
         if (!TryGetCMotionInterp(out IntPtr cmi) || cmi == IntPtr.Zero)
             return false;
 
@@ -404,9 +634,10 @@ internal static class PlayerPhysicsHooks
         return BitConverter.Int32BitsToSingle(bits);
     }
 
-    // CPhysicsObj heading is rotated 90 degrees from the Decal/VTank basis
-    // used by old RynthAi Actions.Heading. Normalize here so plugins can stay
-    // on the original T1 heading math.
+    // AC's get_heading is already a compass value (0 = North, clockwise); 90 - it is
+    // 0 = East, counter-clockwise, which GetPlayerHeading has always returned and the
+    // radar and world map draw with. Kept as it is for them; a bearing wants
+    // HeadingMath.CompassFromYaw (measured 2026-10-20, see HeadingMath).
     private static float NormalizeDecalHeading(float physicsHeading)
     {
         return NormalizeDegrees(90f - physicsHeading);

@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the Characters panel's logic (src\RynthCore.Engine\UI\Data\
+    CharactersModel.cs, compiled in): parsing RynthNet's snapshot (new and older status
+    shapes), distance / compass / "elsewhere" across landblocks and dungeons, the state text,
+    the stale marker and the stable alphabetical row order.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>CharactersPanelTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\CharactersModel.cs" Link="Engine\CharactersModel.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\HeadingMath.cs" Link="Engine\HeadingMath.cs" />
+  </ItemGroup>
+
+</Project>

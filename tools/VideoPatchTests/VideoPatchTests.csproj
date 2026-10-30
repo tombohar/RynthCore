@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the video patch's pure logic (2026-10-05):
+    src\RynthCore.Engine\D3D9\VideoPatchPolicy.cs, compiled in. What each mode skips (in and
+    out of the world, focused and not, with and without the ImGui layer), the frame cap,
+    the command words, and the video_patch.txt round-trip (per-character keys, "all" never
+    saved, unknown lines kept). No file I/O, no AC.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>VideoPatchTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\D3D9\VideoPatchPolicy.cs" Link="Engine\VideoPatchPolicy.cs" />
+  </ItemGroup>
+
+</Project>

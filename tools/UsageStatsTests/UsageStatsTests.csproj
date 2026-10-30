@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Checks for the launcher's opt-in usage statistics (src\RynthCore.App.Avalonia\UsageStats.cs,
+    compiled in): the payload holds only the approved fields, opting out deletes the install ID,
+    one report a day, crash counting, silent failures. Works in a temp folder against a local
+    test server, never in %APPDATA%\RynthCore.
+      dotnet run -c Release                 offline checks (exit 0 = pass, 1 = fail)
+      with the argument "live" (see Program.cs) it also sends ONE real report to aelrynth.com/rynth/ping
+                                            with a throwaway install ID (printed, so the test row
+                                            can be deleted on the server afterwards)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>UsageStatsTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.App.Avalonia\UsageStats.cs" Link="App\UsageStats.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+  </ItemGroup>
+
+</Project>

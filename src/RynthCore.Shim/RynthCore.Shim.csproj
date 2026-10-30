@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RynthCore.Shim: the only RynthCore code in CoreCLR's default AssemblyLoadContext.
+    Loaded once by the native loader (native/Loader/Clr.c) and never reloaded, so keep it
+    small and free of any reference to engine types. See docs/UNLOADABLE_ENGINE_PLAN.md.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <Platforms>x86</Platforms>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>RynthCore.Shim</RootNamespace>
+    <AssemblyName>RynthCore.Shim</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -27,6 +28,11 @@ internal sealed class LocalStatusServer : IDisposable
     private readonly string? _statusDir;           // GET /inventory reads RynthCore.<pid>.inventory.json from here
     private readonly IconService? _icons;          // GET /icon?did=N (portal.dat → PNG); null = disabled
     private readonly MapService? _maps;            // GET /maps + /map?lb&layer (baked dungeon .bin → PNG); null = disabled
+    private readonly WorldMapService? _worldMap;   // GET /worldmap (landscape map from cell.dat, JPEG); null = disabled
+    private readonly NavAtlasService? _navAtlas;   // GET /nav/search (RynthNav's Atlas, the Travel tab); null = disabled
+    // pid -> the plugin reports raiseXp, from the last status cycle (UpdateRaiseClients). A raise is accepted only
+    // for a client in here (POST /command action "raise"); everything else ignores it.
+    private volatile IReadOnlyDictionary<int, bool> _raiseClients = new Dictionary<int, bool>();
     private volatile byte[] _latest =
         Encoding.UTF8.GetBytes("{\"schema\":\"rynthcore.status-agent/1\",\"clientCount\":0,\"clients\":[]}");
     private CancellationTokenSource? _cts;
@@ -34,6 +40,8 @@ internal sealed class LocalStatusServer : IDisposable
     // Connected /statusfeed push clients — each value is a per-socket wake signal. UpdateLatest pulses
     // them all; each socket's loop then sends the freshest _latest (coalescing rapid updates).
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _feedSignals = new();
+    // Failed token checks per remote address (lockout after repeated guesses).
+    private readonly AuthThrottle _authThrottle = new();
     private const int FeedKeepAliveMs = 20000;   // re-send _latest at least this often (keepalive + missed-pulse cover)
 
     public bool Running { get; private set; }
@@ -42,7 +50,8 @@ internal sealed class LocalStatusServer : IDisposable
                              bool enableStream = false, int streamQuality = 55, int streamIntervalMs = 400,
                              WebRtcVideoService? video = null, VideoSocketService? videoSocket = null,
                              RunArchive? runArchive = null, string? statusDirectory = null,
-                             IconService? icons = null, MapService? maps = null)
+                             IconService? icons = null, MapService? maps = null, WorldMapService? worldMap = null,
+                             NavAtlasService? navAtlas = null)
     {
         _prefix = prefix.EndsWith('/') ? prefix : prefix + "/";
         _token = string.IsNullOrWhiteSpace(token) ? null : token;
@@ -56,6 +65,8 @@ internal sealed class LocalStatusServer : IDisposable
         _statusDir = string.IsNullOrWhiteSpace(statusDirectory) ? null : statusDirectory;
         _icons = icons;
         _maps = maps;
+        _worldMap = worldMap;
+        _navAtlas = navAtlas;
         _listener.Prefixes.Add(_prefix);
     }
 
@@ -72,8 +83,27 @@ internal sealed class LocalStatusServer : IDisposable
         }
     }
 
+    /// <summary>The clients the last cycle read, and which take the raise command (thread-safe swap).</summary>
+    public void UpdateRaiseClients(IEnumerable<ClientStatus> clients)
+    {
+        var map = new Dictionary<int, bool>();
+        foreach (var c in clients)
+            if (c.Pid > 0 && c.Source == "status-file" && c.State != "dead") map[c.Pid] = c.RaiseXp;
+        _raiseClients = map;
+    }
+
     public bool TryStart(out string error)
     {
+        // Never serve without a token, loopback included: every route but /healthz is behind it.
+        // A bind other PCs can reach also needs one long enough not to be guessed (ServeGuard).
+        string? tokenProblem = ServeGuard.TokenProblem(_prefix, _token);
+        if (tokenProblem != null)
+        {
+            error = tokenProblem;
+            Running = false;
+            return false;
+        }
+
         try
         {
             _listener.Start();
@@ -115,7 +145,7 @@ internal sealed class LocalStatusServer : IDisposable
             // Diagnostic: log every /webrtc request + every CORS preflight, at the door (before any
             // auth/route processing), so we can see whether the app's offer POST even reaches us.
             if (path.StartsWith("/webrtc") || string.Equals(method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
-                AgentLog.Info($"[video] HTTP {method} {path} ua=\"{req.UserAgent}\"");
+                AgentLog.Info($"[video] HTTP {ServeGuard.LogSafe(method, 16)} {ServeGuard.LogSafe(path, 64)} ua=\"{ServeGuard.LogSafe(req.UserAgent)}\"");
 
             // CORS preflight for the POST /command path (a browser-hosted client may send it).
             if (string.Equals(method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
@@ -173,7 +203,7 @@ internal sealed class LocalStatusServer : IDisposable
                 int vpid = int.TryParse(req.QueryString["pid"], out int vv) ? vv : 0;
                 if (vpid <= 0) { Write(res, 400, "application/json", "{\"error\":\"pid required\"}"u8.ToArray()); return; }
                 if (!req.IsWebSocketRequest) { Write(res, 426, "application/json", "{\"error\":\"websocket required\"}"u8.ToArray()); return; }
-                AgentLog.Info($"[vsock] HTTP WS /video pid={vpid} ua=\"{req.UserAgent}\"");
+                AgentLog.Info($"[vsock] HTTP WS /video pid={vpid} ua=\"{ServeGuard.LogSafe(req.UserAgent)}\"");
                 _ = HandleVideoSocketAsync(ctx, vpid);
                 return;
             }
@@ -183,7 +213,7 @@ internal sealed class LocalStatusServer : IDisposable
             {
                 if (_token != null && !Authorized(req)) { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
                 if (!req.IsWebSocketRequest) { Write(res, 426, "application/json", "{\"error\":\"websocket required\"}"u8.ToArray()); return; }
-                AgentLog.Info($"[feed] WS /statusfeed ua=\"{req.UserAgent}\"");
+                AgentLog.Info($"[feed] WS /statusfeed ua=\"{ServeGuard.LogSafe(req.UserAgent)}\"");
                 _ = HandleStatusFeedAsync(ctx);
                 return;
             }
@@ -215,7 +245,13 @@ internal sealed class LocalStatusServer : IDisposable
                 if (path == "/webrtc/stop") { _video.Stop(pid); Write(res, 200, "application/json", "{\"ok\":true}"u8.ToArray()); return; }
                 if (path == "/webrtc/clientlog")   // diagnostic: WKWebView reports its WebRTC errors/states here
                 {
-                    try { using var sr = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8); AgentLog.Info($"[video] CLIENT pid={pid}: {sr.ReadToEnd()}"); } catch { }
+                    try
+                    {
+                        if (!ServeGuard.TryReadBounded(req.InputStream, req.ContentLength64, ServeGuard.MaxClientLogBodyBytes, req.ContentEncoding, out string clientLog))
+                        { Write(res, 413, "application/json", "{\"error\":\"too large\"}"u8.ToArray()); return; }
+                        AgentLog.Info($"[video] CLIENT pid={pid}: {ServeGuard.LogSafe(clientLog, 2000)}");
+                    }
+                    catch { }
                     Write(res, 200, "application/json", "{\"ok\":true}"u8.ToArray());
                     return;
                 }
@@ -276,7 +312,8 @@ internal sealed class LocalStatusServer : IDisposable
                 foreach (var e in entries)
                     payload.Maps.Add(new MapEntryDto
                     {
-                        Landblock = e.Landblock.ToString("X8"),
+                        // Full "XXYY0000" form: what DrakRemote matches a client's landblock against.
+                        Landblock = RemoteParity.LandblockFull(e.Landblock.ToString("X8")),
                         Layer = e.Layer, Bytes = e.Bytes, Mtime = e.MtimeUtc,
                         W = e.W, H = e.H, XMin = e.XMin, YMin = e.YMin,
                         Name = "Dungeon " + (e.Landblock & 0xFFFF).ToString("X4"),
@@ -371,8 +408,8 @@ internal sealed class LocalStatusServer : IDisposable
                 { Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray()); return; }
                 if (_token != null && !Authorized(req))
                 { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
-                if (!uint.TryParse(req.QueryString["lb"], System.Globalization.NumberStyles.HexNumber,
-                        System.Globalization.CultureInfo.InvariantCulture, out uint lb)
+                // lb in either form: "00005A48" (the file name) or "5A480000" (what /maps lists and the app sends).
+                if (!RemoteParity.TryLandblockShort(req.QueryString["lb"], out uint lb)
                     || !int.TryParse(req.QueryString["layer"], out int layer))
                 { Write(res, 400, "application/json", "{\"error\":\"lb (hex) and layer required\"}"u8.ToArray()); return; }
                 var r = _maps?.GetPng(lb, layer);
@@ -390,6 +427,68 @@ internal sealed class LocalStatusServer : IDisposable
                 res.Headers["X-Map-W"] = meta.W.ToString();
                 res.Headers["X-Map-H"] = meta.H.ToString();
                 Write(res, 200, "image/png", mapPng);
+                return;
+            }
+
+            // ── Character sheet: GET /character?pid=N — attributes, vitals, skills (the phone's Skills tab) ──
+            if (path == "/character" || path == "/character.json")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                { Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray()); return; }
+                if (_token != null && !Authorized(req))
+                { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
+                int cpid = int.TryParse(req.QueryString["pid"], out int cp) ? cp : 0;
+                if (cpid <= 0)
+                { Write(res, 400, "application/json", "{\"error\":\"pid required\"}"u8.ToArray()); return; }
+                byte[]? sheet = ReadClientFile(cpid, "character");
+                if (sheet == null)
+                { Write(res, 404, "application/json", "{\"error\":\"no character sheet from that client yet (needs the RynthRemote plugin 0.3)\"}"u8.ToArray()); return; }
+                res.Headers["Cache-Control"] = "no-cache";
+                Write(res, 200, "application/json", sheet);
+                return;
+            }
+
+            // ── Travel search: GET /nav/search?q=&type=&ns=&ew=&max= — RynthNav's Atlas, best matches first ──
+            if (path == "/nav/search")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                { Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray()); return; }
+                if (_token != null && !Authorized(req))
+                { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
+                if (_navAtlas == null || !_navAtlas.Available)
+                { Write(res, 404, "application/json", "{\"error\":\"RynthNav's Atlas (NavData locations.json) isn't on this PC\"}"u8.ToArray()); return; }
+                var ci = System.Globalization.CultureInfo.InvariantCulture;
+                double? fromNs = double.TryParse(req.QueryString["ns"], System.Globalization.NumberStyles.Float, ci, out double fn) ? fn : null;
+                double? fromEw = double.TryParse(req.QueryString["ew"], System.Globalization.NumberStyles.Float, ci, out double fe) ? fe : null;
+                int max = ClampQuery(req, "max", 40, 1, 100);
+                Write(res, 200, "application/json", _navAtlas.SearchJson(req.QueryString["q"] ?? "", req.QueryString["type"], fromNs, fromEw, max));
+                return;
+            }
+
+            // ── Landscape map: GET /worldmap — Dereth from cell.dat, 2040 px square, 24 units a pixel, north up ──
+            if (path == "/worldmap" || path == "/worldmap.jpg")
+            {
+                if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+                { Write(res, 405, "application/json", "{\"error\":\"method not allowed\"}"u8.ToArray()); return; }
+                if (_token != null && !Authorized(req))
+                { Write(res, 401, "application/json", "{\"error\":\"unauthorized\"}"u8.ToArray()); return; }
+                if (_worldMap == null || !_worldMap.Available)
+                { Write(res, 404, "application/json", "{\"error\":\"world map unavailable (no cell.dat on this PC)\"}"u8.ToArray()); return; }
+                byte[]? jpg = _worldMap.GetJpeg();
+                if (jpg == null)
+                {
+                    res.Headers["Retry-After"] = "5";
+                    Write(res, 503, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"world map " + _worldMap.State + ", try again shortly\"}"));
+                    return;
+                }
+                string wmTag = "\"worldmap-v1-" + jpg.Length + "\"";
+                res.Headers["X-Map-Size"] = WorldMapService.Size.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                res.Headers["X-Map-Units-Per-Pixel"] = WorldMapService.UnitsPerPixel.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (string.Equals(req.Headers["If-None-Match"], wmTag, StringComparison.Ordinal))
+                { res.Headers["ETag"] = wmTag; Write(res, 304, "image/jpeg", Array.Empty<byte>()); return; }
+                res.Headers["Cache-Control"] = "public, max-age=604800";
+                res.Headers["ETag"] = wmTag;
+                Write(res, 200, "image/jpeg", jpg);
                 return;
             }
 
@@ -422,10 +521,14 @@ internal sealed class LocalStatusServer : IDisposable
         "navProfile", "lootProfile", "metaProfile", "settingsProfile",
         "forceRebuff", "cancelRebuff", "clearBusy", "hideUi", "sendChat",
         "moveStart", "moveStop",
+        "moveKeepAlive",   // hold-to-move protocol 2 (RynthRemote 0.4+): {"dirs":[...]} every ~200 ms while held
         "setSetting",   // change ONE advanced setting (value = {"key":..,"value":..}); RynthAi clamps + persists
         "click",        // mouse click in the stream (value = {"u":..,"v":..,"button":..}); handled by the agent (PostMessage)
 
+        "travel",       // RynthNav: go somewhere (value = {"name":..,"ns":..,"ew":..}); the plugin sends /rnav go
+        "travelStop",   // RynthNav: stop travelling (/rnav stop)
         "assess",   // request an Assess/Identify of one item (value = item id) — fills inventory appraisal
+        "raise",    // spend XP / skill credits (value = {"kind","id","count","cost","nonce"}); known raise-capable pid only
         "closeClient",
     };
 
@@ -433,9 +536,11 @@ internal sealed class LocalStatusServer : IDisposable
     {
         try
         {
-            string body;
-            using (var reader = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8))
-                body = reader.ReadToEnd();
+            if (!ServeGuard.TryReadBounded(req.InputStream, req.ContentLength64, ServeGuard.MaxCommandBodyBytes, req.ContentEncoding, out string body))
+            {
+                Write(res, 413, "application/json", "{\"error\":\"command too large\"}"u8.ToArray());
+                return;
+            }
 
             int pid; string action; string value;
             using (var doc = JsonDocument.Parse(body))
@@ -479,10 +584,31 @@ internal sealed class LocalStatusServer : IDisposable
                     }
                 }
                 catch { }
-                bool clicked = ScreenCapture.TryClick(pid, u, v, button);
-                Write(res, clicked ? 202 : 503, "application/json",
-                    clicked ? "{\"ok\":true}"u8.ToArray() : "{\"error\":\"click failed (window missing or minimized)\"}"u8.ToArray());
+                var click = ScreenCapture.TryClick(pid, u, v, button);
+                // One line per tap (no token, no query string): which window, where, and what happened, so a
+                // tap that does nothing in game can be told apart from one that never reached the window.
+                AgentLog.Info($"click pid={pid} u={u:0.###} v={v:0.###} {button} -> {click.Result} at {click.X},{click.Y} of {click.Width}x{click.Height}");
+                if (click.Result == ScreenCapture.ClickResult.Posted)
+                    Write(res, 202, "application/json", Encoding.UTF8.GetBytes(
+                        "{\"ok\":true,\"x\":" + click.X + ",\"y\":" + click.Y + ",\"w\":" + click.Width + ",\"h\":" + click.Height + "}"));
+                else
+                    Write(res, 503, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"click failed: " + click.Reason + "\"}"));
                 return;
+            }
+
+            // Raise spends experience, which can't be undone: only for a client this agent reads whose plugin
+            // takes it, and only in the fixed shape (the plugin and the engine check it all again).
+            if (string.Equals(action, "raise", StringComparison.OrdinalIgnoreCase))
+            {
+                int code = RemoteParity.CheckRaise(pid, value, _raiseClients, out string normalized, out string why);
+                if (code != 202)
+                {
+                    AgentLog.Warn($"raise refused: pid={pid} {why}");
+                    Write(res, code, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"" + why + "\"}"));
+                    return;
+                }
+                action = "raise";
+                value = normalized;
             }
 
             Directory.CreateDirectory(_commandDir!);
@@ -498,7 +624,11 @@ internal sealed class LocalStatusServer : IDisposable
             File.WriteAllText(tmp, payload, Encoding.UTF8);
             File.Move(tmp, dest, overwrite: true);
 
-            AgentLog.Info($"command queued: pid={pid} {action}={value}");
+            // Keep-alives arrive ~5 a second per held client: debug only, so the log keeps the presses and releases.
+            if (string.Equals(action, "moveKeepAlive", StringComparison.OrdinalIgnoreCase))
+                AgentLog.Debug($"command queued: pid={pid} {action}={ServeGuard.LogSafe(value, 500)}");
+            else
+                AgentLog.Info($"command queued: pid={pid} {action}={ServeGuard.LogSafe(value, 500)}");
             Write(res, 202, "application/json", "{\"ok\":true}"u8.ToArray());
         }
         catch (Exception ex)
@@ -562,7 +692,7 @@ internal sealed class LocalStatusServer : IDisposable
         {
             string path = Path.Combine(_statusDir, $"RynthCore.{pid}.inventory.json");
             if (!File.Exists(path)) return EmptyInventory;
-            byte[] bytes = File.ReadAllBytes(path);
+            byte[] bytes = StatusFileCache.ReadAllBytesShared(path);   // let the plugin replace it meanwhile
             return bytes.Length >= 2 ? bytes : EmptyInventory;
         }
         catch { return EmptyInventory; }
@@ -577,10 +707,24 @@ internal sealed class LocalStatusServer : IDisposable
         {
             string path = Path.Combine(_statusDir, $"RynthCore.{pid}.settings.json");
             if (!File.Exists(path)) return "{}"u8.ToArray();
-            byte[] bytes = File.ReadAllBytes(path);
+            byte[] bytes = StatusFileCache.ReadAllBytesShared(path);   // let the plugin replace it meanwhile
             return bytes.Length >= 2 ? bytes : "{}"u8.ToArray();
         }
         catch { return "{}"u8.ToArray(); }
+    }
+
+    /// Read RynthCore.<pid>.<kind>.json (written atomically by the RynthRemote plugin); null when absent.
+    private byte[]? ReadClientFile(int pid, string kind)
+    {
+        if (_statusDir == null) return null;
+        try
+        {
+            string path = Path.Combine(_statusDir, $"RynthCore.{pid}.{kind}.json");
+            if (!File.Exists(path)) return null;
+            byte[] bytes = StatusFileCache.ReadAllBytesShared(path);   // let the plugin replace it meanwhile
+            return bytes.Length >= 2 ? bytes : null;
+        }
+        catch { return null; }
     }
 
     private static int ClampQuery(HttpListenerRequest req, string key, int def, int lo, int hi)
@@ -705,9 +849,11 @@ internal sealed class LocalStatusServer : IDisposable
 
     private void HandleWebRtcOffer(HttpListenerRequest req, HttpListenerResponse res, int pid)
     {
-        string body;
-        using (var sr = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8))
-            body = sr.ReadToEnd();
+        if (!ServeGuard.TryReadBounded(req.InputStream, req.ContentLength64, ServeGuard.MaxOfferBodyBytes, req.ContentEncoding, out string body))
+        {
+            Write(res, 413, "application/json", "{\"error\":\"offer too large\"}"u8.ToArray());
+            return;
+        }
         string? offer = null;
         try { offer = JsonDocument.Parse(body).RootElement.GetProperty("sdp").GetString(); } catch { }
         if (string.IsNullOrEmpty(offer))
@@ -717,10 +863,10 @@ internal sealed class LocalStatusServer : IDisposable
         }
         // Diagnostic: confirm the offer arrived + from which client (Safari vs Chrome), and what H.264
         // profile-level-id(s) it can RECEIVE.
-        AgentLog.Info($"[video] OFFER pid={pid} ua=\"{req.UserAgent}\"");
+        AgentLog.Info($"[video] OFFER pid={pid} ua=\"{ServeGuard.LogSafe(req.UserAgent)}\"");
         foreach (var ln in offer.Split('\n'))
             if (ln.StartsWith("m=video", StringComparison.Ordinal) || ln.Contains("profile-level-id", StringComparison.OrdinalIgnoreCase) || ln.Contains("candidate", StringComparison.OrdinalIgnoreCase))
-                AgentLog.Info($"[video] offer> {ln.Trim()}");
+                AgentLog.Info($"[video] offer> {ServeGuard.LogSafe(ln.Trim(), 300)}");
         string? answer;
         try { answer = _video!.CreateAnswerAsync(pid, offer).GetAwaiter().GetResult(); }
         catch (Exception ex) { AgentLog.Warn($"[video] offer failed pid {pid}: {ex.Message}"); answer = null; }
@@ -739,14 +885,29 @@ internal sealed class LocalStatusServer : IDisposable
 
     private bool Authorized(HttpListenerRequest req)
     {
-        string? header = req.Headers["Authorization"];
-        if (header != null && header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(header.Substring("Bearer ".Length).Trim(), _token, StringComparison.Ordinal))
-            return true;
+        // An address that kept guessing is refused outright for a while, right token or not.
+        IPAddress? from = req.RemoteEndPoint?.Address;
+        DateTime now = DateTime.UtcNow;
+        if (_authThrottle.IsBlocked(from, now)) return false;
 
-        string? q = req.QueryString["token"];
-        return q != null && string.Equals(q, _token, StringComparison.Ordinal);
+        string? header = req.Headers["Authorization"];
+        bool ok = header != null && header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) &&
+                  TokenMatches(header.Substring("Bearer ".Length).Trim());
+        if (!ok)
+        {
+            string? q = req.QueryString["token"];
+            ok = q != null && TokenMatches(q);
+        }
+
+        if (ok) _authThrottle.Succeed(from);
+        else if (_authThrottle.Fail(from, now))
+            AgentLog.Warn($"auth: {from} locked out for {AuthThrottle.Lockout.TotalMinutes:0} min after {AuthThrottle.MaxFailures} bad tokens.");
+        return ok;
     }
+
+    private bool TokenMatches(string candidate)
+        => _token != null && CryptographicOperations.FixedTimeEquals(
+               Encoding.UTF8.GetBytes(candidate), Encoding.UTF8.GetBytes(_token));
 
     private static void Write(HttpListenerResponse res, int status, string contentType, byte[] body)
     {

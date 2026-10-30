@@ -15,7 +15,13 @@ param(
     # -AcClient overrides the binary it checks (default: auto-detect the private
     # copy under $Destination\AcClient, else C:\Turbine\Asheron's Call).
     [switch]$SkipPatternCheck,
-    [string]$AcClient = ""
+    [string]$AcClient = "",
+    # The old deploy: NativeAOT loader, engine and plugins (a hot reload leaks every
+    # generation). The default since 2026-09-29 is the unloadable engine
+    # (docs/UNLOADABLE_ENGINE_PLAN.md): native loader + CoreCLR engine + app-local runtime
+    # in Runtime\ (scripts\Publish-EngineCoreClr.ps1), and managed plugins, all of which
+    # a hot reload frees. Releases (installer\) still ship NativeAOT: players run that engine.
+    [switch]$NativeAot
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,7 +44,6 @@ $loaderProject = Join-Path $repoRoot "src\RynthCore.Loader\RynthCore.Loader.cspr
 $rynthAiSourceRoot     = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthAi"
 $rynthChatSourceRoot   = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthChat"
 $rynthVisionSourceRoot = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthVision"
-$rynthJuiceSourceRoot  = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthJuice"
 $pluginProjects = @(
     @{
         Project    = Join-Path $rynthAiSourceRoot "RynthCore.Plugin.RynthAi.csproj"
@@ -67,15 +72,6 @@ $pluginProjects = @(
         DllName    = "RynthCore.Plugin.RynthTracker.dll"
         DestSubdir = "RynthTracker"
     },
-    # RynthJuice sets <PublishDir> to its deploy home (like RynthVision), so
-    # publish lands directly in $PluginsDestination\RynthJuice and the copy step
-    # below detects source == dest and skips the redundant self-copy.
-    @{
-        Project    = Join-Path $rynthJuiceSourceRoot "RynthCore.Plugin.RynthJuice.csproj"
-        Publish    = Join-Path $PluginsDestination "RynthJuice"
-        DllName    = "RynthCore.Plugin.RynthJuice.dll"
-        DestSubdir = "RynthJuice"
-    },
     # RynthNav also publishes straight to its deploy home via <PublishDir>.
     # It was missing from this list entirely, so full deploys never refreshed it.
     @{
@@ -83,6 +79,13 @@ $pluginProjects = @(
         Publish    = Join-Path $PluginsDestination "RynthNav"
         DllName    = "RynthCore.Plugin.RynthNav.dll"
         DestSubdir = "RynthNav"
+    },
+    # RynthLua: Lua scripting, split out of RynthAi on 2026-09-29.
+    @{
+        Project    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthLua\RynthCore.Plugin.RynthLua.csproj"
+        Publish    = "C:\Projects\RynthSuite\Plugins\RynthCore.Plugin.RynthLua\bin\Release\net10.0-windows\win-x86\publish"
+        DllName    = "RynthCore.Plugin.RynthLua.dll"
+        DestSubdir = "RynthLua"
     }
 )
 
@@ -158,6 +161,13 @@ function Invoke-Publish {
     }
 }
 
+# Managed plugins publish to (and deploy from) out\plugins-clr\<name>, -SkipPublish too.
+if (-not $NativeAot) {
+    foreach ($plugin in $pluginProjects) {
+        $plugin.Publish = Join-Path $repoRoot ("out\plugins-clr\" + $plugin.DestSubdir)
+    }
+}
+
 if (-not $SkipPublish) {
     $env:DOTNET_CLI_HOME = Join-Path $repoRoot ".dotnet-home-deploy-clean"
     $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
@@ -166,10 +176,24 @@ if (-not $SkipPublish) {
         # --self-contained false is required: omitting it with the launcher's IncludeNativeLibrariesForSelfExtract=true produces a broken half-payload (apphost + coreclr.dll, no framework) that reports ".NET is not installed".
         Invoke-Publish -What "launcher" -Arguments @('publish', $launcherProject, '-c', 'Release', '-r', 'win-x86', '--self-contained', 'false')
     }
-    Invoke-Publish -What "engine" -Arguments @('publish', $engineProject, '-c', 'Release')
-    Invoke-Publish -What "loader" -Arguments @('publish', $loaderProject, '-c', 'Release')
+    if ($NativeAot) {
+        Invoke-Publish -What "engine" -Arguments @('publish', $engineProject, '-c', 'Release')
+        Invoke-Publish -What "loader" -Arguments @('publish', $loaderProject, '-c', 'Release')
+    }
+    # (CoreCLR: the engine, loader and shim are built by Publish-EngineCoreClr.ps1 below,
+    # after Runtime\ is wiped.)
     foreach ($plugin in $pluginProjects) {
-        Invoke-Publish -What $plugin.DllName -Arguments @('publish', $plugin.Project, '-c', 'Release')
+        if ($NativeAot) {
+            Invoke-Publish -What $plugin.DllName -Arguments @('publish', $plugin.Project, '-c', 'Release')
+        } else {
+            # Same source, managed: loads into its own collectible context in the CoreCLR
+            # engine (Plugins/ManagedPlugins.cs). Staged under out\plugins-clr, then copied.
+            $stage = $plugin.Publish
+            if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+            Invoke-Publish -What "$($plugin.DllName) (managed)" -Arguments @('publish', $plugin.Project, '-c', 'Release',
+                '-p:PublishAot=false', '-p:NativeLib=', '-p:SelfContained=false', '-p:RuntimeIdentifier=win-x86',
+                '-p:GenerateRuntimeConfigurationFiles=false', '-o', $stage)
+        }
     }
 }
 
@@ -199,6 +223,25 @@ $rootCleanup = @(
 )
 
 if (-not $SkipLauncher) {
+    # Same pre-flight for the launcher payload: a running RynthCore.exe holds its
+    # Avalonia DLLs, and the copy failing on one of them used to abort the deploy
+    # AFTER Runtime\ below had been wiped (2026-09-26) — no engine until a redeploy.
+    $launcherLocked = @()
+    foreach ($f in Get-ChildItem -LiteralPath $launcherPublish -File) {
+        $target = Join-Path $Destination $f.Name
+        if ($f.Name -eq "RynthCore.App.Avalonia.exe") { $target = Join-Path $Destination "RynthCore.exe" }
+        if (-not (Test-Path -LiteralPath $target)) { continue }
+        try {
+            $s = [System.IO.File]::Open($target, 'Open', 'ReadWrite', 'None')
+            $s.Close()
+        } catch {
+            $launcherLocked += $target
+        }
+    }
+    if ($launcherLocked.Count -gt 0) {
+        throw ("Deploy aborted BEFORE touching anything - $($launcherLocked.Count) launcher file(s) are locked (close the RynthCore launcher, or pass -SkipLauncher):`n  " + ($launcherLocked -join "`n  "))
+    }
+
     foreach ($name in $rootCleanup) {
         $target = Join-Path $Destination $name
         if (Test-Path -LiteralPath $target) {
@@ -237,13 +280,20 @@ if (-not $SkipLauncher) {
     Copy-FilteredChildren -Source $launcherPublish -Target $Destination -ExcludeNames @("RynthCore.App.Avalonia.exe") -ExcludeExtensions @(".pdb")
 }
 
-# Engine payload to Runtime\. Skip the bundled Plugins\ subfolder - plugins
-# are deployed separately to $PluginsDestination so they have a single home.
-Copy-FilteredChildren -Source $enginePublish -Target $runtimeDir -ExcludeNames @("Plugins") -ExcludeExtensions @(".pdb")
+if ($NativeAot) {
+    # Engine payload to Runtime\. Skip the bundled Plugins\ subfolder - plugins
+    # are deployed separately to $PluginsDestination so they have a single home.
+    Copy-FilteredChildren -Source $enginePublish -Target $runtimeDir -ExcludeNames @("Plugins") -ExcludeExtensions @(".pdb")
 
-# Loader DLL - this is what RynthCore.Injector loads into acclient.exe; the
-# Loader then maps RynthCore.Engine.dll and provides hot-reload support.
-Copy-Item -LiteralPath (Join-Path $loaderPublish "RynthCore.Loader.dll") -Destination (Join-Path $runtimeDir "RynthCore.Loader.dll") -Force
+    # Loader DLL - this is what RynthCore.Injector loads into acclient.exe; the
+    # Loader then maps RynthCore.Engine.dll and provides hot-reload support.
+    Copy-Item -LiteralPath (Join-Path $loaderPublish "RynthCore.Loader.dll") -Destination (Join-Path $runtimeDir "RynthCore.Loader.dll") -Force
+} else {
+    # Native loader (native\Loader) + RynthCore.Shim + CoreCLR engine (ReadyToRun) + its
+    # dependencies + Runtime\dotnet (app-local CoreCLR x86). Same contract with the
+    # injector (RynthCoreInit); the loader also hosts a NativeAOT engine if one is dropped in.
+    & (Join-Path $PSScriptRoot "Publish-EngineCoreClr.ps1") -Target $runtimeDir
+}
 
 # SEH trampoline - small native x86 MSVC DLL providing __try/__except wrappers
 # around dangerous AC API calls so object-teardown AVs are caught instead of
@@ -283,6 +333,16 @@ foreach ($plugin in $pluginProjects) {
         New-Item -ItemType Directory -Path $pluginTargetDir -Force | Out-Null
     }
 
+    if (-not $NativeAot) {
+        # A managed plugin is its DLL plus its dependencies (RynthCore.PluginSdk,
+        # PluginCore, MoonSharp, ImGui.NET...) and pdbs; copy those, leave user data.
+        foreach ($f in Get-ChildItem -LiteralPath $plugin.Publish -File | Where-Object { $_.Extension -in '.dll', '.pdb' }) {
+            Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $pluginTargetDir $f.Name) -Force
+        }
+        Write-Host "Plugin $($plugin.DllName) (managed) deployed to $pluginTargetDir"
+        continue
+    }
+
     # Only the DLL - leave any user data (LootProfiles\, imgui.ini, etc.)
     # in place by not touching anything else under $pluginTargetDir.
     $pluginDest = Join-Path $pluginTargetDir $plugin.DllName
@@ -299,7 +359,10 @@ foreach ($plugin in $pluginProjects) {
 # Scoped pdb sweep: root + Runtime\ only. A $Destination-wide recurse walked
 # the ~1.4 GB private AcClient copy on every deploy for nothing.
 Get-ChildItem -Path $Destination -Filter *.pdb -File | Remove-Item -Force
-Get-ChildItem -Path $runtimeDir -Recurse -Filter *.pdb -File | Remove-Item -Force
+# (The CoreCLR engine's own pdbs stay: they give its stack traces line numbers.)
+Get-ChildItem -Path $runtimeDir -Recurse -Filter *.pdb -File |
+    Where-Object { $NativeAot -or $_.Name -notin 'RynthCore.Engine.pdb', 'RynthCore.Shim.pdb', 'RynthCore.Loader.pdb' } |
+    Remove-Item -Force
 
 if (-not $SkipLauncher) {
     Write-Host "Launcher deployed to $Destination"

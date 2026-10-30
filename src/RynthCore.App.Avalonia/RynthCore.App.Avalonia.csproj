@@ -1,6 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- Launcher assembly version (bump when changing launcher-only behavior). Previous: 0.1.5.
+         No hard-coded InformationalVersion: release builds pass -p:Version=yyyy.m.d.n, and the
+         product version derived from it is what the launcher/About show (BuildVersion.Format). -->
+    <Version>0.1.6</Version>
+    <AssemblyVersion>0.1.6.0</AssemblyVersion>
+    <FileVersion>0.1.6.0</FileVersion>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows7.0</TargetFramework>
     <PlatformTarget>x86</PlatformTarget>
@@ -11,6 +17,8 @@
     <RootNamespace>RynthCore.App.Avalonia</RootNamespace>
     <AssemblyName>RynthCore.App.Avalonia</AssemblyName>
     <RuntimeIdentifiers>win-x86</RuntimeIdentifiers>
+    <!-- Build-Installer.ps1 publishes self-contained so RynthCore.exe does not require a machine-wide
+         .NET 10 Desktop Runtime. Local dotnet build or dotnet run still use the SDK. -->
     <ApplicationIcon>LogoCore.ico</ApplicationIcon>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
@@ -25,24 +33,53 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.3" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="11.2.3" />
+    <!-- Direct reference overrides Avalonia's transitive 0.20.x (NU1903 / GHSA-xrw6-gwf8-vvr9). -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RynthCore.DesktopLog\RynthCore.DesktopLog.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="..\RynthCore.App\LaunchServerProfile.cs" Link="Shared\LaunchServerProfile.cs" />
+    <Compile Include="..\RynthCore.App\KnownServerCatalog.cs" Link="Shared\KnownServerCatalog.cs" />
     <Compile Include="..\RynthCore.App\LaunchAccountProfile.cs" Link="Shared\LaunchAccountProfile.cs" />
+    <Compile Include="..\RynthCore.App\AccountPasswordProtection.cs" Link="Shared\AccountPasswordProtection.cs" />
+    <Compile Include="..\RynthCore.App\SavedPasswordReveal.cs" Link="Shared\SavedPasswordReveal.cs" />
     <Compile Include="..\RynthCore.App\InjectionMode.cs" Link="Shared\InjectionMode.cs" />
     <Compile Include="..\RynthCore.App\DecalLocator.cs" Link="Shared\DecalLocator.cs" />
+    <Compile Include="..\RynthCore.App\DecalBridgeRegistration.cs" Link="Shared\DecalBridgeRegistration.cs" />
+    <Compile Include="..\RynthCore.App\FolderAccess.cs" Link="Shared\FolderAccess.cs" />
+    <Compile Include="..\RynthCore.App\DecalBridgeCheck.cs" Link="Shared\DecalBridgeCheck.cs" />
+    <Compile Include="..\RynthCore.App\RealDecalCheckHost.cs" Link="Shared\RealDecalCheckHost.cs" />
     <Compile Include="..\RynthCore.App\AcLaunchArgumentBuilder.cs" Link="Shared\AcLaunchArgumentBuilder.cs" />
+    <Compile Include="..\RynthCore.App\AcClientCommandLine.cs" Link="Shared\AcClientCommandLine.cs" />
+    <Compile Include="..\RynthCore.App\FirstLoginRules.cs" Link="Shared\FirstLoginRules.cs" />
+    <Compile Include="..\RynthCore.App\AccountServerRules.cs" Link="Shared\AccountServerRules.cs" />
+    <Compile Include="..\RynthCore.App\CrashDumpWriterRule.cs" Link="Shared\CrashDumpWriterRule.cs" />
+    <Compile Include="..\RynthCore.App\AcWindowRestoreRule.cs" Link="Shared\AcWindowRestoreRule.cs" />
     <Compile Include="..\RynthCore.App\AcClientLaunchSettingsService.cs" Link="Shared\AcClientLaunchSettingsService.cs" />
+    <Compile Include="..\RynthCore.App\UserPrefsSwapRecovery.cs" Link="Shared\UserPrefsSwapRecovery.cs" />
     <Compile Include="..\RynthCore.App\AcClientLoginAutomationService.cs" Link="Shared\AcClientLoginAutomationService.cs" />
     <Compile Include="..\RynthCore.App\CharacterCacheStore.cs" Link="Shared\CharacterCacheStore.cs" />
     <Compile Include="..\RynthCore.App\LaunchContextStore.cs" Link="Shared\LaunchContextStore.cs" />
     <Compile Include="..\RynthCore.App\SessionStateStore.cs" Link="Shared\SessionStateStore.cs" />
+    <Compile Include="..\RynthCore.App\BuildVersion.cs" Link="Shared\BuildVersion.cs" />
     <Compile Include="..\RynthCore.App\AppSettings.cs" Link="Shared\AppSettings.cs" />
     <Compile Include="..\RynthCore.App\AppSettingsStore.cs" Link="Shared\AppSettingsStore.cs" />
+    <Compile Include="..\RynthCore.App\DecalAccountModes.cs" Link="Shared\DecalAccountModes.cs" />
     <Compile Include="..\RynthCore.App\PluginDefinition.cs" Link="Shared\PluginDefinition.cs" />
+    <!-- The plugin API of the engine installed with this launcher (RynthUpdater.InstalledEngineApi). -->
+    <Compile Include="..\RynthCore.Engine\Plugins\PluginContractVersion.cs" Link="Shared\PluginContractVersion.cs" />
     <Compile Include="..\RynthCore.Injector\EngineInjectionService.cs" Link="Shared\EngineInjectionService.cs" />
     <Compile Include="..\RynthCore.Injector\InjectionResult.cs" Link="Shared\InjectionResult.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file in RynthSuite Plugins\Shared. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+    <Compile Include="..\Shared\DumpInProgressRule.cs" Link="Shared\DumpInProgressRule.cs" />
   </ItemGroup>
 
 </Project>

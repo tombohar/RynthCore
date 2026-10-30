@@ -1,32 +1,24 @@
 // ============================================================================
 //  RynthCore.Engine — UI/Panels/RynthChatPanel.cs
-//  Avalonia chat-replacement panel backed by the RynthChat plugin (RynthSuite).
+//  Avalonia face of RynthChat (the popped-out chat; docked it's
+//  ImGui/Panels/ChatFace.cs). Both read the same state (UI/Data/ChatData.cs):
 //
-//  Phase 1: read-only display alongside retail chat (retail not yet suppressed).
 //    • Per-channel tabs: All / Chat / Channels / System / Combat / Rynth / Other
 //      plus user-defined tabs fed by regex filter rules
-//    • Regex filter rules: move matching lines to a custom tab, or hide them
-//    • Per-channel accent colors + timestamps
-//    • Auto-scroll to tail
-//    • Search/filter TextBox (wired; typing requires mouse hover — Phase 4 fix)
+//    • Per-channel accent colors + timestamps, auto-scroll to the tail
+//    • Search box
 //    • Mouse line-selection: drag across lines to highlight, copies to the
 //      Windows clipboard on release (works docked and floating — keyboard
 //      stays with the game, so copy is mouse-driven by design)
-//    • Incremental polling via RynthChatGetScrollbackJson(sinceSeq) every 100 ms
+//    • The input line: ChatModel owns it (Win32Backend's chat keys); this
+//      face only shows it
 //
-//  Bridge exports (resolved from the RynthChat plugin DLL via GetProcAddress):
-//    RynthChatGetScrollbackJson(ulong sinceSeq)  → ANSI JSON array of new lines
-//    RynthChatSendLine(char* ansiText)            → submit via InvokeChatParser (Phase 5)
+//  Lines come from UiSources.Chat (RynthChatGetScrollbackJson on the pump).
 // ============================================================================
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text.Json;
-using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -37,156 +29,18 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using RynthCore.Engine.Compatibility;
 using RynthCore.Engine.ImGuiBackend;
-using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI.Data;
 
 namespace RynthCore.Engine.UI.Panels;
 
 internal static class RynthChatPanel
 {
-    // ── P/Invoke ──────────────────────────────────────────────────────────
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    // Win32 clipboard — Avalonia's clipboard service is unreliable inside the
-    // injected acclient process (no proper TopLevel ownership), so write
-    // CF_UNICODETEXT directly.
-    [DllImport("user32.dll")] private static extern bool   OpenClipboard(IntPtr hWndNewOwner);
-    [DllImport("user32.dll")] private static extern bool   CloseClipboard();
-    [DllImport("user32.dll")] private static extern bool   EmptyClipboard();
-    [DllImport("user32.dll")] private static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
-    [DllImport("kernel32.dll")] private static extern IntPtr GlobalAlloc(uint uFlags, UIntPtr dwBytes);
-    [DllImport("kernel32.dll")] private static extern IntPtr GlobalLock(IntPtr hMem);
-    [DllImport("kernel32.dll")] private static extern bool   GlobalUnlock(IntPtr hMem);
-    [DllImport("kernel32.dll")] private static extern IntPtr GlobalFree(IntPtr hMem);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate IntPtr GetScrollbackJsonFn(ulong sinceSeq);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void SendLineFn(IntPtr ansiText);
-
-    // ── Bridge state ─────────────────────────────────────────────────────
-
-    private static GetScrollbackJsonFn? _getScrollbackJson;
-    private static SendLineFn?          _sendLine;
-    private static bool                 _bindingLogged;
-
-    // ── Runtime state (Avalonia UI thread only) ──────────────────────────
-
-    private static ulong _lastSeq;
-    private static readonly List<ChatDisplayLine> _allLines = new(500);
-    private static string _activeChannel = "All";
-    private static string _searchFilter  = "";
-    // Game-thread state for the chat input — all fields written only from WndProcHook callbacks.
-    private static string _captureText = "";
-    private static int    _cursorPos;
-    private static readonly List<string> _history = new();
-    private static int    _historyIndex = -1;
-
-    // ── Chat display settings ─────────────────────────────────────────────
-    private static double _chatFontSize    = 10.0;
-    private static byte   _backgroundAlpha = 0xF2;
-    private static bool   _autoScroll      = true;
     // Runtime: true while the view is pinned to the newest line. Cleared when the
     // user scrolls up so incoming lines stop yanking the view back to the tail.
     private static bool   _stickToBottom   = true;
     // Treat the view as "at the bottom" when within this many px of the end — absorbs
     // ScrollToEnd landing a line short under deferred layout without dropping follow.
     private const  double ScrollStickThresholdPx = 24.0;
-
-    // ── Regex filter rules + custom tabs (Avalonia UI thread only) ────────
-    //
-    // Each rule is a regex matched against the formatted line. First match
-    // wins. An empty Tab means "hide the line entirely"; otherwise the line
-    // is MOVED to that tab (it leaves its original channel tab but still
-    // shows under "All"). Rules are edited in the separate "ChatFilters"
-    // panel (RynthChatFiltersPanel); the lists live here because the chat
-    // panel owns persistence and display routing.
-    private static readonly List<ChatFilterRule> _filters = new();
-    private static readonly List<string> _customTabs = new();
-    private static bool _settingsLoaded;
-    // Set by Create(): rebuilds tab strip + display. Invoked (via
-    // NotifyFiltersChanged) when the filters panel mutates the rule list.
-    private static Action? _onFiltersChanged;
-
-    internal static List<ChatFilterRule> Filters => _filters;
-    internal static List<string> CustomTabsStore => _customTabs;
-
-    /// <summary>Persist + re-route after any rule/tab mutation. Safe to call
-    /// when the chat panel was never created (settings still save).</summary>
-    internal static void NotifyFiltersChanged()
-    {
-        SaveSettings();
-        _onFiltersChanged?.Invoke();
-    }
-
-    internal sealed class ChatFilterRule
-    {
-        internal bool   Enabled = true;
-        internal string Pattern = "";
-        internal string Tab     = "";      // "" = hide matching lines
-        internal Regex? Compiled;
-        internal bool   Invalid;
-
-        internal void Recompile()
-        {
-            Compiled = null;
-            Invalid  = false;
-            if (Pattern.Length == 0) { Invalid = true; return; }
-            try
-            {
-                Compiled = new Regex(Pattern,
-                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
-                    TimeSpan.FromMilliseconds(50));
-            }
-            catch { Invalid = true; }
-        }
-    }
-
-    /// <summary>Resolve where a line should display after filter rules.
-    /// Returns null when a hide-rule matched; otherwise the effective tab
-    /// (a custom tab name, or the line's classified channel).</summary>
-    private static string? EffectiveTab(ChatDisplayLine line)
-    {
-        foreach (var rule in _filters)
-        {
-            if (!rule.Enabled || rule.Compiled == null) continue;
-            bool hit;
-            try { hit = rule.Compiled.IsMatch(line.FormattedText); }
-            catch (RegexMatchTimeoutException) { continue; }
-            if (!hit) continue;
-            return rule.Tab.Length == 0 ? null : rule.Tab;
-        }
-        return line.Channel;
-    }
-
-    /// <summary>Custom tabs = explicitly created tabs plus any tab named by an
-    /// ENABLED rule (typing a tab name in a rule creates the tab implicitly).
-    /// Deleting a tab removes it from the explicit list AND disables rules
-    /// targeting it, so it doesn't resurrect through this union.</summary>
-    internal static IEnumerable<string> CustomTabs()
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var t in Tabs) seen.Add(t);
-        foreach (var t in _customTabs)
-            if (seen.Add(t)) yield return t;
-        foreach (var rule in _filters)
-            if (rule.Enabled && rule.Tab.Length > 0 && seen.Add(rule.Tab))
-                yield return rule.Tab;
-    }
-
-    internal static bool IsBaseTab(string tab) =>
-        Tabs.Contains(tab, StringComparer.OrdinalIgnoreCase);
-
-    internal static void DeleteCustomTab(string tab)
-    {
-        _customTabs.RemoveAll(t => string.Equals(t, tab, StringComparison.OrdinalIgnoreCase));
-        foreach (var rule in _filters)
-            if (string.Equals(rule.Tab, tab, StringComparison.OrdinalIgnoreCase))
-                rule.Enabled = false;
-        NotifyFiltersChanged();
-    }
 
     // ── Mouse line-selection state (Avalonia UI thread only) ─────────────
     //
@@ -203,59 +57,35 @@ internal static class RynthChatPanel
     private static TextBlock?    _flashLabel;
     private static DispatcherTimer? _flashTimer;
 
-    // ⚠ Lazy, NOT eager. These construct Avalonia SolidColorBrush objects.
-    // If they were eager static initializers, the first *static* touch of this
-    // class (EntryPoint.InitWorker calls RynthChatPanel.EnsureSettingsLoaded()
-    // to apply persisted "hide retail chat" at login) would run the static
-    // ctor on the InitWorker thread — constructing Avalonia objects BEFORE
-    // AvaloniaOverlay.Start() sets up the Win32 platform. That prematurely
-    // creates Dispatcher.UIThread with the non-controlled fallback impl, so the
-    // overlay thread's Dispatcher.MainLoop later throws PlatformNotSupportedException
-    // ("Operation is not supported on this platform") — the entire overlay dies
-    // and no RynthCore/plugin UI renders while the game + plugin pump run fine.
-    // Lazy init keeps the static ctor Avalonia-free; the brushes build on first
-    // access, which only ever happens on the Avalonia UI thread (panel render).
+    // ⚠ Lazy, NOT eager: an eager Avalonia-object static initializer would run
+    // on the first static touch of this class. Nothing touches it before
+    // AvaloniaOverlay.Start() any more (the settings load moved to ChatModel),
+    // but keep the brushes lazy so that stays harmless — see the dispatcher
+    // invariant in EntryPoint.
     private static IBrush? _selectionBrush;
     private static IBrush SelectionBrush =>
         _selectionBrush ??= new SolidColorBrush(Color.FromArgb(0x66, 0x3A, 0x6E, 0xA5));
-
-    // ── Chat logging (Avalonia UI thread only) ────────────────────────────
-    private static bool         _logEnabled;
-    private static string?      _logCharacterName;
-    private static StreamWriter? _logWriter;
-
-    // ── Channel definitions (must match ChatClassifier in plugin) ─────────
-
-    private static readonly string[] Tabs =
-        { "All", "Chat", "Channels", "System", "Combat", "Rynth", "Other" };
-
-    private static Color ChannelColor(string chan) => chan switch
-    {
-        "Chat"     => Color.FromArgb(0xFF, 0xE0, 0xE0, 0xE0),
-        "Channels" => Color.FromArgb(0xFF, 0x7A, 0xB8, 0xF5),
-        "System"   => Color.FromArgb(0xFF, 0x8C, 0xA6, 0xBF),
-        "Combat"   => Color.FromArgb(0xFF, 0xD9, 0x33, 0x33),
-        "Rynth"    => Color.FromArgb(0xFF, 0xE6, 0xB4, 0x50),  // amber — distinct from the blue/grey channels
-        _          => Color.FromArgb(0xFF, 0xAA, 0xAA, 0xAA),
-    };
-
-    // Lazy — see the SelectionBrush note above: eager Avalonia-object static
-    // initializers here would poison Dispatcher.UIThread when EnsureSettingsLoaded
-    // triggers the static ctor off the Avalonia thread before platform init.
     private static IBrush? _tabActiveBrush;
     private static IBrush TabActiveBrush   => _tabActiveBrush   ??= new SolidColorBrush(Color.FromArgb(0xFF, 0x26, 0x4C, 0x59));
     private static IBrush? _tabInactiveBrush;
     private static IBrush TabInactiveBrush => _tabInactiveBrush ??= new SolidColorBrush(Color.FromArgb(0xFF, 0x0F, 0x1F, 0x2E));
 
+    private static Color ChannelColor(string chan) => Color.FromUInt32(ChatModel.ChannelArgb(chan));
+
     // ── Panel construction ────────────────────────────────────────────────
 
     internal static Control Create()
     {
-        EnsureSettingsLoaded();
-        TryBind();
+        ChatModel.EnsureSettingsLoaded();
+
+        string activeTab = ChatModel.CurrentTab();
+        string searchFilter = "";
+        long lastShownId = 0;
+        long seenLinesVersion = -1;
+        long seenFiltersVersion = ChatModel.ViewVersion;
 
         // ── Tab strip with filter + gear buttons ───────────────────────
-        var tabButtons = new Dictionary<string, Button>();
+        var tabButtons = new Dictionary<string, Button>(StringComparer.OrdinalIgnoreCase);
         var tabInner = new WrapPanel { Orientation = Orientation.Horizontal };
         var gearBtn = new Button
         {
@@ -314,10 +144,11 @@ internal static class RynthChatPanel
         _selStack = chatStack;
         ClearSelectionState();
 
-        // ── Chat input ─────────────────────────────────────────────────
+        // ── Chat input (shows ChatModel's line; keys never reach Avalonia) ──
+        const string defaultWatermark = "Press Enter to chat…";
         var chatInputBox = new TextBox
         {
-            Watermark = "Press Enter to chat…",
+            Watermark = defaultWatermark,
             FontSize  = 10,
             Height    = 22,
             Margin    = new Thickness(2, 1, 2, 1),
@@ -329,17 +160,38 @@ internal static class RynthChatPanel
         ScrollViewer.SetHorizontalScrollBarVisibility(chatInputBox, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollBarVisibility(chatInputBox, ScrollBarVisibility.Disabled);
 
+        // Tell: start "/tell <selected>, " for the NPC or player selected in the game — quest
+        // NPCs usually haven't spoken to you, so there's no name to click in the scrollback.
+        // Typing "/tell" (or "/t") alone and pressing Enter does the same.
+        var tellButton = new Button
+        {
+            Content = "Tell",
+            FontSize = 10,
+            Height = 22,
+            Padding = new Thickness(8, 0),
+            Margin = new Thickness(0, 1, 2, 1),
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x0E, 0x2E, 0x3A)),
+            Foreground = Brushes.White,
+        };
+        ToolTip.SetTip(tellButton, "Select an NPC or player in the game, then click to start /tell <name>, — or type /tell and press Enter.");
+        tellButton.Click += (_, _) => Win32Backend.RequestTellSelected();
+        var inputRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        inputRow.Children.Add(chatInputBox);
+        inputRow.Children.Add(tellButton);
+        Grid.SetColumn(tellButton, 1);
+
         // ── Main layout ────────────────────────────────────────────────
         var mainLayout = new DockPanel
         {
-            Background = new SolidColorBrush(Color.FromArgb(_backgroundAlpha, 0x0A, 0x12, 0x1A)),
+            Background = new SolidColorBrush(Color.FromArgb((byte)ChatModel.BackgroundAlpha, 0x0A, 0x12, 0x1A)),
         };
         DockPanel.SetDock(tabStrip,    Dock.Top);
         DockPanel.SetDock(searchBox,   Dock.Top);
-        DockPanel.SetDock(chatInputBox, Dock.Bottom);
+        DockPanel.SetDock(inputRow, Dock.Bottom);
         mainLayout.Children.Add(tabStrip);
         mainLayout.Children.Add(searchBox);
-        mainLayout.Children.Add(chatInputBox);
+        mainLayout.Children.Add(inputRow);
         mainLayout.Children.Add(scrollViewer);
 
         // ── "Copied N lines" flash (top-right, above the scrollback) ──
@@ -361,41 +213,55 @@ internal static class RynthChatPanel
         var autoScrollCheck = new CheckBox
         {
             Content    = "Auto-scroll",
-            IsChecked  = _autoScroll,
+            IsChecked  = ChatModel.AutoScroll,
             FontSize   = 9,
             Foreground = Brushes.White,
         };
 
         var suppressChatCheck = new CheckBox
         {
-            Content    = "Hide retail chat",
+            Content    = "Hide retail chat (Enter types here)",
             IsChecked  = ChatHooks.SuppressOriginalChat,
             FontSize   = 9,
             Foreground = Brushes.White,
         };
+        ToolTip.SetTip(suppressChatCheck,
+            "On: the retail chatbox is hidden and Enter types in RynthChat.\n" +
+            "Off: the retail chatbox is shown and Enter types there; RynthChat keeps showing lines and its Tell button still works.");
         suppressChatCheck.IsCheckedChanged += (_, _) =>
         {
             ChatHooks.SuppressOriginalChat = suppressChatCheck.IsChecked == true;
-            SaveSettings();
+            ChatModel.SaveSettings();
         };
 
         var logChatCheck = new CheckBox
         {
             Content    = "Log to file",
-            IsChecked  = _logEnabled,
+            IsChecked  = ChatModel.LogEnabled,
             FontSize   = 9,
             Foreground = Brushes.White,
         };
         logChatCheck.IsCheckedChanged += (_, _) =>
         {
-            _logEnabled = logChatCheck.IsChecked == true;
-            if (!_logEnabled) CloseLog();
-            SaveSettings();
+            ChatModel.LogEnabled = logChatCheck.IsChecked == true;   // the pump closes the file
+            ChatModel.SaveSettings();
         };
+
+        var clickThroughCheck = new CheckBox
+        {
+            Content    = "Click-through (hold Ctrl to interact)",
+            IsChecked  = ChatModel.CtrlGatedClickThrough,
+            FontSize   = 9,
+            Foreground = Brushes.White,
+        };
+        ToolTip.SetTip(clickThroughCheck,
+            "Applies to the DOCKED chat panel only — the undocked/popped-out chat is always interactive, like every other floating panel.\nOn: docked clicks pass through to the game; hold Ctrl to interact with chat.\nOff: docked chat is always interactive (default).");
+        clickThroughCheck.IsCheckedChanged += (_, _) =>
+            ChatModel.SetCtrlGatedClickThrough(clickThroughCheck.IsChecked == true);
 
         var fontSizeLabel = new TextBlock
         {
-            Text = $"Font size: {_chatFontSize:F0}",
+            Text = $"Font size: {ChatModel.FontSize:F0}",
             FontSize = 9,
             Foreground = Brushes.White,
             VerticalAlignment = VerticalAlignment.Center,
@@ -403,13 +269,13 @@ internal static class RynthChatPanel
         };
         var fontSizeSlider = new Slider
         {
-            Minimum = 8, Maximum = 18, Value = _chatFontSize,
+            Minimum = 8, Maximum = 18, Value = ChatModel.FontSize,
             Width = 110, TickFrequency = 1, IsSnapToTickEnabled = true,
         };
 
         var bgOpacityLabel = new TextBlock
         {
-            Text = $"Background: {(int)Math.Round(_backgroundAlpha / 2.55)}%",
+            Text = $"Background: {(int)Math.Round(ChatModel.BackgroundAlpha / 2.55)}%",
             FontSize = 9,
             Foreground = Brushes.White,
             VerticalAlignment = VerticalAlignment.Center,
@@ -417,20 +283,20 @@ internal static class RynthChatPanel
         };
         var bgOpacitySlider = new Slider
         {
-            Minimum = 0, Maximum = 255, Value = _backgroundAlpha,
+            Minimum = 0, Maximum = 255, Value = ChatModel.BackgroundAlpha,
             Width = 110,
         };
         bgOpacitySlider.ValueChanged += (_, e) =>
         {
-            _backgroundAlpha = (byte)Math.Round(e.NewValue);
-            bgOpacityLabel.Text = $"Background: {(int)Math.Round(_backgroundAlpha / 2.55)}%";
-            mainLayout.Background = new SolidColorBrush(Color.FromArgb(_backgroundAlpha, 0x0A, 0x12, 0x1A));
-            SaveSettings();
+            ChatModel.BackgroundAlpha = (int)Math.Round(e.NewValue);
+            bgOpacityLabel.Text = $"Background: {(int)Math.Round(ChatModel.BackgroundAlpha / 2.55)}%";
+            mainLayout.Background = new SolidColorBrush(Color.FromArgb((byte)ChatModel.BackgroundAlpha, 0x0A, 0x12, 0x1A));
+            ChatModel.SaveSettings();
         };
 
         var statusLabel = new TextBlock
         {
-            Text       = _getScrollbackJson != null ? "" : "Plugin not bound",
+            Text       = ChatModel.PluginBound ? "" : "Plugin not bound",
             FontSize   = 8,
             Foreground = Brushes.Gray,
         };
@@ -458,24 +324,25 @@ internal static class RynthChatPanel
                     autoScrollCheck,
                     suppressChatCheck,
                     logChatCheck,
+                    clickThroughCheck,
                     statusLabel,
                 },
             },
         };
         autoScrollCheck.IsCheckedChanged += (_, _) =>
         {
-            _autoScroll = autoScrollCheck.IsChecked == true;
-            if (_autoScroll)
+            ChatModel.AutoScroll = autoScrollCheck.IsChecked == true;
+            if (ChatModel.AutoScroll)
             {
                 _stickToBottom = true;
                 scrollViewer.ScrollToEnd();
             }
-            SaveSettings();
+            ChatModel.SaveSettings();
         };
         gearBtn.Click += (_, _) => settingsOverlay.IsVisible = !settingsOverlay.IsVisible;
 
-        // Filter rules now live in their own panel — they get complex fast.
-        filtersBtn.Click += (_, _) => AvaloniaOverlay.ActivateBarButton("ChatFilters");
+        // Filter rules live in their own panel — they get complex fast.
+        filtersBtn.Click += (_, _) => PanelRouter.Toggle("ChatFilters");
 
         // ── New-tab prompt (opened by the "+" tab button) ──────────────
         var newTabBox = new TextBox
@@ -536,26 +403,23 @@ internal static class RynthChatPanel
 
         // ── Helpers ────────────────────────────────────────────────────
 
-        bool LineVisible(ChatDisplayLine line, out string? effTab)
-        {
-            effTab = EffectiveTab(line);
-            if (effTab == null) return false;                       // hidden by rule
-            if (_activeChannel != "All" && !string.Equals(effTab, _activeChannel, StringComparison.OrdinalIgnoreCase))
-                return false;
-            string filter = _searchFilter;
-            if (filter.Length > 0 && !line.FormattedText.Contains(filter, StringComparison.OrdinalIgnoreCase))
-                return false;
-            return true;
-        }
+        ChatLine[] CurrentLines() => UiSources.Chat.Current?.Value ?? Array.Empty<ChatLine>();
 
         void RebuildDisplay()
         {
             ClearSelectionState();
             chatStack.Children.Clear();
-            foreach (var line in _allLines)
+            // The newest 500 shown lines, as AppendLine trims to: the history can be 10,000
+            // lines since 2026-10-11 (ChatHistory), far too many TextBlocks. ImGui's face shows all.
+            var lines = CurrentLines();
+            int from = lines.Length;
+            for (int shown = 0; from > 0 && shown < 500; )
+                if (ChatModel.LineVisible(lines[--from], activeTab, searchFilter)) shown++;
+            if (lines.Length > 0) lastShownId = lines[^1].Id;
+            for (int i = from; i < lines.Length; i++)
             {
-                if (!LineVisible(line, out _)) continue;
-                chatStack.Children.Add(MakeTextBlock(line));
+                if (!ChatModel.LineVisible(lines[i], activeTab, searchFilter)) continue;
+                chatStack.Children.Add(MakeTextBlock(lines[i]));
             }
             // A full rebuild (tab/filter/font change) re-pins to the newest line.
             if (autoScrollCheck.IsChecked == true)
@@ -569,7 +433,7 @@ internal static class RynthChatPanel
         {
             tabInner.Children.Clear();
             tabButtons.Clear();
-            foreach (var tab in Tabs.Concat(CustomTabs()))
+            foreach (var tab in ChatModel.AllTabs())
             {
                 var btn = new Button
                 {
@@ -577,7 +441,7 @@ internal static class RynthChatPanel
                     FontSize = 9,
                     Padding = new Thickness(5, 2),
                     Margin  = new Thickness(1, 1, 0, 0),
-                    Background = string.Equals(tab, _activeChannel, StringComparison.OrdinalIgnoreCase)
+                    Background = string.Equals(tab, activeTab, StringComparison.OrdinalIgnoreCase)
                         ? TabActiveBrush : TabInactiveBrush,
                     Foreground = Brushes.White,
                     BorderThickness = new Thickness(0),
@@ -589,7 +453,7 @@ internal static class RynthChatPanel
 
                 // Custom tabs only: a small ✕ to delete the tab (disables any
                 // rules that target it so it doesn't resurrect via the union).
-                if (!IsBaseTab(tab))
+                if (!ChatModel.IsBaseTab(tab))
                 {
                     var delTabBtn = new Button
                     {
@@ -601,7 +465,7 @@ internal static class RynthChatPanel
                         Foreground = Brushes.IndianRed,
                         BorderThickness = new Thickness(0),
                     };
-                    delTabBtn.Click += (_, _) => DeleteCustomTab(captured);
+                    delTabBtn.Click += (_, _) => ChatModel.DeleteCustomTab(captured);
                     tabInner.Children.Add(delTabBtn);
                 }
             }
@@ -625,29 +489,34 @@ internal static class RynthChatPanel
             tabInner.Children.Add(addTabBtn);
 
             // Active tab's source was deleted: fall back to All.
-            if (!tabButtons.ContainsKey(_activeChannel))
+            if (!tabButtons.ContainsKey(activeTab))
             {
-                _activeChannel = "All";
+                activeTab = "All";
                 tabButtons["All"].Background = TabActiveBrush;
             }
         }
 
-        void SelectTab(string tab)
+        void ShowTab(string tab)
         {
-            RynthLog.Info($"[RynthChat] SelectTab({tab}) called.");
-            _activeChannel = tab;
+            activeTab = tab;
             foreach (var kv in tabButtons)
             {
                 kv.Value.Background = string.Equals(kv.Key, tab, StringComparison.OrdinalIgnoreCase)
                     ? TabActiveBrush : TabInactiveBrush;
             }
             RebuildDisplay();
-            SaveSettings();
         }
 
-        void AppendLine(ChatDisplayLine line)
+        void SelectTab(string tab)
         {
-            if (!LineVisible(line, out _)) return;
+            ChatModel.SelectTab(tab);
+            ShowTab(tab);
+        }
+
+        void AppendLine(ChatLine line)
+        {
+            lastShownId = line.Id;
+            if (!ChatModel.LineVisible(line, activeTab, searchFilter)) return;
             chatStack.Children.Add(MakeTextBlock(line));
             // While a selection drag is live, don't trim from the top — it would
             // shift the highlighted indices under the cursor. The next rebuild
@@ -677,15 +546,10 @@ internal static class RynthChatPanel
             newTabOverlay.IsVisible = false;
             Win32Backend.AvaloniaTextInputActive = false;
             if (name.Length == 0) return;
-            if (Tabs.Concat(CustomTabs()).Contains(name, StringComparer.OrdinalIgnoreCase))
-            {
-                SelectTab(name);   // already exists — just switch to it
-                return;
-            }
-            _customTabs.Add(name);
-            SaveSettings();
+            ChatModel.AddCustomTab(name);
+            seenFiltersVersion = ChatModel.ViewVersion;
             RebuildTabs();
-            SelectTab(name);
+            ShowTab(ChatModel.CurrentTab());
         }
 
         newTabAddBtn.Click += (_, _) => CommitNewTab();
@@ -700,19 +564,11 @@ internal static class RynthChatPanel
             else if (e.Key == Key.Escape) { newTabOverlay.IsVisible = false; e.Handled = true; }
         };
 
-        // The filters panel mutates the rule list and calls
-        // NotifyFiltersChanged(); re-route + rebuild the tab strip here.
-        _onFiltersChanged = () =>
-        {
-            RebuildTabs();
-            RebuildDisplay();
-        };
-
         // ── Event wiring ───────────────────────────────────────────────
 
         searchBox.TextChanged += (_, _) =>
         {
-            _searchFilter = searchBox.Text ?? "";
+            searchFilter = searchBox.Text ?? "";
             RebuildDisplay();
         };
 
@@ -752,218 +608,104 @@ internal static class RynthChatPanel
             }
         };
 
-        // ── Chat input callbacks (all key handling in WndProcHook) ────────
-        // WndProcHook intercepts WM_CHAR / VK_BACK / VK_RETURN / VK_ESCAPE while
-        // ChatCaptureActive and fires these callbacks.  No Avalonia focus needed.
-
+        // ── Chat input: ChatModel's line (updated on AC's thread) ─────
         var defaultBorderBrush = chatInputBox.BorderBrush;
         var activeBorderBrush  = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xD7, 0x00));
 
-        Win32Backend.OnChatCaptureActivated = () =>
+        void ShowInput()
         {
-            _captureText = "";
-            _cursorPos   = 0;
-            _historyIndex = -1;
-            Dispatcher.UIThread.Post(() =>
-            {
-                chatInputBox.Text = "";
-                chatInputBox.BorderBrush = activeBorderBrush;
-            });
-        };
+            string text = ChatModel.InputText;
+            chatInputBox.Text = text;
+            chatInputBox.CaretIndex = Math.Min(ChatModel.InputCursor, text.Length);
+            chatInputBox.Watermark = ChatModel.InputHint ?? defaultWatermark;
+            chatInputBox.BorderBrush = Win32Backend.ChatCaptureActive ? activeBorderBrush : defaultBorderBrush;
+        }
+        void OnInputChanged() => Dispatcher.UIThread.Post(ShowInput);
 
-        Win32Backend.OnChatChar = c =>
-        {
-            _captureText = _captureText[.._cursorPos] + c + _captureText[_cursorPos..];
-            _cursorPos++;
-            _historyIndex = -1;
-            var (snap, pos) = (_captureText, _cursorPos);
-            Dispatcher.UIThread.Post(() => { chatInputBox.Text = snap; chatInputBox.CaretIndex = pos; });
-        };
-
-        Win32Backend.OnChatBackspace = () =>
-        {
-            if (_cursorPos > 0)
-            {
-                _captureText = _captureText[..(_cursorPos - 1)] + _captureText[_cursorPos..];
-                _cursorPos--;
-            }
-            var (snap, pos) = (_captureText, _cursorPos);
-            Dispatcher.UIThread.Post(() => { chatInputBox.Text = snap; chatInputBox.CaretIndex = pos; });
-        };
-
-        Win32Backend.OnChatDelete = () =>
-        {
-            if (_cursorPos < _captureText.Length)
-                _captureText = _captureText[.._cursorPos] + _captureText[(_cursorPos + 1)..];
-            var (snap, pos) = (_captureText, _cursorPos);
-            Dispatcher.UIThread.Post(() => { chatInputBox.Text = snap; chatInputBox.CaretIndex = pos; });
-        };
-
-        Win32Backend.OnChatLeft = () =>
-        {
-            if (_cursorPos > 0) _cursorPos--;
-            var pos = _cursorPos;
-            Dispatcher.UIThread.Post(() => chatInputBox.CaretIndex = pos);
-        };
-
-        Win32Backend.OnChatRight = () =>
-        {
-            if (_cursorPos < _captureText.Length) _cursorPos++;
-            var pos = _cursorPos;
-            Dispatcher.UIThread.Post(() => chatInputBox.CaretIndex = pos);
-        };
-
-        Win32Backend.OnChatHome = () =>
-        {
-            _cursorPos = 0;
-            Dispatcher.UIThread.Post(() => chatInputBox.CaretIndex = 0);
-        };
-
-        Win32Backend.OnChatEnd = () =>
-        {
-            _cursorPos = _captureText.Length;
-            var pos = _cursorPos;
-            Dispatcher.UIThread.Post(() => chatInputBox.CaretIndex = pos);
-        };
-
-        Win32Backend.OnChatUp = () =>
-        {
-            if (_history.Count == 0) return;
-            _historyIndex = _historyIndex < 0 ? _history.Count - 1
-                          : Math.Max(0, _historyIndex - 1);
-            _captureText = _history[_historyIndex];
-            _cursorPos   = _captureText.Length;
-            var (snap, pos) = (_captureText, _cursorPos);
-            Dispatcher.UIThread.Post(() => { chatInputBox.Text = snap; chatInputBox.CaretIndex = pos; });
-        };
-
-        Win32Backend.OnChatDown = () =>
-        {
-            if (_historyIndex < 0) return;
-            if (_historyIndex < _history.Count - 1)
-            {
-                _historyIndex++;
-                _captureText = _history[_historyIndex];
-            }
-            else
-            {
-                _historyIndex = -1;
-                _captureText  = "";
-            }
-            _cursorPos = _captureText.Length;
-            var (snap, pos) = (_captureText, _cursorPos);
-            Dispatcher.UIThread.Post(() => { chatInputBox.Text = snap; chatInputBox.CaretIndex = pos; });
-        };
-
-        // OnChatSend fires on the game thread (WndProcHook). _sendLine must be
-        // called here — before Dispatcher.UIThread.Post — so SimulateChatInput's
-        // CallWindowProcA runs on the game thread, not the Avalonia UI thread.
-        Win32Backend.OnChatSend = () =>
-        {
-            string text = _captureText.Trim();
-            _captureText  = "";
-            _cursorPos    = 0;
-            _historyIndex = -1;
-            if (text.Length > 0 && (_history.Count == 0 || _history[^1] != text))
-            {
-                _history.Add(text);
-                if (_history.Count > 100) _history.RemoveAt(0);
-            }
-            Dispatcher.UIThread.Post(() =>
-            {
-                chatInputBox.Text = "";
-                chatInputBox.BorderBrush = defaultBorderBrush;
-            });
-            if (text.Length > 0 && _sendLine != null)
-            {
-                IntPtr ptr = Marshal.StringToHGlobalAnsi(text);
-                try   { _sendLine(ptr); }
-                finally { Marshal.FreeHGlobal(ptr); }
-            }
-        };
-
-        Win32Backend.OnChatCancel = () =>
-        {
-            _captureText  = "";
-            _cursorPos    = 0;
-            _historyIndex = -1;
-            Dispatcher.UIThread.Post(() =>
-            {
-                chatInputBox.Text = "";
-                chatInputBox.BorderBrush = defaultBorderBrush;
-            });
-        };
-
-        // ── Poll timer ─────────────────────────────────────────────────
+        // ── Poll timer: new lines, filter/tab changes ──────────────────
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+        bool captureShown = false;
         timer.Tick += (_, _) =>
         {
-            if (_getScrollbackJson == null)
+            statusLabel.Text = ChatModel.PluginBound ? "" : "Plugin not bound";
+
+            long filtersVersion = ChatModel.ViewVersion;
+            string current = ChatModel.CurrentTab();
+            if (filtersVersion != seenFiltersVersion)
             {
-                TryBind();
-                if (_getScrollbackJson != null)
-                    statusLabel.Text = ""; // clear "Plugin not bound"
-                return;
+                seenFiltersVersion = filtersVersion;
+                activeTab = current;
+                RebuildTabs();
+                ShowTab(activeTab);
+                seenLinesVersion = UiSources.Chat.Current?.Version ?? -1;
+            }
+            else if (!string.Equals(current, activeTab, StringComparison.OrdinalIgnoreCase))
+                ShowTab(current);
+
+            var snap = UiSources.Chat.Current;
+            if (snap != null && snap.Version != seenLinesVersion)
+            {
+                seenLinesVersion = snap.Version;
+                foreach (var line in snap.Value)
+                    if (line.Id > lastShownId) AppendLine(line);
             }
 
-            IntPtr ptr = _getScrollbackJson(_lastSeq);
-            if (ptr == IntPtr.Zero) return;
-            string? json = Marshal.PtrToStringAnsi(ptr);
-            if (string.IsNullOrEmpty(json) || json == "[]") return;
-
-            RynthChatLineDto[]? dtos;
-            try { dtos = JsonSerializer.Deserialize(json, RynthChatJsonContext.Default.RynthChatLineDtoArray); }
-            catch { return; }
-            if (dtos == null || dtos.Length == 0) return;
-
-            foreach (var dto in dtos)
+            // Capture ends inside Win32Backend (Enter / Escape) without an input change.
+            if (captureShown != Win32Backend.ChatCaptureActive)
             {
-                if (dto.Seq <= _lastSeq) continue;
-                _lastSeq = dto.Seq;
-
-                var line = new ChatDisplayLine(dto.Seq, dto.Ts, dto.Chan, dto.Sender, dto.Text);
-                if (_allLines.Count >= 500) _allLines.RemoveAt(0);
-                _allLines.Add(line);
-                AppendLine(line);
-                LogLine(line);
+                captureShown = Win32Backend.ChatCaptureActive;
+                ShowInput();
             }
         };
-        timer.Start();
-        // Stop with the visual tree — a running DispatcherTimer roots the closed
-        // view forever (this one polls at 100ms!). RadarPanel idiom; must
-        // restart on attach: drag/resize fires Detached→Attached.
-        root.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
-        root.DetachedFromVisualTree += (_, _) => timer.Stop();
 
         fontSizeSlider.ValueChanged += (_, e) =>
         {
-            _chatFontSize = e.NewValue;
-            fontSizeLabel.Text = $"Font size: {_chatFontSize:F0}";
+            ChatModel.FontSize = (float)e.NewValue;
+            fontSizeLabel.Text = $"Font size: {ChatModel.FontSize:F0}";
             RebuildDisplay();
-            SaveSettings();
+            ChatModel.SaveSettings();
         };
 
-        // Build tabs (base + custom from loaded filters), filter rows, then
-        // apply loaded active-channel to tab button visuals.
         RebuildTabs();
-        SelectTab(_activeChannel);
+        ShowTab(activeTab);
+        seenLinesVersion = UiSources.Chat.Current?.Version ?? -1;
+
+        // Stop with the visual tree — a running DispatcherTimer roots the closed
+        // view forever. Drag/resize fires Detached→Attached, so restart on attach.
+        // Whether chat is on screen decides who owns Enter and whether the retail
+        // chatbox is hidden (ChatModel.SetShown).
+        root.AttachedToVisualTree += (_, _) =>
+        {
+            UiSources.Chat.Subscribe();
+            UiSources.Chat.RequestRefresh();
+            ChatModel.InputChanged += OnInputChanged;
+            ShowInput();
+            ChatModel.SetShown(true);
+            if (!timer.IsEnabled) timer.Start();
+        };
+        root.DetachedFromVisualTree += (_, _) =>
+        {
+            timer.Stop();
+            ChatModel.SetShown(false);
+            ChatModel.InputChanged -= OnInputChanged;
+            UiSources.Chat.Unsubscribe();
+        };
 
         return root;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    private static TextBlock MakeTextBlock(ChatDisplayLine line)
+    private static TextBlock MakeTextBlock(ChatLine line)
     {
-        string prefix = line.Sender != null ? $"{line.Timestamp} {line.Sender}: " : $"{line.Timestamp} ";
         // Plain TextBlock, IsHitTestVisible=false: line-range selection is
         // handled at the ScrollViewer level (drag → highlight → copy on
         // release). Tag carries the formatted text for the clipboard join.
         return new TextBlock
         {
-            Text         = prefix + line.Text,
+            Text         = line.FormattedText,
             Tag          = line.FormattedText,
-            FontSize     = _chatFontSize,
+            FontSize     = ChatModel.FontSize,
             FontFamily   = new FontFamily("Consolas,Courier New,monospace"),
             Foreground   = new SolidColorBrush(ChannelColor(line.Channel)),
             TextWrapping = TextWrapping.Wrap,
@@ -1064,46 +806,7 @@ internal static class RynthChatPanel
             if (children[i] is TextBlock tb && tb.Tag is string s)
                 parts.Add(s);
         if (parts.Count == 0) return;
-        bool ok = SetClipboardText(string.Join("\r\n", parts));
-        FlashStatus(ok ? $"Copied {parts.Count} line{(parts.Count == 1 ? "" : "s")}" : "Clipboard busy — try again");
-    }
-
-    private static bool SetClipboardText(string text)
-    {
-        const uint CF_UNICODETEXT = 13;
-        const uint GMEM_MOVEABLE  = 0x0002;
-        // The clipboard is a shared resource — another app may hold it briefly.
-        for (int attempt = 0; attempt < 5; attempt++)
-        {
-            if (OpenClipboard(IntPtr.Zero))
-            {
-                try
-                {
-                    EmptyClipboard();
-                    int bytes = (text.Length + 1) * 2;
-                    IntPtr hMem = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)bytes);
-                    if (hMem == IntPtr.Zero) return false;
-                    IntPtr dst = GlobalLock(hMem);
-                    if (dst == IntPtr.Zero) { GlobalFree(hMem); return false; }
-                    unsafe
-                    {
-                        fixed (char* src = text)
-                            Buffer.MemoryCopy(src, (void*)dst, bytes, text.Length * 2);
-                        ((char*)dst)[text.Length] = '\0';
-                    }
-                    GlobalUnlock(hMem);
-                    if (SetClipboardData(CF_UNICODETEXT, hMem) == IntPtr.Zero)
-                    {
-                        GlobalFree(hMem);   // ownership not taken — free it
-                        return false;
-                    }
-                    return true;            // system owns hMem now
-                }
-                finally { CloseClipboard(); }
-            }
-            System.Threading.Thread.Sleep(10);
-        }
-        return false;
+        FlashStatus(ChatModel.CopyLines(parts));
     }
 
     private static void FlashStatus(string message)
@@ -1169,218 +872,4 @@ internal static class RynthChatPanel
     }
 
     internal static bool FloatingSelectionActive => _selDragging;
-
-    private static void TryBind()
-    {
-        LoadedPlugin? plugin = PluginManager.Plugins.FirstOrDefault(
-            p => p.DisplayName.Contains("RynthChat", StringComparison.OrdinalIgnoreCase));
-        if (plugin == null || plugin.ModuleHandle == IntPtr.Zero) return;
-
-        _getScrollbackJson ??= Bind<GetScrollbackJsonFn>(plugin, "RynthChatGetScrollbackJson");
-        _sendLine          ??= Bind<SendLineFn>(plugin,          "RynthChatSendLine");
-
-        if (!_bindingLogged && _getScrollbackJson != null)
-        {
-            _bindingLogged = true;
-            RynthLog.UI("RynthChatPanel: bound RynthChat plugin exports.");
-        }
-    }
-
-    private static T? Bind<T>(LoadedPlugin plugin, string exportName) where T : Delegate
-    {
-        IntPtr addr = GetProcAddress(plugin.ModuleHandle, exportName);
-        return addr == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<T>(addr);
-    }
-
-    // ── Chat logging helpers (Avalonia UI thread) ─────────────────────────
-
-    private static void LogLine(ChatDisplayLine line)
-    {
-        if (!_logEnabled) return;
-        if (_logWriter == null) EnsureLogOpen();
-        _logWriter?.WriteLine(line.FormattedText);
-    }
-
-    private static void EnsureLogOpen()
-    {
-        if (_logWriter != null) return;
-        _logCharacterName ??= TryReadCharacterName();
-        if (_logCharacterName == null) return;
-
-        string dir  = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RynthCore", "ChatLogs");
-        Directory.CreateDirectory(dir);
-        string path = Path.Combine(dir, $"{_logCharacterName}.log");
-        _logWriter  = new StreamWriter(path, append: true, System.Text.Encoding.UTF8) { AutoFlush = true };
-    }
-
-    private static void CloseLog()
-    {
-        _logWriter?.Close();
-        _logWriter = null;
-    }
-
-    // ── Settings persistence ──────────────────────────────────────────────
-
-    private static string SettingsPath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                     "RynthCore", "rynthchat_settings.json");
-
-    /// <summary>Idempotent settings load — called from both the chat panel and
-    /// the filters panel Create(), whichever runs first.</summary>
-    internal static void EnsureSettingsLoaded()
-    {
-        if (_settingsLoaded) return;
-        _settingsLoaded = true;
-        LoadSettings();
-    }
-
-    private static void LoadSettings()
-    {
-        try
-        {
-            string path = SettingsPath;
-            if (!File.Exists(path)) return;
-            var dto = JsonSerializer.Deserialize(File.ReadAllText(path),
-                RynthChatJsonContext.Default.RynthChatSettingsDto);
-            if (dto == null) return;
-
-            _chatFontSize    = Math.Clamp(dto.FontSize <= 0 ? 10 : dto.FontSize, 8, 18);
-            _backgroundAlpha = (byte)Math.Clamp(dto.BackgroundAlpha, 0, 255);
-            _autoScroll      = dto.AutoScroll;
-            ChatHooks.SuppressOriginalChat = dto.SuppressChat;
-            _logEnabled      = dto.LogEnabled;
-
-            _customTabs.Clear();
-            if (dto.CustomTabs != null)
-                foreach (var t in dto.CustomTabs)
-                    if (!string.IsNullOrWhiteSpace(t)) _customTabs.Add(t.Trim());
-
-            _filters.Clear();
-            if (dto.Filters != null)
-            {
-                foreach (var f in dto.Filters)
-                {
-                    var rule = new ChatFilterRule
-                    {
-                        Enabled = f.Enabled,
-                        Pattern = f.Pattern ?? "",
-                        Tab     = (f.Tab ?? "").Trim(),
-                    };
-                    rule.Recompile();
-                    _filters.Add(rule);
-                }
-            }
-
-            if (!string.IsNullOrEmpty(dto.ActiveChannel) &&
-                (Tabs.Contains(dto.ActiveChannel) ||
-                 CustomTabs().Contains(dto.ActiveChannel, StringComparer.OrdinalIgnoreCase)))
-                _activeChannel = dto.ActiveChannel;
-        }
-        catch { }
-    }
-
-    private static void SaveSettings()
-    {
-        try
-        {
-            string path = SettingsPath;
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var dto = new RynthChatSettingsDto
-            {
-                FontSize        = _chatFontSize,
-                BackgroundAlpha = _backgroundAlpha,
-                AutoScroll      = _autoScroll,
-                SuppressChat    = ChatHooks.SuppressOriginalChat,
-                LogEnabled      = _logEnabled,
-                ActiveChannel   = _activeChannel,
-                CustomTabs      = _customTabs.ToArray(),
-                Filters         = _filters.Select(f => new RynthChatFilterDto
-                {
-                    Enabled = f.Enabled,
-                    Pattern = f.Pattern,
-                    Tab     = f.Tab,
-                }).ToArray(),
-            };
-            File.WriteAllText(path, JsonSerializer.Serialize(dto,
-                RynthChatJsonContext.Default.RynthChatSettingsDto));
-        }
-        catch { }
-    }
-
-    private static string? TryReadCharacterName()
-    {
-        try
-        {
-            string root        = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RynthCore");
-            string perProcPath = Path.Combine(root, "launch_contexts", $"launch_context_{Environment.ProcessId}.json");
-            string path        = File.Exists(perProcPath) ? perProcPath : Path.Combine(root, "launch_context.json");
-            if (!File.Exists(path)) return null;
-
-            using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
-            if (doc.RootElement.TryGetProperty("TargetCharacter", out JsonElement tc))
-            {
-                string? name = tc.GetString();
-                if (!string.IsNullOrWhiteSpace(name)) return name.Trim();
-            }
-            return null;
-        }
-        catch { return null; }
-    }
-
-    // ── Display line (Avalonia UI thread only) ────────────────────────────
-
-    private sealed class ChatDisplayLine
-    {
-        internal ulong  Seq           { get; }
-        internal string Channel       { get; }
-        internal string FormattedText { get; }
-        internal string Text          { get; }
-        internal string? Sender       { get; }
-        internal string Timestamp     { get; }
-
-        internal ChatDisplayLine(ulong seq, string ts, string chan, string? sender, string text)
-        {
-            Seq           = seq;
-            Channel       = chan;
-            Sender        = sender;
-            Text          = text;
-            Timestamp     = ts;
-            FormattedText = sender != null ? $"{ts} {sender}: {text}" : $"{ts} {text}";
-        }
-    }
 }
-
-// JsonSerializerContext must be at namespace scope (not nested) for source generation.
-internal sealed class RynthChatLineDto
-{
-    [JsonPropertyName("seq")]    public ulong Seq     { get; set; }
-    [JsonPropertyName("ts")]     public string Ts     { get; set; } = "";
-    [JsonPropertyName("chan")]   public string Chan    { get; set; } = "";
-    [JsonPropertyName("sender")] public string? Sender { get; set; }
-    [JsonPropertyName("text")]   public string Text    { get; set; } = "";
-}
-
-// Property names match the legacy hand-written JSON so existing settings load.
-internal sealed class RynthChatFilterDto
-{
-    [JsonPropertyName("pattern")] public string? Pattern { get; set; }
-    [JsonPropertyName("tab")]     public string? Tab     { get; set; }
-    [JsonPropertyName("enabled")] public bool    Enabled { get; set; } = true;
-}
-
-internal sealed class RynthChatSettingsDto
-{
-    [JsonPropertyName("fontSize")]        public double FontSize        { get; set; } = 10;
-    [JsonPropertyName("backgroundAlpha")] public int    BackgroundAlpha { get; set; } = 0xF2;
-    [JsonPropertyName("autoScroll")]      public bool   AutoScroll      { get; set; } = true;
-    [JsonPropertyName("suppressChat")]    public bool   SuppressChat    { get; set; }
-    [JsonPropertyName("logEnabled")]      public bool   LogEnabled      { get; set; }
-    [JsonPropertyName("activeChannel")]   public string? ActiveChannel  { get; set; }
-    [JsonPropertyName("customTabs")]      public string[]? CustomTabs   { get; set; }
-    [JsonPropertyName("filters")]         public RynthChatFilterDto[]? Filters { get; set; }
-}
-
-[JsonSerializable(typeof(RynthChatLineDto[]))]
-[JsonSerializable(typeof(RynthChatSettingsDto))]
-[JsonSourceGenerationOptions(PropertyNameCaseInsensitive = false)]
-internal partial class RynthChatJsonContext : JsonSerializerContext { }

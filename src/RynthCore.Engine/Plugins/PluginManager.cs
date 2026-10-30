@@ -8,14 +8,19 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using RynthCore.Engine.Compatibility;
+using RynthCore.Engine.UI.ScriptWindows;
 using RynthCore.Engine.D3D9;
+using RynthCore.PluginSdk.Manifest;
 
 namespace RynthCore.Engine.Plugins;
 
-internal static class PluginManager
+internal static partial class PluginManager
 {
-    private readonly record struct PendingIncomingChat(string? Text, uint ChatType);
+    // Held: set when AC hasn't printed the line yet (ChatCallbackHooks holds it until the
+    // plugins' verdict is in; see IncomingChatHold.cs). Null for lines AC already printed.
+    private readonly record struct PendingIncomingChat(string? Text, uint ChatType, HeldChatLine? Held);
     private readonly record struct PendingBusyCountIncremented;
     private readonly record struct PendingBusyCountDecremented;
     private readonly record struct PendingTargetChange(uint CurrentTargetId, uint PreviousTargetId);
@@ -35,7 +40,12 @@ internal static class PluginManager
     private readonly record struct PendingEnchantmentAdded(uint SpellId, double DurationSeconds);
     private readonly record struct PendingEnchantmentRemoved(uint EnchantmentId);
 
-    private const int MaxPendingIncomingChats = 256;
+    // A /myquests reply is one line per quest flag (hundreds on a played character) and arrives
+    // in one burst; a slow pump tick (a busy plugin window) must not drop its head. Lines are short
+    // strings, so a deep queue costs little. Drops are counted and logged (DispatchQueuedChatWindowText).
+    private const int MaxPendingIncomingChats = 4096;
+    private static long _droppedIncomingChats;          // lines dropped unheard since the last log
+    private static long _droppedIncomingChatsLoggedMs;  // when that was last logged
     private const int MaxPendingBusyCountEvents = 128;
     private const int MaxPendingTargetChanges = 128;
     private const int MaxPendingCombatModeChanges = 128;
@@ -64,6 +74,18 @@ internal static class PluginManager
     private static readonly HashSet<uint> _liveObjects = new();
     private static readonly object LiveObjectsLock = new();
     private static readonly List<LoadedPlugin> _plugins = new();
+    // Deep-audit finding #20 (2026-06-18): RenderAll (AC render thread)
+    // iterates _plugins directly while RescanPlugins -> UnloadAllPlugins/
+    // LoadPluginsFromDisk (pump thread, via the RL/rescan button) does
+    // Clear()/Add() with no lock — a torn List can throw
+    // ArgumentOutOfRangeException mid-ImGui-frame. TickAll and every other
+    // _plugins.Count/indexer call site run serialized with rescan on the
+    // SAME pump thread, so only RenderAll (the one cross-thread reader)
+    // needs this. Mirrors Nav3DRenderer's atomic double-buffer: mutators
+    // publish a fresh array via Volatile.Write after every Clear()/Add(),
+    // RenderAll snapshots the reference once and iterates that.
+    private static LoadedPlugin[] _pluginsRenderSnapshot = Array.Empty<LoadedPlugin>();
+    private static void PublishPluginsRenderSnapshot() => System.Threading.Volatile.Write(ref _pluginsRenderSnapshot, _plugins.ToArray());
     private static readonly Queue<PendingIncomingChat> _pendingIncomingChats = new();
     private static readonly Queue<PendingBusyCountIncremented> _pendingBusyCountIncremented = new();
     private static readonly Queue<PendingBusyCountDecremented> _pendingBusyCountDecremented = new();
@@ -222,6 +244,65 @@ internal static class PluginManager
     private static SendPluginCommandCallbackDelegate? _sendPluginCommandCallback;
     private static GetObjectDataIdPropertyCallbackDelegate? _getObjectDataIdPropertyCallback;
     private static GetPluginExportJsonCallbackDelegate? _getPluginExportJsonCallback;
+    private static GetPluginInterfaceCallbackDelegate? _getPluginInterfaceCallback;
+    private static GetLiveObjectIdsCallbackDelegate? _getLiveObjectIdsCallback;
+    private static GetLastUseDoneCallbackDelegate? _getLastUseDoneCallback;
+    private static GetLastWeenieErrorCallbackDelegate? _getLastWeenieErrorCallback;
+    private static WieldItemCallbackDelegate? _wieldItemCallback;
+    private static UiSubmitCallbackDelegate? _uiSubmitCallback;
+    private static UiPollEventsCallbackDelegate? _uiPollEventsCallback;
+    private static UiGetInfoCallbackDelegate? _uiGetInfoCallback;
+    private static GetTradeStateCallbackDelegate? _getTradeStateCallback;
+    private static GetTradeItemsCallbackDelegate? _getTradeItemsCallback;
+    private static TradeOpenCallbackDelegate? _tradeOpenCallback;
+    private static TradeAddCallbackDelegate? _tradeAddCallback;
+    private static TradeSimpleCallbackDelegate? _tradeAcceptCallback;
+    private static TradeSimpleCallbackDelegate? _tradeDeclineCallback;
+    private static TradeSimpleCallbackDelegate? _tradeResetCallback;
+    private static TradeSimpleCallbackDelegate? _tradeCloseCallback;
+    private static GetObjectDataIdPropertyCallbackDelegate? _getObjectInstanceIdPropertyCallback;   // v73 (same shape)
+    private static GetVTankStateCallbackDelegate? _getVTankStateCallback;   // v74
+    private static GetCharacterTitlesCallbackDelegate? _getCharacterTitlesCallback;   // v75
+    private static GetServerInfoCallbackDelegate? _getServerInfoCallback;             // v75
+    private static CloseContainerCallbackDelegate? _closeContainerCallback;           // v76
+    private static SetServerMessageInterestCallbackDelegate? _setServerMessageInterestCallback; // v78
+    private static GetTrainingInfoCallbackDelegate? _getTrainingInfoCallback;       // v79
+    private static RaiseCallbackDelegate? _raiseCallback;                           // v79
+    private static TrainSkillCallbackDelegate? _trainSkillCallback;                 // v79
+    private static GetContainerOrderCallbackDelegate? _getContainerOrderCallback;   // v80
+    private static PutItemInContainerCallbackDelegate? _putItemInContainerCallback; // v80
+    private static SalvageDirectCallbackDelegate? _salvageDirectCallback;           // v82
+    private static GetObjectServerAgeCallbackDelegate? _getObjectServerAgeCallback; // v83
+    private static RemoveClientObjectCallbackDelegate? _removeClientObjectCallback; // v83
+    private static GetObjectPropertiesCallbackDelegate? _getObjectPropertiesCallback; // v84
+    private static GetVendorInfoCallbackDelegate? _getVendorInfoCallback;
+    private static GetVendorItemsCallbackDelegate? _getVendorItemsCallback;
+    private static VendorBuyCallbackDelegate? _vendorBuyCallback;
+    private static VendorSellCallbackDelegate? _vendorSellCallback;
+    private static GetVendorTradeStatusCallbackDelegate? _getVendorTradeStatusCallback;
+    private static GetMergeStackResultCallbackDelegate? _getMergeStackResultCallback;
+    private static ArmConfirmationCallbackDelegate? _armConfirmationCallback;             // v85
+    private static GetLastConfirmationCallbackDelegate? _getLastConfirmationCallback;     // v85
+    private static GetServerStateJsonCallbackDelegate? _getServerStateJsonCallback;       // v86
+    private static GetWieldedItemsCallbackDelegate? _getWieldedItemsCallback;             // v87
+    private static GetUiColorCallbackDelegate? _getUiColorCallback;                       // v89
+    private static GetUiFontCallbackDelegate? _getUiFontCallback;                         // v89
+    private static SetPanelOpenCallbackDelegate? _setPanelOpenCallback;                   // v89
+    private static PanelDragWithLastItemCallbackDelegate? _panelDragWithLastItemCallback; // v90
+    private static SetPanelPopOutCallbackDelegate? _setPanelPopOutCallback;               // v90
+    private static PanelTextSizeCallbackDelegate? _panelTextSizeCallback;                 // v90
+    private static RenderSettingsDrawerCallbackDelegate? _renderSettingsDrawerCallback;   // v90
+    private static GetShortcutsCallbackDelegate? _getShortcutsCallback;                   // v90
+    private static ShortcutActionCallbackDelegate? _shortcutActionCallback;               // v90
+    private static GetActionKeysCallbackDelegate? _getActionKeysCallback;                 // v90
+    private static GetIconTextureCallbackDelegate? _getIconTextureCallback;               // v90
+    private static KeyCaptureCallbackDelegate? _keyCaptureCallback;                       // v90
+    private static SetActionKeyCallbackDelegate? _setActionKeyCallback;                   // v90
+    private static AcPanelCallbackDelegate? _acPanelCallback;                             // v90
+    private static PanelScaleCallbackDelegate? _panelScaleCallback;                       // v90
+    private static DropTargetCallbackDelegate? _dropTargetCallback;                       // v90
+    private static SetAmbientLightFloorCallbackDelegate? _setAmbientLightFloorCallback;   // v91
+    private static GetAmbientLightCallbackDelegate? _getAmbientLightCallback;             // v91
     private static ForceResetBusyCountCallbackDelegate? _forceResetBusyCountCallback;
     private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
     private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
@@ -242,6 +323,15 @@ internal static class PluginManager
     private static string _shadowRootDir = "";
 
     public static IReadOnlyList<LoadedPlugin> Plugins => _plugins;
+
+    /// <summary>
+    /// Raised after every plugin has been shut down and removed (RL / rescan, engine
+    /// shutdown). Unload never FreeLibrary's a NativeAOT plugin, so an export bound
+    /// before a reload stays callable — into the shut-down copy. Panels that cache
+    /// plugin exports drop them here; their next poll re-binds to the fresh copy.
+    /// Raised on the pump thread.
+    /// </summary>
+    public static event Action? PluginsUnloaded;
     public static bool IsRescanQueued => _rescanRequested;
     public static string PluginDirectory => _pluginsDir;
     public static IReadOnlyList<string> ExtraPluginPaths => EngineSettings.PluginPaths;
@@ -262,6 +352,9 @@ internal static class PluginManager
 
     public static void LoadPlugins(string engineDir)
     {
+        // Where the memory goes while the plugins start (Compatibility/MemoryUse.cs).
+        Compatibility.MemoryUse.Mark("before the plugins load");
+        Compatibility.MemoryUse.StartBurst(60, "plugins starting");
         if (_loaded)
             return;
 
@@ -470,6 +563,10 @@ internal static class PluginManager
 
     public static void ProcessPendingActions(IntPtr imguiContext, IntPtr d3dDevice, IntPtr gameHwnd)
     {
+        // v77: Client::Cleanup started (UiFlowHooks): tell the plugins once, then no more events.
+        if (ProcessClientCleanup())
+            return;
+
         UiLifecycleHooks.Poll();
         LoginLifecycleHooks.Poll();
         SessionStateRegistry.Poll();
@@ -488,6 +585,11 @@ internal static class PluginManager
         //   • View BEFORE Stop — a container open-then-close in one frame must
         //     end "closed"; draining Stop-then-View left the plugin believing the
         //     container was still open.
+        // v78 server messages first: the wire comes before the client's handling of it,
+        // which is what the queued events below report. Cheap when nobody asked for any.
+        try { Net.ServerMessageStream.Pump(_initialized && ServerMessageSubscriberCount() > 0); }
+        catch (Exception ex) { RynthLog.Compat($"PluginManager: server message pump failed - {ex.GetType().Name}: {ex.Message}"); }
+
         DispatchQueuedBusyCountIncremented();
         DispatchQueuedBusyCountDecremented();
         DispatchQueuedCombatModeChange();
@@ -507,6 +609,7 @@ internal static class PluginManager
         DispatchQueuedEnchantmentAdded();
         DispatchQueuedEnchantmentRemoved();
         DispatchQueuedChatWindowText();
+        DispatchQueuedUiEvents();   // v77 screen / tooltip / drag / drop (PluginManager.UiHooks.cs)
 
         if (_rescanRequested)
         {
@@ -514,11 +617,19 @@ internal static class PluginManager
             RescanPlugins(imguiContext, d3dDevice, gameHwnd);
         }
 
+        // A server forced On whose plugin the connect host left out: load just that plugin.
+        if (_initialized)
+            LoadRequestedServerPlugins();
+
         if (_uiDispatchPending && _initialized)
             DispatchUIInitializedToLoadedPlugins();
 
         if (_loginDispatchPending && _initialized)
             DispatchLoginCompleteToLoadedPlugins();
+
+        // v71 script windows: a plugin that failed in one of the events above (or in Init,
+        // via a rescan) loses its windows now rather than after the next tick.
+        ScriptWindowRegistry.DropFailedOwners();
     }
 
     public static bool DispatchChatBarEnter(string? text)
@@ -549,7 +660,7 @@ internal static class PluginManager
                     catch (Exception ex)
                     {
                         plugin.Failed = true;
-                        RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnChatBarEnter threw {ex.GetType().Name}: {ex.Message}");
+                        RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnChatBarEnter threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
                     }
                 }
 
@@ -565,19 +676,43 @@ internal static class PluginManager
         }
     }
 
-    public static void QueueChatWindowText(string? text, uint chatType)
+    public static void QueueChatWindowText(string? text, uint chatType) => QueueChatWindowText(text, chatType, null);
+
+    /// <summary>
+    /// Queues an incoming chat line for the plugins (dispatched on the pump). With
+    /// <paramref name="held"/>, AC hasn't printed the line yet and the plugins' verdict is
+    /// written to it. Returns false when no plugin is there to hear it (then a held line must
+    /// be printed by the caller).
+    /// </summary>
+    public static bool QueueChatWindowText(string? text, uint chatType, HeldChatLine? held)
     {
+        // RynthVision overlays (debuffs, combat text, gains) read chat engine-side, plugins or not.
+        ImGuiBackend.Hud.HudFeed.OnChat(text);
+        // Who to /reply and /retell to (ChatCommandDispatcher rewrites those to a /tell).
+        Compatibility.TellMemory.Shared.OnChatLine(text);
+
         if (!_initialized || _plugins.Count == 0)
-            return;
+            return false;
 
         lock (PendingIncomingChatsLock)
         {
             if (_pendingIncomingChats.Count >= MaxPendingIncomingChats)
-                _pendingIncomingChats.Dequeue();
+            {
+                _pendingIncomingChats.Dequeue().Held?.Decide(eat: false); // dropped unheard: it shows
+                _droppedIncomingChats++;
+            }
 
-            _pendingIncomingChats.Enqueue(new PendingIncomingChat(text, chatType));
+            _pendingIncomingChats.Enqueue(new PendingIncomingChat(text, chatType, held));
         }
+        return true;
     }
+
+    /// <summary>
+    /// When the pump last looked at the incoming-chat queue (Environment.TickCount64, 0 = never).
+    /// ChatCallbackHooks holds lines for a verdict only while this is recent.
+    /// </summary>
+    internal static long ChatPumpBeatMs => System.Threading.Interlocked.Read(ref _chatPumpBeatMs);
+    private static long _chatPumpBeatMs;
 
     public static void QueueBusyCountIncremented()
     {
@@ -609,6 +744,8 @@ internal static class PluginManager
 
     public static void QueueSelectedTargetChange(uint currentTargetId, uint previousTargetId)
     {
+        ImGuiBackend.Hud.HudFeed.OnSelection(currentTargetId);   // debuff target matching
+
         if (!_initialized || _plugins.Count == 0)
             return;
 
@@ -651,6 +788,7 @@ internal static class PluginManager
 
     public static void QueueDeleteObject(uint objectId)
     {
+        ImGuiBackend.Hud.HudFeed.OnDeleted(objectId);   // nameplate debuffs / kill burst fallback
         lock (LiveObjectsLock) _liveObjects.Remove(objectId);
 
         // Track deletes that arrive before plugin init so we can filter stale creates from the replay.
@@ -788,6 +926,9 @@ internal static class PluginManager
 
     public static void QueueUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
     {
+        // Monster nameplates keep the last ratio per object (engine-side, plugins or not).
+        ImGuiBackend.Hud.MonsterHudData.RecordHealth(targetId, healthRatio, currentHealth, maxHealth);
+
         if (_plugins.Count == 0)
             return;
 
@@ -897,7 +1038,7 @@ internal static class PluginManager
                     catch (Exception ex)
                     {
                         plugin.Failed = true;
-                        RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnChatWindowText threw {ex.GetType().Name}: {ex.Message}");
+                        RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnChatWindowText threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
                     }
                 }
 
@@ -921,9 +1062,39 @@ internal static class PluginManager
     /// int (atomic read/write on x86) updated by the single TickAll driver.</summary>
     internal static int TickCount;
 
+    // TickAll's own steps are caught one by one (PumpGuards.cs): nothing outside a plugin's
+    // own Tick may take the pump down. Pump thread only.
+    private static readonly StepFaultLog TickStepFaults = new((int)TickStep.Count);
+
+    private static void TickStepFailed(TickStep step, Exception ex)
+    {
+        try
+        {
+            if (!TickStepFaults.Record((int)step, out int count))
+                return;
+            string line = StepFaultLog.Describe(step, ex.GetType().Name, ex.Message, count);
+            RynthLog.Error(count == 1 ? line + Environment.NewLine + ex : line);
+        }
+        catch { /* logging must not be the thing that throws out of TickAll */ }
+    }
+
     public static void TickAll()
     {
         TickCount++;
+        Volatile.Write(ref _tickThread, Environment.CurrentManagedThreadId);
+        // v77: after Client::Cleanup no plugin ticks (AC is tearing its UI down); Shutdown still comes.
+        if (UiFlowHooks.ClientCleanupStarted)
+            return;
+
+        // AC's main thread is frozen (a message box open on it, or no beat for the hang
+        // watchdog's threshold): no plugin Tick this pump tick, so plugins neither decide nor
+        // act against a client that cannot run anything (MainThreadFreezeRule.cs). Events keep
+        // flowing (ProcessPendingActions), and the Nav3D frame is left as it was.
+        bool paused;
+        try { paused = MainThreadFreeze.ShouldPausePluginTick(); }
+        catch (Exception ex) { TickStepFailed(TickStep.FreezeCheck, ex); paused = false; }
+        if (paused)
+            return;
 
         // Fire the delayed login self-identify once AC's vitals UI has settled
         // (armed in DispatchLoginCompleteToLoadedPlugins; deferred past the
@@ -940,17 +1111,18 @@ internal static class PluginManager
                 uint pid = ClientHelperHooks.GetPlayerId();
                 if (pid != 0 && CombatActionHooks.HasRequestId)
                 {
-                    CombatActionHooks.RequestId(pid);
+                    using (Net.EngineSendMarker.Enter(Net.IdRequester.Self))
+                        CombatActionHooks.RequestId(pid);
                     RynthLog.Plugin($"PluginManager: sent (delayed) self-identify for player 0x{pid:X8} to seed max vitals.");
                 }
             }
-            catch { }
+            catch (Exception ex) { TickStepFailed(TickStep.SelfIdentify, ex); }
         }
 
-        // Sample the real cast gate on the single 30 Hz plugin heartbeat (this
-        // is the one TickAll driver, off AC's render thread). Self-guarded;
-        // never throws. Plugins read it via the GetCastBusyState host pull.
-        CastGate.Sample();
+        // The cast gate is sampled on AC's main thread now (MainThreadSnapshots.Tick,
+        // from the Client::UseTime drain and EndScene); this pump only reads the
+        // published value through the GetCastBusyState host pull. Sampling it here
+        // walked SmartBox -> player -> MovementManager -> CMotionInterp off-thread.
 
         // Clear the Nav3D submission buffer once per tick so plugins always
         // submit into a fresh frame. Previously each plugin was expected to
@@ -963,27 +1135,62 @@ internal static class PluginManager
         // buffer, plugins fill it, and CommitFrame at the end of this method
         // atomically swaps it into "ready" so the render thread sees a
         // complete frame instead of mid-tick partial state.
-        D3D9.Nav3DRenderer.ClearFrame();
+        try { D3D9.Nav3DRenderer.ClearFrame(); }
+        catch (Exception ex) { TickStepFailed(TickStep.Nav3DClear, ex); }
 
-        for (int i = 0; i < _plugins.Count; i++)
+        try
         {
-            var plugin = _plugins[i];
-            if (!plugin.Initialized || plugin.Failed || plugin.Tick == null)
-                continue;
+            for (int i = 0; i < _plugins.Count; i++)
+            {
+                var plugin = _plugins[i];
+                if (!plugin.Initialized || plugin.Failed || plugin.Tick == null)
+                    continue;
 
-            try
-            {
-                plugin.Tick();
-            }
-            catch (Exception ex)
-            {
-                plugin.Failed = true;
-                RynthLog.Error($"PluginManager: {plugin.DisplayName} Tick threw {ex.GetType().Name}: {ex.Message} - disabled.");
+                LoadedPlugin? outer = EnterDispatch(plugin, "Tick");
+                try
+                {
+                    plugin.Tick();
+                }
+                catch (Exception ex)
+                {
+                    plugin.Failed = true;
+                    RynthLog.Error($"PluginManager: {plugin.DisplayName} Tick threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)} - disabled.");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
+                }
             }
         }
+        catch (Exception ex)
+        {
+            // The loop's own bookkeeping (not a plugin's Tick, which is caught above).
+            TickStepFailed(TickStep.PluginLoop, ex);
+        }
+        finally
+        {
+            // v71 script windows: a plugin that failed (this tick or in an event) loses its windows.
+            try { ScriptWindowRegistry.DropFailedOwners(); }
+            catch (Exception ex) { TickStepFailed(TickStep.DropFailedOwners, ex); }
 
-        // Atomically publish this tick's Nav3D submissions to the render thread.
-        D3D9.Nav3DRenderer.CommitFrame();
+            // Atomically publish this tick's Nav3D submissions to the render thread.
+            try { D3D9.Nav3DRenderer.CommitFrame(); }
+            catch (Exception ex) { TickStepFailed(TickStep.Nav3DCommit, ex); }
+        }
+    }
+
+    // The first PluginTraceLimit plugin exceptions also log their stack trace: "Tick threw
+    // IndexOutOfRangeException" alone left a crash undiagnosable (2026-10-04). Capped so a plugin
+    // failing in an event every tick can't flood the log.
+    private const int PluginTraceLimit = 20;
+    private static int _pluginTracesLogged;
+
+    private static string PluginTrace(Exception ex)
+    {
+        if (string.IsNullOrEmpty(ex.StackTrace) || Interlocked.Increment(ref _pluginTracesLogged) > PluginTraceLimit)
+            return string.Empty;
+        string inner = ex.InnerException is { } ie ? $"\n  inner {ie.GetType().Name}: {ie.Message}\n{ie.StackTrace}" : string.Empty;
+        return "\n" + ex.StackTrace + inner;
     }
 
     public static void RenderAll()
@@ -995,9 +1202,13 @@ internal static class PluginManager
         if (!_loginCompleteObserved)
             return;
 
-        for (int i = 0; i < _plugins.Count; i++)
+        // Snapshot once (finding #20) instead of iterating _plugins directly —
+        // this runs on AC's render thread while RescanPlugins mutates _plugins
+        // on the pump thread.
+        LoadedPlugin[] plugins = System.Threading.Volatile.Read(ref _pluginsRenderSnapshot);
+        for (int i = 0; i < plugins.Length; i++)
         {
-            var plugin = _plugins[i];
+            var plugin = plugins[i];
             if (!plugin.Initialized || plugin.Failed || plugin.Render == null)
                 continue;
 
@@ -1008,18 +1219,264 @@ internal static class PluginManager
             catch (Exception ex)
             {
                 plugin.Failed = true;
-                RynthLog.Error($"PluginManager: {plugin.DisplayName} Render threw {ex.GetType().Name}: {ex.Message} - disabled.");
+                RynthLog.Error($"PluginManager: {plugin.DisplayName} Render threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)} - disabled.");
             }
         }
     }
 
+    /// <summary>
+    /// ImGui-shell-off counterpart of <see cref="RenderAll"/>: calls the optional
+    /// RynthPluginRenderOverlay export, where a plugin draws only the extra windows that have
+    /// no Avalonia panel (e.g. RynthAi's Mini Remote, RynthILT's Games HUD). They float beside the Avalonia UI and add to it.
+    /// A throw switches off just that plugin's overlay windows; the plugin is NOT marked Failed,
+    /// so its tick/automation and Avalonia panels keep running.
+    /// </summary>
+    public static void RenderOverlayAll()
+    {
+        _overlayCalls++;
+        if (!_loginCompleteObserved)
+        {
+            if (!_loggedOverlayWaitingForLogin)
+            {
+                _loggedOverlayWaitingForLogin = true;
+                RynthLog.Info("PluginManager: RenderOverlayAll called - waiting for login before drawing overlay windows.");
+            }
+            return; // same not-in-world crash zone guard as RenderAll
+        }
+
+        LoadedPlugin[] plugins = System.Threading.Volatile.Read(ref _pluginsRenderSnapshot);
+
+        // Count plugins that will actually be called; log whenever that set changes.
+        int bound = 0;
+        for (int i = 0; i < plugins.Length; i++)
+        {
+            var p = plugins[i];
+            if (p.Initialized && !p.Failed && p.RenderOverlay != null) bound++;
+        }
+        _overlayBound = bound;
+        if (bound != _loggedOverlayBound || plugins.Length != _loggedOverlayTotal)
+        {
+            _loggedOverlayBound = bound;
+            _loggedOverlayTotal = plugins.Length;
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < plugins.Length; i++)
+            {
+                var p = plugins[i];
+                if (sb.Length > 0) sb.Append(", ");
+                sb.Append(p.DisplayName).Append('(')
+                  .Append(p.RenderOverlay != null ? "overlay" : "no-overlay")
+                  .Append(p.Initialized ? "" : ",not-init")
+                  .Append(p.Failed ? ",failed" : "")
+                  .Append(')');
+            }
+            RynthLog.Info($"PluginManager: RenderOverlayAll login seen, {bound} of {plugins.Length} plugin(s) will draw overlay windows: {sb}.");
+        }
+
+        for (int i = 0; i < plugins.Length; i++)
+        {
+            var plugin = plugins[i];
+            var overlay = plugin.RenderOverlay;
+            if (!plugin.Initialized || plugin.Failed || overlay == null)
+                continue;
+
+            if (!plugin.RenderOverlayLogged)
+            {
+                // One line per plugin per session: proves the engine is actually driving the overlay export.
+                plugin.RenderOverlayLogged = true;
+                RynthLog.Plugin($"PluginManager: first RenderOverlay call for {plugin.DisplayName}.");
+            }
+
+            try
+            {
+                overlay();
+            }
+            catch (Exception ex)
+            {
+                plugin.RenderOverlay = null;
+                RynthLog.Error($"PluginManager: {plugin.DisplayName} RenderOverlay threw {ex.GetType().Name}: {ex.Message} - overlay windows off for this session (plugin keeps running).");
+            }
+        }
+    }
+
+    // RenderOverlayAll diagnostics (render thread only).
+    private static long _overlayCalls;
+    private static int _overlayBound;
+    private static bool _loggedOverlayWaitingForLogin;
+    private static int _loggedOverlayBound = -1;
+    private static int _loggedOverlayTotal = -1;
+
+    /// <summary>
+    /// True when an initialized, healthy plugin exports RynthPluginRenderOverlay. Reads the
+    /// render snapshot only (no lock, no allocation): safe every frame on the render thread.
+    /// </summary>
+    internal static bool HasOverlayPlugins
+    {
+        get
+        {
+            LoadedPlugin[] plugins = System.Threading.Volatile.Read(ref _pluginsRenderSnapshot);
+            for (int i = 0; i < plugins.Length; i++)
+            {
+                var p = plugins[i];
+                if (p.Initialized && !p.Failed && p.RenderOverlay != null) return true;
+            }
+            return false;
+        }
+    }
+
+    /// <summary>Overlay stats for the ImGui heartbeat line.</summary>
+    internal static string DescribeOverlayState()
+        => $"overlayCalls={_overlayCalls} loginSeen={_loginCompleteObserved} overlayPlugins={_overlayBound}";
+
+    /// <summary>RenderEmbed results.</summary>
+    internal const int EmbedDrawn = 1, EmbedNotReady = 0, EmbedNoPlugin = -1, EmbedFailed = -2;
+
+    /// <summary>
+    /// Appended to an embed surface's name when the caller draws in another ImGui context than
+    /// the one plugins were given (a popped-out panel's own context). Only a plugin that knows
+    /// the suffix draws then, into the current context; an older one switches to the main
+    /// context, which is not mid-frame there, and faults inside cimgui (an access violation no
+    /// try/catch stops: 2026-10-11, the popped-out Mini Remote), so it must see a surface name
+    /// it doesn't know and decline.
+    /// </summary>
+    private static ReadOnlySpan<byte> PopOutSurfaceSuffix => ":popout"u8;
+
+    /// <summary>
+    /// Lets the plugin named <paramref name="pluginName"/> (display name contains it) draw the
+    /// surface <paramref name="surfaceUtf8"/> (NUL-terminated) into the current ImGui window,
+    /// through its optional RynthPluginRenderEmbed export. The caller has begun a child of
+    /// <paramref name="size"/>; the plugin draws only inside it and reports the content size it
+    /// wants in <paramref name="want"/> (zero when it didn't say). In a context other than the
+    /// plugins' (a pop-out), the surface goes out as "name:popout" (see
+    /// <see cref="PopOutSurfaceSuffix"/>).
+    /// Render thread only. Returns <see cref="EmbedDrawn"/>, <see cref="EmbedNotReady"/> (the
+    /// plugin isn't ready: before login, no ImGui context, or too old to draw in a pop-out),
+    /// <see cref="EmbedNoPlugin"/> (not loaded, or too old to have the export) or
+    /// <see cref="EmbedFailed"/> (it threw, or returned -2 to say it caught its own exception:
+    /// the export is switched off for this session; the plugin keeps running).
+    /// </summary>
+    internal static unsafe int RenderEmbed(string pluginName, ReadOnlySpan<byte> surfaceUtf8, System.Numerics.Vector2 size, out System.Numerics.Vector2 want)
+    {
+        want = System.Numerics.Vector2.Zero;
+        if (!_loginCompleteObserved) return EmbedNotReady;   // same not-in-world guard as RenderAll
+        IntPtr current = ImGuiNET.ImGui.GetCurrentContext();
+        if (current == IntPtr.Zero) return EmbedNotReady;
+        if (current != _api.ImGuiContext)
+        {
+            // "name\0" -> "name:popout\0" on the stack; surface names are a few bytes.
+            int nameLen = surfaceUtf8.IndexOf((byte)0);
+            if (nameLen < 0) nameLen = surfaceUtf8.Length;
+            int total = nameLen + PopOutSurfaceSuffix.Length + 1;
+            if (total > 128) return EmbedNotReady;
+            Span<byte> popOut = stackalloc byte[total];
+            surfaceUtf8[..nameLen].CopyTo(popOut);
+            PopOutSurfaceSuffix.CopyTo(popOut[nameLen..]);
+            popOut[^1] = 0;
+            // A plugin on a second cimgui copy must see the pop-out's context there too (StrayImGuiContext).
+            StrayImGuiContext.Scope stray = StrayImGuiContext.Enter(current);
+            try { return RenderEmbedCore(pluginName, popOut, size, out want); }
+            finally { StrayImGuiContext.Restore(stray); }
+        }
+        return RenderEmbedCore(pluginName, surfaceUtf8, size, out want);
+    }
+
+    /// <summary>The export call behind <see cref="RenderEmbed"/>, with the surface name already final.</summary>
+    private static unsafe int RenderEmbedCore(string pluginName, ReadOnlySpan<byte> surfaceUtf8, System.Numerics.Vector2 size, out System.Numerics.Vector2 want)
+    {
+        want = System.Numerics.Vector2.Zero;
+        LoadedPlugin[] plugins = System.Threading.Volatile.Read(ref _pluginsRenderSnapshot);
+        LoadedPlugin? p = FindRenderPlugin(plugins, pluginName);
+        if (p == null) return EmbedNoPlugin;
+        IntPtr fn = p.RenderEmbedPtr;
+        if (fn == IntPtr.Zero) return EmbedNoPlugin;
+        float w = 0, h = 0;
+        try
+        {
+            int r;
+            fixed (byte* s = surfaceUtf8)
+                r = ((delegate* unmanaged[Cdecl]<byte*, float, float, float*, float*, int>)fn)(s, size.X, size.Y, &w, &h);
+            want = new System.Numerics.Vector2(float.IsFinite(w) ? MathF.Max(0, w) : 0, float.IsFinite(h) ? MathF.Max(0, h) : 0);
+            if (r == EmbedFailed)
+            {
+                // The plugin caught its own exception and says so (an exception can't leave a
+                // managed plugin's [UnmanagedCallersOnly] export, so plugins catch everything; with
+                // 0 the window would say "Waiting..." for ever): the same as a throw.
+                p.RenderEmbedPtr = IntPtr.Zero;
+                RynthLog.Error($"PluginManager: {p.DisplayName} RenderEmbed reported a failure (-2) - embedded surfaces off for this session (plugin keeps running).");
+                return EmbedFailed;
+            }
+            return r == 1 ? EmbedDrawn : EmbedNotReady;
+        }
+        catch (Exception ex)
+        {
+            p.RenderEmbedPtr = IntPtr.Zero;
+            RynthLog.Error($"PluginManager: {p.DisplayName} RenderEmbed threw {ex.GetType().Name}: {ex.Message} - embedded surfaces off for this session (plugin keeps running).");
+            return EmbedFailed;
+        }
+    }
+
+    /// <summary>A running plugin in the render snapshot by name: exact first (see ResolvePluginExport), else contains.</summary>
+    private static LoadedPlugin? FindRenderPlugin(LoadedPlugin[] plugins, string pluginName)
+    {
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < plugins.Length; i++)
+            {
+                LoadedPlugin p = plugins[i];
+                if (p.Initialized && !p.Failed && NameMatches(p.DisplayName, pluginName, exact: pass == 0))
+                    return p;
+            }
+        return null;
+    }
+
+    /// <summary>
+    /// Each running plugin's Mini Remote sections manifest (its optional
+    /// RynthPluginGetSectionsJson export), copied out as (display name, JSON). A plugin whose
+    /// export throws has it switched off for the session. Render thread (UI/Sections).
+    /// </summary>
+    internal static unsafe List<(string Plugin, string Json)> CollectSectionManifests()
+    {
+        var result = new List<(string, string)>();
+        if (!_loginCompleteObserved) return result;   // plugins build these from in-world state
+        LoadedPlugin[] plugins = System.Threading.Volatile.Read(ref _pluginsRenderSnapshot);
+        for (int i = 0; i < plugins.Length; i++)
+        {
+            LoadedPlugin p = plugins[i];
+            IntPtr fn = p.SectionsJsonPtr;
+            if (!p.Initialized || p.Failed || fn == IntPtr.Zero) continue;
+            try
+            {
+                IntPtr text = ((delegate* unmanaged[Cdecl]<IntPtr>)fn)();
+                if (text == IntPtr.Zero) continue;
+                string? json = Marshal.PtrToStringUTF8(text);
+                if (!string.IsNullOrEmpty(json)) result.Add((p.DisplayName, json));
+            }
+            catch (Exception ex)
+            {
+                p.SectionsJsonPtr = IntPtr.Zero;
+                RynthLog.Error($"PluginManager: {p.DisplayName} RynthPluginGetSectionsJson threw {ex.GetType().Name}: {ex.Message} - its sections are off for this session.");
+            }
+        }
+        return result;
+    }
+
     public static void ShutdownAll()
     {
+        // A plugin's Shutdown never runs alongside its Tick on the pump thread (audit
+        // 2026-10-21, 01 #1). EngineLifecycle.Shutdown stops the pump before anything reaches
+        // here, so this returns at once; a frame still running gets ShutdownWaitMs more, and
+        // if it outlasts that the plugins are left alone. Nothing below changes then: the
+        // teardown's defensive ShutdownAll asks again after its other steps.
+        PluginShutdownGate.Verdict gate = EntryPoint.StopTickPumpForPluginShutdown(PluginShutdownGate.ShutdownWaitMs);
+        if (!PluginShutdownGate.MayShutDownPlugins(gate))
+        {
+            RynthLog.Error(PluginShutdownGate.DescribeRefusal(_plugins.Count, DescribePumpDispatch()));
+            return;
+        }
         RynthLog.Plugin($"PluginManager: Shutting down {_plugins.Count} plugin(s)...");
         UiLifecycleHooks.UiInitialized -= OnUIInitializedObserved;
         LoginLifecycleHooks.LoginComplete -= OnLoginCompleteObserved;
         LogoutLifecycleHooks.LogoutComplete -= OnLogoutObserved;
         UnloadAllPlugins();
+        ScriptWindowRegistry.Reset();
         RynthLog.Info("ShutdownAll: post-UnloadAllPlugins");
         // SKIP CleanupShadowCopies during shutdown — it walks the (still-mapped)
         // plugin DLL directory and was a heavy heap-IO step during the 1.4s
@@ -1084,8 +1541,8 @@ internal static class PluginManager
         RynthLog.Info("ShutdownAll: post-queue-clears");
     }
 
-    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+    // Managed plugins (CoreCLR engine) answer from their export map; see ManagedPlugins.
+    private static IntPtr GetProcAddress(IntPtr hModule, string lpProcName) => ManagedPlugins.GetProcAddress(hModule, lpProcName);
 
     /// <summary>
     /// Resolve a named export on a loaded plugin's module, matched by display
@@ -1100,16 +1557,54 @@ internal static class PluginManager
         if (string.IsNullOrEmpty(pluginName) || string.IsNullOrEmpty(exportName))
             return IntPtr.Zero;
 
-        for (int i = 0; i < _plugins.Count; i++)
+        // Exact name first: "RynthLeafDawn" is inside "RynthLeafdawning".
+        for (int pass = 0; pass < 2; pass++)
         {
-            var p = _plugins[i];
-            if (p.ModuleHandle == IntPtr.Zero || !p.Initialized || p.Failed)
-                continue;
-            if (!p.DisplayName.Contains(pluginName, StringComparison.OrdinalIgnoreCase))
-                continue;
-            return GetProcAddress(p.ModuleHandle, exportName);
+            for (int i = 0; i < _plugins.Count; i++)
+            {
+                var p = _plugins[i];
+                if (p.ModuleHandle == IntPtr.Zero || !p.Initialized || p.Failed)
+                    continue;
+                if (!NameMatches(p.DisplayName, pluginName, exact: pass == 0))
+                    continue;
+                return GetProcAddress(p.ModuleHandle, exportName);
+            }
         }
         return IntPtr.Zero;
+    }
+
+    /// <summary>The plugin-name test of the by-name lookups: exact (any case), else "display name contains it".</summary>
+    private static bool NameMatches(string displayName, string pluginName, bool exact) =>
+        exact ? string.Equals(displayName, pluginName, StringComparison.OrdinalIgnoreCase)
+              : displayName.Contains(pluginName, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Reload deferral (2026-10-05, ReloadDeferral): asks every running plugin's optional
+    /// <c>const char* RynthPluginReloadBlocker(void)</c> export whether a hot reload now would
+    /// hurt. Null or "" = safe; a plugin without the export never objects. Fixed signature, so no
+    /// mismatch can reach the stack; the plugin owns the buffer and it is copied at once. Called
+    /// on the loader's reload thread before the engine tears down, while every plugin is loaded.
+    /// </summary>
+    internal static unsafe IReadOnlyList<(string Plugin, string Reason)> QueryReloadBlockers()
+    {
+        var result = new List<(string, string)>();
+        LoadedPlugin[] plugins;
+        try { plugins = _plugins.ToArray(); }
+        catch { return result; }   // the list changed under us (a plugin loading): don't hold the reload on it
+        foreach (var p in plugins)
+        {
+            try
+            {
+                if (p.ModuleHandle == IntPtr.Zero || !p.Initialized || p.Failed) continue;
+                IntPtr fn = GetProcAddress(p.ModuleHandle, "RynthPluginReloadBlocker");
+                if (fn == IntPtr.Zero) continue;
+                IntPtr text = ((delegate* unmanaged[Cdecl]<IntPtr>)fn)();
+                string? reason = text != IntPtr.Zero ? Marshal.PtrToStringAnsi(text) : null;
+                if (!string.IsNullOrWhiteSpace(reason)) result.Add((p.DisplayName, reason.Trim()));
+            }
+            catch { /* a plugin that can't answer doesn't hold the reload */ }
+        }
+        return result;
     }
 
     private static void LogFromPlugin(IntPtr messageUtf8)
@@ -1182,6 +1677,11 @@ internal static class PluginManager
         Compatibility.ChatHooks.ResetCachedInstance();
         Compatibility.RadarHooks.ResetCachedInstance();
         Compatibility.PowerbarHooks.ResetCachedInstance();
+        Compatibility.RetailVitalsHooks.ResetCachedInstance();
+        Compatibility.RetailToolbarHooks.ResetCachedInstance();
+        Compatibility.AcShortcuts.Reset();
+        Compatibility.AcKeymapLive.Reset();
+        Compatibility.AcPanels.Reset();
         Compatibility.ChatCallbackHooks.ResetOutgoingTarget();
 
         // Drop the cached PlayerDesc/CACQualities pointer so the next call into the
@@ -1192,6 +1692,13 @@ internal static class PluginManager
         // Drop the cached ClientUISystem pointer for the same reason — the busy
         // watchdog/force-clear must not touch the freed singleton at char-select.
         Compatibility.BusyCountHooks.ResetSession();
+
+        // Clear the per-guid appraisal caches (finding #33) — guids don't
+        // survive a session, so leaving these unbounded across relogs is a
+        // slow but real leak on this stack's 32-bit VA budget.
+        Compatibility.AppraisalHooks.ClearSession();
+        // The update caches and the player's PlayerDescription record likewise (2026-09-30).
+        Compatibility.PropertyUpdateHooks.ClearSession();
 
         // Reset login observation so the next SendLoginCompleteNotification kicks
         // off a fresh login-complete cycle.
@@ -1217,6 +1724,7 @@ internal static class PluginManager
             if (!plugin.Initialized || plugin.Failed || plugin.OnLogout == null)
                 continue;
 
+            LoadedPlugin? outer = EnterDispatch(plugin);
             try
             {
                 plugin.OnLogout();
@@ -1225,7 +1733,11 @@ internal static class PluginManager
             catch (Exception ex)
             {
                 plugin.Failed = true;
-                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnLogout threw {ex.GetType().Name}: {ex.Message}");
+                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnLogout threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+            }
+            finally
+            {
+                LeaveDispatch(outer);
             }
         }
     }
@@ -1239,6 +1751,7 @@ internal static class PluginManager
         }
 
         RynthLog.Plugin("PluginManager: Rescanning plugins...");
+        Net.FlightRecorder.Mark(Net.FlightMark.PluginReload, text: "all plugins unloaded and loaded again (rescan)");
 
         UnloadAllPlugins();
         PluginLoader.CleanupShadowCopies(_shadowRootDir);
@@ -1258,26 +1771,43 @@ internal static class PluginManager
     {
         if (!_initialized || _plugins.Count == 0)
             return;
+        // Plugins are here and hearing chat: ChatCallbackHooks may hold lines for their verdict.
+        System.Threading.Interlocked.Exchange(ref _chatPumpBeatMs, Environment.TickCount64);
 
         PendingIncomingChat[] pending;
+        long dropped = 0;
         lock (PendingIncomingChatsLock)
         {
-            if (_pendingIncomingChats.Count == 0)
-                return;
+            // Report drops at most every 10 s (a flood would otherwise flood the log too).
+            long nowMs = Environment.TickCount64;
+            if (_droppedIncomingChats > 0 && nowMs - _droppedIncomingChatsLoggedMs >= 10_000)
+            {
+                dropped = _droppedIncomingChats;
+                _droppedIncomingChats = 0;
+                _droppedIncomingChatsLoggedMs = nowMs;
+            }
 
-            pending = _pendingIncomingChats.ToArray();
+            pending = _pendingIncomingChats.Count == 0 ? Array.Empty<PendingIncomingChat>() : _pendingIncomingChats.ToArray();
             _pendingIncomingChats.Clear();
         }
+        // Logged outside the lock: AC's main thread queues chat under it.
+        if (dropped > 0)
+            RynthLog.Plugin($"PluginManager: {dropped} incoming chat line(s) dropped before plugins heard them (queue full at {MaxPendingIncomingChats}).");
+        if (pending.Length == 0)
+            return;
 
         unsafe
         {
             foreach (PendingIncomingChat evt in pending)
             {
-                IntPtr textPtr = evt.Text != null ? Marshal.StringToHGlobalUni(evt.Text) : IntPtr.Zero;
+                IntPtr textPtr = IntPtr.Zero;
+                bool eaten = false;   // the verdict for a held line: AC prints it unless this ends true
                 try
                 {
+                    textPtr = evt.Text != null ? Marshal.StringToHGlobalUni(evt.Text) : IntPtr.Zero;
                     int eat = 0;
                     IntPtr eatPtr = new(&eat);
+                    bool threw = false;
 
                     for (int i = 0; i < _plugins.Count; i++)
                     {
@@ -1285,6 +1815,7 @@ internal static class PluginManager
                         if (!plugin.Initialized || plugin.Failed)
                             continue;
 
+                        LoadedPlugin? outer = EnterDispatch(plugin);
                         try
                         {
                             if (plugin.OnChatWindowTextPtr != IntPtr.Zero)
@@ -1298,13 +1829,31 @@ internal static class PluginManager
                         }
                         catch (Exception ex)
                         {
+                            threw = true;
                             plugin.Failed = true;
-                            RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnChatWindowText threw {ex.GetType().Name}: {ex.Message}");
+                            RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnChatWindowText threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
                         }
+                        finally
+                        {
+                            LeaveDispatch(outer);
+                        }
+                    }
+
+                    eaten = HeldChatQueue.PluginsAteIt(eat, threw);
+                    // RynthChat's Hide rules / standard filters live in the engine, not in a plugin, so
+                    // without this a hidden line still printed in AC's own chat window. Only a held line
+                    // can still be kept out (one already printed has gone); a failure lets it show.
+                    if (!eaten && evt.Held != null)
+                    {
+                        try { eaten = UI.Data.ChatModel.ShouldHideInRetail(evt.Text, unchecked((int)evt.ChatType)); }
+                        catch (Exception ex) { RynthLog.Plugin($"PluginManager: retail chat filter check failed ({ex.GetType().Name}: {ex.Message})."); }
                     }
                 }
                 finally
                 {
+                    // Always give a held line its verdict, so AC prints it at once rather than
+                    // after the hold timeout; a line nobody could judge shows.
+                    evt.Held?.Decide(eaten);
                     if (textPtr != IntPtr.Zero)
                         Marshal.FreeHGlobal(textPtr);
                 }
@@ -1335,6 +1884,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnSelectedTargetChange == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnSelectedTargetChange(evt.CurrentTargetId, evt.PreviousTargetId);
@@ -1342,7 +1892,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnSelectedTargetChange threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnSelectedTargetChange threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1371,6 +1925,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnBusyCountIncremented == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnBusyCountIncremented();
@@ -1378,7 +1933,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnBusyCountIncremented threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnBusyCountIncremented threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1407,6 +1966,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnBusyCountDecremented == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnBusyCountDecremented();
@@ -1414,7 +1974,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnBusyCountDecremented threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnBusyCountDecremented threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1443,6 +2007,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnCombatModeChange == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnCombatModeChange(evt.CurrentCombatMode, evt.PreviousCombatMode);
@@ -1450,7 +2015,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnCombatModeChange threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnCombatModeChange threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1479,6 +2048,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     unsafe
@@ -1500,7 +2070,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnSmartBoxEvent threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnSmartBoxEvent threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1542,6 +2116,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     unsafe
@@ -1563,7 +2138,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnUpdateObject threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnUpdateObject threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1596,6 +2175,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnDeleteObject == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnDeleteObject(evt.ObjectId);
@@ -1603,7 +2183,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnDeleteObject threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnDeleteObject threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1638,6 +2222,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnCreateObject == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnCreateObject(evt.ObjectId);
@@ -1645,7 +2230,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnCreateObject threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnCreateObject threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1674,6 +2263,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnUpdateObjectInventory == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnUpdateObjectInventory(evt.ObjectId);
@@ -1681,7 +2271,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnUpdateObjectInventory threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnUpdateObjectInventory threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1710,6 +2304,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnViewObjectContents == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnViewObjectContents(evt.ObjectId);
@@ -1717,7 +2312,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnViewObjectContents threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnViewObjectContents threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1746,6 +2345,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnStopViewingObjectContents == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnStopViewingObjectContents(evt.ObjectId);
@@ -1753,7 +2353,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnStopViewingObjectContents threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnStopViewingObjectContents threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1782,6 +2386,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnVendorOpen == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnVendorOpen(evt.VendorId);
@@ -1789,7 +2394,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnVendorOpen threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnVendorOpen threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1818,6 +2427,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnVendorClose == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnVendorClose(evt.VendorId);
@@ -1825,7 +2435,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnVendorClose threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnVendorClose threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1854,6 +2468,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     unsafe
@@ -1871,7 +2486,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnUpdateHealth threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnUpdateHealth threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1900,6 +2519,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     unsafe
@@ -1917,7 +2537,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnCombatDamage threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnCombatDamage threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -1949,6 +2573,7 @@ internal static class PluginManager
                     if (!plugin.Initialized || plugin.Failed)
                         continue;
 
+                    LoadedPlugin? outer = EnterDispatch(plugin);
                     try
                     {
                         unsafe
@@ -1966,7 +2591,11 @@ internal static class PluginManager
                     catch (Exception ex)
                     {
                         plugin.Failed = true;
-                        RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnKillNotification threw {ex.GetType().Name}: {ex.Message}");
+                        RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnKillNotification threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                    }
+                    finally
+                    {
+                        LeaveDispatch(outer);
                     }
                 }
             }
@@ -2001,6 +2630,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnEnchantmentAdded == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnEnchantmentAdded(evt.SpellId, evt.DurationSeconds);
@@ -2008,7 +2638,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnEnchantmentAdded threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnEnchantmentAdded threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -2037,6 +2671,7 @@ internal static class PluginManager
                 if (!plugin.Initialized || plugin.Failed || plugin.OnEnchantmentRemoved == null)
                     continue;
 
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.OnEnchantmentRemoved(evt.EnchantmentId);
@@ -2044,7 +2679,11 @@ internal static class PluginManager
                 catch (Exception ex)
                 {
                     plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnEnchantmentRemoved threw {ex.GetType().Name}: {ex.Message}");
+                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnEnchantmentRemoved threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+                }
+                finally
+                {
+                    LeaveDispatch(outer);
                 }
             }
         }
@@ -2059,7 +2698,16 @@ internal static class PluginManager
         // %APPDATA%\RynthCore\engine.json. The engine never auto-scans a
         // bundled Plugins\ folder — that historically caused stray DLLs to
         // load on next start (or after hot-reload) without the user knowing.
+        //
+        // Track DLL file names and canonical paths already staged this generation. engine.json can
+        // list the same plugin twice (e.g. a stale copy in another folder); a second File.Copy to the
+        // same shadow file name fails while the first copy is still mapped ("used by another process")
+        // and breaks hot-reload ordering for later DLLs.
+        var loadedBasenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var loadedCanonicalPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         var extraPaths = EngineSettings.PluginPaths;
+        var present = new List<string>(extraPaths.Count);
         for (int i = 0; i < extraPaths.Count; i++)
         {
             string dllPath = extraPaths[i];
@@ -2068,31 +2716,145 @@ internal static class PluginManager
                 RynthLog.Plugin($"PluginManager: Extra plugin not found: {dllPath}");
                 continue;
             }
+            present.Add(dllPath);
+        }
 
-            // Skip if a plugin with the same filename was already loaded from the default directory.
-            // Both paths share the same session shadow dir — loading the same filename twice would
-            // try to overwrite a locked shadow copy and crash.
-            string extraFileName = Path.GetFileName(dllPath);
-            bool alreadyLoaded = false;
-            for (int j = 0; j < _plugins.Count; j++)
+        // One plugin per file name, before any shadow copy: every shadow copy shares the session
+        // folder, so a second DLL of the same name would overwrite a mapped copy. The same file
+        // listed twice loads once; the same name from two folders is a conflict - the first wins
+        // (PluginPathDedupe).
+        var loadedSources = new List<string>(_plugins.Count);
+        for (int j = 0; j < _plugins.Count; j++)
+            loadedSources.Add(_plugins[j].SourceFilePath);
+        PluginPathDedupe.Result deduped = PluginPathDedupe.Dedupe(present, loadedSources);
+        foreach (PluginPathDedupe.Skipped skipped in deduped.Skipped)
+        {
+            if (skipped.SameFile)
+                RynthLog.Plugin($"PluginManager: {skipped.Message}");
+            else
+                RynthLog.Warn($"PluginManager: {skipped.Message}");
+        }
+        List<string> candidates = deduped.Load;
+
+        // Manifests (embedded in the DLLs, read without loading them): refuse a plugin that needs
+        // a newer engine API or a missing plugin, and put required plugins first. Without
+        // manifests the list loads exactly as before. Server plugins: the connect host picks this
+        // server's (the others stay unloaded; their runtimes would only take address space).
+        PluginManifestGate.LoadPlan plan = PluginManifestGate.Plan(candidates, PluginContractVersion.Current, RawFileVersion,
+            Compatibility.ServerInfo.LaunchHost, EngineSettings.LoadAllServerPlugins);
+        foreach (string line in plan.Log)
+            RynthLog.Plugin($"PluginManager: {line}");
+        if (plan.SkippedForServer.Count > 0)
+            RynthLog.Info($"PluginManager: {plan.SkippedForServer.Count} server plugin(s) for other servers not loaded (host {Compatibility.ServerInfo.HostDescription}).");
+        RememberSkippedServerPlugins(plan.SkippedServerPlugins);
+        foreach (PluginRefusal refusal in plan.Refused)
+            RefusePlugin(Path.GetFileName(refusal.Plugin.Key), refusal.Reason);
+
+        foreach ((string dllPath, RynthPluginManifest? manifest) in plan.Load)
+        {
+            // A required plugin that failed to load (PluginLoader said no) takes its dependents with it.
+            string? missing = PluginManifestGate.CheckRequiredStarted(manifest, name => FindPlugin(name) != null ? true : null);
+            if (missing != null)
             {
-                if (string.Equals(Path.GetFileName(_plugins[j].SourceFilePath), extraFileName, StringComparison.OrdinalIgnoreCase))
-                {
-                    alreadyLoaded = true;
-                    break;
-                }
-            }
-            if (alreadyLoaded)
-            {
-                RynthLog.Plugin($"PluginManager: Extra plugin {extraFileName} already loaded from default directory — skipping.");
+                RefusePlugin(Path.GetFileName(dllPath), missing);
                 continue;
             }
 
-            RynthLog.Plugin($"PluginManager: Loading extra plugin: {dllPath}");
+            // Address space before and after each load: a 32-bit client runs out on the largest
+            // free block, and a reload stacks copies (Compatibility/AddressSpace.cs).
+            RynthLog.Plugin($"PluginManager: Loading extra plugin: {dllPath} (va before: {Compatibility.AddressSpace.Describe()})");
             var plugin = PluginLoader.LoadSingle(dllPath, _shadowRootDir, _loadGeneration);
+            RynthLog.Plugin($"PluginManager: loaded {Path.GetFileName(dllPath)}{(plugin == null ? " (FAILED)" : "")} (va after: {Compatibility.AddressSpace.Describe()})");
+            Compatibility.MemoryUse.Mark($"{Path.GetFileNameWithoutExtension(dllPath)} loaded");
             if (plugin != null)
+            {
+                plugin.Manifest = manifest;
+                if (manifest != null && !string.Equals(manifest.Name, plugin.DisplayName, StringComparison.OrdinalIgnoreCase))
+                    RynthLog.Plugin($"PluginManager: {plugin.FileName}: manifest name '{manifest.Name}' differs from RynthPluginName '{plugin.DisplayName}'; dependencies use the manifest's.");
                 _plugins.Add(plugin);
+            }
         }
+
+        // RenderAll / RenderOverlayAll iterate only this snapshot; without it they see no plugins.
+        PublishPluginsRenderSnapshot();
+        RynthLog.Plugin($"PluginManager: render snapshot published ({_plugins.Count} plugin(s)).");
+    }
+
+    private static void TryAddCanonicalPath(HashSet<string> set, string path)
+    {
+        if (TryGetCanonicalPath(path, out string canon))
+            set.Add(canon);
+    }
+
+    private static bool TryGetCanonicalPath(string path, out string canonical)
+    {
+        try
+        {
+            canonical = Path.GetFullPath(path);
+            return true;
+        }
+        catch
+        {
+            canonical = string.Empty;
+            return false;
+        }
+    }
+
+    // ── Plugin manifests ─────────────────────────────────────────────────
+
+    /// <summary>Refusals not yet said in chat; said once each, at login (see AnnouncePluginRefusals).</summary>
+    private static readonly List<string> _pendingRefusalNotices = new();
+    private static readonly HashSet<string> _announcedRefusals = new(StringComparer.Ordinal);
+
+    private static void RefusePlugin(string fileName, string reason)
+    {
+        RynthLog.Plugin($"PluginManager: NOT starting {fileName}: {reason} (this RynthCore is plugin API {PluginContractVersion.Current}).");
+        lock (_pendingRefusalNotices)
+        {
+            if (!_announcedRefusals.Contains(reason) && !_pendingRefusalNotices.Contains(reason))
+                _pendingRefusalNotices.Add(reason);
+        }
+        if (_loginCompleteObserved)
+            AnnouncePluginRefusals();
+    }
+
+    /// <summary>Says each refusal once in chat ("[RynthCore] RynthOracle needs a newer RynthCore (API 77) - not started."). Pump thread.</summary>
+    private static void AnnouncePluginRefusals()
+    {
+        List<string> lines;
+        lock (_pendingRefusalNotices)
+        {
+            if (_pendingRefusalNotices.Count == 0) return;
+            lines = new List<string>(_pendingRefusalNotices);
+            _pendingRefusalNotices.Clear();
+            foreach (string l in lines) _announcedRefusals.Add(l);
+        }
+        foreach (string line in lines)
+            AcMainThreadQueue.EnqueueWriteToChat($"[RynthCore] {line} - not started.", 1);
+    }
+
+    /// <summary>The loaded plugin going by <paramref name="name"/>: manifest name, else its file's name, else RynthPluginName.</summary>
+    private static LoadedPlugin? FindPlugin(string name)
+    {
+        for (int i = 0; i < _plugins.Count; i++)
+        {
+            LoadedPlugin p = _plugins[i];
+            if (p.Manifest != null && string.Equals(p.Manifest.Name, name, StringComparison.OrdinalIgnoreCase)) return p;
+        }
+        for (int i = 0; i < _plugins.Count; i++)
+        {
+            LoadedPlugin p = _plugins[i];
+            if (string.Equals(RynthPluginManifest.NameFromFile(p.SourceFilePath), name, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(p.DisplayName, name, StringComparison.OrdinalIgnoreCase))
+                return p;
+        }
+        return null;
+    }
+
+    private static string RawFileVersion(string path)
+    {
+        try { return System.Diagnostics.FileVersionInfo.GetVersionInfo(path).ProductVersion ?? ""; }
+        catch { return ""; }
     }
 
     private static void InitializeLoadedPlugins()
@@ -2107,37 +2869,59 @@ internal static class PluginManager
         RynthLog.Plugin($"PluginManager: Initializing {_plugins.Count} plugin(s)...");
 
         for (int i = 0; i < _plugins.Count; i++)
-        {
-            var plugin = _plugins[i];
-            try
-            {
-                int result = plugin.Init!(ref _api);
-                if (result == 0)
-                {
-                    plugin.Initialized = true;
-                    plugin.Failed = false;
-                    plugin.UIInitializedDispatched = false;
-                    plugin.LoginCompleteDispatched = false;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} initialized OK (api v{PluginContractVersion.Current}).");
-                }
-                else
-                {
-                    plugin.Failed = true;
-                    RynthLog.Plugin($"PluginManager: {plugin.DisplayName} Init returned {result} - marked as failed. (engine api version={PluginContractVersion.Current})");
-                }
-            }
-            catch (Exception ex)
-            {
-                plugin.Failed = true;
-                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} Init threw {ex.GetType().Name}: {ex.Message}");
-            }
-        }
+            InitializePlugin(_plugins[i]);
 
         if (!_uiInitializedObserved)
             RynthLog.Plugin("PluginManager: Waiting for OnUIInitialized before starting UI-gated plugins.");
 
         if (!_loginCompleteObserved)
             RynthLog.Plugin("PluginManager: Waiting for OnLoginComplete before starting login-gated plugins.");
+    }
+
+    /// <summary>Calls one loaded plugin's Init (after checking its required plugins started). Pump thread.</summary>
+    private static void InitializePlugin(LoadedPlugin plugin)
+    {
+        // Manifest: a plugin whose required plugin didn't start isn't started either (they
+        // come first: LoadPluginsFromDisk ordered them). No manifest, no check.
+        string? blocked = PluginManifestGate.CheckRequiredStarted(plugin.Manifest, name =>
+            FindPlugin(name) is { } dep ? dep.Initialized && !dep.Failed : null);
+        if (blocked != null)
+        {
+            plugin.Failed = true;
+            plugin.NotStartedReason = blocked;
+            RefusePlugin(plugin.FileName, blocked);
+            return;
+        }
+        plugin.NotStartedReason = "";
+
+        LoadedPlugin? outer = EnterDispatch(plugin);
+        try
+        {
+            int result = plugin.Init!(ref _api);
+            if (result == 0)
+            {
+                plugin.Initialized = true;
+                plugin.Failed = false;
+                plugin.UIInitializedDispatched = false;
+                plugin.LoginCompleteDispatched = false;
+                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} initialized OK (api v{PluginContractVersion.Current}).");
+                Compatibility.MemoryUse.Mark($"{plugin.DisplayName} Init");
+            }
+            else
+            {
+                plugin.Failed = true;
+                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} Init returned {result} - marked as failed. (engine api version={PluginContractVersion.Current})");
+            }
+        }
+        catch (Exception ex)
+        {
+            plugin.Failed = true;
+            RynthLog.Plugin($"PluginManager: {plugin.DisplayName} Init threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+        }
+        finally
+        {
+            LeaveDispatch(outer);
+        }
     }
 
     private static void UnloadAllPlugins()
@@ -2152,6 +2936,7 @@ internal static class PluginManager
             // a FRESH copy of the same plugin → double-instance after reload).
             if (plugin.Initialized && plugin.Shutdown != null)
             {
+                LoadedPlugin? outer = EnterDispatch(plugin);
                 try
                 {
                     plugin.Shutdown();
@@ -2161,12 +2946,24 @@ internal static class PluginManager
                 {
                     RynthLog.Plugin($"PluginManager: {plugin.DisplayName} Shutdown threw: {ex.Message}");
                 }
+                finally
+                {
+                    LeaveDispatch(outer);
+                }
             }
+            // v71: its script windows close (their placement is kept).
+            ScriptWindowRegistry.DropOwner(plugin);
 
+            string vaBefore = Compatibility.AddressSpace.Describe();
             PluginLoader.Unload(plugin);
+            RynthLog.Plugin($"PluginManager: unloaded {plugin.DisplayName} (va before: {vaBefore}, after: {Compatibility.AddressSpace.Describe()})");
         }
 
         _plugins.Clear();
+        PublishPluginsRenderSnapshot();
+
+        try { PluginsUnloaded?.Invoke(); }
+        catch (Exception ex) { RynthLog.Plugin($"PluginManager: PluginsUnloaded handler threw: {ex.Message}"); }
     }
 
     private static void DispatchUIInitializedToLoadedPlugins()
@@ -2182,6 +2979,7 @@ internal static class PluginManager
             if (!plugin.Initialized || plugin.Failed || plugin.OnUIInitialized == null || plugin.UIInitializedDispatched)
                 continue;
 
+            LoadedPlugin? outer = EnterDispatch(plugin);
             try
             {
                 plugin.OnUIInitialized();
@@ -2191,7 +2989,11 @@ internal static class PluginManager
             catch (Exception ex)
             {
                 plugin.Failed = true;
-                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnUIInitialized threw {ex.GetType().Name}: {ex.Message}");
+                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnUIInitialized threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+            }
+            finally
+            {
+                LeaveDispatch(outer);
             }
         }
     }
@@ -2202,6 +3004,7 @@ internal static class PluginManager
             return;
 
         _loginDispatchPending = false;
+        AnnouncePluginRefusals();   // plugins the manifests kept out, once each, now that chat is up
 
         for (int i = 0; i < _plugins.Count; i++)
         {
@@ -2209,16 +3012,22 @@ internal static class PluginManager
             if (!plugin.Initialized || plugin.Failed || plugin.OnLoginComplete == null || plugin.LoginCompleteDispatched)
                 continue;
 
+            LoadedPlugin? outer = EnterDispatch(plugin);
             try
             {
                 plugin.OnLoginComplete();
                 plugin.LoginCompleteDispatched = true;
                 RynthLog.Plugin($"PluginManager: {plugin.DisplayName} received OnLoginComplete.");
+                Compatibility.MemoryUse.Mark($"{plugin.DisplayName} OnLoginComplete");
             }
             catch (Exception ex)
             {
                 plugin.Failed = true;
-                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnLoginComplete threw {ex.GetType().Name}: {ex.Message}");
+                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} OnLoginComplete threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+            }
+            finally
+            {
+                LeaveDispatch(outer);
             }
         }
 
@@ -2358,6 +3167,67 @@ internal static class PluginManager
         _sendPluginCommandCallback ??= SendPluginCommandAction;
         _getObjectDataIdPropertyCallback ??= GetObjectDataIdPropertyAction;
         _getPluginExportJsonCallback ??= GetPluginExportJsonAction;
+        _getPluginInterfaceCallback ??= GetPluginInterfaceAction;
+        unsafe { _getLiveObjectIdsCallback ??= GetLiveObjectIdsAction; }
+        unsafe { _getLastUseDoneCallback ??= GetLastUseDoneAction; }
+        unsafe { _getLastWeenieErrorCallback ??= GetLastWeenieErrorAction; }
+        _wieldItemCallback ??= WieldItemAction;
+        unsafe { _uiSubmitCallback ??= UiSubmitAction; }
+        unsafe { _uiPollEventsCallback ??= UiPollEventsAction; }
+        unsafe { _uiGetInfoCallback ??= UiGetInfoAction; }
+        unsafe { _getTradeStateCallback ??= GetTradeStateAction; }
+        unsafe { _getTradeItemsCallback ??= GetTradeItemsAction; }
+        _tradeOpenCallback ??= TradeOpenAction;
+        _tradeAddCallback ??= TradeAddAction;
+        _tradeAcceptCallback ??= TradeAcceptAction;
+        _tradeDeclineCallback ??= TradeDeclineAction;
+        _tradeResetCallback ??= TradeResetAction;
+        _tradeCloseCallback ??= TradeCloseAction;
+        unsafe { _getObjectInstanceIdPropertyCallback ??= GetObjectInstanceIdPropertyAction; }
+        unsafe { _getVTankStateCallback ??= GetVTankStateAction; }
+        unsafe { _getCharacterTitlesCallback ??= GetCharacterTitlesAction; }
+        unsafe { _getServerInfoCallback ??= GetServerInfoAction; }
+        _closeContainerCallback ??= CloseContainerAction;
+        unsafe { _getScreenModeCallback ??= GetScreenModeAction; }   // v77 (PluginManager.UiHooks.cs)
+        _getUiHookFlagsCallback ??= GetUiHookFlagsAction;
+        unsafe { _setServerMessageInterestCallback ??= SetServerMessageInterestAction; }
+        unsafe { _getTrainingInfoCallback ??= GetTrainingInfoAction; }   // v79
+        unsafe { _raiseCallback ??= RaiseAction; }
+        _trainSkillCallback ??= TrainSkillAction;
+        unsafe { _getContainerOrderCallback ??= GetContainerOrderAction; }   // v80
+        _putItemInContainerCallback ??= PutItemInContainerAction;
+        unsafe { _salvageDirectCallback ??= SalvageDirectAction; }   // v82
+        _getObjectServerAgeCallback ??= GetObjectServerAgeAction;    // v83
+        _removeClientObjectCallback ??= RemoveClientObjectAction;    // v83
+        unsafe { _getObjectPropertiesCallback ??= GetObjectPropertiesAction; }   // v84
+        _getVendorInfoCallback ??= GetVendorInfoAction;
+        _getVendorItemsCallback ??= GetVendorItemsAction;
+        _vendorBuyCallback ??= VendorBuyAction;
+        _vendorSellCallback ??= VendorSellAction;
+        _getVendorTradeStatusCallback ??= GetVendorTradeStatusAction;
+        _getMergeStackResultCallback ??= GetMergeStackResultAction;
+        _armConfirmationCallback ??= ArmConfirmationAction;
+        unsafe { _getLastConfirmationCallback ??= GetLastConfirmationAction; }
+        unsafe { _getServerStateJsonCallback ??= GetServerStateJsonAction; }
+        unsafe { _getWieldedItemsCallback ??= GetWieldedItemsAction; }
+        _getUiColorCallback ??= UiKit.GetUiColor;
+        _getUiFontCallback ??= UiKit.GetUiFont;
+        unsafe { _setPanelOpenCallback ??= UiKit.SetPanelOpen; }
+        _panelDragWithLastItemCallback ??= UiKit.PanelDragWithLastItem;   // v90
+        unsafe { _setPanelPopOutCallback ??= UiKit.SetPanelPopOut; }
+        unsafe { _panelTextSizeCallback ??= UiKit.PanelTextSize; }
+        unsafe { _renderSettingsDrawerCallback ??= UiKit.RenderSettingsDrawer; }
+        unsafe { _getShortcutsCallback ??= ShortcutApi.GetShortcuts; }
+        _shortcutActionCallback ??= ShortcutApi.ShortcutAction;
+        unsafe { _getActionKeysCallback ??= ShortcutApi.GetActionKeys; }
+        _getIconTextureCallback ??= ShortcutApi.GetIconTexture;
+        unsafe { _keyCaptureCallback ??= ShortcutApi.KeyCapture; }
+        unsafe { _setActionKeyCallback ??= ShortcutApi.SetActionKey; }
+        _acPanelCallback ??= ShortcutApi.AcPanel;
+        unsafe { _panelScaleCallback ??= UiKit.PanelScale; }
+        unsafe { _dropTargetCallback ??= ShortcutApi.DropTarget; }
+        _setAmbientLightFloorCallback ??= AmbientLight.SetFloor;      // v91
+        unsafe { _getAmbientLightCallback ??= AmbientLight.Get; }
 
         _api.Version = PluginContractVersion.Current;
         _api.LogFn = Marshal.GetFunctionPointerForDelegate(_logCallback);
@@ -2469,10 +3339,112 @@ internal static class PluginManager
         _api.SendPluginCommandFn = Marshal.GetFunctionPointerForDelegate(_sendPluginCommandCallback);
         _api.GetObjectDataIdPropertyFn = Marshal.GetFunctionPointerForDelegate(_getObjectDataIdPropertyCallback);
         _api.GetPluginExportJsonFn = Marshal.GetFunctionPointerForDelegate(_getPluginExportJsonCallback);
+        _api.GetPluginInterfaceFn = Marshal.GetFunctionPointerForDelegate(_getPluginInterfaceCallback);
+        _api.GetLiveObjectIdsFn = Marshal.GetFunctionPointerForDelegate(_getLiveObjectIdsCallback);
+        _api.GetLastUseDoneFn = Marshal.GetFunctionPointerForDelegate(_getLastUseDoneCallback);
+        _api.GetLastWeenieErrorFn = Marshal.GetFunctionPointerForDelegate(_getLastWeenieErrorCallback);
+        _api.WieldItemFn = Marshal.GetFunctionPointerForDelegate(_wieldItemCallback);
+        _api.UiSubmitFn = Marshal.GetFunctionPointerForDelegate(_uiSubmitCallback);
+        _api.UiPollEventsFn = Marshal.GetFunctionPointerForDelegate(_uiPollEventsCallback);
+        _api.UiGetInfoFn = Marshal.GetFunctionPointerForDelegate(_uiGetInfoCallback);
+        _api.GetTradeStateFn = Marshal.GetFunctionPointerForDelegate(_getTradeStateCallback);
+        _api.GetTradeItemsFn = Marshal.GetFunctionPointerForDelegate(_getTradeItemsCallback);
+        _api.TradeOpenFn = Marshal.GetFunctionPointerForDelegate(_tradeOpenCallback);
+        _api.TradeAddFn = Marshal.GetFunctionPointerForDelegate(_tradeAddCallback);
+        _api.TradeAcceptFn = Marshal.GetFunctionPointerForDelegate(_tradeAcceptCallback);
+        _api.TradeDeclineFn = Marshal.GetFunctionPointerForDelegate(_tradeDeclineCallback);
+        _api.TradeResetFn = Marshal.GetFunctionPointerForDelegate(_tradeResetCallback);
+        _api.TradeCloseFn = Marshal.GetFunctionPointerForDelegate(_tradeCloseCallback);
+        _api.GetObjectInstanceIdPropertyFn = Marshal.GetFunctionPointerForDelegate(_getObjectInstanceIdPropertyCallback);
+        _api.GetVTankStateFn = Marshal.GetFunctionPointerForDelegate(_getVTankStateCallback);
+        _api.GetCharacterTitlesFn = Marshal.GetFunctionPointerForDelegate(_getCharacterTitlesCallback);
+        _api.GetServerInfoFn = Marshal.GetFunctionPointerForDelegate(_getServerInfoCallback);
+        _api.CloseContainerFn = Marshal.GetFunctionPointerForDelegate(_closeContainerCallback);
+        _api.GetScreenModeFn = Marshal.GetFunctionPointerForDelegate(_getScreenModeCallback);
+        _api.GetUiHookFlagsFn = Marshal.GetFunctionPointerForDelegate(_getUiHookFlagsCallback);
+        _api.SetServerMessageInterestFn = Marshal.GetFunctionPointerForDelegate(_setServerMessageInterestCallback);
+        _api.GetTrainingInfoFn = Marshal.GetFunctionPointerForDelegate(_getTrainingInfoCallback);
+        _api.RaiseFn = Marshal.GetFunctionPointerForDelegate(_raiseCallback);
+        _api.TrainSkillFn = Marshal.GetFunctionPointerForDelegate(_trainSkillCallback);
+        _api.GetContainerOrderFn = Marshal.GetFunctionPointerForDelegate(_getContainerOrderCallback);
+        _api.PutItemInContainerFn = Marshal.GetFunctionPointerForDelegate(_putItemInContainerCallback);
+        _api.SalvageDirectFn = Marshal.GetFunctionPointerForDelegate(_salvageDirectCallback);
+        _api.GetObjectServerAgeFn = Marshal.GetFunctionPointerForDelegate(_getObjectServerAgeCallback);
+        _api.RemoveClientObjectFn = Marshal.GetFunctionPointerForDelegate(_removeClientObjectCallback);
+        _api.GetObjectPropertiesFn = Marshal.GetFunctionPointerForDelegate(_getObjectPropertiesCallback);
+        _api.GetVendorInfoFn = Marshal.GetFunctionPointerForDelegate(_getVendorInfoCallback);
+        _api.GetVendorItemsFn = Marshal.GetFunctionPointerForDelegate(_getVendorItemsCallback);
+        _api.VendorBuyFn = Marshal.GetFunctionPointerForDelegate(_vendorBuyCallback);
+        _api.VendorSellFn = Marshal.GetFunctionPointerForDelegate(_vendorSellCallback);
+        _api.GetVendorTradeStatusFn = Marshal.GetFunctionPointerForDelegate(_getVendorTradeStatusCallback);
+        _api.GetMergeStackResultFn = Marshal.GetFunctionPointerForDelegate(_getMergeStackResultCallback);
+        _api.ArmConfirmationFn = Marshal.GetFunctionPointerForDelegate(_armConfirmationCallback);
+        _api.GetLastConfirmationFn = Marshal.GetFunctionPointerForDelegate(_getLastConfirmationCallback);
+        _api.GetServerStateJsonFn = Marshal.GetFunctionPointerForDelegate(_getServerStateJsonCallback);
+        _api.GetWieldedItemsFn = Marshal.GetFunctionPointerForDelegate(_getWieldedItemsCallback);
+        _api.GetUiColorFn = Marshal.GetFunctionPointerForDelegate(_getUiColorCallback);
+        _api.GetUiFontFn = Marshal.GetFunctionPointerForDelegate(_getUiFontCallback);
+        _api.SetPanelOpenFn = Marshal.GetFunctionPointerForDelegate(_setPanelOpenCallback);
+        _api.PanelDragWithLastItemFn = Marshal.GetFunctionPointerForDelegate(_panelDragWithLastItemCallback);
+        _api.SetPanelPopOutFn = Marshal.GetFunctionPointerForDelegate(_setPanelPopOutCallback);
+        _api.PanelTextSizeFn = Marshal.GetFunctionPointerForDelegate(_panelTextSizeCallback);
+        _api.RenderSettingsDrawerFn = Marshal.GetFunctionPointerForDelegate(_renderSettingsDrawerCallback);
+        _api.GetShortcutsFn = Marshal.GetFunctionPointerForDelegate(_getShortcutsCallback);
+        _api.ShortcutActionFn = Marshal.GetFunctionPointerForDelegate(_shortcutActionCallback);
+        _api.GetActionKeysFn = Marshal.GetFunctionPointerForDelegate(_getActionKeysCallback);
+        _api.GetIconTextureFn = Marshal.GetFunctionPointerForDelegate(_getIconTextureCallback);
+        _api.KeyCaptureFn = Marshal.GetFunctionPointerForDelegate(_keyCaptureCallback);
+        _api.SetActionKeyFn = Marshal.GetFunctionPointerForDelegate(_setActionKeyCallback);
+        _api.AcPanelFn = Marshal.GetFunctionPointerForDelegate(_acPanelCallback);
+        _api.PanelScaleFn = Marshal.GetFunctionPointerForDelegate(_panelScaleCallback);
+        _api.DropTargetFn = Marshal.GetFunctionPointerForDelegate(_dropTargetCallback);
+        _api.SetAmbientLightFloorFn = Marshal.GetFunctionPointerForDelegate(_setAmbientLightFloorCallback);
+        _api.GetAmbientLightFn = Marshal.GetFunctionPointerForDelegate(_getAmbientLightCallback);
+        RouteApiThroughLoader();
     }
+
+    /// <summary>
+    /// Plugins copy the API table and can never give it back, so under the native loader
+    /// every function pointer in it becomes one of the loader's permanent stubs
+    /// (Hooking/LoaderServices): after this engine generation shuts down, a plugin thread
+    /// that still calls the host waits for the next generation instead of jumping into
+    /// unloaded code. Fields 0-3 (Version, ImGuiContext, D3DDevice, GameHwnd) are data.
+    /// </summary>
+    private static unsafe void RouteApiThroughLoader()
+    {
+        if (!Hooking.LoaderServices.Available)
+            return;
+        fixed (RynthCoreAPI* api = &_api)
+        {
+            IntPtr* slots = (IntPtr*)api;
+            int count = sizeof(RynthCoreAPI) / sizeof(IntPtr);
+            for (int i = 4; i < count; i++)
+                if (slots[i] != IntPtr.Zero)
+                    slots[i] = Hooking.LoaderServices.ApiStub(i, slots[i]);
+        }
+    }
+
+    private static int _loggedOffThreadProbe;
 
     private static void ProbeClientHooks()
     {
+        // Host ProbeClientHooksFn is called from the plugin pump. A probe Resets and
+        // rebinds the combat/movement/object delegates the main-thread drain is using
+        // and re-scans AC memory, so it must not run there: off the main thread,
+        // ask MainThreadSnapshots.Tick to re-probe on AC's main thread (only if the
+        // action hooks are not initialized; bootstrap already probed them).
+        // Fire-and-forget: plugins read readiness through GetClientHookFlags.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            if (!ClientActionHooks.GetStatus().CombatInitialized)
+                MainThreadSnapshots.RequestClientHookProbe();
+            if (System.Threading.Interlocked.Exchange(ref _loggedOffThreadProbe, 1) == 0)
+                RynthLog.Compat("ProbeClientHooks: called off AC's main thread - "
+                    + (ClientActionHooks.GetStatus().CombatInitialized
+                        ? "hooks already initialized, nothing to do."
+                        : "re-probe queued for AC's main thread."));
+            return;
+        }
         ClientActionHooks.Probe();
         // ClientCombatHooks.Probe() is called during engine bootstrap (EntryPoint.cs)
         // — do NOT re-probe here, it uses GetDelegateForFunctionPointer (no MinHook).
@@ -2545,6 +3517,7 @@ internal static class PluginManager
 
     private static int CancelAttack()
     {
+        Compatibility.AcActionTrace.Record("CancelAttack");
         return ToAbiBool(ClientActionHooks.CancelAttack());
     }
 
@@ -2555,7 +3528,9 @@ internal static class PluginManager
 
     private static int RequestIdAction(uint objectId)
     {
-        return ToAbiBool(ClientActionHooks.RequestId(objectId));
+        // A plugin's identify: never limited by AutoIdMode; its 0xC8 is tagged [eng:plugin].
+        using (Net.EngineSendMarker.Enter(Net.IdRequester.Plugin))
+            return ToAbiBool(ClientActionHooks.RequestId(objectId));
     }
 
     private static int CastSpellAction(uint targetId, int spellId)
@@ -2585,6 +3560,106 @@ internal static class PluginManager
     private static unsafe int GetObjectDataIdPropertyAction(uint objectId, uint stype, uint* value)
     {
         if (!ClientObjectHooks.TryGetObjectDataIdProperty(objectId, stype, out uint v))
+            return 0;
+
+        *value = v;
+        return 1;
+    }
+
+    private static unsafe int GetVTankStateAction(int* sequence)
+    {
+        try
+        {
+            uint flags = Compatibility.VTankWatch.GetPluginState(out int seq);
+            if (sequence != null)
+                *sequence = seq;
+            return (int)flags;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static unsafe int GetCharacterTitlesAction(uint* ids, int maxCount, uint* currentTitle)
+    {
+        try
+        {
+            return Compatibility.CharacterTitles.Copy(ClientHelperHooks.GetPlayerId(), ids, Math.Max(0, maxCount), currentTitle);
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    /// <summary>
+    /// v86: the server list as JSON (UI/Sections/ServerStateJson.cs) from the published snapshot.
+    /// Any thread: the snapshot is immutable and the strings are volatile reads. -1 on failure.
+    /// </summary>
+    /// <summary>v87: what the player wields (EquipmentTracker). -1 while it can't start.</summary>
+    private static unsafe int GetWieldedItemsAction(uint* ids, uint* locations, int max)
+    {
+        try
+        {
+            if (ids == null || locations == null || max <= 0) return -1;
+            return Compatibility.EquipmentTracker.Copy(new Span<uint>(ids, max), new Span<uint>(locations, max));
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private static unsafe int GetServerStateJsonAction(byte* buffer, int capacity)
+    {
+        try
+        {
+            UI.Sections.SectionRegistry.Snapshot snap = UI.Sections.SectionRegistry.Current;
+            string json = UI.Sections.ServerStateJson.Build(snap.Servers, snap.Manifests, snap.Revision,
+                ServerInfo.LaunchHost, AccountHooks.AnnouncedWorldName, UI.Sections.SectionRegistry.EnginePlugin);
+            return UI.Sections.ServerStateJson.Write(json, buffer, capacity);
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private static unsafe int GetServerInfoAction(byte* worldName, int capacity)
+    {
+        try
+        {
+            ServerVerdict v = ServerInfo.Current;
+            int flags = (v.IsAelrynth ? 1 : 0) | (v.IsStaging ? 2 : 0);
+            string? world = AccountHooks.AnnouncedWorldName;
+            if (!string.IsNullOrEmpty(world))
+            {
+                flags |= 4;
+                if (worldName != null && capacity > 0)
+                {
+                    byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(world);
+                    int n = Math.Min(utf8.Length, capacity - 1);
+                    while (n > 0 && n < utf8.Length && (utf8[n] & 0xC0) == 0x80) n--;
+                    for (int i = 0; i < n; i++) worldName[i] = utf8[i];
+                    worldName[n] = 0;
+                }
+            }
+            else if (worldName != null && capacity > 0)
+            {
+                worldName[0] = 0;
+            }
+            return flags;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static unsafe int GetObjectInstanceIdPropertyAction(uint objectId, uint stype, uint* value)
+    {
+        if (!ClientObjectHooks.TryGetObjectInstanceIdProperty(objectId, stype, out uint v))
             return 0;
 
         *value = v;
@@ -3000,41 +4075,135 @@ internal static class PluginManager
     private static int UseObject(uint objectId)
     {
         Compatibility.AcActionTrace.Record("UseObject", objectId);
+        LogPluginUse("UseObject", objectId, 0);
         return ToAbiBool(ClientHelperHooks.UseObject(objectId));
     }
 
     private static int UseObjectOn(uint sourceObjectId, uint targetObjectId)
     {
+        Compatibility.AcActionTrace.Record("UseObjectOn", sourceObjectId, targetObjectId);
+        LogPluginUse("UseObjectOn", sourceObjectId, targetObjectId);
         return ToAbiBool(ClientHelperHooks.UseObjectOn(sourceObjectId, targetObjectId));
+    }
+
+    // ── Use backstop log (2026-10-04) ─────────────────────────────────────────
+    // One line per plugin use, whichever plugin asked, so a use nobody explains
+    // shows up in the log (doors and corpses opening "on their own" went
+    // unexplained for months because no use was logged). The plugins log the
+    // why next to it ("[Use] RynthAi/..."); this line is the engine's record
+    // that the use was sent. The same object (and target) is logged at most
+    // once per UseLogRepeatMs: repeats in between are counted and reported on
+    // the next line for it, so a fight's weapon swaps don't flood the log.
+    private const long UseLogRepeatMs = 3000;
+    private static readonly object UseLogGate = new();
+    private static readonly Dictionary<ulong, (long LastMs, int Suppressed)> UseLogSeen = new();
+
+    private static void LogPluginUse(string what, uint objectId, uint targetId)
+    {
+        try
+        {
+            long now = Environment.TickCount64;
+            ulong key = ((ulong)targetId << 32) | objectId;
+            int suppressed;
+            lock (UseLogGate)
+            {
+                if (UseLogSeen.TryGetValue(key, out var seen) && now - seen.LastMs < UseLogRepeatMs)
+                {
+                    UseLogSeen[key] = (seen.LastMs, seen.Suppressed + 1);
+                    return;
+                }
+                suppressed = UseLogSeen.TryGetValue(key, out seen) ? seen.Suppressed : 0;
+                if (UseLogSeen.Count > 256) UseLogSeen.Clear();
+                UseLogSeen[key] = (now, 0);
+            }
+            string name = ClientActionHooks.TryGetObjectName(objectId, out string n) && !string.IsNullOrWhiteSpace(n) ? n : "?";
+            string target = "";
+            if (targetId != 0)
+            {
+                string tn = ClientActionHooks.TryGetObjectName(targetId, out string t) && !string.IsNullOrWhiteSpace(t) ? t : "?";
+                target = $" on 0x{targetId:X8} '{tn}'";
+            }
+            string more = suppressed > 0 ? $" (+{suppressed} repeat(s) since its last line)" : "";
+            RynthLog.Info($"[Use] engine: {what} 0x{objectId:X8} '{name}'{target}{more}");
+        }
+        catch { }
     }
 
     private static int UseEquippedItem(uint sourceObjectId, uint targetObjectId)
     {
+        Compatibility.AcActionTrace.Record("UseEquippedItem", sourceObjectId, targetObjectId);
         return ToAbiBool(ClientHelperHooks.UseEquippedItem(sourceObjectId, targetObjectId));
     }
 
     private static int MoveItemExternal(uint objectId, uint targetContainerId, int amount)
     {
+        Compatibility.AcActionTrace.Record("MoveItemExternal", objectId, targetContainerId);
         return ToAbiBool(ClientHelperHooks.MoveItemExternal(objectId, targetContainerId, amount));
     }
 
     private static int MoveItemInternal(uint objectId, uint targetContainerId, int slot, int amount)
     {
+        Compatibility.AcActionTrace.Record("MoveItemInternal", objectId, targetContainerId);
         return ToAbiBool(ClientHelperHooks.MoveItemInternal(objectId, targetContainerId, slot, amount));
     }
 
     private static int SplitStackInternal(uint objectId, uint targetContainerId, int slot, int amount)
     {
+        Compatibility.AcActionTrace.Record("SplitStackInternal", objectId, targetContainerId);
         return ToAbiBool(ClientHelperHooks.SplitStackInternal(objectId, targetContainerId, slot, amount));
     }
 
     private static int MergeStackInternal(uint sourceObjectId, uint targetObjectId)
     {
+        Compatibility.AcActionTrace.Record("MergeStackInternal", sourceObjectId, targetObjectId);
         return ToAbiBool(ClientHelperHooks.MergeStackInternal(sourceObjectId, targetObjectId));
+    }
+
+    // v68: outcome of the latest MergeStackInternal(source, target) (MergeStackResults codes).
+    private static unsafe int GetMergeStackResultAction(uint sourceObjectId, uint targetObjectId, int* amount, int* ageMs)
+    {
+        try
+        {
+            int status = MergeStackResults.Get(sourceObjectId, targetObjectId, out int sent, out int age);
+            if (amount != null) *amount = sent;
+            if (ageMs != null) *ageMs = age;
+            return status;
+        }
+        catch
+        {
+            return MergeStackResults.None;
+        }
+    }
+
+    // v85: arm one answer for the next server yes/no prompt (ConfirmationResponder).
+    private static int ArmConfirmationAction(uint type, int minPercent, int timeoutMs)
+    {
+        try { return ConfirmationResponder.Arm(type, minPercent, timeoutMs); }
+        catch { return 0; }
+    }
+
+    // v85: the last server yes/no prompt and what happened to it.
+    private static unsafe int GetLastConfirmationAction(uint* type, uint* contextId, int* percent, int* outcome, int* ageMs)
+    {
+        try
+        {
+            int seq = ConfirmationResponder.GetLast(out uint t, out uint ctx, out int pct, out int oc, out int age);
+            if (type != null) *type = t;
+            if (contextId != null) *contextId = ctx;
+            if (percent != null) *percent = pct;
+            if (outcome != null) *outcome = oc;
+            if (ageMs != null) *ageMs = age;
+            return seq;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     private static int GiveObjectTo(uint objectId, uint targetId, int amount)
     {
+        Compatibility.AcActionTrace.Record("GiveObjectTo", objectId, targetId);
         return ToAbiBool(ClientHelperHooks.GiveObjectTo(objectId, targetId, amount));
     }
 
@@ -3171,6 +4340,502 @@ internal static class PluginManager
         }
     }
 
+    /// <summary>
+    /// v68: a named plugin's typed interface table, through its fixed-signature
+    /// <c>void* RynthPluginQueryInterface(const char* iface, uint version)</c> export (never
+    /// an arbitrary export, so no signature mismatch can reach the stack). Null if missing.
+    /// </summary>
+    private static unsafe IntPtr GetPluginInterfaceAction(IntPtr pluginNameAnsi, IntPtr ifaceAnsi, uint version)
+    {
+        try
+        {
+            string? name = pluginNameAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(pluginNameAnsi) : null;
+            if (string.IsNullOrEmpty(name) || ifaceAnsi == IntPtr.Zero)
+                return IntPtr.Zero;
+            IntPtr fn = ResolvePluginExport(name, "RynthPluginQueryInterface");
+            if (fn == IntPtr.Zero)
+                return IntPtr.Zero;
+            return ((delegate* unmanaged[Cdecl]<IntPtr, uint, IntPtr>)fn)(ifaceAnsi, version);
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    /// <summary>v69: the engine's live object id snapshot (see PluginContract.GetLiveObjectIdsFn).</summary>
+    private static unsafe int GetLiveObjectIdsAction(uint* buffer, int capacity)
+    {
+        try
+        {
+            uint[] ids = ClientObjectHooks.LiveObjectIds;
+            if (buffer != null && capacity > 0)
+            {
+                int n = Math.Min(capacity, ids.Length);
+                for (int i = 0; i < n; i++)
+                    buffer[i] = ids[i];
+            }
+            return ids.Length;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>v70: the last UseDone's seq + error code (see PluginContract.GetLastUseDoneFn).</summary>
+    private static unsafe int GetLastUseDoneAction(int* seq, uint* error)
+    {
+        try
+        {
+            bool ok = SmartBoxHooks.TryGetLastUseDone(out int s, out uint e);
+            if (seq != null) *seq = s;
+            if (error != null) *error = e;
+            return ok ? 1 : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>v70: the last server refusal (see PluginContract.GetLastWeenieErrorFn).</summary>
+    private static unsafe int GetLastWeenieErrorAction(int* seq, uint* error, uint* eventType, uint* objectId)
+    {
+        try
+        {
+            bool ok = SmartBoxHooks.TryGetLastWeenieError(out int s, out uint e, out uint t, out uint o);
+            if (seq != null) *seq = s;
+            if (error != null) *error = e;
+            if (eventType != null) *eventType = t;
+            if (objectId != null) *objectId = o;
+            return ok ? 1 : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    // ── v71: script windows ─────────────────────────────────────────────
+
+    // The plugin being called on this thread (Tick, Init, lifecycle events, Shutdown), so
+    // UiSubmit / UiPollEvents know their owner. Written only by the dispatching thread; a
+    // call from any other thread (a plugin's own thread, AC's thread) sees no owner.
+    private static LoadedPlugin? _dispatchPlugin;
+    private static int _dispatchThread;
+
+    // What the dispatch in progress calls and since when (PumpDispatchInfo), for the hang
+    // watchdog: a plugin export that faults natively ends the process with only TickAll in
+    // the event log, so the watchdog's report during the crash-dump freeze names the plugin.
+    private static string? _dispatchExport;
+    private static long _dispatchSinceMs;
+
+    private static LoadedPlugin? EnterDispatch(LoadedPlugin plugin, string export = "event")
+    {
+        int thread = Environment.CurrentManagedThreadId;
+        LoadedPlugin? outer = _dispatchThread == thread ? _dispatchPlugin : null;
+        _dispatchThread = thread;
+        _dispatchExport = export;
+        _dispatchSinceMs = Environment.TickCount64;
+        _dispatchPlugin = plugin;
+        return outer;
+    }
+
+    private static void LeaveDispatch(LoadedPlugin? outer)
+    {
+        _dispatchPlugin = outer;
+        if (outer == null)
+            _dispatchSinceMs = 0;
+    }
+
+    /// <summary>
+    /// "inside RynthAi Tick for 12375 ms" while a plugin call has been running for a second
+    /// or more, else null. Any thread (the hang watchdog); racy by design.
+    /// </summary>
+    internal static string? DescribePumpDispatch()
+    {
+        LoadedPlugin? plugin = _dispatchPlugin;
+        return PumpDispatchInfo.Describe(plugin?.DisplayName, _dispatchExport, Volatile.Read(ref _dispatchSinceMs), Environment.TickCount64);
+    }
+
+    /// <summary>The plugin whose tick, event, Init or Shutdown is running on the calling thread, or null.</summary>
+    internal static LoadedPlugin? CurrentDispatch
+    {
+        get
+        {
+            LoadedPlugin? plugin = _dispatchPlugin;
+            return plugin != null && _dispatchThread == Environment.CurrentManagedThreadId ? plugin : null;
+        }
+    }
+
+    /// <summary>v71: see PluginContract.UiSubmitFn.</summary>
+    private static unsafe int UiSubmitAction(byte* data, int length)
+    {
+        try
+        {
+            LoadedPlugin? owner = CurrentDispatch;
+            if (owner == null) return -2;
+            return ScriptWindowRegistry.Submit(owner, data, length);
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Plugin($"PluginManager: UiSubmit threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+            return -1;
+        }
+    }
+
+    /// <summary>v71: see PluginContract.UiPollEventsFn.</summary>
+    private static unsafe int UiPollEventsAction(byte* buffer, int capacity, int* remaining)
+    {
+        try
+        {
+            if (remaining != null) *remaining = 0;
+            LoadedPlugin? owner = CurrentDispatch;
+            if (owner == null) return -2;
+            return ScriptWindowRegistry.PollEvents(owner, buffer, capacity, remaining);
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Plugin($"PluginManager: UiPollEvents threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>v71: see PluginContract.UiGetInfoFn.</summary>
+    private static unsafe int UiGetInfoAction(UiInfoNative* info)
+    {
+        try
+        {
+            return ScriptWindowRegistry.GetInfo(info);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    // ── v72: player-to-player trade ────────────────────────────────────
+
+    /// <summary>v72: see PluginContract.GetTradeStateFn.</summary>
+    private static unsafe int GetTradeStateAction(TradeStateNative* state)
+    {
+        try
+        {
+            return PlayerTrade.GetState(state);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>v72: see PluginContract.GetTradeItemsFn.</summary>
+    private static unsafe int GetTradeItemsAction(int side, uint* buffer, int capacity)
+    {
+        try
+        {
+            return PlayerTrade.GetItems(side, buffer, capacity);
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    /// <summary>v72: see PluginContract.TradeOpenFn.</summary>
+    private static int TradeOpenAction(uint targetId) => ToAbiBool(PlayerTrade.Open(targetId));
+
+    /// <summary>v72: see PluginContract.TradeAddFn.</summary>
+    private static int TradeAddAction(uint itemId, uint slot) => ToAbiBool(PlayerTrade.Add(itemId, slot));
+
+    /// <summary>v72: see PluginContract.TradeAcceptFn.</summary>
+    private static int TradeAcceptAction() => ToAbiBool(PlayerTrade.Accept());
+
+    /// <summary>v72: see PluginContract.TradeDeclineFn.</summary>
+    private static int TradeDeclineAction() => ToAbiBool(PlayerTrade.Decline());
+
+    /// <summary>v72: see PluginContract.TradeResetFn.</summary>
+    private static int TradeResetAction() => ToAbiBool(PlayerTrade.Reset());
+
+    /// <summary>v72: see PluginContract.TradeCloseFn.</summary>
+    private static int TradeCloseAction() => ToAbiBool(PlayerTrade.Close());
+
+    // ── v79: spending experience (Compatibility/TrainingApi.cs) ─────────
+
+    /// <summary>v79: see PluginContract.GetTrainingInfoFn.</summary>
+    private static unsafe int GetTrainingInfoAction(TrainingInfoNative* info, TrainingEntryNative* entries, int maxEntries)
+    {
+        try
+        {
+            return TrainingApi.GetInfo(info, entries, maxEntries);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>v79: see PluginContract.RaiseFn.</summary>
+    private static unsafe int RaiseAction(uint kind, uint stype, uint ranks, long expectedXp, long* xpSent)
+    {
+        try
+        {
+            RaiseStatus r = TrainingApi.Raise(kind, stype, ranks, expectedXp, out long sent);
+            if (xpSent != null) *xpSent = sent;
+            return (int)r;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"Raise failed - {ex.GetType().Name}: {ex.Message}");
+            return (int)RaiseStatus.SendFailed;
+        }
+    }
+
+    /// <summary>v79: see PluginContract.TrainSkillFn.</summary>
+    private static int TrainSkillAction(uint stype, int expectedCredits)
+    {
+        try
+        {
+            return (int)TrainingApi.TrainSkill(stype, expectedCredits);
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"TrainSkill failed - {ex.GetType().Name}: {ex.Message}");
+            return (int)RaiseStatus.SendFailed;
+        }
+    }
+
+    // ── v80: slot order and placed moves (Net/InventoryOrder, ClientHelperHooks) ──
+
+    /// <summary>v80: see PluginContract.GetContainerOrderFn.</summary>
+    private static unsafe int GetContainerOrderAction(uint containerId, int slotKind, uint* ids, int maxIds)
+    {
+        try
+        {
+            if (containerId == 0 || slotKind is < 0 or > 1 || maxIds < 0 || (ids == null && maxIds > 0)) return -1;
+            if (!Net.InventoryOrder.TryGetOrder(containerId, slotKind == 1, out uint[] order)) return -1;
+            int n = Math.Min(order.Length, maxIds);
+            for (int i = 0; i < n; i++) ids[i] = order[i];
+            return order.Length;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    /// <summary>v80: see PluginContract.PutItemInContainerFn.</summary>
+    private static int PutItemInContainerAction(uint itemId, uint containerId, int placement)
+    {
+        try
+        {
+            if (!ClientHelperHooks.HasPutItemInContainer) return -1;
+            Compatibility.AcActionTrace.Record("PutItemInContainer", itemId, containerId);
+            return ToAbiBool(ClientHelperHooks.PutItemInContainerAt(itemId, containerId, placement));
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"PutItemInContainer failed - {ex.GetType().Name}: {ex.Message}");
+            return 0;
+        }
+    }
+
+    // ── v84: every property of an object (ObjectPropertyDump) ──
+
+    /// <summary>v84: see PluginContract.GetObjectPropertiesFn.</summary>
+    private static unsafe int GetObjectPropertiesAction(uint objectId, byte* buffer, int bufferSize)
+    {
+        try
+        {
+            if (objectId == 0 || bufferSize < 0 || (buffer == null && bufferSize > 0)) return -1;
+            byte[]? rec = Compatibility.ObjectPropertyDump.Collect(objectId);
+            if (rec == null) return 0;
+            if (rec.Length <= bufferSize)
+                rec.AsSpan().CopyTo(new Span<byte>(buffer, bufferSize));
+            return rec.Length;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"GetObjectProperties 0x{objectId:X8} failed - {ex.GetType().Name}: {ex.Message}");
+            return -1;
+        }
+    }
+
+    // ── v83: ghost creatures (ObjectFreshness, DeleteObjectHooks.RemoveClientObject) ──
+
+    /// <summary>v83: see PluginContract.GetObjectServerAgeFn.</summary>
+    private static int GetObjectServerAgeAction(uint objectId)
+    {
+        try
+        {
+            long age = Compatibility.ObjectFreshness.AgeMs(objectId, Environment.TickCount64);
+            return age < 0 ? -1 : (int)Math.Min(age, int.MaxValue);
+        }
+        catch { return -1; }
+    }
+
+    /// <summary>v83: see PluginContract.RemoveClientObjectFn.</summary>
+    private static int RemoveClientObjectAction(uint objectId)
+    {
+        try
+        {
+            var r = Compatibility.DeleteObjectHooks.RemoveClientObject(objectId, out string? why);
+            if (r == Compatibility.DeleteObjectHooks.RemoveResult.Refused && why != null)
+                RynthLog.Compat($"RemoveClientObject 0x{objectId:X8}: refused - {why}.");
+            return (int)r;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"RemoveClientObject failed - {ex.GetType().Name}: {ex.Message}");
+            return 0;
+        }
+    }
+
+    // ── v82: salvage without the panel (ClientHelperHooks.SalvageDirect) ──
+
+    /// <summary>v82: see PluginContract.SalvageDirectFn.</summary>
+    private static unsafe int SalvageDirectAction(uint toolId, uint* itemIds, int count)
+    {
+        try
+        {
+            if (!ClientHelperHooks.HasSalvageDirect) return -1;
+            if (toolId == 0 || itemIds == null || count <= 0 || count > ClientHelperHooks.MaxSalvageDirectItems) return 0;
+            var ids = new uint[count];
+            for (int i = 0; i < count; i++) ids[i] = itemIds[i];
+            Compatibility.AcActionTrace.Record("SalvageDirect", toolId, (uint)count);
+            return ClientHelperHooks.SalvageDirect(toolId, ids) ? count : 0;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"SalvageDirect failed - {ex.GetType().Name}: {ex.Message}");
+            return 0;
+        }
+    }
+
+    /// <summary>v78: see PluginContract.SetServerMessageInterestFn.</summary>
+    private static unsafe int SetServerMessageInterestAction(uint* opcodes, int opcodeCount, uint* gameEvents, int eventCount)
+    {
+        try
+        {
+            LoadedPlugin? owner = CurrentDispatch;
+            if (owner == null)
+                return -1;
+            if (opcodeCount == 0 && eventCount == 0)
+            {
+                owner.ServerMessageInterest?.Clear();
+                RynthLog.Plugin($"PluginManager: {owner.DisplayName} stopped server messages.");
+                return 1;
+            }
+            if (owner.OnServerMessagePtr == IntPtr.Zero)
+                owner.OnServerMessagePtr = GetProcAddress(owner.ModuleHandle, "RynthPluginOnServerMessage");
+            if (owner.OnServerMessagePtr == IntPtr.Zero)
+                return 0;
+            var interest = owner.ServerMessageInterest ??= new Net.ServerMessageInterest();
+            if (!interest.Set(opcodes, opcodeCount, gameEvents, eventCount))
+                return -3;
+            RynthLog.Plugin($"PluginManager: {owner.DisplayName} wants server messages: " +
+                (interest.All ? "all" : $"{interest.OpcodeCount} opcode(s), {interest.EventCount} game event(s){(interest.AllGameEvents ? " + all game events" : "")}"));
+            return EngineSettings.ServerMessageStream ? 1 : 2;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Plugin($"PluginManager: SetServerMessageInterest failed - {ex.GetType().Name}: {ex.Message}");
+            return -3;
+        }
+    }
+
+    /// <summary>v78: initialized, healthy plugins with a non-empty server-message interest.</summary>
+    internal static int ServerMessageSubscriberCount()
+    {
+        int n = 0;
+        for (int i = 0; i < _plugins.Count; i++)
+        {
+            var p = _plugins[i];
+            if (p.Initialized && !p.Failed && p.OnServerMessagePtr != IntPtr.Zero &&
+                p.ServerMessageInterest is { IsEmpty: false })
+                n++;
+        }
+        return n;
+    }
+
+    /// <summary>
+    /// v78: one reassembled server message to the plugins that asked for it (called from
+    /// ServerMessageStream.Pump, on this pump). <paramref name="body"/> is the message after
+    /// its opcode, valid only during the call. Returns how many plugins were called.
+    /// </summary>
+    internal static unsafe int DispatchServerMessage(uint opcode, uint eventType, byte* body, int length)
+    {
+        int called = 0;
+        for (int i = 0; i < _plugins.Count; i++)
+        {
+            var plugin = _plugins[i];
+            if (!plugin.Initialized || plugin.Failed || plugin.OnServerMessagePtr == IntPtr.Zero)
+                continue;
+            var interest = plugin.ServerMessageInterest;
+            if (interest == null || !interest.Wants(opcode, eventType))
+                continue;
+
+            LoadedPlugin? outer = EnterDispatch(plugin);
+            try
+            {
+                ((delegate* unmanaged[Cdecl]<uint, byte*, int, void>)plugin.OnServerMessagePtr)(opcode, body, length);
+                called++;
+            }
+            catch (Exception ex)
+            {
+                plugin.Failed = true;
+                RynthLog.Error($"PluginManager: {plugin.DisplayName} OnServerMessage threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)} - disabled.");
+            }
+            finally
+            {
+                LeaveDispatch(outer);
+            }
+        }
+        return called;
+    }
+
+    /// <summary>v76: close an external container (see PluginContract.CloseContainerFn).</summary>
+    private static int CloseContainerAction(uint containerId)
+    {
+        Compatibility.AcActionTrace.Record("CloseContainer", containerId);
+        return ToAbiBool(ClientHelperHooks.CloseContainer(containerId));
+    }
+
+    /// <summary>v70: wield into a chosen slot (see PluginContract.WieldItemFn).</summary>
+    private static int WieldItemAction(uint objectId, uint equipMask)
+    {
+        Compatibility.AcActionTrace.Record("WieldItem", objectId, equipMask);
+        return ToAbiBool(ClientHelperHooks.WieldItem(objectId, equipMask));
+    }
+
+    /// <summary>
+    /// The engine's own (action, value) to a loaded plugin's optional RynthPluginApplyRemoteCommand
+    /// (the plugin copies the strings and queues them). False when the plugin isn't loaded and
+    /// ready or has no such export. Same thread rules as ResolvePluginExport.
+    /// </summary>
+    internal static unsafe bool SendPluginCommand(string pluginName, string action, string value)
+    {
+        IntPtr export = ResolvePluginExport(pluginName, "RynthPluginApplyRemoteCommand");
+        if (export == IntPtr.Zero || string.IsNullOrEmpty(action)) return false;
+        IntPtr a = Marshal.StringToHGlobalAnsi(action);
+        IntPtr v = Marshal.StringToHGlobalAnsi(value ?? string.Empty);
+        try
+        {
+            ((delegate* unmanaged[Cdecl]<IntPtr, IntPtr, void>)export)(a, v);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(a);
+            Marshal.FreeHGlobal(v);
+        }
+    }
+
     private static unsafe int SendPluginCommandAction(IntPtr pluginNameAnsi, IntPtr actionAnsi, IntPtr valueAnsi)
     {
         try
@@ -3178,6 +4843,16 @@ internal static class PluginManager
             string? name = pluginNameAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(pluginNameAnsi) : null;
             if (string.IsNullOrEmpty(name))
                 return 0;
+
+            // The flight recorder answers to a reserved name (no plugin export, no API bump):
+            // an engine without it finds no such plugin and returns 0, so a plugin can call it
+            // on any engine.
+            if (name == Net.FlightRecorder.PluginCommandTarget)
+            {
+                string? action = actionAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(actionAnsi) : null;
+                string? value = valueAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(valueAnsi) : null;
+                return Net.FlightRecorder.HandlePluginCommand(action, value) ? 1 : 0;
+            }
 
             IntPtr export = ResolvePluginExport(name, "RynthPluginApplyRemoteCommand");
             if (export == IntPtr.Zero)
@@ -3234,7 +4909,61 @@ internal static class PluginManager
 
     private static int GetUseDoneSeqAction() => SmartBoxHooks.GetUseDoneSeq();
 
-    private static void ForceResetBusyCountAction() => BusyCountHooks.ForceResetBusyCount();
+    // ── Vendor trading (v67) — see Compatibility/VendorTrade.cs ─────────────
+    // Reads are served from the main-thread snapshot; buy/sell only queue here
+    // (checked against the snapshot) and go out on AC's main thread.
+    private static unsafe int GetVendorInfoAction(VendorInfoNative* info)
+    {
+        try { return VendorTrade.FillInfo(info); }
+        catch { return 0; }
+    }
+
+    private static unsafe int GetVendorItemsAction(VendorItemNative* items, int maxCount)
+    {
+        try { return VendorTrade.FillItems(items, maxCount); }
+        catch { return -1; }
+    }
+
+    private static unsafe uint VendorBuyAction(uint vendorId, VendorTradeEntryNative* entries, int count)
+    {
+        try
+        {
+            if (entries == null || count <= 0 || count > 1000)
+                return VendorTrade.RefuseRequest(true, vendorId, count, entries == null ? "null entry list" : $"bad line count {count}");
+            var ids = new uint[count];
+            var amounts = new int[count];
+            for (int i = 0; i < count; i++)
+            {
+                ids[i] = entries[i].ObjectId;
+                amounts[i] = entries[i].Amount;
+            }
+            return VendorTrade.RequestBuy(vendorId, ids, amounts);
+        }
+        catch { return 0; }
+    }
+
+    private static unsafe uint VendorSellAction(uint vendorId, uint* itemIds, int count)
+    {
+        try
+        {
+            if (itemIds == null || count <= 0 || count > 1000)
+                return VendorTrade.RefuseRequest(false, vendorId, count, itemIds == null ? "null item list" : $"bad line count {count}");
+            return VendorTrade.RequestSell(vendorId, new ReadOnlySpan<uint>(itemIds, count));
+        }
+        catch { return 0; }
+    }
+
+    private static unsafe int GetVendorTradeStatusAction(VendorTradeStatusNative* status)
+    {
+        try { return VendorTrade.FillStatus(status); }
+        catch { return 0; }
+    }
+
+    private static void ForceResetBusyCountAction()
+    {
+        Net.FlightRecorder.Mark(Net.FlightMark.BusyForceClearAsk, text: "a plugin (host ForceResetBusyCount)");
+        BusyCountHooks.ForceResetBusyCount();
+    }
 
     private static unsafe int GetObjectSpellIdsAction(uint guid, uint* spellIds, int maxCount)
     {

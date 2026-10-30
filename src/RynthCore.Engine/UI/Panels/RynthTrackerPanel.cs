@@ -2,54 +2,29 @@
 //  RynthCore.Engine — UI/Panels/RynthTrackerPanel.cs
 //  Session-stats panel backed by the RynthTracker plugin (RynthSuite).
 //
-//  Bridge exports (resolved from the RynthTracker plugin DLL via GetProcAddress):
-//    RynthTrackerGetSnapshotJson()   → ANSI JSON object, polled every 500ms
-//    RynthTrackerReset()             → resets session counters + timer
+//  Data comes from UiDataHub (UiSources.Tracker), which is the only caller of
+//  RynthTrackerGetSnapshotJson: the export frees its previous buffer on each
+//  call, so this face and the ImGui face (ImGui/Panels/P1Faces.cs) must never
+//  call it themselves. Reset goes through the hub too. The background opacity
+//  is shared with the ImGui face (TrackerSettings).
 // ============================================================================
 
 using System;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
-using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI.Data;
 
 namespace RynthCore.Engine.UI.Panels;
 
 internal static class RynthTrackerPanel
 {
-    // ── P/Invoke ──────────────────────────────────────────────────────────────
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate IntPtr GetSnapshotJsonFn();
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void ResetFn();
-
-    // ── Bridge state ──────────────────────────────────────────────────────────
-
-    private static GetSnapshotJsonFn? _getSnapshotJson;
-    private static ResetFn?           _reset;
-    private static bool               _bindingLogged;
-
-    // ── Persisted settings ────────────────────────────────────────────────────
-
-    private static byte _bgAlpha = 0xCC; // ~80% default
-
     // ── Panel construction ────────────────────────────────────────────────────
 
     internal static Control Create()
     {
-        LoadSettings();
-        TryBind();
 
         // ── Value TextBlocks (updated by poll timer) ───────────────────
         // Rates first — most important at the top when panel is tiny.
@@ -64,7 +39,7 @@ internal static class RynthTrackerPanel
         var deathVal    = Val();
 
         // ── Background brush — only this changes with the slider ───────
-        SolidColorBrush MakeBg() => new(Color.FromArgb(_bgAlpha, 0x0A, 0x12, 0x1A));
+        SolidColorBrush MakeBg() => new(Color.FromArgb(TrackerSettings.BgAlpha, 0x0A, 0x12, 0x1A));
         var stack = new StackPanel
         {
             Orientation = Orientation.Vertical,
@@ -76,7 +51,7 @@ internal static class RynthTrackerPanel
         {
             Minimum  = 0,
             Maximum  = 100,
-            Value    = Math.Round(_bgAlpha / 2.55),
+            Value    = Math.Round(TrackerSettings.BgAlpha / 2.55),
             Padding  = new Thickness(0),
             Margin   = new Thickness(4, 0, 4, 0),
             VerticalAlignment   = VerticalAlignment.Center,
@@ -84,9 +59,8 @@ internal static class RynthTrackerPanel
         };
         opacitySlider.ValueChanged += (_, e) =>
         {
-            _bgAlpha = (byte)Math.Round(e.NewValue * 2.55);
+            TrackerSettings.SetBgAlpha((byte)Math.Round(e.NewValue * 2.55), save: true);
             stack.Background = MakeBg();
-            SaveSettings();
         };
 
         // ── Reset button ───────────────────────────────────────────────
@@ -101,7 +75,7 @@ internal static class RynthTrackerPanel
             BorderThickness = new Thickness(1),
             VerticalAlignment = VerticalAlignment.Center,
         };
-        resetBtn.Click += (_, _) => _reset?.Invoke();
+        resetBtn.Click += (_, _) => UiSources.Tracker.RequestReset();
 
         // ── Title row: [Tracker] [===slider===] [R] ────────────────────
         var titleText = new TextBlock
@@ -136,51 +110,35 @@ internal static class RynthTrackerPanel
         var root = new Grid { ClipToBounds = true };
         root.Children.Add(stack);
 
-        // ── Poll timer (500ms) ─────────────────────────────────────────
+        // ── Hub snapshot (500ms) ───────────────────────────────────────
+        var values = new[] { sessionVal, xpHrVal, lumHrVal, killHrVal, xpVal, lumVal, killVal, xpkVal, deathVal };
+        long seen = -1;
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         timer.Tick += (_, _) =>
         {
-            if (_getSnapshotJson == null) { TryBind(); return; }
-
-            IntPtr ptr = _getSnapshotJson();
-            if (ptr == IntPtr.Zero) return;
-            string? json = Marshal.PtrToStringAnsi(ptr);
-            if (string.IsNullOrEmpty(json)) return;
-
-            try
-            {
-                using var doc = JsonDocument.Parse(json);
-                var r = doc.RootElement;
-
-                double ss = r.TryGetProperty("ss", out var v) ? v.GetDouble() : 0;
-                long   xt = r.TryGetProperty("xt", out v) ? v.GetInt64()  : 0;
-                long   xh = r.TryGetProperty("xh", out v) ? v.GetInt64()  : 0;
-                long   lt = r.TryGetProperty("lt", out v) ? v.GetInt64()  : 0;
-                long   lh = r.TryGetProperty("lh", out v) ? v.GetInt64()  : 0;
-                int    kt = r.TryGetProperty("kt", out v) ? v.GetInt32()  : 0;
-                double kh = r.TryGetProperty("kh", out v) ? v.GetDouble() : 0;
-                long   xk = r.TryGetProperty("xk", out v) ? v.GetInt64()  : 0;
-                int    dt = r.TryGetProperty("dt", out v) ? v.GetInt32()  : 0;
-
-                var ic = System.Globalization.CultureInfo.InvariantCulture;
-                sessionVal.Text = FormatTime(ss);
-                xpHrVal.Text    = FormatNum(xh);
-                lumHrVal.Text   = FormatNum(lh);
-                killHrVal.Text  = kh.ToString("F1", ic);
-                xpVal.Text      = FormatNum(xt);
-                lumVal.Text     = FormatNum(lt);
-                killVal.Text    = kt.ToString();
-                xpkVal.Text     = FormatNum(xk);
-                deathVal.Text   = dt.ToString();
-            }
-            catch { }
+            var snap = UiSources.Tracker.Current;
+            if (snap == null || snap.Version == seen) return;
+            seen = snap.Version;
+            for (int i = 0; i < values.Length; i++)
+                values[i].Text = snap.Value.Values[i];
+            // Opacity may have been changed by the ImGui face.
+            stack.Background = MakeBg();
         };
-        timer.Start();
         // Stop with the visual tree — a running DispatcherTimer roots the closed
         // view forever (one immortal poller per open/close). RadarPanel idiom;
-        // must restart on attach: drag/resize fires Detached→Attached.
-        root.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
-        root.DetachedFromVisualTree += (_, _) => timer.Stop();
+        // must restart on attach: drag/resize fires Detached→Attached. The hub
+        // only polls the plugin while some face is subscribed.
+        root.AttachedToVisualTree += (_, _) =>
+        {
+            UiSources.Tracker.Subscribe();
+            UiSources.Tracker.RequestRefresh();
+            if (!timer.IsEnabled) timer.Start();
+        };
+        root.DetachedFromVisualTree += (_, _) =>
+        {
+            timer.Stop();
+            UiSources.Tracker.Unsubscribe();
+        };
 
         return root;
     }
@@ -216,79 +174,4 @@ internal static class RynthTrackerPanel
         Foreground = Brushes.White,
         HorizontalAlignment = HorizontalAlignment.Right,
     };
-
-    private static string FormatTime(double totalSeconds)
-    {
-        var ts = TimeSpan.FromSeconds(totalSeconds);
-        return ts.TotalHours >= 1
-            ? $"{(int)ts.TotalHours}:{ts.Minutes:D2}:{ts.Seconds:D2}"
-            : $"{ts.Minutes}:{ts.Seconds:D2}";
-    }
-
-    private static string FormatNum(long value)
-    {
-        if (value == 0) return "0";
-        bool neg = value < 0;
-        string s = (neg ? -value : value).ToString();
-        var sb = new System.Text.StringBuilder(s.Length + s.Length / 3);
-        int offset = s.Length % 3;
-        for (int i = 0; i < s.Length; i++)
-        {
-            if (i > 0 && (i - offset) % 3 == 0) sb.Append(',');
-            sb.Append(s[i]);
-        }
-        return neg ? "-" + sb : sb.ToString();
-    }
-
-    private static void TryBind()
-    {
-        LoadedPlugin? plugin = PluginManager.Plugins.FirstOrDefault(
-            p => p.DisplayName.Contains("RynthTracker", StringComparison.OrdinalIgnoreCase));
-        if (plugin == null || plugin.ModuleHandle == IntPtr.Zero) return;
-
-        _getSnapshotJson ??= Bind<GetSnapshotJsonFn>(plugin, "RynthTrackerGetSnapshotJson");
-        _reset           ??= Bind<ResetFn>(plugin,           "RynthTrackerReset");
-
-        if (!_bindingLogged && _getSnapshotJson != null)
-        {
-            _bindingLogged = true;
-            RynthLog.UI("RynthTrackerPanel: bound RynthTracker plugin exports.");
-        }
-    }
-
-    private static T? Bind<T>(LoadedPlugin plugin, string exportName) where T : Delegate
-    {
-        IntPtr addr = GetProcAddress(plugin.ModuleHandle, exportName);
-        return addr == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<T>(addr);
-    }
-
-    // ── Settings persistence ──────────────────────────────────────────────────
-
-    private static string SettingsPath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                     "RynthCore", "rynthtracker_settings.json");
-
-    private static void LoadSettings()
-    {
-        try
-        {
-            string path = SettingsPath;
-            if (!File.Exists(path)) return;
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            if (doc.RootElement.TryGetProperty("bgAlpha", out var v))
-                _bgAlpha = (byte)Math.Clamp(v.GetInt32(), 0, 255);
-        }
-        catch { }
-    }
-
-    private static void SaveSettings()
-    {
-        try
-        {
-            string path = SettingsPath;
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, $"{{\"bgAlpha\":{_bgAlpha}}}");
-        }
-        catch { }
-    }
 }

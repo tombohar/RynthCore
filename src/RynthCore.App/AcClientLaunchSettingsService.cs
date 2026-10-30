@@ -28,38 +28,45 @@ internal sealed class AcClientLaunchSettingsService
     /// My Documents\Asheron's Call, then re-applies the ComputeUniquePort flag.
     /// If <paramref name="stashPath"/> is empty or missing, no swap is performed
     /// and the live file is left as-is.
+    /// Returns what was swapped (null when nothing was), so a client that quits at
+    /// startup can be traced back to the stash and the swap undone
+    /// (<see cref="UserPrefsSwapRecovery"/>).
     /// </summary>
-    public bool SwapUserPreferences(string? stashPath, bool allowMultipleClients, Action<string>? log = null)
+    public UserPrefsSwap? SwapUserPreferences(string? stashPath, bool allowMultipleClients, Action<string>? log = null)
     {
         if (string.IsNullOrWhiteSpace(stashPath))
-            return false;
+            return null;
 
         if (!File.Exists(stashPath))
         {
             log?.Invoke($"User prefs swap skipped: stash file not found at {stashPath}.");
-            return false;
+            return null;
         }
 
         string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
         string prefsDirectory = Path.Combine(documentsDirectory, "Asheron's Call");
         string prefsPath = Path.Combine(prefsDirectory, UserPreferencesFileName);
 
+        byte[] stashBytes;
+        byte[]? previousLiveBytes;
         try
         {
             Directory.CreateDirectory(prefsDirectory);
+            stashBytes = File.ReadAllBytes(stashPath);
+            previousLiveBytes = File.Exists(prefsPath) ? File.ReadAllBytes(prefsPath) : null;
             File.Copy(stashPath, prefsPath, overwrite: true);
         }
         catch (Exception ex)
         {
             log?.Invoke($"User prefs swap failed copying {stashPath}: {ex.Message}");
-            return false;
+            return null;
         }
 
         // Re-apply the ComputeUniquePort flag — the stash may have it set to
         // the wrong value (e.g. user set it up before enabling multi-client).
         UpdateUserPreferences(allowMultipleClients, log: null);
         log?.Invoke($"User prefs swap: applied stash {Path.GetFileName(stashPath)}.");
-        return true;
+        return new UserPrefsSwap(stashPath, prefsPath, stashBytes, previousLiveBytes);
     }
 
     private static void UpdateUserPreferences(bool allowMultipleClients, Action<string>? log)

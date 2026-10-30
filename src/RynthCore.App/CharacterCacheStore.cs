@@ -46,6 +46,13 @@ internal static class CharacterCacheStore
                 List<string> serverCharacters = ReadCharacterFile(GetServerScopedPath(safeServer, safeAccount));
                 if (serverCharacters.Count > 0)
                     return serverCharacters;
+
+                // The same account name can exist on several servers. The legacy
+                // account-only file predates server scoping, so it is only trusted
+                // while no server-scoped file exists for this account at all;
+                // otherwise it would hand one server's characters to another.
+                if (HasAnyServerScopedFile(safeAccount))
+                    return [];
             }
 
             return ReadCharacterFile(GetAccountScopedPath(safeAccount));
@@ -84,38 +91,68 @@ internal static class CharacterCacheStore
         if (string.IsNullOrWhiteSpace(accountName) || string.IsNullOrWhiteSpace(characterName))
             return;
 
-        List<string> characters = Read(accountName, serverName);
-        if (!characters.Contains(characterName, StringComparer.OrdinalIgnoreCase))
+        // With a server, seed only from that server's own file so a legacy
+        // account-only list cannot be merged into the wrong server.
+        List<string> characters = string.IsNullOrWhiteSpace(serverName)
+            ? Read(accountName, serverName)
+            : ReadStrict(accountName, serverName);
+        if (!characters.Any(existing => IsSameCharacter(existing, characterName)))
             characters.Add(characterName);
 
         Write(accountName, serverName, characters);
     }
 
-    public static void DeleteForAccount(string accountName)
+    // The client shows admin names with a leading '+' ('+Buffi'); a launch-context
+    // name may lack it. Treat both as one character so the list holds no duplicate.
+    private static bool IsSameCharacter(string a, string b) =>
+        string.Equals(a.Trim().TrimStart('+'), b.Trim().TrimStart('+'), StringComparison.OrdinalIgnoreCase);
+
+    /// Deletes the character cache for one (account, server) pair. Other servers'
+    /// files for the same account name are left alone. The legacy account-only
+    /// file is removed only when <paramref name="includeLegacy"/> is set (the
+    /// caller knows whether another profile still uses this account name).
+    public static void DeleteForAccount(string accountName, string serverName, bool includeLegacy)
     {
         if (string.IsNullOrWhiteSpace(accountName))
             return;
 
         try
         {
-            string rootDirectory = GetRootDirectory();
-            if (!Directory.Exists(rootDirectory))
-                return;
-
             string safeAccount = SanitizeFileName(accountName);
-            foreach (string file in Directory.GetFiles(rootDirectory, $"characters_*_{safeAccount}.json"))
+            if (!string.IsNullOrWhiteSpace(serverName))
             {
-                try { File.Delete(file); } catch { }
+                string serverScopedPath = GetServerScopedPath(SanitizeFileName(serverName), safeAccount);
+                if (File.Exists(serverScopedPath))
+                {
+                    try { File.Delete(serverScopedPath); } catch { }
+                }
             }
 
-            string accountScopedPath = GetAccountScopedPath(safeAccount);
-            if (File.Exists(accountScopedPath))
+            if (includeLegacy)
             {
-                try { File.Delete(accountScopedPath); } catch { }
+                string accountScopedPath = GetAccountScopedPath(safeAccount);
+                if (File.Exists(accountScopedPath))
+                {
+                    try { File.Delete(accountScopedPath); } catch { }
+                }
             }
         }
         catch
         {
+        }
+    }
+
+    private static bool HasAnyServerScopedFile(string safeAccountName)
+    {
+        try
+        {
+            string rootDirectory = GetRootDirectory();
+            return Directory.Exists(rootDirectory) &&
+                   Directory.EnumerateFiles(rootDirectory, $"characters_*_{safeAccountName}.json").Any();
+        }
+        catch
+        {
+            return false;
         }
     }
 

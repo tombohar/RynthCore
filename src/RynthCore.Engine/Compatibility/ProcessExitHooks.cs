@@ -47,28 +47,6 @@ internal static class ProcessExitHooks
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint NtTerminateProcessDelegate(IntPtr processHandle, uint exitStatus);
 
-    // kernel32!RaiseFailFastException — what __fastfail() / abort() / FailFast
-    // route through. Doesn't take an exit code; takes EXCEPTION_RECORD + CONTEXT.
-    // We don't need the params, just the call-site capture.
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate void RaiseFailFastExceptionDelegate(IntPtr pExceptionRecord, IntPtr pContext, uint dwFlags);
-
-    // ntdll!RtlFailFast(NTSTATUS) — internally executes `int 0x29` (the
-    // __fastfail intrinsic). The kernel handles 0x29 directly and terminates
-    // the process WITHOUT re-entering user mode through ExitProcess /
-    // TerminateProcess / RaiseFailFastException. Hooking RtlFailFast itself
-    // is the only way to capture this path before the kernel takes over.
-    // Used by: stack-cookie failures (/GS), heap corruption checks, CRT
-    // abort paths on newer toolchains, NTDLL's own internal asserts.
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate void RtlFailFastDelegate(uint code);
-
-    // ntdll!RtlFailFast2(NTSTATUS, EXCEPTION_RECORD*) — newer variant that
-    // also passes an exception record. Same semantics: the kernel terminates
-    // the process via int 0x29 without revisiting user mode.
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate void RtlFailFast2Delegate(uint code, IntPtr pExceptionRecord);
-
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr GetModuleHandleW(string? lpModuleName);
 
@@ -103,42 +81,8 @@ internal static class ProcessExitHooks
     private static RtlExitUserProcessDelegate? _rtlExitOriginal;
     private static NtTerminateProcessDelegate? _ntTermDetour;
     private static NtTerminateProcessDelegate? _ntTermOriginal;
-    private static RaiseFailFastExceptionDelegate? _failFastDetour;
-    private static RaiseFailFastExceptionDelegate? _failFastOriginal;
-    private static RtlFailFastDelegate? _rtlFailFastDetour;
-    private static RtlFailFastDelegate? _rtlFailFastOriginal;
-    private static RtlFailFast2Delegate? _rtlFailFast2Detour;
-    private static RtlFailFast2Delegate? _rtlFailFast2Original;
-
     private static int _installed;
     private static int _logged; // ensure we log at most once even if both fire
-
-    // Re-entrancy latch for the fail-fast family (RaiseFailFastException,
-    // RtlFailFast, RtlFailFast2). In the NativeAOT-inside-acclient environment
-    // a fail-fast does NOT terminate the way it does in a normal process: the
-    // runtime/AC exception machinery swallows or continues the fail-fast
-    // exception, so kernel32!RaiseFailFastException RETURNS instead of killing
-    // the process. Its caller then re-invokes it, hitting our MinHook again →
-    // detour re-enters → calls the original again → ~190K-deep recursion that
-    // exhausts the 8 MB stack and AVs in ntdll (the recursing code is this
-    // exit logger itself, so nothing downstream can ever log it). Latch is
-    // process-wide and never reset — a fail-fast is terminal by contract;
-    // there is no "recovery", we only need to die cleanly and once.
-    private static int _inFailFast;
-
-    /// <summary>
-    /// Terminate without any possibility of re-entering a ProcessExitHooks
-    /// detour. Each call target is a MinHook *trampoline* (relocated original
-    /// prologue + jump PAST our hook), so none of them route back through our
-    /// detours. Used to break the fail-fast bounce.
-    /// </summary>
-    private static void HardTerminateNoReentry(uint code)
-    {
-        try { _ntTermOriginal?.Invoke(new IntPtr(-1), code); } catch { }
-        try { _rtlExitOriginal?.Invoke(code); } catch { }
-        try { _exitOriginal?.Invoke(code); } catch { }
-        try { Environment.Exit(unchecked((int)code)); } catch { }
-    }
 
     public static void Initialize()
     {
@@ -178,23 +122,13 @@ internal static class ProcessExitHooks
                 RynthLog.Info($"ProcessExitHooks: hooked kernel32!TerminateProcess @ 0x{terminateTarget.ToInt32():X8}.");
             }
 
-            // ── DO NOT HOOK RaiseFailFastException (proven fatal 2026-05-16) ──
-            // Dump analysis of the every-few-minutes silent crash showed a
-            // 190K-deep stack overflow whose repeating frame pair is
-            // <ReverseOpenStaticDelegateStub>...RaiseFailFastExceptionDelegate
-            // ↔ RhpReversePInvokeAttachOrTrapThread2. The NativeAOT reverse-
-            // P/Invoke transition that enters a managed detour for this export
-            // itself re-triggers RaiseFailFastException, so the detour recurses
-            // through the transition shim BEFORE any managed code (incl. any
-            // re-entrancy guard) can run. Unfixable from the managed side — the
-            // only correct action is to not hook it. A real fail-fast then
-            // terminates cleanly (as designed) instead of our hook converting
-            // it into the guaranteed stack-overflow crash. Same applies to
-            // ntdll!RtlFailFast / RtlFailFast2 below. The other exit hooks
-            // (ExitProcess/TerminateProcess/RtlExitUserProcess/NtTerminate) are
-            // safe — exiting the process does not re-enter those from within
-            // the transition, and they log clean interceptions.
-
+            // DO NOT HOOK RaiseFailFastException, RtlFailFast or RtlFailFast2 (proven fatal
+            // in practice): the reverse-P/Invoke transition into a managed detour for those
+            // exports re-triggered the fail-fast itself (190K-deep recursion through the
+            // transition shim, before any managed guard could run). Their detour bodies were
+            // dead code and are gone, so nothing can switch them back on by
+            // accident: a managed body on the fail-fast path turns a crash that would leave
+            // a dump into a silent one.
             // ntdll-level hooks — catch paths that bypass kernel32 entirely.
             IntPtr ntdll = GetModuleHandleW("ntdll.dll");
             if (ntdll != IntPtr.Zero)
@@ -223,38 +157,6 @@ internal static class ProcessExitHooks
                     RynthLog.Info($"ProcessExitHooks: hooked ntdll!NtTerminateProcess @ 0x{ntTermTarget.ToInt32():X8}.");
                 }
 
-                // RtlFailFast / RtlFailFast2 — NOT HOOKED. Same NativeAOT
-                // reverse-P/Invoke re-entry recursion as RaiseFailFastException
-                // (see the block above). Hooking these with a managed detour
-                // is the every-few-minutes crash. Leave them alone; a genuine
-                // fail-fast terminates cleanly. (On this Windows build the
-                // GetProcAddress for these also failed historically anyway.)
-                if (false && ntdll != IntPtr.Zero)
-                {
-                    HookExport(ntdll, "RtlFailFast", out IntPtr rtlFailFastTarget);
-                    if (rtlFailFastTarget != IntPtr.Zero)
-                    {
-                        _rtlFailFastDetour = RtlFailFastDetour;
-                        IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_rtlFailFastDetour);
-                        IntPtr trampoline = MinHook.HookCreate(rtlFailFastTarget, detourPtr);
-                        _rtlFailFastOriginal = Marshal.GetDelegateForFunctionPointer<RtlFailFastDelegate>(trampoline);
-                        Thread.MemoryBarrier();
-                        MinHook.Enable(rtlFailFastTarget);
-                        RynthLog.Info($"ProcessExitHooks: hooked ntdll!RtlFailFast @ 0x{rtlFailFastTarget.ToInt32():X8}.");
-                    }
-
-                    HookExport(ntdll, "RtlFailFast2", out IntPtr rtlFailFast2Target);
-                    if (rtlFailFast2Target != IntPtr.Zero)
-                    {
-                        _rtlFailFast2Detour = RtlFailFast2Detour;
-                        IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_rtlFailFast2Detour);
-                        IntPtr trampoline = MinHook.HookCreate(rtlFailFast2Target, detourPtr);
-                        _rtlFailFast2Original = Marshal.GetDelegateForFunctionPointer<RtlFailFast2Delegate>(trampoline);
-                        Thread.MemoryBarrier();
-                        MinHook.Enable(rtlFailFast2Target);
-                        RynthLog.Info($"ProcessExitHooks: hooked ntdll!RtlFailFast2 @ 0x{rtlFailFast2Target.ToInt32():X8}.");
-                    }
-                }
             }
         }
         catch (Exception ex)
@@ -272,6 +174,15 @@ internal static class ProcessExitHooks
 
     private static void ExitProcessDetour(uint exitCode)
     {
+        // A crash exit goes straight to the original, before any managed work (IsCrashExit).
+        // The reverse-P/Invoke transition into this detour is the only managed step left; a
+        // native pass-through would remove that too; it is possible but not done here.
+        if (IsCrashExit(exitCode))
+        {
+            SehTrampoline.FlushCrashLog(exitCode);   // native, allocation-free
+            _exitOriginal!(exitCode);
+            return;
+        }
         LogTermination("ExitProcess", IntPtr.Zero, exitCode);
         // Run our orderly shutdown BEFORE AC's CRT atexit chain. Without this,
         // hooks stay installed, our threads (TickPump, Avalonia STA) keep
@@ -283,24 +194,83 @@ internal static class ProcessExitHooks
         catch { /* original never returns; swallow if it somehow does */ }
     }
 
+    // A crash exit: an NTSTATUS error or exception code (0xC0000000 and up: 0xC0000005 an
+    // access violation, 0xE0434352 a CLR exception). The process is dying of a fault, often
+    // from inside the runtime's own fatal-error path; managed work here (logging, a
+    // MiniDumpWriteDump) can deadlock or fault again there and leave nothing at all. So a crash
+    // exit is passed straight to the original. The evidence comes from places that do not
+    // need managed code on the way out: the native crash logger (SehTrampoline.c, its vectored
+    // handler sees the fault first) and CoreCLR's own createdump (native\Loader\Loader.c, ConfigureCrashDumps). This
+    // replaces the managed crash dump written here before, which left nothing for real crashes.
+    // The one call made first, SehTrampoline.FlushCrashLog, is a raw native call: it writes
+    // the crash logger's recent first-chance records that were not written one by one (the
+    // fatal hit of an address seen before is usually among them; a terminate from a handler
+    // never reaches the last-chance filter). Which codes count: CrashExitRule.
+    private static bool IsCrashExit(uint code) => CrashExitRule.IsCrashExit(code);
+
+    // Review fix (2026-10-18): the managed dump this file used to write on TerminateProcess /
+    // NtTerminateProcess (f9c62ed, for Lucy's Town) was removed above on the grounds that
+    // createdump covers it. It covers only the paths the CLR itself ends: an AV that unwinds
+    // through one of our managed detours, or reaches the CLR's unhandled-exception filter (both
+    // checked offline with a small CoreCLR host: createdump runs). It does NOT cover a native AV
+    // that AC's own handler catches and answers with TerminateProcess: no CLR frame, no CLR
+    // filter, and nothing else here writes a dump. So the dump is back on that path, with what
+    // made the old one risky taken out:
+    //   - after the native log flush, so the crash log is on disk whatever happens next;
+    //   - on its own thread with a bounded wait (CrashDumpWaitMs): if the dying process is stuck
+    //     on a lock, the exit goes ahead after that, never hangs; a 0-byte file is deleted by
+    //     the next client's log housekeeping;
+    //   - once per process, and not at all when createdump already wrote clr_<pid>_*.dmp;
+    //   - small type only (CrashDump.WriteSelfDump), which also needs free space
+    //     (DumpBudget.SmallDumpMinFree), and only the newest few are kept.
+    private static int _crashDumped;
+    private const int CrashDumpWaitMs = 20_000;
+
+    private static void DumpCrashOnce(string via, uint code)
+    {
+        if (Interlocked.Exchange(ref _crashDumped, 1) != 0) return;
+        try
+        {
+            var worker = new Thread(() =>
+            {
+                try { CrashDump.WriteCrashDumpOnce(via, code); }
+                catch { }
+            }) { IsBackground = true, Name = "RynthCore.CrashDump" };
+            worker.Start();
+            worker.Join(CrashDumpWaitMs);
+        }
+        catch { /* never block or break the exit */ }
+    }
+
     private static bool TerminateProcessDetour(IntPtr hProcess, uint exitCode)
     {
-        // Only log when terminating ourselves — TerminateProcess on other
-        // process handles is a normal Process.Kill and not what we're hunting.
-        // hProcess == -1 (pseudo-handle for current process) or == GetCurrentProcess() handle.
+        // Only log when terminating ourselves: TerminateProcess on other process handles is a
+        // normal Process.Kill and not what we're hunting. hProcess == -1 is the pseudo-handle.
         bool selfKill = hProcess == new IntPtr(-1) || hProcess == GetCurrentProcessHandle();
         if (selfKill)
-            LogTermination("TerminateProcess", hProcess, exitCode);
+        {
+            if (IsCrashExit(exitCode))
+            {
+                SehTrampoline.FlushCrashLog(exitCode);
+                DumpCrashOnce("TerminateProcess", exitCode);
+            }
+            else LogTermination("TerminateProcess", hProcess, exitCode);
+        }
         try { return _terminateOriginal!(hProcess, exitCode); }
         catch { return false; }
     }
-
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentProcess();
     private static IntPtr GetCurrentProcessHandle() => GetCurrentProcess();
 
     private static void RtlExitUserProcessDetour(uint exitStatus)
     {
+        if (IsCrashExit(exitStatus))   // see ExitProcessDetour
+        {
+            SehTrampoline.FlushCrashLog(exitStatus);
+            _rtlExitOriginal!(exitStatus);
+            return;
+        }
         LogTermination("RtlExitUserProcess", IntPtr.Zero, exitStatus);
         try { EngineLifecycle.Shutdown(); }
         catch (Exception ex) { RynthLog.Info($"ProcessExit: EngineLifecycle.Shutdown threw {ex.GetType().Name}: {ex.Message}"); }
@@ -312,54 +282,21 @@ internal static class ProcessExitHooks
     {
         bool selfKill = processHandle == new IntPtr(-1) || processHandle == GetCurrentProcessHandle();
         if (selfKill)
-            LogTermination("NtTerminateProcess", processHandle, exitStatus);
+        {
+            // A second flush (TerminateProcess calls this) writes nothing: records are written once.
+            if (IsCrashExit(exitStatus))
+            {
+                SehTrampoline.FlushCrashLog(exitStatus);
+                DumpCrashOnce("NtTerminateProcess", exitStatus);
+            }
+            else LogTermination("NtTerminateProcess", processHandle, exitStatus);
+        }
         try { return _ntTermOriginal!(processHandle, exitStatus); }
         catch { return 0xC0000001; /* STATUS_UNSUCCESSFUL */ }
     }
 
-    private static void RaiseFailFastExceptionDetour(IntPtr pExceptionRecord, IntPtr pContext, uint dwFlags)
-    {
-        if (Interlocked.Exchange(ref _inFailFast, 1) != 0)
-        {
-            // Re-entered: the original bounced back through our hook instead
-            // of terminating. Forwarding again is the 190K-deep stack-overflow
-            // recursion. Break it — die now, non-recursively.
-            HardTerminateNoReentry(dwFlags);
-            return;
-        }
-        LogTermination("RaiseFailFastException", IntPtr.Zero, dwFlags);
-        try { _failFastOriginal!(pExceptionRecord, pContext, dwFlags); }
-        catch { }
-        // A real fail-fast never returns. In this environment it can — don't
-        // let the caller spin re-raising it; terminate deterministically.
-        HardTerminateNoReentry(dwFlags);
-    }
-
-    private static void RtlFailFastDetour(uint code)
-    {
-        if (Interlocked.Exchange(ref _inFailFast, 1) != 0)
-        {
-            HardTerminateNoReentry(code);
-            return;
-        }
-        LogTermination("RtlFailFast", IntPtr.Zero, code);
-        try { _rtlFailFastOriginal!(code); }
-        catch { /* original never returns */ }
-        HardTerminateNoReentry(code);
-    }
-
-    private static void RtlFailFast2Detour(uint code, IntPtr pExceptionRecord)
-    {
-        if (Interlocked.Exchange(ref _inFailFast, 1) != 0)
-        {
-            HardTerminateNoReentry(code);
-            return;
-        }
-        LogTermination("RtlFailFast2", IntPtr.Zero, code);
-        try { _rtlFailFast2Original!(code, pExceptionRecord); }
-        catch { /* original never returns */ }
-        HardTerminateNoReentry(code);
-    }
+    /// <summary>ExitProcess/TerminateProcess was called: the process is closing.</summary>
+    public static bool TerminationIntercepted => Volatile.Read(ref _logged) != 0;
 
     private static void LogTermination(string func, IntPtr hProcess, uint exitCode)
     {
@@ -424,7 +361,7 @@ internal static class ProcessExitHooks
         }
     }
 
-    private static string ResolveModule(IntPtr address, out int rva)
+    internal static string ResolveModule(IntPtr address, out int rva)
     {
         rva = 0;
         try

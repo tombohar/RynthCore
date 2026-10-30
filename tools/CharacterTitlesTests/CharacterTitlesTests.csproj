@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the character-title tracking behind plugin API v75 GetCharacterTitles
+    (src\RynthCore.Engine\Compatibility\CharacterTitles.cs, compiled in): ACE's 0x0029 and
+    0x002B game events, the owner rule and the hot-reload mirror. Nothing native: no AC.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>CharacterTitlesTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\CharacterTitles.cs" Link="Engine\CharacterTitles.cs" />
+  </ItemGroup>
+
+</Project>

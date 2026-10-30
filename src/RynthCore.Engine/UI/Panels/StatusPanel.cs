@@ -9,6 +9,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI.Data;
 
 namespace RynthCore.Engine.UI.Panels;
 
@@ -19,7 +20,11 @@ internal static class StatusPanel
         var content = new StackPanel { Spacing = 4 };
 
         var refreshButton = new Button { Content = "Refresh", HorizontalAlignment = HorizontalAlignment.Left };
-        refreshButton.Click += (_, _) => Populate(content);
+        refreshButton.Click += (_, _) =>
+        {
+            UiSources.PluginStatus.RequestRefresh();
+            Populate(content);
+        };
 
         var root = new DockPanel { Margin = new Avalonia.Thickness(8) };
         DockPanel.SetDock(refreshButton, Dock.Bottom);
@@ -32,6 +37,29 @@ internal static class StatusPanel
         };
         root.Children.Add(scroll);
 
+        // Plugin rows come from UiDataHub (read on the pump thread that owns the
+        // plugin list); repopulate when that snapshot changes.
+        long seen = -1;
+        var timer = new Avalonia.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        timer.Tick += (_, _) =>
+        {
+            var snap = UiSources.PluginStatus.Current;
+            if (snap == null || snap.Version == seen) return;
+            seen = snap.Version;
+            Populate(content);
+        };
+        root.AttachedToVisualTree += (_, _) =>
+        {
+            UiSources.PluginStatus.Subscribe();
+            UiSources.PluginStatus.RequestRefresh();
+            if (!timer.IsEnabled) timer.Start();
+        };
+        root.DetachedFromVisualTree += (_, _) =>
+        {
+            timer.Stop();
+            UiSources.PluginStatus.Unsubscribe();
+        };
+
         Populate(content);
         return root;
     }
@@ -41,7 +69,7 @@ internal static class StatusPanel
         panel.Children.Clear();
 
         AddHeader(panel, "Engine");
-        AddRow(panel, "Build", EntryPoint.BuildStamp);
+        AddRow(panel, "Version", EntryPoint.BuildStamp);
         AddRow(panel, "Game HWND", $"0x{EntryPoint.GameHwnd:X8}");
         AddRow(panel, "Plugin dir", PluginManager.PluginDirectory);
 
@@ -52,22 +80,33 @@ internal static class StatusPanel
             Margin = new Avalonia.Thickness(0, 6, 0, 6)
         });
 
-        var plugins = PluginManager.Plugins;
-        AddHeader(panel, $"Plugins ({plugins.Count})");
+        PluginStatusRow[] plugins = UiSources.PluginStatus.Current?.Value ?? Array.Empty<PluginStatusRow>();
+        AddHeader(panel, $"Plugins ({plugins.Length})");
 
-        if (plugins.Count == 0)
+        if (plugins.Length == 0)
         {
             AddRow(panel, "", "None loaded");
         }
         else
         {
-            foreach (var p in plugins)
-            {
-                string state = p.Failed ? "FAILED" : p.Initialized ? "OK" : "pending";
-                string version = p.VersionString.Length > 0 ? $" v{p.VersionString}" : "";
-                AddRow(panel, p.DisplayName + version, state, p.Failed);
-            }
+            foreach (PluginStatusRow p in plugins)
+                AddRow(panel, p.Label, p.State, p.IsError);
         }
+
+        AddSeparator(panel);
+        AddHeader(panel, "UI faces");
+        foreach (string line in PanelRouter.Describe())
+            AddRow(panel, "", line);
+    }
+
+    private static void AddSeparator(StackPanel panel)
+    {
+        panel.Children.Add(new Border
+        {
+            Height = 1,
+            Background = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)),
+            Margin = new Avalonia.Thickness(0, 6, 0, 6)
+        });
     }
 
     private static void AddHeader(StackPanel panel, string text)

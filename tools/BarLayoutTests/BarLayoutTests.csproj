@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the toolbar's rows (src\RynthCore.Engine\UI\BarLayout.cs, compiled in):
+    icons per row = ceil(icons / rows) capped at the limit, the clamps (rows 1-6, limit 0 or
+    2-30), the grip menu's icons-per-row steps (no limit above 30), the Settings picker index
+    maps, and the barlayout= row of panel_state.txt (a missing or bad row gives 1 row, no limit).
+    The open highlight (src\RynthCore.Engine\UI\BarOpenState.cs, compiled in): the window each
+    button stands for (a script window by its panel key, not its title) and a menu button (ILT,
+    Scripts) lit while any window it lists is open. No files, no ImGui. Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>BarLayoutTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\BarLayout.cs" Link="Engine\BarLayout.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\BarOpenState.cs" Link="Engine\BarOpenState.cs" />
+  </ItemGroup>
+
+</Project>

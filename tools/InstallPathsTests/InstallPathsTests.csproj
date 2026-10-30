@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the install-folder resolver (src\Shared\RynthInstallPaths.cs, compiled in):
+    environment beats HKCU beats HKLM beats the default; empty, relative or broken values are skipped;
+    with nothing set the answer is exactly C:\Games\RynthCore / C:\Games\RynthSuite; paths with spaces.
+    The environment and registry are a fake; the only real-registry call is a READ of a value that
+    does not exist. Nothing is ever written.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>InstallPathsTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+  </ItemGroup>
+
+</Project>

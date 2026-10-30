@@ -11,7 +11,7 @@
 //    * ImGui-gated (only when EngineSettings.EnableImGuiBackend is true):
 //      Win32Backend.NewFrame / DX9Backend.NewFrame, ImGui.NewFrame/EndFrame/
 //      Render, RynthCoreShell + plugin RenderAll, DX9Backend.RenderDrawData,
-//      mouse/keyboard capture flag updates, multi-viewport platform pump.
+//      mouse/keyboard capture flag updates.
 //
 //  Renamed 2026-05-10 from ImGuiController — the type now owns more than
 //  ImGui's frame; the ImGui block is just one branch of its work.
@@ -23,6 +23,7 @@ using System.Runtime.InteropServices;
 using ImGuiNET;
 using RynthCore.Engine.D3D9;
 using RynthCore.Engine.Plugins;
+using RynthCore.Install;
 
 namespace RynthCore.Engine.ImGuiBackend;
 
@@ -42,23 +43,15 @@ internal static class EngineFrameController
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindowVisible(IntPtr hWnd);
 
-    [DllImport("user32.dll")]
-    private static extern bool GetClientRect(IntPtr hWnd, out ClientRect lpRect);
-
-    [DllImport("user32.dll")]
-    private static extern bool ClientToScreen(IntPtr hWnd, ref ClientPoint lpPoint);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ClientRect { public int Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ClientPoint { public int X, Y; }
-
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     private static bool _imguiInitialized;
     private static bool _imguiInitFailed;
     private static bool _coreResolved;
     private static bool _pluginsInitialized;
+    // Pump frames plugin init has waited for the ImGui context (PumpPluginFrame; ~16 ms each).
+    private static int _pluginInitContextWaits;
+    private const int PluginInitContextMaxWaits = 300;
     private static IntPtr _context;
     private static IntPtr _gameHwnd;
 
@@ -72,6 +65,26 @@ internal static class EngineFrameController
     /// </summary>
     internal static volatile IntPtr CachedDevice;
     private static int _pluginPumpInFrame; // re-entrancy guard for the pump
+    private static int _pumpFrameFaults;   // PumpPluginFrame throws caught (pump thread only)
+
+    // ImGui pipeline diagnostics (render thread only): one-time lines plus a 30 s heartbeat so a
+    // log shows whether frames start, which branch runs and whether draw data is submitted.
+    private const long HeartbeatIntervalMs = 30_000;
+    private static long _engineErrorCount;
+    private static long _nextEngineErrorLogAt;
+    private static bool _loggedFirstSubmit;
+    private static int _loggedBranch = -1;
+    private static string _initFailStep = "unknown";
+    private static long _drawSubmits;
+    private static long _nextHeartbeatAt;
+
+    // Device for this frame's built ImGui draw data, submitted by RenderDeferredImGui after the
+    // Avalonia blit. Render thread only; Zero = nothing pending. The draw data stays valid until
+    // the next NewFrame on the main context.
+    private static IntPtr _deferredSubmitDevice;
+    // Build + pop-out time of the frame waiting in _deferredSubmitDevice (UiFrameStats adds the submit).
+    private static long _deferredUiTicks;
+
     private static long _lastFrameTicks;
     private static int _frameCount;
 
@@ -103,6 +116,8 @@ internal static class EngineFrameController
         RynthLog.Render($"EngineFrameController: Game HWND = 0x{_gameHwnd:X8}");
         EntryPoint.GameHwnd = _gameHwnd;
         _coreResolved = true;
+        // Pop-outs hold D3DPOOL_DEFAULT render targets: release them before AC resets a lost device.
+        D3D9.DeviceResetHook.InstallFromDevice(pDevice);
         return true;
     }
 
@@ -112,13 +127,24 @@ internal static class EngineFrameController
             return true;
 
         if (!EnsureCore(pDevice))
+        {
+            _initFailStep = "EnsureCore (game window not found)";
             return false;
+        }
+
+        // Before any context exists: the loaded cimgui.dll must be the exact
+        // build ImGui.NET wraps, or every struct read below is at wrong offsets.
+        Compatibility.MemoryUse.Mark("ImGui init: before the self-test");
+        if (!ImGuiSelfTest.Run(EntryPoint.ImGuiNativeHandle))
+            return false;
+        Compatibility.MemoryUse.Mark("ImGui self-test done");
 
         IntPtr previousContext = ImGuiNET.ImGui.GetCurrentContext();
         if (previousContext != IntPtr.Zero)
             RynthLog.Render($"EngineFrameController: Existing ImGui context detected (0x{previousContext:X8}) - isolating RynthCore context.");
 
         _context = ImGuiNET.ImGui.CreateContext();
+        Compatibility.MemoryUse.Mark("ImGui context created");
         bool initSucceeded = false;
         try
         {
@@ -131,11 +157,11 @@ internal static class EngineFrameController
             // between launches. Allocated once, kept alive for the process lifetime.
             try
             {
-                const string iniPath = @"C:\Games\RynthSuite\RynthAi\imgui.ini";
-                System.IO.Directory.CreateDirectory(@"C:\Games\RynthSuite\RynthAi");
+                string iniPath = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "imgui.ini");
+                System.IO.Directory.CreateDirectory(RynthCore.Install.RynthInstallPaths.RynthAiDir);
                 IntPtr iniPtr = System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(iniPath);
                 unsafe { io.NativePtr->IniFilename = (byte*)iniPtr; }
-                RynthLog.Render($"EngineFrameController: imgui.ini pinned to {iniPath}");
+                RynthLog.Info($"EngineFrameController: imgui.ini pinned to {iniPath}");
             }
             catch (Exception ex)
             {
@@ -143,50 +169,41 @@ internal static class EngineFrameController
             }
 
             io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
-            // ViewportsEnable was enabling ImGui multi-viewport platform/renderer
-            // callbacks against a cimgui.dll that is NOT built with
-            // IMGUI_ENABLE_VIEWPORTS. The platform/renderer callback chain then
-            // recursed (Platform → Renderer → Platform → ...) on AC's render
-            // thread, eating the 1MB stack in ~17s and AV'ing in ntdll mid-push.
-            // CLAUDE.md flags this: Multi-viewport "requires cimgui built with
-            // IMGUI_ENABLE_VIEWPORTS" — flag re-introduced this in the engine
-            // and triggered the silent stack-overflow on every login.
-            // io.ConfigFlags |= ImGuiConfigFlags.ViewportsEnable;
-            // Popped-out plugin windows use WS_EX_TOOLWINDOW so they don't show
-            // up as extra "Asheron's Call" entries in the taskbar — critical for
-            // users running many clients side by side.
-            io.ConfigViewportsNoTaskBarIcon = true;
-            ImGuiNET.ImGui.StyleColorsDark();
+            // Multi-viewport (ViewportsEnable) is deliberately never enabled: it
+            // runs many native->managed platform/renderer callbacks per frame on
+            // AC's thread and creates HWNDs from inside EndScene. Pop-out panels,
+            // if built, are driven explicitly by the engine instead
+            // (docs/IMGUI_PARITY_PLAN.md section 4.2).
 
-            // One-shot offset probe for diagnostics — safe to keep installed.
-            ViewportProbe.Run();
+            // DPI scale for fonts and style metrics. Logged next to Avalonia's
+            // scale: docked positions are stored in Avalonia logical units, so
+            // the two must agree for a panel to land in the same place in
+            // either face (plan section 4.4).
+            _uiScale = UiScale.ForWindow(_gameHwnd);
+            RynthLog.UI($"EngineFrameController: ImGui scale {_uiScale:0.##} (Avalonia input scale {UI.AvaloniaOverlay.InputScale:0.##}).");
+            RynthTheme.Apply(ImGuiNET.ImGui.GetStyle(), _uiScale);
+            Compatibility.MemoryUse.Mark("ImGui theme applied");
+            ImGuiFonts.Build(io, _uiScale);
 
             if (!Win32Backend.Init(_gameHwnd))
-                return false;
-
-            if (!DX9Backend.InitImGui(pDevice))
-                return false;
-
-            // Viewport backends only run when ViewportsEnable is on. Installing
-            // their callbacks on PlatformIO without the flag has no upside and
-            // just expands the crash surface.
-            if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
             {
-                bool platformOk = ViewportPlatformBackend.Init(_gameHwnd);
-                bool rendererOk = platformOk && ViewportRendererBackend.Init(pDevice);
-                if (!platformOk || !rendererOk)
-                {
-                    RynthLog.Render($"EngineFrameController: viewport init failed (platform={platformOk}, renderer={rendererOk}) — disabling ViewportsEnable.");
-                    io.ConfigFlags &= ~ImGuiConfigFlags.ViewportsEnable;
-                }
-                ViewportPlatformBackend.ImGuiContext = _context;
+                _initFailStep = "Win32Backend.Init";
+                return false;
             }
+
+            Compatibility.MemoryUse.Mark("Win32 backend ready");
+            if (!DX9Backend.InitImGui(pDevice))
+            {
+                _initFailStep = "DX9Backend.InitImGui";
+                return false;
+            }
+            Compatibility.MemoryUse.Mark("DX9 backend ready (font texture)");
 
             _lastFrameTicks = Stopwatch.GetTimestamp();
             _imguiInitialized = true;
             initSucceeded = true;
 
-            RynthLog.Render("EngineFrameController: Fully initialized - RynthCore shell active.");
+            RynthLog.UI("EngineFrameController: ImGui initialized.");
             return true;
         }
         finally
@@ -213,23 +230,28 @@ internal static class EngineFrameController
         {
             ImGuiNET.ImGui.SetCurrentContext(contextToDestroy);
 
-            // Zero the WndProc context guard BEFORE DestroyContext so any
-            // deferred OS messages that arrive at viewport HWNDs during or
-            // after teardown don't try to call into freed ImGui memory.
-            ViewportPlatformBackend.ImGuiContext = IntPtr.Zero;
             PluginManager.ShutdownAll();
+            // No context may be destroyed while a font worker runs (ImGuiFonts, re-bake note).
+            ImGuiFonts.WaitForWorkers();
+            // Pop-outs share the main font atlas: their contexts go before the main one.
+            ImGuiPopOuts.Shutdown();
             OverlayTextureRenderer.Shutdown();
-            ViewportRendererBackend.Shutdown();
-            ViewportPlatformBackend.Shutdown();
+            // Its lists are drawn by DX9Backend from the DIP hook, which is still live.
+            UnderUiLayer.Shutdown();
+            ScriptIcons.Shutdown();   // script window icon textures, before the backend goes
+            WorldMapTiles.Shutdown(); // the world map's tile textures, likewise
+            WorldMapVectors.Shutdown();
+            RetailSprites.Shutdown(); // retail UI pictures (Inventory Classic view), likewise
             DX9Backend.Shutdown();
             // Do NOT call Win32Backend.Shutdown() here. EngineLifecycle.Shutdown
             // owns that step explicitly, AFTER AvaloniaOverlay.Stop — floating
-            // panels are destroyed via RunOnGameThread (a SendMessage handled by
-            // our subclass WndProc), so restoring AC's original WndProc this
-            // early makes that SendMessage land on AC's proc, get ignored, and
-            // "succeed" — DestroyWindow never runs and the orphaned panel HWND
-            // outlives the engine module with its WndProc pointing at freed code.
+            // panels can only be destroyed on the game thread by our subclass
+            // WndProc (Win32Backend.Shutdown sweeps any still open before it
+            // unhooks), so restoring AC's original WndProc this early sends
+            // those destroys to AC's proc, which ignores them, and the orphaned
+            // panel HWND outlives the engine load.
             ImGuiNET.ImGui.DestroyContext(contextToDestroy);
+            ImGuiFonts.Free(); // the atlas referenced these buffers; the context is gone now
 
             _imguiInitialized = false;
             _coreResolved = false;
@@ -248,11 +270,18 @@ internal static class EngineFrameController
         // EngineSettings.EnableImGuiBackend, so world→screen capture, nav-
         // marker rendering, and plugin lifecycle stay alive when the ImGui
         // surface is disabled.
+        // A frame that throws before its build must not resubmit last frame's draw data.
+        _deferredSubmitDevice = IntPtr.Zero;
         try
         {
             // Resolve game HWND and seed EntryPoint.GameHwnd. Required even
             // in ImGui-off mode so Avalonia owner-window binding works.
             EnsureCore(pDevice);
+
+            // Settings > Display: borderless windowed + AC window placement. Throttled; reads only
+            // here - the window itself is changed from the game WndProc (AcWindowChrome).
+            try { UI.AcWindowChrome.Tick(_gameHwnd); }
+            catch (Exception ex) { RynthLog.UI($"AcWindowChrome.Tick threw {ex.GetType().Name}: {ex.Message}"); }
 
             // Cache the D3D9 device function pointers used by Nav3DRenderInjector,
             // RenderNav3D, and the always-on render path. This is a strict subset
@@ -266,10 +295,16 @@ internal static class EngineFrameController
             // accumulates, RenderedThisFrame stays false on every frame, and the
             // end-of-frame fallback below paints markers OVER the UI. This call was
             // dropped in the v0.19 Nav3D double-buffer refactor — restored here.
+            // Since 2026-10-04 this is the second choice: with AcUiPassHook live the
+            // overlays draw at AC's UI pass and SyncHookState (end of frame) switches
+            // this hook off; it comes back for /rc worldlayer transition or without it.
             D3D9.Nav3DRenderInjector.Install(pDevice);
 
             // Capture the game's View/Projection matrices before ImGui touches them
             GameMatrixCapture.CaptureFrame(pDevice);
+            // ...and AC's 3D view viewport: at AC's UI pass (AcUiPassHook) the viewport is
+            // full-screen, and the Nav3D markers draw in this one there.
+            DX9Backend.CaptureSceneViewport(pDevice);
 
             // Refresh the player-skill snapshot on AC's main thread (this
             // EndScene runs on it). The plugin tick is pumped off-thread and
@@ -299,9 +334,15 @@ internal static class EngineFrameController
             // is the dump-verified 0x0067E779 READ-AV when done on the pump thread.
             // Sampled every frame (positions are volatile), zero-alloc.
             Compatibility.ClientObjectHooks.PrefetchPositions();
+            // Refresh the cached player id every frame (unthrottled: the native leaf is
+            // two loads) and the other small main-thread snapshots (cast gate, pose,
+            // ...). Off-thread callers are served from these instead of reading AC
+            // memory from the pump thread. Also runs from the Client::UseTime drain.
+            Compatibility.MainThreadSnapshots.Tick();
             // Same main-thread guard: snapshot XP/luminance/deaths/vitae (main-thread-only
             // Inq* reads) so the GetEngineStatusJson host bridge can serve them off-thread (throttled).
             Compatibility.ClientObjectHooks.PrefetchPlayerStats();
+            Compatibility.ClientObjectHooks.ServeObjectQualitiesRequest();   // v84 GetObjectProperties (none asked: one read)
 
             // Cold-login object backfill on the SAME AC main thread as the
             // skill prefetch above: deliver objects already present at login
@@ -324,24 +365,13 @@ internal static class EngineFrameController
             try { Compatibility.AcMainThreadQueue.Drain(); }
             catch (Exception ex) { RynthLog.Plugin($"AcMainThreadQueue.Drain threw {ex.GetType().Name}: {ex.Message}"); }
 
-            // Nav3DRenderInjector fires mid-frame at the 3D→UI ZENABLE
-            // transition — that's the only pipeline position where markers
-            // can render BEHIND AC's UI (the UI pass draws after ZENABLE
-            // turns off, and the end-of-frame fallback is past it entirely).
-            //
-            // The injector accumulates state per-frame via DrawIndexedPrimitive
-            // callbacks during AC's draws (which fire before this EndScene),
-            // so by the time we check RenderedThisFrame here, its decision
-            // for the current frame is final. ResetFrame at the END of
-            // OnEndScene primes it for the next frame's accumulation.
-            //
-            // Historically the engine forced the end-of-frame fallback ONLY
-            // because the injector's hit-rate varied across motion, producing
-            // flicker when some frames painted at the 3D→UI boundary and
-            // others at end-of-frame. We accept that risk here: the user
-            // wants markers behind the UI, and a frame the injector misses
-            // simply doesn't render markers (less jarring than a Z-order flip).
-            bool nav3DAlreadyRendered = D3D9.Nav3DRenderInjector.RenderedThisFrame;
+            // The world overlays (Nav3D markers, nameplates, combat text) normally drew
+            // mid-frame, before this EndScene: at the start of AC's 2D UI pass
+            // (AcUiPassHook), or without that hook at the 3D->UI ZENABLE transition
+            // (Nav3DRenderInjector's DIP hook). A frame where neither fired (portal space,
+            // a loading screen, no AC UI) draws them at EndScene instead - see
+            // Nav3DRenderInjector.PresentAtEndScene below. ResetFrame at the END of
+            // OnEndScene primes the next frame.
 
             // Publish the live device pointer for the off-render-thread plugin
             // pump (see PumpPluginFrame). The D3D9 device is a stable COM
@@ -363,26 +393,59 @@ internal static class EngineFrameController
             // calls it at all.
 
             // ── ImGui-gated work ─────────────────────────────────────────
-            if (Plugins.EngineSettings.EnableImGuiBackend)
-                RunImGuiFrame(pDevice);
+            // The frame is BUILT here and SUBMITTED by RenderDeferredImGui, which
+            // EndSceneHook calls after the Avalonia quad, so ImGui windows sit above
+            // the Nav3D fallback, the vital HUD and the Avalonia panels. Input order
+            // matches: Win32Backend gives ImGui the mouse while it wants it.
+            bool imguiEnabled = Plugins.EngineSettings.EnableImGuiBackend;
+            bool imguiBuilt = false;
+            long uiTicks = 0;
+            if (!imguiEnabled)
+                _imguiIdle = true; // switched off in game: input state resets when it comes back
+            else
+            {
+                long t0 = Stopwatch.GetTimestamp();
+                imguiBuilt = BuildImGuiFrame(pDevice);
+                uiTicks = Stopwatch.GetTimestamp() - t0;
+            }
 
-            // Fallback render — only fires when the injector missed this
-            // frame's 3D→UI transition. _coreInitialized is enough — this
-            // does not touch font / vertex buffer state.
-            if (!nav3DAlreadyRendered)
-                DX9Backend.RenderNav3D(pDevice);
+            // Fallback: the Nav3D markers and the world overlays built last frame
+            // (nameplates, combat text), when neither the UI pass nor the transition
+            // drew them this frame - still under the ImGui panels. No-op when they
+            // already drew (one per-frame flag for every path; UnderUiLayer presents
+            // a list once). _coreInitialized is enough for the markers.
+            D3D9.Nav3DRenderInjector.PresentAtEndScene(pDevice);
 
-            // Custom D3D9 vital HUD (Health/Stamina/Mana). Always-on (independent
-            // of EnableImGuiBackend) so it shows even in Avalonia-only mode; drawn
-            // last so it sits on top of the world + AC UI. Reads the vitals
-            // snapshot maintained on this same (AC main) thread and does its own
-            // device state save/restore. No-op until vitals are seeded.
-            if (Plugins.EngineSettings.DrawCustomVitalBars)
-                D3D9.VitalHud.Draw(pDevice);
+            if (imguiEnabled)
+            {
+                long t0 = Stopwatch.GetTimestamp();
+                // Popped-out panels: their own contexts, windows and render targets.
+                if (_imguiInitialized)
+                    ImGuiPopOuts.RenderAll(pDevice, _uiScale, PanelsLive);
+                long ticks = uiTicks + (Stopwatch.GetTimestamp() - t0);
+                if (imguiBuilt)
+                {
+                    _deferredUiTicks = ticks;
+                    _deferredSubmitDevice = pDevice;
+                }
+                else
+                {
+                    UiFrameStats.Record(ticks);
+                }
+            }
         }
         catch (Exception ex)
         {
-            RynthLog.Info($"EngineFrameController: frame {_frameCount} engine error: {ex.GetType().Name}: {ex.Message}");
+            // An exception here skips everything after it this frame (including RunImGuiFrame), so
+            // the first one gets a stack trace; repeats are summarised every 30 s instead of per frame.
+            _engineErrorCount++;
+            long errNow = Environment.TickCount64;
+            if (_engineErrorCount == 1)
+                RynthLog.Error($"EngineFrameController: engine frame error (rest of this frame skipped): {ex}");
+            else if (errNow >= _nextEngineErrorLogAt)
+                RynthLog.Error($"EngineFrameController: engine frame errors so far={_engineErrorCount}, latest {ex.GetType().Name}: {ex.Message}");
+            if (errNow >= _nextEngineErrorLogAt)
+                _nextEngineErrorLogAt = errNow + HeartbeatIntervalMs;
         }
         finally
         {
@@ -392,7 +455,33 @@ internal static class EngineFrameController
             // never fires again — every subsequent frame falls back to the
             // end-of-frame draw (which paints over the UI).
             D3D9.Nav3DRenderInjector.ResetFrame();
+            // The DIP hook only runs while the transition path is in use (no UI-pass
+            // hook, or /rc worldlayer transition); switched here, between frames.
+            try { D3D9.Nav3DRenderInjector.SyncHookState(); }
+            catch (Exception ex) { RynthLog.D3D9($"Nav3DRenderInjector.SyncHookState threw {ex.GetType().Name}: {ex.Message}"); }
+            // What this frame built for the world overlays is presented next frame.
+            UnderUiLayer.EndFrame();
         }
+    }
+
+    /// <summary>
+    /// The main-thread prefetches of the always-on pipeline above, for a client without
+    /// the EndScene hook (Decal in the process): called from the Client::UseTime detour
+    /// (AC's main thread) once GameTickHooks.HeadlessPrefetch is set. Same calls, same
+    /// order, each throttled and main-thread-gated internally. The EndScene path doesn't
+    /// use this (it runs the calls inline, unchanged).
+    /// </summary>
+    internal static void RunHeadlessPrefetch()
+    {
+        Compatibility.ClientObjectHooks.PrefetchPlayerSkills();
+        Compatibility.ClientObjectHooks.PrefetchKnownSpells();
+        Compatibility.ClientObjectHooks.PrefetchAttackable();
+        Compatibility.ClientObjectHooks.PrefetchObjectIdentity();
+        Compatibility.ClientObjectHooks.PrefetchPositions();
+        Compatibility.ClientObjectHooks.PrefetchPlayerStats();
+        Compatibility.ClientObjectHooks.ServeObjectQualitiesRequest();   // v84 GetObjectProperties (none asked: one read)
+        try { Plugins.PluginManager.TrySeedLiveObjectsFromCObjectMaintOnce(); }
+        catch (Exception ex) { RynthLog.Plugin($"CObjectMaint seed threw {ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>
@@ -419,19 +508,54 @@ internal static class EngineFrameController
             return; // never re-enter PluginManager from two stacks
         try
         {
+            // Plugins only get the ImGui context when they may draw with it: the
+            // ImGui shell (EnableImGuiShell, FORCE-gated) or their own overlay
+            // windows (EnablePluginOverlayWindows: RynthAi's Mini Remote, HUDs, Item
+            // Info; RynthPluginRenderOverlay). RynthAi only reads the context for
+            // those windows, so this does not switch it into a legacy-ImGui setup.
+            bool pluginsDraw = Plugins.EngineSettings.EnableImGuiShell
+                || (Plugins.EngineSettings.EnablePluginOverlayWindows && Plugins.EngineSettings.EnableImGuiBackend);
+            // _context is written by the render thread (Init); this is the pump thread.
+            IntPtr pluginContext = pluginsDraw ? System.Threading.Volatile.Read(ref _context) : IntPtr.Zero;
             if (!_pluginsInitialized)
             {
+                // The plugin host copies the context once at init, so wait for the
+                // render path's ImGui init (first ImGui frame) rather than hand over
+                // zero for the whole session. Bounded: a failed or stalled ImGui init
+                // must not hold plugins (and the bot) back.
+                if (pluginsDraw && pluginContext == IntPtr.Zero && !_imguiInitFailed
+                    && ++_pluginInitContextWaits <= PluginInitContextMaxWaits)
+                    return;
+                if (pluginsDraw && pluginContext == IntPtr.Zero)
+                    RynthLog.Warn($"EngineFrameController: plugins initialised without an ImGui context (imguiInitFailed={_imguiInitFailed}, waits={_pluginInitContextWaits}) - plugin overlay windows will not draw this session.");
                 _pluginsInitialized = true;
-                PluginManager.InitPlugins(_context, device, _gameHwnd);
+                PluginManager.InitPlugins(pluginContext, device, _gameHwnd);
             }
 
-            PluginManager.ProcessPendingActions(_context, device, _gameHwnd);
+            // Decal bridge mode with the in-game renderer (DecalInGameImGui): chat and
+            // chat-bar lines come from the bridge. One flag check in every other client.
+            if (Compatibility.DecalBridgeHost.Active)
+                Compatibility.DecalBridgeHost.Drain();
+            PluginManager.ProcessPendingActions(pluginContext, device, _gameHwnd);
+            // Client::Cleanup started (UiFlowHooks): the call above told the plugins; from
+            // here on no plugin tick and no plugin export for the panels' data.
+            if (Compatibility.UiFlowHooks.ClientCleanupStarted)
+                return;
             PluginManager.FlushPendingDeletes(); // closes the create→delete race window
             PluginManager.TickAll();
+            // Panel data: plugin exports for the UI are called here, on the same
+            // thread as the plugin tick, and published as immutable snapshots.
+            UI.Data.UiDataHub.Step();
         }
         catch (Exception ex)
         {
-            RynthLog.Plugin($"EngineFrameController.PumpPluginFrame: {ex.GetType().Name}: {ex.Message}");
+            // The first one with its stack, then counted (a step throwing every frame
+            // would otherwise write a line per pump tick).
+            int n = ++_pumpFrameFaults;
+            if (n == 1)
+                RynthLog.Plugin($"EngineFrameController.PumpPluginFrame: {ex.GetType().Name}: {ex.Message} (caught; repeats are counted){Environment.NewLine}{ex}");
+            else if (n % StepFaultLog.RepeatEvery == 0)
+                RynthLog.Plugin($"EngineFrameController.PumpPluginFrame: {ex.GetType().Name}: {ex.Message} - {n} times so far, still caught.");
         }
         finally
         {
@@ -440,37 +564,165 @@ internal static class EngineFrameController
     }
 
     /// <summary>
-    /// Runs the ImGui-specific portion of the per-frame pipeline:
-    /// backend NewFrame plumbing, ImGui frame open/close, RynthCore shell +
-    /// plugin RenderAll, draw-data submission, capture flag update, and the
-    /// multi-viewport platform pump. Bypassed entirely when
-    /// EngineSettings.EnableImGuiBackend is false.
+    /// Runs <paramref name="action"/> on the calling thread while no plugin pump frame runs,
+    /// holding the pump's frame guard so it can't start one meanwhile. False (not run) when a
+    /// frame is running. For Client::Cleanup (UiFlowHooks): AC's main thread tells the
+    /// plugins itself when the pump is idle or no longer running frames.
     /// </summary>
-    private static void RunImGuiFrame(IntPtr pDevice)
+    internal static bool TryRunOutsidePumpFrame(Action action)
     {
-        if (_imguiInitFailed) return;
+        if (System.Threading.Interlocked.CompareExchange(ref _pluginPumpInFrame, 1, 0) != 0)
+            return false;
+        try { action(); }
+        finally { System.Threading.Interlocked.Exchange(ref _pluginPumpInFrame, 0); }
+        return true;
+    }
+
+    /// <summary>True when anything ImGui should be drawn this frame.</summary>
+    private static bool HasImGuiContent()
+    {
+        if (Plugins.EngineSettings.EnableImGuiShell || ImGuiFontTest.Enabled) return true;
+        if (!PanelsLive) return false;
+        ImGuiPanelHost.RestoreOnce();
+        return ImGuiPanelHost.NeedsFrame || ImGuiBar.Visible || ImGuiBar.PoppedOut || Hud.MonsterHud.WantsFrame
+            || D3D9.VideoPatch.WantsBanner || PluginOverlayWindowsLive;
+    }
+
+    /// <summary>
+    /// In the world, with the shell off, and some loaded plugin exports
+    /// RynthPluginRenderOverlay: its windows need a frame every frame.
+    /// </summary>
+    private static bool PluginOverlayWindowsLive =>
+        PanelsLive && Plugins.EngineSettings.EnablePluginOverlayWindows && PluginManager.HasOverlayPlugins;
+
+    /// <summary>
+    /// Panel faces show only in the world, like the Avalonia overlay (hidden
+    /// between characters, not closed). Also off as soon as AC leaves the world screen
+    /// (UiFlowHooks, before the logout dispatch catches up) and for good once
+    /// Client::Cleanup starts.
+    /// </summary>
+    private static bool PanelsLive => Compatibility.LoginLifecycleHooks.HasObservedLoginComplete
+        && Compatibility.UiFlowHooks.InWorldOrUnknown
+        && !Compatibility.UiFlowHooks.ClientCleanupStarted;
+
+    /// <summary>DPI scale the fonts and style were built for (see Init).</summary>
+    private static float _uiScale = 1f;
+    private static int _themeApplied;   // RynthTheme.Version the base style was coloured at
+
+    /// <summary>The scale the fonts and style were built for.</summary>
+    internal static float FontScale => _uiScale;
+
+    /// <summary>A popped-out panel was clicked: the main context's text edit ends next frame. AC thread.</summary>
+    internal static void DropMainTextFocus() => _dropImGuiTextFocus = true;
+
+    // ── Diagnostics (/rc imgui diag) ─────────────────────────────────
+    private static long _framesBuilt;
+    private static System.Numerics.Vector2 _lastDisplaySize;
+
+    /// <summary>One line per fact about the ImGui layer's state. Game thread (reads plain fields).</summary>
+    internal static System.Collections.Generic.List<string> DescribeState()
+    {
+        var lines = new System.Collections.Generic.List<string>
+        {
+            $"layer={(Plugins.EngineSettings.EnableImGuiBackend ? "on" : "off")} initialized={_imguiInitialized} initFailed={_imguiInitFailed} selfTest={ImGuiSelfTest.LastResult}",
+            $"inWorld={PanelsLive} content={HasImGuiContentNoRestore()} idle={_imguiIdle} framesBuilt={_framesBuilt} uiScale={_uiScale:0.##} avaloniaScale={UI.AvaloniaOverlay.InputScale:0.##} display={_lastDisplaySize.X:0}x{_lastDisplaySize.Y:0}",
+            DX9Backend.DescribeLastFrame(),
+            UnderUiLayer.Describe(),
+            D3D9.Nav3DRenderInjector.Describe(),
+            $"capture: {Win32Backend.DescribeCapture()}",
+        };
+        lines.AddRange(ImGuiPopOuts.Describe());
+        return lines;
+    }
+
+    private static bool HasImGuiContentNoRestore() =>
+        Plugins.EngineSettings.EnableImGuiShell || ImGuiFontTest.Enabled || (PanelsLive && (ImGuiPanelHost.NeedsFrame || ImGuiBar.Visible || ImGuiBar.PoppedOut || Hud.MonsterHud.WantsFrame || D3D9.VideoPatch.WantsBanner))
+        || PluginOverlayWindowsLive;
+
+    // Keyboard owner between the stacks (plan §3.2 d): whichever side started
+    // text entry most recently keeps the keyboard.
+    private static bool _prevImGuiText, _prevAvaloniaText, _dropImGuiTextFocus;
+
+    /// <summary>True while frames are being skipped because nothing ImGui is open.</summary>
+    private static bool _imguiIdle = true;
+
+    /// <summary>
+    /// Builds the ImGui frame (NewFrame ... Render) and publishes the capture
+    /// flags. Returns true when there is draw data for <see cref="SubmitImGuiFrame"/>.
+    /// Only called while EngineSettings.EnableImGuiBackend is true.
+    ///
+    /// Early-out: with no ImGui content there is no ImGui frame at all. Queued
+    /// input is dropped (nothing would drain it) and capture flags are cleared,
+    /// so the idle cost is one GetClientRect.
+    /// </summary>
+    private static bool BuildImGuiFrame(IntPtr pDevice)
+    {
+        if (_imguiInitFailed) return false;
 
         if (!_imguiInitialized)
         {
+            // Initialised as soon as the backend is enabled (not lazily on first
+            // content), so the cimgui self-test result is in the log at startup.
             if (!Init(pDevice))
             {
                 _imguiInitFailed = true;
-                return;
+                RynthLog.Error($"EngineFrameController: ImGui init FAILED at step '{_initFailStep}' - ImGui frames disabled for this session.");
+                return false;
             }
+        }
+
+        Win32Backend.UpdateClientMetrics(out int clientW, out int clientH);
+
+        // Monster nameplates: pick the monsters (throttled) before deciding
+        // whether there is a frame to build, so plates alone can ask for one.
+        Hud.MonsterHud.Update(PanelsLive);
+
+        if (!HasImGuiContent())
+        {
+            _imguiIdle = true;
+            Win32Backend.DiscardQueuedInput();
+            Win32Backend.ClearCaptureFlags();
+            ImGuiTextFocus.ClearMain();
+            return false;
         }
 
         IntPtr previousContext = ImGuiNET.ImGui.GetCurrentContext();
         ImGuiNET.ImGui.SetCurrentContext(_context);
         bool frameStarted = false;
         bool frameEnded = false;
-
         try
         {
-            _frameCount++;
-            DX9Backend.NewFrame();
-            Win32Backend.NewFrame();
-
             ImGuiIOPtr io = ImGuiNET.ImGui.GetIO();
+            long now = Stopwatch.GetTimestamp();
+            if (_imguiIdle)
+            {
+                // Resuming: keys/buttons released while idle must not read as held,
+                // and the idle gap must not become one huge DeltaTime.
+                _imguiIdle = false;
+                Win32Backend.ResetImGuiInputState(io);
+                _lastFrameTicks = now;
+            }
+
+            _frameCount++;
+            // A panel's text size changed: re-bake the fonts (only the sizes in
+            // use) and replace the font texture, between frames.
+            // The new atlas is baked on a worker (ImGuiFonts.PumpRebuild), once per run of
+            // changes (RequestRebuild debounces); here it is swapped in and its texture made.
+            DX9Backend.ReleaseRetiredFontTexture();   // the texture a rebuild replaced last frame
+            long rebuildStart = Stopwatch.GetTimestamp();
+            if (ImGuiFonts.PumpRebuild(io, _uiScale, out string rebuilt))
+            {
+                DX9Backend.RebuildFontTexture(pDevice);
+                double rebuildMs = (Stopwatch.GetTimestamp() - rebuildStart) * 1000.0 / Stopwatch.Frequency;
+                RynthLog.UI($"ImGuiFonts: text size change: {rebuilt}; render thread {rebuildMs:0.0} ms (swap + texture).");
+            }
+            // Script window icons decoded since the last frame become textures, and the least
+            // recently drawn go, before anything draws (no draw list points at them any more).
+            ScriptIcons.BeginFrame(pDevice);
+            WorldMapTiles.BeginFrame(pDevice);   // world map tiles read since the last frame become textures
+            RetailSprites.BeginFrame(pDevice);   // retail UI pictures decoded since the last frame (kept, never evicted)
+            DX9Backend.NewFrame();
+            Win32Backend.NewFrame(clientW, clientH);
 
             // Fallback: if Win32Backend could not determine display size, read from the D3D9 viewport.
             if (io.DisplaySize.X <= 1 || io.DisplaySize.Y <= 1)
@@ -480,65 +732,101 @@ internal static class EngineFrameController
                     io.DisplaySize = new System.Numerics.Vector2(vpW, vpH);
             }
 
-            long now = Stopwatch.GetTimestamp();
             float dt = (float)(now - _lastFrameTicks) / Stopwatch.Frequency;
             _lastFrameTicks = now;
             io.DeltaTime = dt > 0f ? dt : 1f / 60f;
 
-            // With ViewportsEnable on, ImGui routes mouse and window positions in
-            // absolute screen coords. The main viewport's Pos must equal the game
-            // client's screen origin so clicks over the main viewport map to the
-            // correct windows, and popped-out viewports share a coord system with
-            // the main one.
-            if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
-            {
-                int screenX = 0, screenY = 0;
-                if (_gameHwnd != IntPtr.Zero)
-                {
-                    ClientPoint p = new ClientPoint { X = 0, Y = 0 };
-                    if (ClientToScreen(_gameHwnd, ref p)) { screenX = p.X; screenY = p.Y; }
-                }
-                ImGuiViewportPtr mainVp = ImGuiNET.ImGui.GetMainViewport();
-                mainVp.Pos = new System.Numerics.Vector2(screenX, screenY);
-                mainVp.Size = io.DisplaySize;
-                mainVp.WorkPos = new System.Numerics.Vector2(screenX, screenY);
-                mainVp.WorkSize = io.DisplaySize;
-            }
-
+            RynthTheme.RefreshStyle(ref _themeApplied);   // a theme change re-colours the base style
             ImGuiNET.ImGui.NewFrame();
             frameStarted = true;
-            // EnableImGuiShell gates the in-AC ImGui surface as a whole: both the
-            // RynthCore overlay bar and any plugin-drawn ImGui windows. Plugins
-            // still load, init, and tick when this is off — they just don't
-            // draw, so Avalonia panels can drive them via the plugin's C exports.
+            // Before any window: a drag from a popped-out Inventory or AC's inventory becomes
+            // a payload the client's drop targets (Mini Remote slots) see this frame.
+            ItemDragBridge.SubmitMainFrame(io);
+            ImGuiTextFocus.BeginFrame();
+            if (_dropImGuiTextFocus)
+            {
+                // An Avalonia TextBox took the keyboard: end ImGui's text edit.
+                _dropImGuiTextFocus = false;
+                ImGuiNET.ImGui.SetWindowFocus(null);
+            }
+            // EnableImGuiShell gates the old diagnostic shell and plugin-drawn
+            // ImGui windows (plugin code on AC's thread: FORCE-gated, stays off).
+            int branch;
             if (Plugins.EngineSettings.EnableImGuiShell)
             {
+                branch = 1;
                 RynthCoreShell.Render(_frameCount);
                 PluginManager.RenderAll();
             }
-
-            bool captureMouse =
-                ImGuiNET.ImGui.IsWindowHovered(ImGuiHoveredFlags.AnyWindow) ||
-                ImGuiNET.ImGui.IsAnyItemActive();
-            bool captureKeyboard = ImGuiNET.ImGui.IsAnyItemActive();
+            else if (PluginOverlayWindowsLive)
+            {
+                branch = 2;
+                // Only the opt-in extra windows (RynthPluginRenderOverlay), never the
+                // plugins' full ImGui UIs.
+                PluginManager.RenderOverlayAll();
+            }
+            else
+            {
+                branch = 0;
+            }
+            if (branch != _loggedBranch)
+            {
+                _loggedBranch = branch;
+                RynthLog.Info($"EngineFrameController: ImGui plugin branch = {(branch == 1 ? "shell (RenderAll)" : branch == 2 ? "overlay windows (RenderOverlayAll)" : "none")}.");
+            }
+            if (PanelsLive)
+            {
+                // World overlays: built into UnderUiLayer's list, drawn next frame at
+                // AC's 3D->UI transition (under AC's UI and every panel), no input.
+                // Video patch: with no 3D scene only the screen-fixed player plate draws.
+                Hud.MonsterHud.Draw(_uiScale, worldVisible: !D3D9.VideoPatch.SkipWorldThisFrame);
+                // Video patch "all": the "rendering paused" banner (background list, under the panels).
+                VideoPatchBanner.Draw();
+                // Server verdicts, the plugins' section manifests and the servermenu push. Every
+                // frame, bar or not: with the bar hidden (the rail instead) nothing else ticks them,
+                // so Options > Diagnostics listed no servers and no server plugin was told it is active.
+                RynthCore.Engine.UI.ServerMenus.Tick();
+                if (ImGuiBar.Visible)
+                    ImGuiBar.Draw(_uiScale);
+                ImGuiPanelHost.DrawAll(_uiScale);
+                // Settings drawer bodies RynthAi's window didn't draw this frame let their sources go.
+                Panels.SettingsDrawerBodies.EndFrame();
+                ImGuiBar.SyncPopOut(_uiScale);
+            }
+            if (ImGuiFontTest.Enabled)
+                ImGuiFontTest.Draw(_uiScale);
 
             ImGuiNET.ImGui.EndFrame();
             frameEnded = true;
             ImGuiNET.ImGui.Render();
-            Win32Backend.UpdateCaptureFlags(captureMouse, captureKeyboard);
+            ImGuiAssertLog.Poll();
+            _framesBuilt++;
+            _lastDisplaySize = io.DisplaySize;
 
-            ImDrawDataPtr drawData = ImGuiNET.ImGui.GetDrawData();
-
-            DX9Backend.RenderDrawData(drawData, pDevice);
-            // OverlayTextureRenderer.Render is now driven from EndSceneHook.EndSceneDetour
-            // directly so the Avalonia compositor runs even when EnableImGuiBackend=false.
-            // Leaving it out of this call site avoids double-blit when ImGui is also active.
-
-            if ((io.ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
-            {
-                ImGuiNET.ImGui.UpdatePlatformWindows();
-                ImGuiNET.ImGui.RenderPlatformWindowsDefault();
-            }
+            // io.WantCaptureMouse already applies ImGui's own button-ownership
+            // rule; io.WantTextInput is true only while a text field is edited.
+            // MonsterHud.WantsMouse: the cursor is on a clickable nameplate (or a
+            // press that began on one is held), so that click is the plate's.
+            // Keyboard: io.WantTextInput lags the box by a frame (ImGui publishes it from
+            // the previous frame's widgets), so a box that went active this frame counts
+            // too (ImGuiTextFocus): the keys typed right after the click stay out of AC.
+            ImGuiTextFocus.EndMainFrame(io.WantTextInput);
+            bool typing = io.WantTextInput || ImGuiTextFocus.MainBoxActive;
+            // A plate that is only hovered lets the mouse moves through, so AC's own
+            // mouse-over stays current (MonsterHud.MouseMovesToGame, Compatibility/AcMouseOver).
+            // A docked click-through panel under the cursor that zooms with the wheel (the radar's
+            // "Mouse wheel still zooms"): the wheel is its own, clicks and moves still the game's.
+            Win32Backend.UpdateCaptureFlags(io.WantCaptureMouse || Hud.MonsterHud.WantsMouse, typing,
+                mouseMovesToGame: !io.WantCaptureMouse && Hud.MonsterHud.MouseMovesToGame,
+                wheelToUi: !io.WantCaptureMouse && PanelsLive && ImGuiPanelHost.WheelWanted);
+            Compatibility.AcMouseOver.Tick();   // /rc acmouse watch, when on
+            // The UI is released (Insert): no text box keeps the keyboard. Keys are not
+            // gated by the toggle any more (Win32Backend.UpdateCaptureFlags), so the edit
+            // ends instead and the next keys go to the game.
+            if (typing && !Win32Backend.UiCaptureEnabled)
+                _dropImGuiTextFocus = true;
+            ArbitrateTextFocus(io.WantTextInput);
+            return true;
         }
         catch (Exception ex)
         {
@@ -552,12 +840,101 @@ internal static class EngineFrameController
             {
             }
 
+            Win32Backend.ClearCaptureFlags();
+            ImGuiTextFocus.ClearMain();
             RynthLog.Info($"EngineFrameController: frame {_frameCount} ImGui error: {ex.GetType().Name}: {ex.Message}");
+            return false;
         }
         finally
         {
             ImGuiNET.ImGui.SetCurrentContext(previousContext);
         }
+    }
+
+    private static void ArbitrateTextFocus(bool imguiText)
+    {
+        bool avaloniaText = Win32Backend.AvaloniaTextInputActive;
+        if (imguiText && !_prevImGuiText && avaloniaText)
+        {
+            // An ImGui field just started typing: Avalonia gives up the keyboard.
+            Win32Backend.AvaloniaTextInputActive = false;
+            UI.AvaloniaOverlay.ClearTextFocus();
+            avaloniaText = false;
+        }
+        else if (avaloniaText && !_prevAvaloniaText && imguiText)
+        {
+            _dropImGuiTextFocus = true;
+        }
+        _prevImGuiText = imguiText;
+        _prevAvaloniaText = avaloniaText;
+    }
+
+    /// <summary>
+    /// Submits this frame's ImGui draw data. EndSceneHook calls it after
+    /// OverlayTextureRenderer.Render so ImGui windows draw on top of the Avalonia layer.
+    /// Runs whether or not the Avalonia blit ran (character select, Avalonia off), and is
+    /// a no-op when <see cref="OnEndScene"/> built nothing this frame. Never throws.
+    /// </summary>
+    public static void RenderDeferredImGui()
+    {
+        IntPtr device = _deferredSubmitDevice;
+        if (device == IntPtr.Zero)
+            return;
+        _deferredSubmitDevice = IntPtr.Zero; // one submission per frame, even if it throws
+
+        long t0 = Stopwatch.GetTimestamp();
+        SubmitImGuiFrame(device);
+        UiFrameStats.Record(_deferredUiTicks + (Stopwatch.GetTimestamp() - t0));
+    }
+
+    /// <summary>Draws the frame <see cref="BuildImGuiFrame"/> produced.</summary>
+    private static void SubmitImGuiFrame(IntPtr pDevice)
+    {
+        IntPtr previousContext = ImGuiNET.ImGui.GetCurrentContext();
+        ImGuiNET.ImGui.SetCurrentContext(_context);
+        try
+        {
+            ImDrawDataPtr drawData = ImGuiNET.ImGui.GetDrawData();
+            DX9Backend.RenderDrawData(drawData, pDevice);
+            _drawSubmits++;
+            if (!_loggedFirstSubmit)
+            {
+                _loggedFirstSubmit = true;
+                RynthLog.Info("EngineFrameController: first ImGui draw submitted.");
+            }
+            LogHeartbeatIfDue(drawData);
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Info($"EngineFrameController: frame {_frameCount} ImGui submit error: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            ImGuiNET.ImGui.SetCurrentContext(previousContext);
+        }
+    }
+
+    /// <summary>
+    /// Every 30 s: built ImGui frames, submits, draw list / vertex counts of the
+    /// latest frame and the overlay-window stats from PluginManager. Zero draw lists means no
+    /// ImGui window was drawn that frame. One string per interval; no per-frame allocation.
+    /// </summary>
+    private static void LogHeartbeatIfDue(ImDrawDataPtr drawData)
+    {
+        long now = Environment.TickCount64;
+        if (now < _nextHeartbeatAt) return;
+        bool first = _nextHeartbeatAt == 0;
+        _nextHeartbeatAt = now + HeartbeatIntervalMs;
+        if (first) return; // first interval starts now; the first-frame line already covers t=0
+
+        int lists = 0, vertices = 0;
+        unsafe
+        {
+            // ImDrawData: +4 CmdListsCount, +8 TotalIdxCount, +12 TotalVtxCount (see CLAUDE.md offsets).
+            byte* p = (byte*)drawData.NativePtr;
+            if (p != null) { lists = *(int*)(p + 4); vertices = *(int*)(p + 12); }
+        }
+        RynthLog.Info($"EngineFrameController: ImGui heartbeat frames={_framesBuilt} submits={_drawSubmits} lastFrame drawLists={lists} vertices={vertices} {PluginManager.DescribeOverlayState()}.");
     }
 
     internal static IntPtr FindGameWindow()

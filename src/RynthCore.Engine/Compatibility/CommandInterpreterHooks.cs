@@ -25,6 +25,19 @@ internal static class CommandInterpreterHooks
     private const int TakeControlOffsetFromSetAutoRun = ReferenceCommandInterpreterTakeControlFromServer - ReferenceCommandInterpreterSetAutoRun;
     private const int ClearAllCommandsOffsetFromSetAutoRun = ReferenceCommandInterpreterClearAllCommands - ReferenceCommandInterpreterSetAutoRun;
 
+    // CommandInterpreter::SendMovementEvent (vtable slot 19 = +0x4C, VA 0x006B55C0, thiscall,
+    // no args, plain ret): sends the current raw motion state to the server as a MoveToState
+    // (0xF61C). Bound from the live vtable and accepted only when it sits at the reference
+    // distance from SetAutoRun (same binary layout); otherwise it stays null and SetAutoRun
+    // behaves as before (no send).
+    private const int VtblSendMovementEventIndex = 19;
+    private const int ReferenceCommandInterpreterSendMovementEvent = 0x006B55C0;
+    private const int SendMovementEventOffsetFromSetAutoRun = ReferenceCommandInterpreterSendMovementEvent - ReferenceCommandInterpreterSetAutoRun;
+
+    // CommandInterpreter.autoRun (int): SetAutoRun(val, ...) compares and writes [this+0x48];
+    // ToggleAutoRun reads it (acclient 0x006B5790 / 0x006B4C00).
+    internal const int CmdInterpAutoRunOffset = 0x48;
+
     // Verified unique + lands at the Reference VA offline (tools/pe_pattern.py).
     // Primary resolution; the *Offset deltas below remain as fallback only.
     private static readonly byte?[] SetMotionPattern = [ 0x8B, 0x41, 0x08, 0x81, 0xEC, 0x0C, 0x01, 0x00 ];
@@ -61,6 +74,9 @@ internal static class CommandInterpreterHooks
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
     private delegate void ClearAllCommandsDelegate(IntPtr thisPtr);
 
+    [UnmanagedFunctionPointer(CallingConvention.ThisCall)]
+    private delegate void SendMovementEventDelegate(IntPtr thisPtr);
+
     private static IntPtr _smartboxStaticAddr;
     private static IntPtr _boundCmdInterp;
     private static bool _absResolved;
@@ -74,7 +90,14 @@ internal static class CommandInterpreterHooks
     private static PlayerTeleportedDelegate? _playerTeleported;
     private static TakeControlFromServerDelegate? _takeControlFromServer;
     private static ClearAllCommandsDelegate? _clearAllCommands;
+    private static SendMovementEventDelegate? _sendMovementEvent;
+    private static bool _sendMovementEventMissLogged;
+    private static long _autoRunMovementSends;
     private static string _statusMessage = "Not probed yet.";
+
+    /// <summary>MoveToStates sent after an autorun change (diagnostics).</summary>
+    public static long AutoRunMovementSends => System.Threading.Interlocked.Read(ref _autoRunMovementSends);
+    public static bool HasSendMovementEvent => _sendMovementEvent != null;
 
     public static bool IsInitialized { get; private set; }
     public static bool HasTapJump => _commenceJump != null && _doJump != null;
@@ -140,7 +163,7 @@ internal static class CommandInterpreterHooks
         // motion graph the CSequence-AV corruption class kills. Off-thread
         // callers marshal through the action ring (drained post-tick,
         // gesture-gated) like every other mutator.
-        if (!MainThreadGuard.IsOnMainThread())
+        if (AcMainThreadQueue.MustQueue(teardown: !enabled))
             return AcMainThreadQueue.EnqueueSetAutoRun(enabled);
         int n = System.Threading.Interlocked.Increment(ref _setAutoRunCalls);
         if (!TryBindDelegates())
@@ -152,9 +175,39 @@ internal static class CommandInterpreterHooks
 
         try
         {
+            // Tell the server, like AC's own autorun key and Decal's SetAutorun (2026-10-12).
+            // CommandInterpreter::SetAutoRun(val, applyMovement) only changes the LOCAL motion
+            // (MovePlayer -> DoMotion/StopMotion); it never sends a MoveToState. AC's autorun key
+            // (HandleKeyboardCommand 0x090000C7) is ToggleAutoRun + SendMovementEvent, and
+            // Decal's IACHooks::SetAutorun (Decal.dll 0x18025C10) is SetAutoRun(on, 1) followed by
+            // one more no-arg cmdinterp call. Without the send the server never learned that the
+            // bot started or stopped running: the client ran on AutonomousPositions alone, and the
+            // next SendMovementEvent - a SetMotion turn-off, or the cast's own
+            // FreeHandsAndCastSpell -> MaybeStopCompletely -> StopCompletely - delivered a burst
+            // of stops for a run the server had never seen (flight 63260, 12:27:44 / 12:35:55 /
+            // 12:38:56: every bad burst had no forward command; the harmless ones began with
+            // WalkForward). Sent only when AC's flag really changed: nav re-sends autorun every
+            // tick and AC ignores an unchanged value, so a send each time would spam the server.
+            int before = TryReadAutoRunFlag(_boundCmdInterp);
             _setAutoRun!(_boundCmdInterp, enabled ? 1 : 0, 1);
+            int after = TryReadAutoRunFlag(_boundCmdInterp);
+            bool sent = false;
+            if (before >= 0 && after >= 0 && before != after)
+            {
+                if (_sendMovementEvent != null)
+                {
+                    _sendMovementEvent(_boundCmdInterp);
+                    System.Threading.Interlocked.Increment(ref _autoRunMovementSends);
+                    sent = true;
+                }
+                else if (!_sendMovementEventMissLogged)
+                {
+                    _sendMovementEventMissLogged = true;
+                    RynthLog.Compat("Move: SetAutoRun changed AC's autorun but SendMovementEvent is not bound - the server is not told (old behavior).");
+                }
+            }
             if (ShouldLogMove(n))
-                RynthLog.Compat($"Move: SetAutoRun({enabled}) #{n} -> ok (cmdInterp=0x{_boundCmdInterp.ToInt32():X8})");
+                RynthLog.Compat($"Move: SetAutoRun({enabled}) #{n} -> ok (cmdInterp=0x{_boundCmdInterp.ToInt32():X8}, autorun {before}->{after}{(sent ? ", MoveToState sent" : "")})");
             return true;
         }
         catch (Exception ex)
@@ -165,9 +218,58 @@ internal static class CommandInterpreterHooks
         }
     }
 
+    // CommandInterpreter.controlled_by_server (int, +0x34): LoseControlToServer sets it to 1,
+    // TakeControlFromServer to 0. MaybeStopCompletely (vtable +0xC0, 0x006B4AD0) - the first thing
+    // ClientMagicSystem::FreeHandsAndCastSpell (0x00567C90) does - calls StopCompletely (and so
+    // sends a MoveToState) only while it is 0, i.e. while the player has control.
+    internal const int CmdInterpControlledByServerOffset = 0x34;
+
+    /// <summary>1 the server has control (a cast sends no stop), 0 the player has (a cast sends one), -1 unknown. Main thread.</summary>
+    public static int ReadControlledByServer()
+    {
+        if (!MainThreadGuard.IsOnMainThread() || !TryBindDelegates()) return -1;
+        try { return Marshal.ReadInt32(_boundCmdInterp + CmdInterpControlledByServerOffset) != 0 ? 1 : 0; }
+        catch { return -1; }
+    }
+
+    /// <summary>
+    /// For the length of one cast call: makes MaybeStopCompletely see "server has control", so
+    /// FreeHandsAndCastSpell sends no stop in the cast's frame. Only for a cast whose stop the
+    /// engine already sent a server answer ahead (PreCastStop). Returns the command interpreter to
+    /// pass to <see cref="EndCastStopSuppression"/>, or Zero when nothing was changed.
+    /// </summary>
+    public static IntPtr BeginCastStopSuppression(out int saved)
+    {
+        saved = 0;
+        if (!MainThreadGuard.IsOnMainThread() || !TryBindDelegates()) return IntPtr.Zero;
+        try
+        {
+            IntPtr ci = _boundCmdInterp;
+            saved = Marshal.ReadInt32(ci + CmdInterpControlledByServerOffset);
+            if (saved != 0) return IntPtr.Zero;               // already no stop: nothing to do
+            Marshal.WriteInt32(ci + CmdInterpControlledByServerOffset, 1);
+            return ci;
+        }
+        catch { return IntPtr.Zero; }
+    }
+
+    public static void EndCastStopSuppression(IntPtr cmdInterp, int saved)
+    {
+        if (cmdInterp == IntPtr.Zero || !MainThreadGuard.IsOnMainThread()) return;
+        try { Marshal.WriteInt32(cmdInterp + CmdInterpControlledByServerOffset, saved); } catch { }
+    }
+
+    /// <summary>AC's autorun flag (0/1), or -1 when it can't be read.</summary>
+    private static int TryReadAutoRunFlag(IntPtr cmdInterp)
+    {
+        if (cmdInterp == IntPtr.Zero) return -1;
+        try { return Marshal.ReadInt32(cmdInterp + CmdInterpAutoRunOffset) != 0 ? 1 : 0; }
+        catch { return -1; }
+    }
+
     public static bool SetMotion(uint motion, bool enabled)
     {
-        if (!MainThreadGuard.IsOnMainThread())
+        if (AcMainThreadQueue.MustQueue(teardown: !enabled))
             return AcMainThreadQueue.EnqueueSetMotion(motion, enabled); // same off-thread class as SetAutoRun
         if (!TryBindDelegates() || _setMotion == null)
             return false;
@@ -185,7 +287,7 @@ internal static class CommandInterpreterHooks
 
     public static bool StopCompletely()
     {
-        if (!MainThreadGuard.IsOnMainThread())
+        if (AcMainThreadQueue.MustQueue(teardown: true))
             return AcMainThreadQueue.EnqueueStopCompletely(); // same off-thread class as SetAutoRun
         if (!TryBindDelegates() || _stopCompletely == null)
             return false;
@@ -203,7 +305,7 @@ internal static class CommandInterpreterHooks
 
     public static bool TurnToHeading(float headingDegrees)
     {
-        if (!MainThreadGuard.IsOnMainThread())
+        if (AcMainThreadQueue.MustQueue(teardown: false))
             return AcMainThreadQueue.EnqueueTurnToHeading(headingDegrees); // same off-thread class as SetAutoRun
         int n = System.Threading.Interlocked.Increment(ref _turnToHeadingCalls);
         if (!TryBindDelegates() || _turnToHeading == null)
@@ -228,8 +330,16 @@ internal static class CommandInterpreterHooks
         }
     }
 
+    // Recovery triplet: unguarded like the jump trio, but only latent today
+    // (reached solely from the main-thread-gated ForceResetBusyCount) — public
+    // API surface though, so gate defensively rather than add queue plumbing
+    // for a currently-unreached off-thread path (revisit with an ActionKind if
+    // one of these is ever exposed to off-thread callers).
+
     public static bool PlayerTeleported()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (!TryBindDelegates() || _playerTeleported == null)
             return false;
 
@@ -246,6 +356,8 @@ internal static class CommandInterpreterHooks
 
     public static bool TakeControlFromServer()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (!TryBindDelegates() || _takeControlFromServer == null)
             return false;
 
@@ -262,6 +374,8 @@ internal static class CommandInterpreterHooks
 
     public static bool ClearAllCommands()
     {
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (!TryBindDelegates() || _clearAllCommands == null)
             return false;
 
@@ -276,8 +390,16 @@ internal static class CommandInterpreterHooks
         }
     }
 
+    // Jump trio marshalled 2026-09-02 (deep-audit finding #2): these called the
+    // native CommandInterpreter through _boundCmdInterp with zero
+    // MainThreadGuard gate, unlike every sibling (SetAutoRun/SetMotion/
+    // StopCompletely/TurnToHeading above), live-exercised off-thread via
+    // Jumper.cs's Decal-coexistence pump-thread tick.
+
     public static bool TapJump()
     {
+        if (AcMainThreadQueue.MustQueue(teardown: false))
+            return AcMainThreadQueue.EnqueueTapJump();
         if (!TryBindDelegates())
             return false;
 
@@ -297,6 +419,8 @@ internal static class CommandInterpreterHooks
 
     public static bool CommenceJump()
     {
+        if (AcMainThreadQueue.MustQueue(teardown: false))
+            return AcMainThreadQueue.EnqueueCommenceJump();
         if (!TryBindDelegates())
             return false;
 
@@ -313,6 +437,8 @@ internal static class CommandInterpreterHooks
 
     public static bool DoJump(bool autonomous)
     {
+        if (AcMainThreadQueue.MustQueue(teardown: false))
+            return AcMainThreadQueue.EnqueueDoJumpAutonomous(autonomous);
         if (!TryBindDelegates())
             return false;
 
@@ -437,6 +563,21 @@ internal static class CommandInterpreterHooks
         _takeControlFromServer = Marshal.GetDelegateForFunctionPointer<TakeControlFromServerDelegate>(takeControlPtr);
         _clearAllCommands = Marshal.GetDelegateForFunctionPointer<ClearAllCommandsDelegate>(clearAllCommandsPtr);
 
+        // Optional: SendMovementEvent from the vtable, only at the reference distance from
+        // SetAutoRun. A miss leaves it null (SetAutoRun then sends nothing, as before) and never
+        // fails the binding of the others.
+        IntPtr sendMovementPtr = Marshal.ReadIntPtr(vtable, VtblSendMovementEventIndex * IntPtr.Size);
+        if (sendMovementPtr == AddOffset(setAutoRunPtr, SendMovementEventOffsetFromSetAutoRun)
+            && SmartBoxLocator.IsPointerInModule(sendMovementPtr))
+        {
+            _sendMovementEvent = Marshal.GetDelegateForFunctionPointer<SendMovementEventDelegate>(sendMovementPtr);
+        }
+        else
+        {
+            _sendMovementEvent = null;
+            RynthLog.Compat($"Compat: CommandInterpreter::SendMovementEvent not bound (vtable slot {VtblSendMovementEventIndex} = 0x{sendMovementPtr.ToInt32():X8}, expected SetAutoRun{SendMovementEventOffsetFromSetAutoRun:+0;-0}) - autorun changes are not sent to the server.");
+        }
+
         _smartboxStaticAddr = selectedStaticAddr;
         _boundCmdInterp = cmdInterp;
         IsInitialized = true;
@@ -472,6 +613,7 @@ internal static class CommandInterpreterHooks
         _playerTeleported = null;
         _takeControlFromServer = null;
         _clearAllCommands = null;
+        _sendMovementEvent = null;
         IsInitialized = false;
         _statusMessage = "Not probed yet.";
     }

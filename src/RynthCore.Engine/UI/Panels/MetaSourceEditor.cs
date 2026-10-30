@@ -19,41 +19,18 @@ using AvaloniaEdit.Document;
 using AvaloniaEdit.Editing;
 using AvaloniaEdit.Rendering;
 using RynthCore.Engine.ImGuiBackend;
+using RynthCore.Engine.UI.Data;
 
 namespace RynthCore.Engine.UI.Panels;
 
 internal static class MetaSourceEditor
 {
     // ── .af vocabulary (mirrors MetaSchema in RynthSuite plugin) ──────────────
-    // Top-level structural keywords.
-    private static readonly HashSet<string> StructKeywords = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "STATE", "IF", "DO", "NAV",
-    };
-
-    // Condition keywords as they appear in .af source (keyword form, not labels).
-    internal static readonly string[] ConditionKeywords =
-    {
-        "Never", "Always", "All", "Any", "ChatMatch", "MainSlotsLE",
-        "SecsInStateGE", "Death", "VendorOpen", "VendorClosed",
-        "ItemCountLE", "ItemCountGE",
-        "MobsInDist_Name", "MobsInDist_Priority",
-        "NeedToBuff", "NoMobsInDist", "BlockE", "CellE",
-        "IntoPortal", "ExitPortal", "Not",
-        "PSecsInStateGE", "SecsOnSpellGE", "SecsOnSpellLE",
-        "BuPercentGE", "DistToRteGE", "Expr",
-        "ChatCapture", "NavEmpty",
-        "MainHealthLE", "MainHealthPHE", "MainManaLE", "MainManaPHE",
-        "MainStamLE", "VitaePHE",
-    };
-
-    internal static readonly string[] ActionKeywords =
-    {
-        "None", "Chat", "SetState", "EmbedNav", "DoAll",
-        "CallState", "Return", "DoExpr", "ChatExpr",
-        "SetWatchdog", "ClearWatchdog", "GetOpt", "SetOpt",
-        "CreateView", "DestroyView", "DestroyAllViews",
-    };
+    // The keyword lists live in UI/Data/MetaData.cs (MetaVocabulary), shared
+    // with the ImGui face's editor.
+    private static readonly HashSet<string> StructKeywords = new(MetaVocabulary.StructKeywords, StringComparer.OrdinalIgnoreCase);
+    internal static readonly string[] ConditionKeywords = MetaVocabulary.ConditionKeywords;
+    internal static readonly string[] ActionKeywords = MetaVocabulary.ActionKeywords;
 
     private static readonly HashSet<string> CondSet = new(ConditionKeywords, StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> ActSet  = new(ActionKeywords, StringComparer.OrdinalIgnoreCase);

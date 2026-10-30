@@ -16,6 +16,8 @@ internal static class SmartBoxHooks
     private const uint PlayerPositionUpdateOpcode = 0x0000F74B;
     private const uint VectorUpdateOpcode = 0x0000F74E;
     private const uint UpdateObjectOpcode = 0x0000F7DB;
+    private const uint ServerObjectDeleteOpcode = 0x0000F747;
+    private const uint PlayerTeleportOpcode = 0x0000F751;
 
     // ACSmartBox::DispatchSmartBoxEvent
     // 83 EC 08 53 8B 5C 24 10 8B 53 30 83 FA 04 8B 43 2C 56 8B F1 89 44 24 14 89 54 24 08 72 ?? 8B 08
@@ -93,6 +95,7 @@ internal static class SmartBoxHooks
                         {
                             delegate* unmanaged[Thiscall]<IntPtr, IntPtr, int, uint> pGeDetour = &DispatchGameEventDetour;
                             MinHook.Hook(geAddr, (IntPtr)pGeDetour, out _originalDispatchGameEventPtr);
+                            _gameEventHookInstalled = true;
                             RynthLog.Verbose($"Compat: game-event hook ready @ 0x{geAddr.ToInt32():X8}");
                         }
                         else RynthLog.Compat("Compat: game-event pattern matched already-hooked address.");
@@ -130,8 +133,22 @@ internal static class SmartBoxHooks
 
         try
         {
+            ObjectFreshness.Note(info.Opcode, info.RawObjectId, Environment.TickCount64);   // ghost check (RemoveClientObject)
+            if (info.Opcode == PositionUpdateOpcode && info.RawObjectId != 0)
+                NotePlayerMotionEcho(blob, info);
             TryQueueHealthUpdate(blob, info);
             TryQueueDamageEvent(blob, info);
+
+            // Always on (no server-message capture needed), after AC handled the message:
+            //  0xF747 ObjectDelete [opcode][objectId]: the SERVER deleted it (AutoId re-arms it
+            //   and its kept identify data goes), unlike the client's own view releases;
+            //  0xF751 PlayerTeleport: a teleport starts, so queued game actions hold for the
+            //   settle window from this moment (WorldTransitionState), whatever the per-tick
+            //   teleport_in_progress sample catches.
+            if (info.Opcode == ServerObjectDeleteOpcode && info.RawObjectId != 0)
+                AutoIdService.OnServerDelete(info.RawObjectId);
+            else if (info.Opcode == PlayerTeleportOpcode)
+                PlayerLifecycleLog.OnTeleportMessage();
 
             if (info.RawObjectId != 0 &&
                 (info.Opcode == PositionUpdateOpcode ||
@@ -164,6 +181,8 @@ internal static class SmartBoxHooks
         RecursionGuard.Tick("SmartBoxHooks.DispatchGameEvent");
         var pOriginal = (delegate* unmanaged[Thiscall]<IntPtr, IntPtr, int, uint>)_originalDispatchGameEventPtr;
 
+        EnchantmentChange? enchantment = null;
+        bool answered = false;
         try
         {
             // Reject undersized payloads instead of clamping up: an inflated
@@ -173,16 +192,92 @@ internal static class SmartBoxHooks
             {
                 uint eventType = unchecked((uint)Marshal.ReadInt32(data));
                 int len = size > 0x4000 ? 0x4000 : size;
+                // Property messages (2026-09-30): the identify reply, PlayerDescription and every
+                // UpdateProperty* message pass through here, from their type on. `size` is the
+                // real length (the function bounds itself with data+size), so the two large ones
+                // get all of it (PlayerDescription runs to ~29 KB) instead of the 16 KB clamp.
+                ParsePropertyMessage(eventType, data, size > 0x10000 ? 0x10000 : size);
                 ParseGameEvent(eventType, data, (uint)len);
+                if ((eventType >= 0x02C2 && eventType <= 0x02C8) || eventType == 0x0312)
+                    enchantment = CaptureEnchantmentEvent(eventType, data, (uint)len);
+                // v85: a prompt a plugin armed an answer for is answered here instead of
+                // opening AC's dialog.
+                if (eventType == ConfirmationResponder.EventConfirmationRequest)
+                    answered = ConfirmationResponder.OnRequest(data, (uint)len);
             }
         }
         catch { }
 
-        return pOriginal(thisPtr, data, size);
+        // AC's ConfirmationRequest handler returns 0 on every path, so an answered prompt
+        // returns the same without reaching it.
+        if (answered)
+            return 0;
+
+        uint status = pOriginal(thisPtr, data, size);
+
+        // Enchantment events are queued AFTER the original ran: by then AC's
+        // CEnchantmentRegistry holds the change (ClientMagicSystem::Handle_Magic__*
+        // update it synchronously), so a plugin that re-reads the registry when the
+        // event reaches it on the pump sees the new state. Queue only, never call
+        // plugins from here (AC's main thread).
+        if (enchantment != null)
+        {
+            try { FlushEnchantmentEvent(enchantment); } catch { }
+        }
+
+        return status;
+    }
+
+    // spike/decal-bridge: set while a game event from the Decal bridge is parsed on the
+    // plugin pump thread, where the main-thread-only live reads must not run.
+    [ThreadStatic] private static bool _fromBridge;
+
+    /// <summary>
+    /// spike/decal-bridge: a game event taken from Decal's raw server message instead of
+    /// the ProcessNetBlobData hook. <paramref name="data"/> is [eventType][payload], as the
+    /// hook sees it. Runs on the pump thread after AC has already applied the event, so an
+    /// enchantment is queued at once, and a purge (no ids on the wire) can't be diffed.
+    /// </summary>
+    internal static unsafe void ProcessBridgeGameEvent(byte* data, int size)
+    {
+        if (data == null || size < 4)
+            return;
+        uint eventType = *(uint*)data;
+        int len = size > 0x4000 ? 0x4000 : size;
+        _fromBridge = true;
+        try
+        {
+            ParseGameEvent(eventType, (IntPtr)data, (uint)len);
+            if ((eventType >= 0x02C2 && eventType <= 0x02C8) && eventType != 0x02C6)
+            {
+                EnchantmentChange? c = CaptureEnchantmentEvent(eventType, (IntPtr)data, (uint)len);
+                if (c != null)
+                    FlushEnchantmentEvent(c);
+            }
+        }
+        catch { }
+        finally { _fromBridge = false; }
     }
 
     private static int _geEventLogCount;
     private static int _hpReadLogCount;
+
+    // Feeds the property caches (AppraisalHooks, PropertyUpdateHooks) from the messages that
+    // carry properties. Parsing only: nothing here touches AC state. Each parser is
+    // bounds-checked against `size` and ignores a message it can't read.
+    private static void ParsePropertyMessage(uint eventType, IntPtr data, int size)
+    {
+        try
+        {
+            if (eventType == PropertyWire.EventIdentifyObjectResponse)
+                AppraisalHooks.OnIdentifyWire(data, size);
+            else if (eventType == PropertyWire.EventPlayerDescription)
+                PropertyUpdateHooks.OnPlayerDescriptionWire(data, size);
+            else if (PropertyWire.IsPropertyUpdateOpcode(eventType))
+                PropertyUpdateHooks.OnUpdateWire(data, size);
+        }
+        catch { }
+    }
 
     // Parse an inbound GameEvent for the events combat cares about. `data` points
     // at the event blob: inner type @ +0, payload @ +4. `size` bounds reads.
@@ -199,6 +294,20 @@ internal static class SmartBoxHooks
             RynthLog.Compat($"GE evt=0x{eventType:X4} len={size} p=[{d1:X8} {d2:X8} {d3:X8}]");
         }
 
+        // v75: the character's titles (0x0029 at login, 0x002B per new title; see CharacterTitles).
+        if (CharacterTitles.IsTitleEvent(eventType))
+        {
+            try { CharacterTitles.OnGameEvent(eventType, data, size, ClientHelperHooks.GetPlayerId()); } catch { }
+            return;
+        }
+
+        // v72: the player-to-player trade events (0x01FD-0x0208; see PlayerTrade).
+        if (PlayerTrade.IsTradeEvent(eventType))
+        {
+            PlayerTrade.OnGameEvent(eventType, data, size);
+            return;
+        }
+
         switch (eventType)
         {
             case 0x01C0: // UpdateHealth: [targetId u32][ratio f32]
@@ -213,7 +322,8 @@ internal static class SmartBoxHooks
                     // The plugin QueryHealth()s its combat target on lock, which is
                     // what makes this fire for the mobs it's actually fighting.
                     // Falls back to the wire-parsed appraisal cache if the read fails.
-                    bool gotReal = ClientObjectHooks.TryReadCreatureMaxHealth(targetId, out uint realMax) && realMax > 0;
+                    uint realMax = 0;
+                    bool gotReal = !_fromBridge && ClientObjectHooks.TryReadCreatureMaxHealth(targetId, out realMax) && realMax > 0;
                     if (gotReal)
                         maxHealth = realMax;
                     else if (ObjectQualityCache.TryGetCreatureVitals(targetId, out CreatureVitals exact) && exact.MaxHealth > 0)
@@ -245,6 +355,7 @@ internal static class SmartBoxHooks
                         RynthLog.Compat($"Combat: kill notify '{msg}'");
                     }
                     PluginManager.QueueKillNotification(msg);
+                    ImGuiBackend.Hud.HudFeed.OnKillMessage(msg);   // kill burst
                 }
                 break;
             }
@@ -259,13 +370,70 @@ internal static class SmartBoxHooks
             {
                 uint err = size >= 8 ? unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4))) : 0;
                 int seq = System.Threading.Interlocked.Increment(ref _useDoneSeq);
-                if (_useDoneLogCount < 25)
+                // v70: the sequence and its error code as one 64-bit value, so a reader
+                // on the plugin pump never pairs one UseDone's number with another's code.
+                System.Threading.Interlocked.Exchange(ref _useDoneLast, ((long)(uint)seq << 32) | err);
+                // AC is about to take one off m_cBusy inline (Handle_Item::UseDone): the engine's
+                // shadow and the plugins' mirrors take it too (2026-10-06, BusyCountHooks.OnUseDone).
+                try { BusyCountHooks.OnUseDone(); } catch { }
+                // Every one while RynthLog.ActionDoneTraceEnabled (the default; 2026-10-05: the
+                // first 25 of a session couldn't show which completion a held cast was waiting on).
+                if (RynthLog.ActionDoneTraceEnabled || _useDoneLogCount < 25)
                 {
                     _useDoneLogCount++;
-                    RynthLog.Compat($"UseDone seq={seq} err=0x{err:X}");
+                    RynthLog.Compat($"UseDone seq={seq} err=0x{err:X}{(err == 0x1D ? " (too busy)" : err == 0 ? " (done)" : "")}");
                 }
                 break;
             }
+
+            case 0x028A: // WeenieError: [errorType u32]. "Your spell fizzled",
+                         // "You don't know that spell", ... — AC's own refusal lines.
+                         // A cast that fizzles ends with this AND a UseDone(None).
+                if (size >= 8)
+                {
+                    uint code = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4)));
+                    RecordWeenieError(eventType, code, 0);
+                    if (code == 0x0529) // TradeComplete (v72 trade state)
+                        PlayerTrade.OnTradeComplete();
+                }
+                break;
+
+            case 0x028B: // WeenieErrorWithString: [errorType u32][string16 text]
+                if (size >= 8)
+                    RecordWeenieError(eventType, unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4))), 0);
+                break;
+
+            case 0x0022: // InventoryPutObjInContainer: [item u32][container u32][placement][type].
+                         // AutoId (Limited): an item that landed in the player's inventory with
+                         // nothing cached is a candidate. Here, not on the server message stream,
+                         // so it works with that stream off (engine.json / /rc netmsg off).
+                if (size >= 12)
+                {
+                    uint putItem = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4)));
+                    uint putContainer = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 8)));
+                    AutoIdService.OnPutInContainer(putItem, putContainer);
+                    EquipmentTracker.OnContained(putItem, putContainer);
+                }
+                break;
+            case 0x0023: // WieldObject: [item u32][EquipMask u32] (ACE GameEventWieldItem).
+                if (size >= 12)
+                    EquipmentTracker.OnWield(
+                        unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4))),
+                        unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 8))));
+                break;
+            case 0x019A: // InventoryPutObjectIn3D: [item u32] (ACE GameEventItemServerSaysMoveItem): dropped.
+                if (size >= 8)
+                    EquipmentTracker.OnDropped(unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4))));
+                break;
+            case 0x00A0: // InventoryServerSaveFailed: [objectId u32][errorType u32] —
+                         // the server refused an inventory change (wield, move, ...).
+                         // Layout from UIQueueManager::ProcessNetBlobData's inline case
+                         // @0x0055C012 (edx=[p], esi=[p+4]) and ACE's writer.
+                if (size >= 12)
+                    RecordWeenieError(eventType,
+                        unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 8))),
+                        unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4))));
+                break;
         }
     }
 
@@ -273,7 +441,224 @@ internal static class SmartBoxHooks
     // at cast time and re-reads it to detect the server finishing the cast.
     private static int _useDoneSeq;
     private static int _useDoneLogCount;
+    // (seq << 32) | errorType of the most recent UseDone; 0 until the first one.
+    private static long _useDoneLast;
+    private static bool _gameEventHookInstalled;
+    /// <summary>True once the game-event detour (UIQueueManager::ProcessNetBlobData) is installed.</summary>
+    public static bool IsGameEventHookInstalled => _gameEventHookInstalled;
     public static int GetUseDoneSeq() => System.Threading.Volatile.Read(ref _useDoneSeq);
+
+    /// <summary>
+    /// v70: the most recent UseDone's sequence number (as GetUseDoneSeq counts them) and its
+    /// WeenieError code (0 = the action completed). Any thread. False when the game-event
+    /// hook isn't installed; seq 0 = no UseDone yet this session.
+    /// </summary>
+    public static bool TryGetLastUseDone(out int seq, out uint error)
+    {
+        long v = System.Threading.Interlocked.Read(ref _useDoneLast);
+        seq = unchecked((int)(v >> 32));
+        error = unchecked((uint)v);
+        return _gameEventHookInstalled;
+    }
+
+    // ── Weenie errors (v70) ─────────────────────────────────────────────
+    // The last refusal the server sent: WeenieError (0x028A), WeenieErrorWithString
+    // (0x028B) or InventoryServerSaveFailed (0x00A0, with the item id). Written on AC's
+    // main thread, read from the plugin pump: four fields, so a lock (never contended).
+    private static readonly object _weenieErrorLock = new();
+    private static int _weenieErrorSeq;
+    private static uint _weenieErrorCode, _weenieErrorEvent, _weenieErrorObject;
+    private static int _weenieErrorLogCount;
+
+    private static void RecordWeenieError(uint eventType, uint code, uint objectId)
+    {
+        int seq;
+        lock (_weenieErrorLock)
+        {
+            seq = ++_weenieErrorSeq;
+            _weenieErrorCode = code;
+            _weenieErrorEvent = eventType;
+            _weenieErrorObject = objectId;
+        }
+        if (_weenieErrorLogCount < 25)
+        {
+            _weenieErrorLogCount++;
+            RynthLog.Compat($"WeenieError seq={seq} evt=0x{eventType:X3} err=0x{code:X4} obj=0x{objectId:X8}");
+        }
+    }
+
+    /// <summary>
+    /// v70: the most recent server refusal (see RecordWeenieError). seq counts them (0 = none
+    /// yet); eventType says which message carried it; objectId is the item for 0x00A0, else 0.
+    /// Any thread. False when the game-event hook isn't installed.
+    /// </summary>
+    public static bool TryGetLastWeenieError(out int seq, out uint error, out uint eventType, out uint objectId)
+    {
+        lock (_weenieErrorLock)
+        {
+            seq = _weenieErrorSeq;
+            error = _weenieErrorCode;
+            eventType = _weenieErrorEvent;
+            objectId = _weenieErrorObject;
+        }
+        return _gameEventHookInstalled;
+    }
+
+    // ── Enchantment events (v70) ────────────────────────────────────────
+    // The player's enchantment changes arrive as these GameEvents (all dispatched by
+    // UIQueueManager::ProcessNetBlobData, the function this file hooks; the case targets
+    // were traced to CM_Magic::DispatchUI_* in the Chorizite map):
+    //   0x02C2 UpdateEnchantment            Enchantment
+    //   0x02C4 UpdateMultipleEnchantments   u32 count + Enchantment[]
+    //   0x02C3 RemoveEnchantment            LayeredSpellId (u16 spell, u16 layer)
+    //   0x02C5 RemoveMultipleEnchantments   u32 count + LayeredSpellId[]
+    //   0x02C7 DispelEnchantment            LayeredSpellId (silent removal)
+    //   0x02C8 DispelMultipleEnchantments   u32 count + LayeredSpellId[]
+    //   0x02C6 PurgeEnchantments            (none: all but vitae go, e.g. on death)
+    //   0x0312 PurgeBadEnchantments         (none: the harmful ones go)
+    // The purges carry no ids, so the player's registry is read just before and just after
+    // AC applies them and the spells that disappeared are reported. Removals report the spell
+    // id (layer stripped), which is what OnEnchantmentRemoved's plugins key on.
+    //
+    // Enchantment on the wire (ACE's writer, 60 bytes, +4 when HasSpellSetId != 0):
+    //   +0 u16 spellId  +2 u16 layer  +4 u16 category  +6 u16 hasSpellSetId  +8 u32 power
+    //   +12 f64 startTime  +20 f64 duration  +28 u32 caster  +32 f32 degradeMod
+    //   +36 f32 degradeLimit  +40 f64 lastDegraded  +48 u32 statModType  +52 u32 key
+    //   +56 f32 value  [+60 u32 spellSetId]
+    private const int EnchantmentWireSize = 60;
+    private const int MaxEnchantmentsPerEvent = 256;
+    private static int _enchantmentEventLogCount;
+
+    private sealed class EnchantmentChange
+    {
+        public uint EventType;
+        public bool Added;
+        public int Count;
+        public uint[] SpellIds = Array.Empty<uint>();
+        public double[] Durations = Array.Empty<double>();
+        /// <summary>Purges: the player's spell ids before AC applied it (null = unreadable).</summary>
+        public uint[]? Before;
+    }
+
+    private static EnchantmentChange? CaptureEnchantmentEvent(uint eventType, IntPtr data, uint size)
+    {
+        // Payload starts at data+4; `size` counts the 4-byte event type too.
+        switch (eventType)
+        {
+            case 0x02C2: // UpdateEnchantment
+            {
+                if (size < 4 + EnchantmentWireSize) return null;
+                var c = new EnchantmentChange { EventType = eventType, Added = true, Count = 1, SpellIds = new uint[1], Durations = new double[1] };
+                ReadWireEnchantment(data, 4, out c.SpellIds[0], out c.Durations[0]);
+                return c.SpellIds[0] != 0 ? c : null;
+            }
+
+            case 0x02C4: // UpdateMultipleEnchantments
+            {
+                if (size < 8) return null;
+                uint count = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4)));
+                if (count == 0 || count > MaxEnchantmentsPerEvent) return null;
+                var c = new EnchantmentChange { EventType = eventType, Added = true, SpellIds = new uint[count], Durations = new double[count] };
+                uint off = 8;
+                for (uint i = 0; i < count; i++)
+                {
+                    if (off + EnchantmentWireSize > size) break;
+                    ushort hasSet = unchecked((ushort)Marshal.ReadInt16(IntPtr.Add(data, (int)off + 6)));
+                    ReadWireEnchantment(data, (int)off, out uint spellId, out double duration);
+                    off += EnchantmentWireSize + (hasSet != 0 ? 4u : 0u);
+                    if (spellId == 0) continue;
+                    c.SpellIds[c.Count] = spellId;
+                    c.Durations[c.Count] = duration;
+                    c.Count++;
+                }
+                return c.Count > 0 ? c : null;
+            }
+
+            case 0x02C3: // RemoveEnchantment
+            case 0x02C7: // DispelEnchantment
+            {
+                if (size < 8) return null;
+                uint spellId = (uint)(ushort)Marshal.ReadInt16(IntPtr.Add(data, 4));
+                if (spellId == 0) return null;
+                return new EnchantmentChange { EventType = eventType, Count = 1, SpellIds = new[] { spellId } };
+            }
+
+            case 0x02C5: // RemoveMultipleEnchantments
+            case 0x02C8: // DispelMultipleEnchantments
+            {
+                if (size < 8) return null;
+                uint count = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, 4)));
+                if (count == 0 || count > MaxEnchantmentsPerEvent) return null;
+                var c = new EnchantmentChange { EventType = eventType, SpellIds = new uint[count] };
+                for (uint i = 0; i < count && 8 + i * 4 + 4 <= size; i++)
+                {
+                    uint spellId = (uint)(ushort)Marshal.ReadInt16(IntPtr.Add(data, (int)(8 + i * 4)));
+                    if (spellId != 0) c.SpellIds[c.Count++] = spellId;
+                }
+                return c.Count > 0 ? c : null;
+            }
+
+            case 0x02C6: // PurgeEnchantments
+            case 0x0312: // PurgeBadEnchantments
+                return new EnchantmentChange { EventType = eventType, Before = SnapshotPlayerSpellIds() };
+        }
+        return null;
+    }
+
+    private static void ReadWireEnchantment(IntPtr data, int off, out uint spellId, out double duration)
+    {
+        spellId = (uint)(ushort)Marshal.ReadInt16(IntPtr.Add(data, off));
+        duration = BitConverter.Int64BitsToDouble(Marshal.ReadInt64(IntPtr.Add(data, off + 20)));
+    }
+
+    private static void FlushEnchantmentEvent(EnchantmentChange c)
+    {
+        // The registry just changed: refresh the off-thread player snapshot NOW (we
+        // are on the main thread, after AC applied the change), before the event is
+        // queued, so a plugin re-reading on the event sees the new state as before.
+        EnchantmentHooks.RefreshPlayerSnapshotNow();
+
+        if (c.Before != null)
+        {
+            // A purge: whatever left the registry.
+            uint[]? after = SnapshotPlayerSpellIds();
+            if (after == null) return;
+            var remaining = new HashSet<uint>(after);
+            var reported = new HashSet<uint>();
+            foreach (uint id in c.Before)
+                if (!remaining.Contains(id) && reported.Add(id))
+                    PluginManager.QueueEnchantmentRemoved(id);
+            LogEnchantmentEvent(c.EventType, reported.Count, 0);
+            return;
+        }
+
+        for (int i = 0; i < c.Count; i++)
+        {
+            if (c.Added) PluginManager.QueueEnchantmentAdded(c.SpellIds[i], c.Durations[i]);
+            else PluginManager.QueueEnchantmentRemoved(c.SpellIds[i]);
+        }
+        LogEnchantmentEvent(c.EventType, c.Count, c.SpellIds[0]);
+    }
+
+    private static void LogEnchantmentEvent(uint eventType, int count, uint firstSpellId)
+    {
+        if (_enchantmentEventLogCount >= 25) return;
+        _enchantmentEventLogCount++;
+        RynthLog.Compat($"Enchantment evt=0x{eventType:X3} count={count} first={firstSpellId}");
+    }
+
+    /// <summary>The player's enchantment spell ids (main thread here), or null when unreadable.</summary>
+    private static unsafe uint[]? SnapshotPlayerSpellIds()
+    {
+        const int Max = 512;
+        uint* ids = stackalloc uint[Max];
+        double* expiry = stackalloc double[Max];
+        int n = EnchantmentHooks.ReadPlayerEnchantments(ids, expiry, Max);
+        if (n < 0) return null;
+        var result = new uint[n];
+        for (int i = 0; i < n; i++) result[i] = ids[i];
+        return result;
+    }
 
     // AttackerNotification (0x01B1) / DefenderNotification (0x01B2). Payload at
     // data+4: string16 name, u32 damageType, f64 percent, u32 damage,
@@ -282,6 +667,9 @@ internal static class SmartBoxHooks
     {
         if (size < 24) return;
         bool attacker = eventType == 0x01B1;
+        // "X hits you": the nameplates' engaged filter keys attackers by name (no id on the wire).
+        if (!attacker)
+            ImGuiBackend.Hud.MonsterHudData.RecordAttacker(ReadString16Latin1(data, 4, size));
 
         int nameLen = (ushort)Marshal.ReadInt16(IntPtr.Add(data, 4));
         int strBlock = ((2 + nameLen + 3) / 4) * 4;       // u16 len + chars, padded to a multiple of 4
@@ -290,6 +678,7 @@ internal static class SmartBoxHooks
         if (critOff + 4 > size) return;
 
         uint damageType = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, off)));
+        double share = BitConverter.Int64BitsToDouble(Marshal.ReadInt64(IntPtr.Add(data, off + 4)));   // damage / the monster's max health
         uint damage = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, off + 12)));
         uint crit = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(data, critOff)));
         if (damage == 0 || damage > 1_000_000) return;
@@ -300,6 +689,8 @@ internal static class SmartBoxHooks
             RynthLog.Compat($"Combat: damage evt 0x{eventType:X3} dmg={damage} crit={crit} atk={attacker} len={size}");
         }
         PluginManager.QueueCombatDamage(damage, damageType, crit != 0, attacker);
+        // RynthVision combat text (and the plate of a monster with no health feed): the attacker event names the monster hit.
+        ImGuiBackend.Hud.HudFeed.OnDamageEvent(attacker, attacker ? ReadString16Latin1(data, 4, size) : null, damage, crit != 0, attacker ? share : 0);
     }
 
     private static SmartBoxEventInfo ReadSmartBoxEventInfo(IntPtr blob)
@@ -327,6 +718,24 @@ internal static class SmartBoxHooks
         {
             return default;
         }
+    }
+
+    // UpdateMotion (0xF74C) for the player with the autonomous flag set: the server's answer to a
+    // MoveToState from this client (layout: opcode, guid, u16 instance, u16 movement seq, u16
+    // server-control seq, u8 autonomous at +14). Counted for the pre-cast stop (PreCastStopRules).
+    private static void NotePlayerMotionEcho(IntPtr blob, SmartBoxEventInfo info)
+    {
+        if (info.BlobSize < 16) return;
+        uint player = ClientHelperHooks.CachedPlayerId;
+        if (player == 0 || info.RawObjectId != player) return;
+        try
+        {
+            IntPtr payloadPtr = Marshal.ReadIntPtr(IntPtr.Add(blob, NetBlobBufPtrOffset));
+            if (payloadPtr == IntPtr.Zero) return;
+            if (Marshal.ReadByte(IntPtr.Add(payloadPtr, 14)) != 0)
+                AcMainThreadQueue.NotePlayerMotionEcho();
+        }
+        catch { }
     }
 
     private static void TryQueueHealthUpdate(IntPtr blob, SmartBoxEventInfo info)
@@ -405,6 +814,7 @@ internal static class SmartBoxHooks
                 return;
 
             uint damageType = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, off)));
+            double share = BitConverter.Int64BitsToDouble(Marshal.ReadInt64(IntPtr.Add(payloadPtr, off + 4)));   // damage / the monster's max health
             uint damage = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, off + 12)));
             uint crit = unchecked((uint)Marshal.ReadInt32(IntPtr.Add(payloadPtr, critOff)));
             if (damage == 0 || damage > 1_000_000)
@@ -417,6 +827,7 @@ internal static class SmartBoxHooks
             }
 
             PluginManager.QueueCombatDamage(damage, damageType, crit != 0, attacker);
+            ImGuiBackend.Hud.HudFeed.OnDamageEvent(attacker, attacker ? ReadString16Latin1(payloadPtr, nameOff, info.BlobSize) : null, damage, crit != 0, attacker ? share : 0);
         }
         catch
         {

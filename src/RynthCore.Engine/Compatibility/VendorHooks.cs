@@ -14,6 +14,10 @@ namespace RynthCore.Engine.Compatibility;
 ///   RecvNotice_CloseVendor           = 0x000BFF40 + 0x00401000 = 0x004C0F40
 ///
 /// We hook the real impl (0x004C5790, called by the thunk) and the close entry directly.
+///
+/// The open detour also feeds <see cref="VendorTrade"/> (the vendor snapshot plugins
+/// read and trade against); the close path goes through <see cref="MarkVendorClosed"/>,
+/// which VendorTrade's main-thread poll also calls when the vendor window goes away.
 /// </summary>
 internal static class VendorHooks
 {
@@ -104,22 +108,62 @@ internal static class VendorHooks
         {
             _statusMessage = ex.Message;
             RynthLog.Compat($"Compat: vendor hooks failed - {ex.Message}");
+            return;
         }
+
+        // Vendor trading rides on these detours (snapshot + close tracking).
+        try { VendorTrade.Initialize(textSection); }
+        catch (Exception ex) { RynthLog.Warn($"VendorTrade: init failed - {ex.GetType().Name}: {ex.Message}"); }
     }
 
     private static void OpenVendorDetour(IntPtr thisPtr, uint vendorId, IntPtr vpRef, IntPtr itemsRef, int shopMode)
     {
+        // Copy the vendor out of the arguments BEFORE the original runs: OpenVendor frees
+        // the item PWDs on its own copy as it turns them into weenie objects.
+        VendorSnapshot? snap = null;
+        if (vendorId != 0)
+        {
+            try { snap = VendorTrade.CaptureFromNotice(vendorId, vpRef, itemsRef, shopMode); }
+            catch { snap = null; }
+        }
+
         _originalOpen!(thisPtr, vendorId, vpRef, itemsRef, shopMode);
         if (vendorId == 0) return;
+
+        try { VendorTrade.OnVendorOpened(thisPtr, vendorId, snap); }
+        catch { }
+
+        // Switching straight to another vendor never sends a close notice; tell plugins.
+        uint prev = _currentVendorId;
         _currentVendorId = vendorId;
+        if (prev != 0 && prev != vendorId)
+            PluginManager.QueueVendorClose(prev);
         PluginManager.QueueVendorOpen(vendorId);
     }
 
     private static void CloseVendorDetour(IntPtr thisPtr, int updating)
     {
         _originalClose!(thisPtr, updating);
+        // The flag is a bool in the low byte (MOV AL,[ESP+4]; TEST AL,AL); the rest of the
+        // stack slot is garbage. With it set, the retail function returns without closing
+        // anything, so neither do we.
+        if ((updating & 0xFF) != 0)
+            return;
+        MarkVendorClosed("close notice");
+    }
+
+    /// <summary>
+    /// The vendor is gone: clear the trade snapshot and raise OnVendorClose once. Called
+    /// from the close detour and from VendorTrade's main-thread poll of gmVendorUI's
+    /// shopVendorID, which backs the notice up for any close path that skips it.
+    /// AC's main thread only.
+    /// </summary>
+    internal static void MarkVendorClosed(string reason)
+    {
         uint vid = _currentVendorId;
         _currentVendorId = 0;
+        try { VendorTrade.OnVendorClosed(reason); }
+        catch { }
         if (vid != 0)
             PluginManager.QueueVendorClose(vid);
     }

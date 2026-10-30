@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the radar's per-kind show boxes (RadarSettingsStore.ShowFlag / ShowKind)
+    the marker kinds (RadarKind) the RynthAi snapshot sends, and the per-kind marker size /
+    name label settings (MarkerStyleSettings). src\RynthCore.Engine\UI\Panels\
+    RadarSettingsStore.cs and UI\Data\RadarSnapshotJson.cs are compiled in, with a synchronous
+    UiBackgroundWriter stub. Every kind must have its own box, Corpses off must hide your corpses
+    too, unknown kinds stay hidden, a plugin-shaped snapshot filters per box, and every box must
+    round-trip through the settings file. Uses RYNTHCORE_RADAR_SETTINGS (temp files); never
+    touches %LOCALAPPDATA%\RynthCore.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RadarSettingsTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Panels\RadarSettingsStore.cs" Link="Engine\RadarSettingsStore.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\RadarSnapshotJson.cs" Link="Engine\RadarSnapshotJson.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Panels\MarkerStyleSettings.cs" Link="Engine\MarkerStyleSettings.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\Panels\CircleClip.cs" Link="Engine\CircleClip.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\Panels\RadarWheel.cs" Link="Engine\RadarWheel.cs" />
+  </ItemGroup>
+
+</Project>

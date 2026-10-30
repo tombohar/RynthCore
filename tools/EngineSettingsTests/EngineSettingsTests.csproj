@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for saving engine.json (2026-10-05; idea from Silentkelpie, rynth PR #1):
+    src\RynthCore.Engine\Plugins\EngineSettings.cs and EngineSettingsFile.cs, compiled in, with a
+    stub RynthLog. A save keeps every key the engine doesn't own (the launcher's) exactly as it
+    was, writes the engine's own keys as before, swaps the file in atomically (no temp file left),
+    and leaves an unreadable engine.json alone instead of overwriting it. The real EngineSettings
+    runs in a child process of this test (its settings path is read once per process), pointed at
+    a temp file with RYNTHCORE_ENGINE_SETTINGS. Never touches %APPDATA%\RynthCore.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>EngineSettingsTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\EngineSettings.cs" Link="Engine\EngineSettings.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\EngineSettingsFile.cs" Link="Engine\EngineSettingsFile.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ReloadCapNotice.cs" Link="Engine\ReloadCapNotice.cs" />
+    <!-- HoldReloadInWorldMaxMinutes: the default and the 1-240 clamp live with the gate. -->
+    <Compile Include="..\..\src\RynthCore.Engine\ReloadInWorldGate.cs" Link="Engine\ReloadInWorldGate.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AutoIdPolicy.cs" Link="Engine\AutoIdPolicy.cs" />
+    <!-- EditIltServerName starts from IltDetect's defaults (IltDetect shares a parser with AelrynthWire). -->
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\IltDetect.cs" Link="Engine\IltDetect.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AelrynthWire.cs" Link="Engine\AelrynthWire.cs" />
+    <!-- Settings > Display for the AC window: the borderless / window-position decisions (pure functions). -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\AcWindowChromePolicy.cs" Link="Engine\AcWindowChromePolicy.cs" />
+  </ItemGroup>
+
+</Project>

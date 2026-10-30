@@ -5,14 +5,17 @@
 //
 //  Order matters. Each phase is wrapped so a failure does not abort the rest:
 //
+//   0. TickPump.StopAndJoin — the plugin pump stops (and its frame in flight
+//      finishes) before any plugin is shut down: no Tick alongside a Shutdown.
 //   1. EndSceneHook.Uninstall — chains into EngineFrameController.Shutdown which
 //      tears down PluginManager (RynthPluginShutdown + FreeLibrary plugins),
-//      OverlayTextureRenderer, ViewportRendererBackend, ViewportPlatformBackend,
-//      DX9Backend, Win32Backend (restores WndProc), and destroys ImGui context.
+//      OverlayTextureRenderer, DX9Backend, and destroys the ImGui context.
 //   2. Drain — sleep so any in-flight EndScene call has returned through the
 //      trampoline before we tear down anything else.
 //   3. AvaloniaOverlay.Stop — Dispatcher shutdown, join STA thread.
-//   4. PluginManager.ShutdownAll — defensive (no-op if step 1 already ran).
+//   4. PluginManager.ShutdownAll — defensive (no-op if step 1 already ran; it
+//      tries again if step 1 left the plugins alone because the pump was
+//      still inside a frame).
 //   5. MH_DisableHook(ALL) + MH_Uninitialize — safety net for Compatibility/*
 //      hooks that aren't in the ImGui chain.
 //
@@ -63,6 +66,10 @@ internal static class EngineLifecycle
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr hObject);
 
+    private static long _lastSignalReloadMs;
+    /// <summary>Environment.TickCount64 of this engine's last SignalReload (0 = none).</summary>
+    internal static long LastSignalReloadMs => Interlocked.Read(ref _lastSignalReloadMs);
+
     internal static bool IsShuttingDown => Volatile.Read(ref _shuttingDown) != 0;
     internal static bool HasShutDown => Volatile.Read(ref _hasShutDown) != 0;
 
@@ -73,6 +80,9 @@ internal static class EngineLifecycle
     /// </summary>
     public static bool SignalReload()
     {
+        // Every caller is a player's request (RL, ERl, /rc rl): the reload cap's chat notice
+        // answers those each time (EntryPoint.ReloadCapped).
+        Interlocked.Exchange(ref _lastSignalReloadMs, Environment.TickCount64);
         IntPtr hEvent = OpenEventW(EVENT_MODIFY_STATE, false, ReloadEventName);
         if (hEvent == IntPtr.Zero)
         {
@@ -106,6 +116,15 @@ internal static class EngineLifecycle
 
         RynthLog.Info("EngineLifecycle: Shutdown beginning.");
 
+        // A reload can come while this generation is still initializing (two RL clicks,
+        // or a file-watcher reload during login). Let InitWorker reach its next step and
+        // stop before tearing anything down under it.
+        Step("InitWorker join", () =>
+        {
+            if (!EntryPoint.WaitForInitWorker(15000))
+                RynthLog.Info("EngineLifecycle: InitWorker still running after 15 s; tearing down anyway.");
+        });
+
         // Stop the hang watchdog BEFORE its beat source (the EndScene detour)
         // is uninstalled. A still-running old-generation watchdog sees the beat
         // go silent, declares a false hang ~4s later, suspends AC's healthy main
@@ -121,6 +140,28 @@ internal static class EngineLifecycle
         // 2026-06-11 DINPUT8 reload wedge.
         Step("AcMainThreadQueue.Disarm", () => Compatibility.AcMainThreadQueue.Disarm());
 
+        // Same for queued panel commands (UI.Data.UiDataHub): never run a
+        // plugin-mutating UI command while the plugins are shutting down.
+        Step("UiDataHub.Disarm", () => UI.Data.UiDataHub.Disarm());
+
+        // Stop the plugin pump (and wait for a frame in flight) BEFORE anything below can
+        // shut a plugin down: EndSceneHook.Uninstall runs PluginManager.ShutdownAll (through
+        // EngineFrameController.Shutdown), and a pump still running would call a plugin's Tick
+        // and events on its own thread while that plugin's Shutdown frees what they use on
+        // this one (audit 2026-10-21, 01 #1). It used to stop further down, after the plugins
+        // were already gone; only the WM_CLOSE path (Win32Backend) stopped it first. Every
+        // shutdown comes through here: the loader's hot reload, ExitProcess and
+        // RtlExitUserProcess, WM_CLOSE, the bar's Sd button. If a frame is still running when
+        // the wait ends, ShutdownAll leaves the plugins alone (PluginShutdownGate).
+        Step("TickPump.StopAndJoin", () => EntryPoint.StopTickPumpAndJoin());
+
+        // AC's UI-pass hook draws the world overlays mid-frame from the same render-side
+        // state EndSceneHook.Uninstall tears down: stop it first (its 80 ms drain covers both).
+        Step("AcUiPassHook.Uninstall", () => AcUiPassHook.Uninstall());
+        // The video patch's scene hook passes straight to AC from here on (AC draws again).
+        Step("VideoPatch.Uninstall", () => VideoPatch.Uninstall());
+        // The ambient light floor's hook passes AC's own colour from here on (no floor).
+        Step("AmbientLight.Uninstall", () => AmbientLight.Uninstall());
         Step("EndSceneHook.Uninstall", () => EndSceneHook.Uninstall());
 
         // Give in-flight EndScene calls a chance to drain. AC's render thread
@@ -140,17 +181,28 @@ internal static class EngineLifecycle
         // → AC chat box stops receiving input after a reload). Idempotent —
         // no-ops if Init never ran or the ImGui path already tore it down.
         Step("Win32Backend.Shutdown (input subclass)", () => ImGuiBackend.Win32Backend.Shutdown());
+        Step("HotkeyService.Shutdown", () => Hotkeys.HotkeyService.Shutdown());
 
-        // Stop the dispatch-file watcher and the auto-ID drain timer before the
-        // tick pump and plugins go away — both otherwise keep firing in the old
-        // generation's (intentionally still-mapped) module across hot-reloads.
+        // Stop the dispatch-file watcher and the auto-ID drain timer — both
+        // otherwise keep firing in the old generation's (intentionally
+        // still-mapped) module across hot-reloads.
         Step("ChatFileDispatcher.Stop", () => Compatibility.ChatFileDispatcher.Stop());
+        Step("LogSettings.StopWatcher", () => LogSettings.StopWatcher());
         Step("AutoIdService.Stop", () => Compatibility.AutoIdService.Stop());
 
-        // Stop the headless tick pump BEFORE plugin shutdown / FreeLibrary.
-        // Otherwise the pump's TickAll/ProcessPendingActions can be mid-call
-        // into a plugin whose code pages we're about to unmap → AV.
-        Step("TickPump.StopAndJoin", () => EntryPoint.StopTickPumpAndJoin());
+        // (The plugin pump stopped at the top, before the plugins were shut down.)
+        // spike/decal-bridge: after the pump (its only reader) has stopped.
+        Step("DecalBridgeHost.Shutdown", () => Compatibility.DecalBridgeHost.Shutdown());
+
+        // The chat log is written on the tick pump (UiDataHub), now stopped. Left open,
+        // it outlived this generation and locked the next one out of the file.
+        Step("ChatModel.CloseLog", () => UI.Data.ChatModel.CloseLog());
+        // Discord posts still in flight would finish in this dying generation's code.
+        Step("ChatDiscord.Shutdown", () => UI.Data.Discord.ChatDiscord.Shutdown());
+        Step("ServerMessageStream.Shutdown", () => Net.ServerMessageStream.Shutdown());
+        Step("FlightRecorder.Shutdown", () => Net.FlightRecorder.Shutdown());
+        // A report still being sent: cancel it and dispose its HttpClient (nothing may outlive this generation).
+        Step("ProblemReport.Shutdown", () => Report.ProblemReport.Shutdown());
 
         Step("PluginManager.ShutdownAll (defensive)", () => PluginManager.ShutdownAll());
 
@@ -160,6 +212,14 @@ internal static class EngineLifecycle
         // returns). Without this, hot-reload fires a CLR exception in the dying
         // module's code at the moment of FreeLibrary.
         Step("HeartbeatLogger.StopAndJoin", () => Compatibility.HeartbeatLogger.StopAndJoin());
+
+        // Every other engine thread (init, pumps, login helpers, D3D9 bootstrap...).
+        // Their sleeps wake at once; a thread still running engine code afterwards
+        // keeps this generation from unloading under the CoreCLR host.
+        Step("EngineThreads.StopAndJoinAll", () => EngineThreads.StopAndJoinAll(3000));
+
+        // Process-wide events: under CoreCLR they would hold this generation.
+        Step("EntryPoint.UninstallManagedExceptionHandlers", EntryPoint.UninstallManagedExceptionHandlers);
 
         Step("MH_DisableHook(ALL)", () =>
         {
@@ -174,6 +234,10 @@ internal static class EngineLifecycle
             int disable = MinHook.MH_DisableHook(MinHook.MH_ALL_HOOKS);
             RynthLog.Info($"MH_DisableHook(ALL) = {MinHook.StatusString(disable)}");
         });
+
+        // Managed plugins' contexts go last: nothing in the engine may call into them
+        // after this (every thread is joined, the hooks are off).
+        Step("ManagedPlugins.UnloadRetired", ManagedPlugins.UnloadRetired);
 
         Volatile.Write(ref _hasShutDown, 1);
         RynthLog.Info("EngineLifecycle: Shutdown complete.");

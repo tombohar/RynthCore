@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RynthCore Decal Bridge: a Decal network filter that lets the RynthCore engine run in
+    the same acclient.exe as Decal (docs/DECAL_BRIDGE_PLAN.md).
+
+    net48 / x86: it loads into Decal's desktop CLR inside the 32-bit client. Built only
+    against Decal's public reference assemblies (Decal.Adapter and the interop PIAs it
+    exposes in its signatures), never shipped with them (Private=false).
+
+      dotnet build -c Release          (also part of RynthCore.sln)
+
+    Needs Decal installed (default C:\Program Files (x86)\Decal 3.0, or -p:DecalDir=...).
+    Without it the project builds nothing useful: a warning, and an empty assembly under
+    bin\<Configuration>-NoDecal\ (never the real output folder), so a machine without
+    Decal can still build the whole solution.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <Platforms>AnyCPU;x86</Platforms>
+    <OutputType>Library</OutputType>
+    <AssemblyName>RynthCore.DecalBridge</AssemblyName>
+    <RootNamespace>RynthCore.DecalBridge</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <Deterministic>true</Deterministic>
+    <Version>0.2.0</Version>
+    <DecalDir Condition="'$(DecalDir)' == ''">C:\Program Files (x86)\Decal 3.0</DecalDir>
+    <DecalAvailable Condition="Exists('$(DecalDir)\Decal.Adapter.dll')">true</DecalAvailable>
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <OutputPath Condition="'$(DecalAvailable)' != 'true'">bin\$(Configuration)-NoDecal\</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(DecalAvailable)' == 'true'">
+    <Reference Include="Decal.Adapter">
+      <HintPath>$(DecalDir)\Decal.Adapter.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Public interop assemblies that appear in Decal.Adapter's own signatures. -->
+    <Reference Include="Decal.Interop.Core"><HintPath>$(DecalDir)\.NET 4.0 PIA\Decal.Interop.Core.DLL</HintPath><Private>false</Private></Reference>
+    <Reference Include="Decal.Interop.Filters"><HintPath>$(DecalDir)\.NET 4.0 PIA\Decal.Interop.Filters.DLL</HintPath><Private>false</Private></Reference>
+    <Reference Include="Decal.Interop.Net"><HintPath>$(DecalDir)\.NET 4.0 PIA\Decal.Interop.Net.DLL</HintPath><Private>false</Private></Reference>
+    <Reference Include="Decal.Interop.Inject"><HintPath>$(DecalDir)\.NET 4.0 PIA\Decal.Interop.Inject.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Decal.Interop.D3DService"><HintPath>$(DecalDir)\.NET 4.0 PIA\Decal.Interop.D3DService.DLL</HintPath><Private>false</Private></Reference>
+    <Reference Include="Decal.Interop.Render"><HintPath>$(DecalDir)\.NET 4.0 PIA\Decal.Interop.Render.DLL</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(DecalAvailable)' != 'true'">
+    <Compile Remove="**\*.cs" />
+  </ItemGroup>
+
+  <Target Name="WarnNoDecal" BeforeTargets="CoreCompile" Condition="'$(DecalAvailable)' != 'true' and '$(RequireDecal)' != 'true'">
+    <Warning Text="RynthCore.DecalBridge: Decal.Adapter.dll not found in '$(DecalDir)' - the Decal bridge is not built (install Decal or pass -p:DecalDir=...)." />
+  </Target>
+
+  <!-- Release builds (installer\Build-Installer.ps1) pass -p:RequireDecal=true: no Decal, no build. -->
+  <Target Name="RequireDecal" BeforeTargets="BeforeBuild" Condition="'$(RequireDecal)' == 'true' and '$(DecalAvailable)' != 'true'">
+    <Error Text="RynthCore.DecalBridge: Decal.Adapter.dll not found in '$(DecalDir)'. The release ships the Decal bridge, so it must be built against Decal's reference assemblies: install Decal 3.0 or pass -p:DecalDir=..." />
+  </Target>
+
+</Project>

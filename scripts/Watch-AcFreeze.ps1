@@ -7,7 +7,8 @@
 #  (MaybeRestartWedgedClients), so it can run with the launcher closed:
 #
 #    * fps=0 with login=1 sustained >= WedgeHoldSeconds   (render dead, alive)
-#    * main-thread queue qd > QueueWedgeDepth with login=1 (queue not draining)
+#    * (inert since 2026-10-01: the engine reports qdrop, a running total of dropped
+#      actions, not a queue depth; healthy clients were being killed on it)
 #    * combat-mode "stuck Ns" >= StanceStuckSeconds        (item-action hard-lock)
 #    * heartbeat file silent > HbStaleSeconds while alive  (engine died in-proc)
 #

@@ -1,14 +1,26 @@
-using ACE.DatLoader;
+// ============================================================================
+//  RynthCore.StatusAgent - Dat/IconDecoder.cs
+//  An item icon (a 0x06 Texture in client_portal.dat) as RGBA pixels, for the
+//  phone remote. Written for RynthCore (MIT) on 2026-10-05.
+//
+//  Written from the Texture file layout as Chorizite's DatReaderWriter (MIT,
+//  see the notice in Dat/DatDatabase.cs) describes it (RenderSurface and
+//  Palette) and the Direct3D pixel-format definitions:
+//    Texture 0x06: id u32, data category u32, width i32, height i32,
+//                  format u32, length i32, data[length], and for the palette
+//                  formats (P8, INDEX16) the default palette id u32.
+//    Palette 0x04: id u32, colour count i32, colours (u32 A8R8G8B8 each).
+//  Formats in the retail portal dat: A8R8G8B8, R8G8B8, R5G6B5, A4R4G4B4, A8,
+//  P8, INDEX16, the landscape R8G8B8 / alpha customs and DXT1/3/5 (DxtUtil.cs).
+//  Raw JPEG textures are not decoded.
+// ============================================================================
+
+using RynthCore.Imaging;
 using RynthCore2.TerrainData;
 
 namespace RynthCore.StatusAgent;
 
-/// <summary>
-/// Decodes an AC item ICON to RGBA pixels. An item's icon DID (PWD _iconID, range 0x06xxxxxx) points
-/// straight at a 0x06 Texture in portal.dat, so this is the Texture path only — trimmed from
-/// AcClientReborn's AcTextureDecoder (no Surface/SurfaceTexture/clothing). Format byte-layout + the
-/// format constants are ported verbatim from ACEmulator's DatLoader.
-/// </summary>
+/// <summary>Decodes an AC item icon (a 0x06 Texture in portal.dat) to RGBA pixels.</summary>
 internal sealed class IconDecoder
 {
     private readonly DatDatabase _portal;
@@ -22,94 +34,113 @@ internal sealed class IconDecoder
         public byte[] Pixels = System.Array.Empty<byte>();
     }
 
-    // Palette (0x04): Id(u32), Colors(List<uint>: i32 count + u32[] ARGB).
-    private uint[]? LoadPalette(uint paletteId)
-    {
-        byte[]? data = _portal.GetFileData(paletteId);
-        if (data == null || data.Length < 8) return null;
-        using var ms = new MemoryStream(data);
-        using var r = new BinaryReader(ms);
-        r.ReadUInt32();
-        int n = r.ReadInt32();
-        if (n <= 0 || n > 100000) return null;
-        var pal = new uint[n];
-        for (int i = 0; i < n; i++)
-        {
-            if (ms.Position + 4 > ms.Length) { System.Array.Resize(ref pal, i); break; }
-            pal[i] = r.ReadUInt32();
-        }
-        return pal;
-    }
+    private const uint A8R8G8B8 = 0x15, R8G8B8 = 0x14, R5G6B5 = 0x17, A4R4G4B4 = 0x1A, A8 = 0x1C,
+        P8 = 0x29, Index16 = 0x65, LscapeR8G8B8 = 0xF3, LscapeAlpha = 0xF4,
+        Dxt1 = 0x31545844, Dxt3 = 0x33545844, Dxt5 = 0x35545844;
 
-    // Texture (0x06): Id(u32),Unknown(i32),Width(i32),Height(i32),Format(u32),Length(i32),Source[Length],
-    //                 if INDEX16/P8: DefaultPaletteId(u32).
+    /// <summary>The texture <paramref name="textureId"/> as RGBA, or null (missing, unsupported or damaged).</summary>
     public Rgba? Decode(uint textureId)
     {
-        byte[]? data = _portal.GetFileData(textureId);
-        if (data == null || data.Length < 24) return null;
-        using var ms = new MemoryStream(data);
-        using var r = new BinaryReader(ms);
-        r.ReadUInt32(); r.ReadInt32();
-        int w = r.ReadInt32(), h = r.ReadInt32();
-        uint fmt = r.ReadUInt32();
-        int len = r.ReadInt32();
-        if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || len < 0 || ms.Position + len > ms.Length) return null;
-        byte[] src = r.ReadBytes(len);
-        uint defPal = 0;
-        if (fmt == 101 /*INDEX16*/ || fmt == 41 /*P8*/) { if (ms.Position + 4 <= ms.Length) defPal = r.ReadUInt32(); }
-
-        var rgba = new byte[w * h * 4];
-        void Px(int i, int rr, int gg, int bb, int aa) { int o = i * 4; rgba[o] = (byte)rr; rgba[o + 1] = (byte)gg; rgba[o + 2] = (byte)bb; rgba[o + 3] = (byte)aa; }
-
-        switch (fmt)
+        try
         {
-            case 827611204: return Wrap(DxtUtil.DecompressDxt1(src, w, h), w, h); // DXT1
-            case 861165636: return Wrap(DxtUtil.DecompressDxt3(src, w, h), w, h); // DXT3
-            case 894720068: return Wrap(DxtUtil.DecompressDxt5(src, w, h), w, h); // DXT5
-            case 20: // R8G8B8 (stored B,G,R)
-                for (int i = 0; i < w * h && i * 3 + 2 < src.Length; i++) Px(i, src[i * 3 + 2], src[i * 3 + 1], src[i * 3], 255);
-                break;
-            case 243: // CUSTOM_LSCAPE_R8G8B8 (stored R,G,B)
-                for (int i = 0; i < w * h && i * 3 + 2 < src.Length; i++) Px(i, src[i * 3], src[i * 3 + 1], src[i * 3 + 2], 255);
-                break;
-            case 21: // A8R8G8B8
-            case 22: // X8R8G8B8
-                for (int i = 0; i < w * h && i * 4 + 3 < src.Length; i++)
-                { int b = src[i * 4], g = src[i * 4 + 1], rr = src[i * 4 + 2], a = fmt == 22 ? 255 : src[i * 4 + 3]; Px(i, rr, g, b, a); }
-                break;
-            case 23: // R5G6B5
-                for (int i = 0; i < w * h && i * 2 + 1 < src.Length; i++)
-                { ushort v = (ushort)(src[i * 2] | (src[i * 2 + 1] << 8)); Px(i, ((v >> 11) & 0x1F) << 3, ((v >> 5) & 0x3F) << 2, (v & 0x1F) << 3, 255); }
-                break;
-            case 26: // A4R4G4B4
-                for (int i = 0; i < w * h && i * 2 + 1 < src.Length; i++)
-                { ushort v = (ushort)(src[i * 2] | (src[i * 2 + 1] << 8)); Px(i, ((v >> 8) & 0xF) * 17, ((v >> 4) & 0xF) * 17, (v & 0xF) * 17, ((v >> 12) & 0xF) * 17); }
-                break;
-            case 28:  // A8 (greyscale)
-            case 244: // LSCAPE_ALPHA
-                for (int i = 0; i < w * h && i < src.Length; i++) Px(i, src[i], src[i], src[i], 255);
-                break;
-            case 101: // INDEX16
-            case 41:  // P8
+            byte[]? file = _portal.GetFileData(textureId);
+            if (file == null || file.Length < 24) return null;
+            var r = new ReadOnlySpan<byte>(file);
+            int w = I32(r, 8), h = I32(r, 12);
+            uint format = U32(r, 16);
+            int length = I32(r, 20);
+            if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || length < 0 || 24L + length > file.Length) return null;
+            var src = r.Slice(24, length);
+            int n = w * h;
+
+            switch (format)
             {
-                uint[]? pal = LoadPalette(defPal);
-                if (pal == null || pal.Length == 0) return null;
-                bool p8 = fmt == 41;
-                for (int i = 0; i < w * h; i++)
-                {
-                    int idx;
-                    if (p8) { if (i >= src.Length) break; idx = src[i]; }
-                    else { if (i * 2 + 1 >= src.Length) break; idx = (ushort)(src[i * 2] | (src[i * 2 + 1] << 8)); }
-                    uint cc = pal[idx % pal.Length];
-                    Px(i, (int)((cc >> 16) & 0xFF), (int)((cc >> 8) & 0xFF), (int)(cc & 0xFF), (int)((cc >> 24) & 0xFF));
-                }
-                break;
+                case Dxt1: return Make(w, h, DxtUtil.DecompressDxt1(src.ToArray(), w, h));
+                case Dxt3: return Make(w, h, DxtUtil.DecompressDxt3(src.ToArray(), w, h));
+                case Dxt5: return Make(w, h, DxtUtil.DecompressDxt5(src.ToArray(), w, h));
             }
-            default:
-                return null; // unhandled format
+
+            var px = new byte[n * 4];
+            switch (format)
+            {
+                case A8R8G8B8:   // B, G, R, A in memory
+                    if (length < n * 4) return null;
+                    for (int i = 0; i < n; i++) Put(px, i, src[i * 4 + 2], src[i * 4 + 1], src[i * 4], src[i * 4 + 3]);
+                    break;
+                case R8G8B8:     // B, G, R
+                    if (length < n * 3) return null;
+                    for (int i = 0; i < n; i++) Put(px, i, src[i * 3 + 2], src[i * 3 + 1], src[i * 3], 255);
+                    break;
+                case LscapeR8G8B8: // R, G, B
+                    if (length < n * 3) return null;
+                    for (int i = 0; i < n; i++) Put(px, i, src[i * 3], src[i * 3 + 1], src[i * 3 + 2], 255);
+                    break;
+                case R5G6B5:
+                    if (length < n * 2) return null;
+                    for (int i = 0; i < n; i++)
+                    {
+                        int v = src[i * 2] | (src[i * 2 + 1] << 8);
+                        // Top bits only (low bits left 0), as the decoder this replaced did.
+                        Put(px, i, (byte)(((v >> 11) & 0x1F) << 3), (byte)(((v >> 5) & 0x3F) << 2), (byte)((v & 0x1F) << 3), 255);
+                    }
+                    break;
+                case A4R4G4B4:
+                    if (length < n * 2) return null;
+                    for (int i = 0; i < n; i++)
+                    {
+                        int v = src[i * 2] | (src[i * 2 + 1] << 8);
+                        Put(px, i, (byte)(((v >> 8) & 0xF) * 17), (byte)(((v >> 4) & 0xF) * 17), (byte)((v & 0xF) * 17), (byte)(((v >> 12) & 0xF) * 17));
+                    }
+                    break;
+                case A8:          // one byte a pixel, shown as an opaque grey level
+                case LscapeAlpha:
+                    if (length < n) return null;
+                    for (int i = 0; i < n; i++) Put(px, i, src[i], src[i], src[i], 255);
+                    break;
+                case P8:
+                case Index16:
+                {
+                    int bpp = format == P8 ? 1 : 2;
+                    if (length < n * bpp || 24L + length + 4 > file.Length) return null;
+                    uint[]? palette = LoadPalette(U32(r, 24 + length));
+                    if (palette == null) return null;
+                    for (int i = 0; i < n; i++)
+                    {
+                        int idx = bpp == 1 ? src[i] : src[i * 2] | (src[i * 2 + 1] << 8);
+                        uint argb = idx < palette.Length ? palette[idx] : 0;
+                        Put(px, i, (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb, (byte)(argb >> 24));
+                    }
+                    break;
+                }
+                default:
+                    return null;
+            }
+            return Make(w, h, px);
         }
-        return new Rgba { Width = w, Height = h, Pixels = rgba };
+        catch
+        {
+            return null;
+        }
     }
 
-    private static Rgba Wrap(byte[] rgba, int w, int h) => new Rgba { Width = w, Height = h, Pixels = rgba }; // DxtUtil already RGBA
+    // A 0x04 Palette's colours (A8R8G8B8), or null.
+    private uint[]? LoadPalette(uint paletteId)
+    {
+        byte[]? file = _portal.GetFileData(paletteId);
+        if (file == null || file.Length < 8) return null;
+        int count = I32(file, 4);
+        if (count < 0 || 8L + count * 4L > file.Length) return null;
+        var colours = new uint[count];
+        for (int i = 0; i < count; i++) colours[i] = U32(file, 8 + i * 4);
+        return colours;
+    }
+
+    private static void Put(byte[] px, int i, byte r, byte g, byte b, byte a)
+    {
+        px[i * 4] = r; px[i * 4 + 1] = g; px[i * 4 + 2] = b; px[i * 4 + 3] = a;
+    }
+
+    private static Rgba Make(int w, int h, byte[] rgba) => new() { Width = w, Height = h, Pixels = rgba };
+    private static int I32(ReadOnlySpan<byte> s, int at) => System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(s.Slice(at));
+    private static uint U32(ReadOnlySpan<byte> s, int at) => System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(at));
 }

@@ -2,9 +2,10 @@
 //  RynthCore.Engine — UI/Panels/NavPanel.cs
 //  Avalonia replica of LegacyNavigationUi.cs (RynthSuite plugin).
 //
-//  Plugin exports used:
-//    RynthPluginGetNavJson     → polled every 1s for live state
-//    RynthPluginSendNavCommand → dispatched on button actions
+//  Data goes through UiDataHub (UI/Data/NavData.cs): UiSources.Nav polls
+//  RynthPluginGetNavJson on the pump thread and NavCommands sends
+//  RynthPluginSendNavCommand there; the ImGui face (ImGui/Panels/NavFace.cs)
+//  reads the same snapshot.
 // ============================================================================
 
 using System;
@@ -19,29 +20,13 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI.Data;
+using Payload = RynthCore.Engine.UI.Data.NavPayload;
 
 namespace RynthCore.Engine.UI.Panels;
 
-[JsonSerializable(typeof(NavPanel.Payload))]
-[JsonSerializable(typeof(NavPanel.NavCmd))]
-[JsonSerializable(typeof(List<NavPanel.NavPoint>))]
-[JsonSerializable(typeof(List<string>), TypeInfoPropertyName = "StringList")]
-[JsonSourceGenerationOptions(PropertyNameCaseInsensitive = true, WriteIndented = false, IncludeFields = false)]
-internal partial class NavPanelJsonContext : JsonSerializerContext { }
-
 internal static class NavPanel
 {
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate IntPtr GetNavJsonFn();
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void SendNavCommandFn(IntPtr ansiJson);
-
-    private static GetNavJsonFn?     _getNavJson;
-    private static SendNavCommandFn? _sendNavCommand;
-
     private static readonly IBrush ColAmber   = new SolidColorBrush(Color.FromRgb(0xE8, 0xB3, 0x33));
     private static readonly IBrush ColGreen   = new SolidColorBrush(Color.FromRgb(0x33, 0xCC, 0x66));
     private static readonly IBrush ColTeal    = new SolidColorBrush(Color.FromRgb(0x26, 0xD9, 0xE6));
@@ -56,62 +41,20 @@ internal static class NavPanel
     private static readonly IBrush ColStartBg = new SolidColorBrush(Color.FromRgb(0x19, 0x61, 0x19));
     private static readonly IBrush ColStopBg  = new SolidColorBrush(Color.FromRgb(0x80, 0x19, 0x19));
 
-    private static readonly string[] RouteTypes = { "Once", "Circular", "Linear", "Follow" };
-    private static readonly string[] AddModes   = { "End", "Above", "Below" };
+    private static readonly string[] RouteTypes = NavCommands.RouteTypes;
+    private static readonly string[] AddModes   = NavCommands.AddModes;
 
-    private static readonly int[] RecallIds =
-    {
-        48, 2645, 2647,
-        1635, 1636,
-        157, 158, 1637,
-        2648, 2649, 2650,
-        2931, 2023, 2041, 2358, 2813, 2941, 2943,
-        3865, 3929, 3930, 4084, 4198, 4213,
-        4907, 4908, 4909,
-        5175, 5330, 5541, 6150, 6321, 6322,
-    };
-
-    // ── Data types (mirror NavBridgePayload / NavCommand on plugin side) ──────
-
-    internal sealed class NavPoint
-    {
-        public int    Idx  { get; set; }
-        public string Type { get; set; } = string.Empty;
-        public string Desc { get; set; } = string.Empty;
-        public double NS   { get; set; }
-        public double EW   { get; set; }
-        public double Z    { get; set; }
-    }
-
-    internal sealed class Payload
-    {
-        public string         ActiveNavName     { get; set; } = string.Empty;
-        public string         NavStatusLine     { get; set; } = string.Empty;
-        public bool           NavIsStuck        { get; set; }
-        public bool           MacroRunning      { get; set; }
-        public bool           NavigationEnabled { get; set; }
-        public int            RouteType         { get; set; }
-        public int            ActiveNavIndex    { get; set; }
-        public List<string>   NavFiles          { get; set; } = new();
-        public List<NavPoint> Points            { get; set; } = new();
-    }
-
-    internal sealed class NavCmd
-    {
-        public string Cmd       { get; set; } = string.Empty;
-        public int    SpellId   { get; set; }
-        public int    Index     { get; set; }
-        public int    RouteType { get; set; }
-        public int    AddMode   { get; set; }
-        public int    InsertAt  { get; set; } = -1;
-        public string NavName   { get; set; } = string.Empty;
-    }
+    private static readonly int[] RecallIds = NavCommands.RecallIds;
 
     private sealed class State
     {
         public Payload Data        = new();
         public int     SelectedIdx = -1;
         public int     AddModeIdx  = 0;
+        public string  SaveName    = string.Empty;
+        public string  ChatText    = string.Empty;
+        public int     ChatFor     = -1;   // waypoint whose command is in ChatText
+        public bool    Typing;     // name box focused: the poll must not rebuild it away
     }
 
     // ── Picker overlay (identical pattern to SettingsPanel) ──────────────────
@@ -195,7 +138,6 @@ internal static class NavPanel
 
     public static Control Create()
     {
-        TryBind();
         var state = new State();
 
         var root = new Border
@@ -229,9 +171,29 @@ internal static class NavPanel
             { e.Handled = true; picker.Close(); }
         };
 
+        // Waypoint list controls live for the panel's lifetime. Rebuild() only refills
+        // waypointStack: a ScrollViewer recreated (or given a new Content) resets its
+        // offset to the top, which made the list jump back every poll and impossible to edit.
+        var waypointStack  = new StackPanel { Spacing = 1 };
+        var waypointScroll = new ScrollViewer
+        {
+            VerticalScrollBarVisibility   = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
+            Content = waypointStack,
+        };
+        var waypointHost = new Border { Height = 200, Child = waypointScroll };
+
+        // Last plugin JSON the panel was built from. A rebuild from a user action
+        // (optimistic local edit) clears it so the next poll always resyncs with the plugin.
+        string lastJson = string.Empty;
+        bool   rebuildFromPoll = false;
+
         void Rebuild()
         {
+            if (!rebuildFromPoll) lastJson = string.Empty;
+            Vector keepOffset = waypointScroll.Offset;
             content.Children.Clear();
+            waypointStack.Children.Clear();
             var d = state.Data;
             bool navActive = d.MacroRunning && d.NavigationEnabled;
 
@@ -341,7 +303,7 @@ internal static class NavPanel
             var addRecallBtn = MakeActionBtn("Add Recall");
             var recallLabels = new string[RecallIds.Length];
             for (int ri = 0; ri < RecallIds.Length; ri++)
-                recallLabels[ri] = $"Spell {RecallIds[ri]} ({RecallIds[ri]})";
+                recallLabels[ri] = NavCommands.RecallLabels[ri];
             addRecallBtn.Click += (_, _) =>
                 picker.Show(addRecallBtn, recallLabels, -1, idx =>
                     Send(new NavCmd { Cmd = "addRecall", SpellId = RecallIds[idx], AddMode = state.AddModeIdx, InsertAt = state.SelectedIdx }));
@@ -366,6 +328,100 @@ internal static class NavPanel
             actionWrap.Children.Add(dunPatrolBtn);
 
             content.Children.Add(actionWrap);
+
+            // ── Chat waypoint ─────────────────────────────────────────────────
+            // Sent as if typed when the route reaches it: /ra, /ub, /mt commands,
+            // game commands, or plain text to say. Placed per the Add mode.
+            // Selecting an existing chat waypoint loads its command; Update saves the edit.
+            bool chatSelected = state.SelectedIdx >= 0 && state.SelectedIdx < d.Points.Count
+                                && d.Points[state.SelectedIdx].Type == "Chat";
+            if (state.SelectedIdx != state.ChatFor)
+            {
+                if (chatSelected) state.ChatText = d.Points[state.SelectedIdx].Text;
+                else if (state.ChatFor >= 0) state.ChatText = string.Empty;
+                state.ChatFor = chatSelected ? state.SelectedIdx : -1;
+            }
+            var chatRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto") };
+            var chatBox = new TextBox
+            {
+                Text = state.ChatText, Watermark = "Chat command, e.g. /ub usei Healing Kit",
+                Background = ColBtnFill, Foreground = ColTextDim,
+                BorderBrush = ColBtnBord, BorderThickness = new Thickness(1),
+                FontSize = 10, Height = 22, Padding = new Thickness(4, 1),
+                Margin = new Thickness(0, 0, 4, 0),
+            };
+            chatBox.TextChanged += (_, _) => state.ChatText = chatBox.Text ?? string.Empty;
+            chatBox.GotFocus    += (_, _) => state.Typing = true;
+            chatBox.LostFocus   += (_, _) => state.Typing = false;
+            var addChatBtn = MakeActionBtn("Add Chat");
+            var updChatBtn = MakeActionBtn("Update");
+            updChatBtn.IsVisible = chatSelected;
+            void AddChat()
+            {
+                string text = state.ChatText.Trim();
+                if (text.Length == 0) return;
+                Send(new NavCmd { Cmd = "addChat", Text = text, AddMode = state.AddModeIdx, InsertAt = state.SelectedIdx });
+                state.ChatText = string.Empty;
+                state.ChatFor = -1;
+                state.Typing = false;
+                Rebuild();
+            }
+            void UpdateChat()
+            {
+                string text = state.ChatText.Trim();
+                if (text.Length == 0 || !chatSelected) return;
+                Send(new NavCmd { Cmd = "editChat", Index = state.SelectedIdx, Text = text });
+                state.Typing = false;
+                Rebuild();
+            }
+            addChatBtn.Click += (_, _) => AddChat();
+            updChatBtn.Click += (_, _) => UpdateChat();
+            chatBox.KeyDown += (_, e) =>
+            {
+                if (e.Key != Avalonia.Input.Key.Enter) return;
+                e.Handled = true;
+                if (chatSelected) UpdateChat(); else AddChat();
+            };
+            Grid.SetColumn(chatBox, 0);
+            Grid.SetColumn(updChatBtn, 1);
+            Grid.SetColumn(addChatBtn, 2);
+            chatRow.Children.Add(chatBox);
+            chatRow.Children.Add(updChatBtn);
+            chatRow.Children.Add(addChatBtn);
+            content.Children.Add(chatRow);
+
+            // ── Save as a named nav ───────────────────────────────────────────
+            // Save Route writes the current file; a route with no file got
+            // nowhere to go and there was no way to name one.
+            var saveAsRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+            var nameBox = new TextBox
+            {
+                Text = state.SaveName, Watermark = "Nav name...",
+                Background = ColBtnFill, Foreground = ColTextDim,
+                BorderBrush = ColBtnBord, BorderThickness = new Thickness(1),
+                FontSize = 10, Height = 22, Padding = new Thickness(4, 1),
+                Margin = new Thickness(0, 0, 4, 0),
+            };
+            nameBox.TextChanged += (_, _) => state.SaveName = nameBox.Text ?? string.Empty;
+            nameBox.GotFocus    += (_, _) => state.Typing = true;
+            nameBox.LostFocus   += (_, _) => state.Typing = false;
+            var saveAsBtn = MakeActionBtn("Save As");
+            void SaveAs()
+            {
+                string name = state.SaveName.Trim();
+                if (name.Length == 0) return;
+                Send(new NavCmd { Cmd = "saveRoute", NavName = name });
+                state.SaveName = string.Empty;
+                state.Typing = false;
+                Rebuild();
+            }
+            saveAsBtn.Click += (_, _) => SaveAs();
+            nameBox.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) { e.Handled = true; SaveAs(); } };
+            Grid.SetColumn(nameBox, 0);
+            Grid.SetColumn(saveAsBtn, 1);
+            saveAsRow.Children.Add(nameBox);
+            saveAsRow.Children.Add(saveAsBtn);
+            content.Children.Add(saveAsRow);
 
             // ── Nav file selector ─────────────────────────────────────────────
             if (d.NavFiles.Count > 0)
@@ -403,7 +459,6 @@ internal static class NavPanel
                 FontSize   = 10,
             });
 
-            var waypointStack = new StackPanel { Spacing = 1 };
             for (int i = 0; i < d.Points.Count; i++)
             {
                 int  ci         = i;
@@ -457,9 +512,7 @@ internal static class NavPanel
                 Grid.SetColumn(indicator, 1);
                 row.Children.Add(indicator);
 
-                string disp = !string.IsNullOrEmpty(pt.Desc)
-                    ? $"[{i}] {pt.Desc}"
-                    : $"[{i}] {pt.Type} ({pt.NS:F2}N, {pt.EW:F2}E, {pt.Z:F1})";
+                string disp = NavCommands.PointText(pt, i);
                 var desc = new TextBlock
                 {
                     Text             = disp,
@@ -482,34 +535,43 @@ internal static class NavPanel
                 waypointStack.Children.Add(row);
             }
 
-            content.Children.Add(new Border
-            {
-                Height = 200,
-                Child = new ScrollViewer
-                {
-                    VerticalScrollBarVisibility   = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
-                    HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
-                    Content = waypointStack,
-                },
-            });
+            content.Children.Add(waypointHost); // same instance every rebuild — keeps scroll offset
+            // Re-apply after layout too: the re-attach / new row extent can coerce it to 0.
+            waypointScroll.Offset = keepOffset;
+            Dispatcher.UIThread.Post(() => waypointScroll.Offset = keepOffset, DispatcherPriority.Loaded);
         }
 
         // ── Poll timer ────────────────────────────────────────────────────────
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        // Reads the hub's snapshot (fetched every 1 s while subscribed, and
+        // right after each command).
+        long seenVersion = -1;
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         timer.Tick += (_, _) =>
         {
-            if (_getNavJson == null) TryBind();
-            if (picker.ActivePicker != null) return;
-            if (!TryFetch(out var fresh)) return;
-            state.Data = fresh;
+            if (picker.ActivePicker != null || state.Typing) return;
+            // A rebuild between press and release eats the click on X / row select. seenVersion
+            // is left alone, so the change is picked up once the pointer leaves the list.
+            if (waypointHost.IsPointerOver) return;
+            var snap = UiSources.Nav.Current;
+            if (snap == null || snap.Version == seenVersion) return;
+            seenVersion = snap.Version;
+            state.Data = snap.Value.Clone();
             Rebuild();
         };
-        timer.Start();
         // Stop with the visual tree — a running DispatcherTimer roots the closed
         // view forever (one immortal poller per open/close). RadarPanel idiom;
         // must restart on attach: drag/resize fires Detached→Attached.
-        root.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
-        root.DetachedFromVisualTree += (_, _) => timer.Stop();
+        root.AttachedToVisualTree += (_, _) =>
+        {
+            UiSources.Nav.Subscribe();
+            UiSources.Nav.RequestRefresh();
+            if (!timer.IsEnabled) timer.Start();
+        };
+        root.DetachedFromVisualTree += (_, _) =>
+        {
+            timer.Stop();
+            UiSources.Nav.Unsubscribe();
+        };
 
         Rebuild();
         return root;
@@ -548,63 +610,5 @@ internal static class NavPanel
         Margin          = new Thickness(0, 0, 4, 4),
     };
 
-    // =========================================================================
-    //  Plugin bridge
-    // =========================================================================
-
-    private static void TryBind()
-    {
-        var plugin = PluginManager.Plugins.FirstOrDefault(
-            p => p.DisplayName.Contains("RynthAi", StringComparison.OrdinalIgnoreCase));
-        if (plugin == null || plugin.ModuleHandle == IntPtr.Zero) return;
-
-        if (_getNavJson == null)
-        {
-            IntPtr p1 = GetProcAddress(plugin.ModuleHandle, "RynthPluginGetNavJson");
-            if (p1 != IntPtr.Zero)
-                _getNavJson = Marshal.GetDelegateForFunctionPointer<GetNavJsonFn>(p1);
-        }
-        if (_sendNavCommand == null)
-        {
-            IntPtr p2 = GetProcAddress(plugin.ModuleHandle, "RynthPluginSendNavCommand");
-            if (p2 != IntPtr.Zero)
-                _sendNavCommand = Marshal.GetDelegateForFunctionPointer<SendNavCommandFn>(p2);
-        }
-    }
-
-    private static bool TryFetch(out Payload payload)
-    {
-        payload = new Payload();
-        if (_getNavJson == null) return false;
-        try
-        {
-            IntPtr ptr = _getNavJson();
-            if (ptr == IntPtr.Zero) return false;
-            string? json = Marshal.PtrToStringAnsi(ptr);
-            if (string.IsNullOrEmpty(json)) return false;
-            var parsed = JsonSerializer.Deserialize(json, NavPanelJsonContext.Default.Payload);
-            if (parsed == null) return false;
-            payload = parsed;
-            return true;
-        }
-        catch { return false; }
-    }
-
-    private static void Send(NavCmd cmd)
-    {
-        if (_sendNavCommand == null) TryBind();
-        if (_sendNavCommand == null) return;
-        IntPtr ansi = IntPtr.Zero;
-        try
-        {
-            string json = JsonSerializer.Serialize(cmd, NavPanelJsonContext.Default.NavCmd);
-            ansi = Marshal.StringToHGlobalAnsi(json);
-            _sendNavCommand(ansi);
-        }
-        catch { }
-        finally
-        {
-            if (ansi != IntPtr.Zero) Marshal.FreeHGlobal(ansi);
-        }
-    }
+    private static void Send(NavCmd cmd) => NavCommands.Send(cmd);
 }

@@ -2,7 +2,7 @@
 
 RynthCore is a modern .NET 10 modding host for Asheron's Call. It combines an x86 NativeAOT in-process engine, a hot-reload-capable loader, an injector, an Avalonia desktop launcher, and a plugin surface that replaces the legacy Decal + UBService + VTank stack with a self-contained RynthCore-native API.
 
-The plugin code (RynthAi etc.) lives in a sibling repository: [RynthSuite](https://github.com/tombohar/RynthSuite).
+The plugin code (RynthAi etc.) lives in a sibling repository: [RynthSuite](https://aelrynth.com/git/rynth/RynthSuite).
 
 ## What it does
 
@@ -86,7 +86,7 @@ For full deploy details, the Inno Setup installer, and gotchas, see [`BUILD.md`]
 ## Repository notes
 
 - Local settings, machine-specific files, generated `bin/`, `obj/`, `.vs/`, `.dotnet-home/` content, and launcher data (profiles, runtime state) are kept out of source control via `.gitignore`
-- Plugin code lives in the [RynthSuite](https://github.com/tombohar/RynthSuite) repo as a sibling clone
+- Plugin code lives in the [RynthSuite](https://aelrynth.com/git/rynth/RynthSuite) repo as a sibling clone
 
 ## Security and secrets
 

@@ -70,6 +70,33 @@ internal static unsafe class GameMatrixCapture
     private static bool _loggedFirstCapture;
 
     public static bool HasCapturedFrame => _hasValidViewProj;
+
+    // Landblock whose local frame the current view matrix is built in: the
+    // anchor (submission / player) landblock when the camera was shifted into
+    // it, else the viewer's own. Anything projecting a world point must first
+    // move that point into this landblock's frame (192 m per landblock step).
+    private static uint _frameLandblock;
+
+    /// <summary>
+    /// Landblock (cellId &gt;&gt; 16) whose local coordinates WorldToScreen expects,
+    /// as of the last CaptureFrame; 0 when unknown. AC's render thread.
+    /// </summary>
+    public static uint FrameLandblock => _frameLandblock;
+
+    // Camera position in the same frame as the view matrix (D3D axes: x = east,
+    // y = up, z = north, FrameLandblock-local), as of the last CaptureFrame.
+    private static float _camX, _camY, _camZ;
+
+    /// <summary>
+    /// The camera's position in WorldToScreen's frame (D3D axes, FrameLandblock-local).
+    /// False before the first capture. AC's render thread.
+    /// </summary>
+    public static bool TryGetCameraPosition(out float x, out float y, out float z)
+    {
+        x = _camX; y = _camY; z = _camZ;
+        return _hasValidViewProj;
+    }
+
     public static uint ViewportWidth => _vpWidth;
     public static uint ViewportHeight => _vpHeight;
 
@@ -100,6 +127,10 @@ internal static unsafe class GameMatrixCapture
         if (pMatrix != null && state == D3DTS_PROJECTION)
         {
             bool isPerspective = Math.Abs(pMatrix[11]) > 0.01f;
+            // Decal clients: a Virindi/Decal/UB 3D pass into its own render target must not
+            // replace AC's projection. Projection sets are rare; only checked with Decal.
+            if (isPerspective && DecalD3D9.Enabled && !ImGuiBackend.DX9Backend.IsRenderingToBackBuffer(dev))
+                isPerspective = false;
             if (isPerspective)
             {
                 for (int i = 0; i < 16; i++)
@@ -144,6 +175,19 @@ internal static unsafe class GameMatrixCapture
             _framesSinceLog = 0;
             RynthLog.D3D9($"GameMatrixCapture: valid={_hasValidViewProj} vp={_vpWidth}x{_vpHeight}");
         }
+    }
+
+    /// <summary>
+    /// Rebuilds the view matrix from AC's camera as it is right now. CaptureFrame runs at
+    /// EndScene, after the frame's 3D scene and AC's UI pass are done, so a draw at the UI pass
+    /// (the Nav3D markers, the world overlays) would otherwise project with the PREVIOUS frame's
+    /// camera: one frame of camera travel off the depth buffer it is tested against, which makes
+    /// unclimbable-slope triangles blink while the player moves. AC's render thread.
+    /// </summary>
+    public static void RefreshView()
+    {
+        if (_hasProj)
+            BuildViewProjFromCamera();
     }
 
     private static void BuildViewProjFromCamera()
@@ -198,6 +242,7 @@ internal static unsafe class GameMatrixCapture
         uint viewerCellId = unchecked((uint)Marshal.ReadInt32(camFrame + CamCellIdOffset));
         uint viewerLandblock = viewerCellId >> 16;
         viewerLbForLog = viewerLandblock;
+        uint frameLandblock = viewerLandblock; // replaced by the anchor when the shift applies
 
         // Prefer the landblock the plugin tick LOCKED IN when it submitted
         // its Nav3D geometry (see Nav3DRenderer.ClearFrame). If we use the
@@ -235,6 +280,7 @@ internal static unsafe class GameMatrixCapture
                 cx += dXBlocks * 192f; // EW shift back into player-landblock frame
                 cy += dYBlocks * 192f; // NS
                 shiftApplied = (dXBlocks != 0 || dYBlocks != 0);
+                frameLandblock = playerLandblock;
             }
             else
             {
@@ -299,6 +345,8 @@ internal static unsafe class GameMatrixCapture
             RynthLog.D3D9($"GameMatrixCapture: viewport={_vpWidth}x{_vpHeight}");
         }
 
+        _camX = px; _camY = py; _camZ = pz;
+        _frameLandblock = frameLandblock;
         _hasValidViewProj = true;
     }
 
@@ -354,8 +402,8 @@ internal static unsafe class GameMatrixCapture
     {
         try
         {
-            IntPtr vtable = Marshal.ReadIntPtr(pDevice);
-            IntPtr setTransformAddr = Marshal.ReadIntPtr(vtable, DeviceVTableIndex.SetTransform * IntPtr.Size);
+            IntPtr setTransformAddr = DecalD3D9.HookTarget(pDevice, DeviceVTableIndex.SetTransform);
+            if (setTransformAddr == IntPtr.Zero) return;   // Decal client and the slot isn't d3d9's: not hooked
 
             _hookDelegate = new SetTransformD(SetTransformDetour);
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_hookDelegate);

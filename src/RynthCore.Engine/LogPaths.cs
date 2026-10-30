@@ -21,13 +21,14 @@
 
 using System;
 using System.IO;
+using RynthCore.Install;
 
 namespace RynthCore.Engine;
 
 internal static class LogPaths
 {
     /// <summary>Unified log directory for all RynthCore components.</summary>
-    internal const string LogDirectory = @"C:\Games\RynthCore\Logs";
+    internal static string LogDirectory => RynthCore.Install.RynthInstallPaths.CoreLogsDir; // C:\Games\RynthCore\Logs by default
 
     /// <summary>Shared launch/orchestration log (injector + launcher + per-engine session pointer).</summary>
     internal const string SharedLogFileName = "RynthCore.log";
@@ -112,6 +113,39 @@ internal static class LogPaths
         }
         catch
         {
+        }
+    }
+
+    /// <summary>The shared native crash log every client appends to (see <see cref="RotateNativeCrashLogAtStartup"/>).</summary>
+    internal const string NativeCrashLogName = "native-crash.log";
+
+    /// <summary>A native-crash.log larger than this is moved aside when a client starts.</summary>
+    internal const long NativeCrashLogRotateBytes = 1L * 1024 * 1024;
+
+    /// <summary>
+    /// Engine-startup rotation of the SHARED native-crash.log (one fixed name for every client,
+    /// so <see cref="RotateAtStartup"/>'s per-PID rule does not cover it). Over
+    /// <see cref="NativeCrashLogRotateBytes"/> it moves to native-crash.log.old (replacing the
+    /// previous one). Must run BEFORE the native logger opens the file. A client that already has
+    /// it open (they open it share-delete) keeps writing to the moved file, which the logger's
+    /// own byte budget keeps bounded; nothing is lost, it just continues in the .old file.
+    /// Best-effort; never throws. Returns true when it moved the file.
+    /// </summary>
+    internal static bool RotateNativeCrashLogAtStartup()
+    {
+        try
+        {
+            string active = Path.Combine(LogDirectory, NativeCrashLogName);
+            if (!File.Exists(active)) return false;
+            if (new FileInfo(active).Length < NativeCrashLogRotateBytes) return false;
+            string rotated = active + ".old";
+            try { if (File.Exists(rotated)) File.Delete(rotated); } catch { }
+            File.Move(active, rotated);
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 

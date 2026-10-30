@@ -6,6 +6,9 @@
     <RuntimeIdentifier>win-x86</RuntimeIdentifier>
     <OutputType>Library</OutputType>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Unreachable code (CS0162) is always a bug here: a misplaced statement after a return
+         once left the plugin render snapshot unpublished and silently disabled every overlay window. -->
+    <WarningsAsErrors>$(WarningsAsErrors);CS0162</WarningsAsErrors>
     <Nullable>enable</Nullable>
     <PublishAot>true</PublishAot>
     <NativeLib>Shared</NativeLib>
@@ -26,11 +29,39 @@
     <Platforms>x86</Platforms>
   </PropertyGroup>
 
+  <!--
+    -p:EngineHost=coreclr builds the engine as a plain managed assembly for the native
+    loader's CoreCLR host (docs/UNLOADABLE_ENGINE_PLAN.md): each hot reload loads it into a
+    fresh collectible AssemblyLoadContext and unloads the old one. Publish it with
+    scripts\Publish-EngineCoreClr.ps1. The default (aot) build is unchanged.
+  -->
+  <PropertyGroup Condition="'$(EngineHost)' == 'coreclr'">
+    <PublishAot>false</PublishAot>
+    <NativeLib></NativeLib>
+    <SelfContained>false</SelfContained>
+    <DefineConstants>$(DefineConstants);ENGINE_CORECLR</DefineConstants>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
     <StackTraceSupport>true</StackTraceSupport>
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
   </PropertyGroup>
+
+  <!--
+    GC segment size (hex, 8 MB). The GC reserves SOH + LOH + POH segments up
+    front, 16 MB each by default on x86: 48 MB of acclient's 4 GB address space
+    per engine copy, kept for the life of the process since a NativeAOT DLL
+    can't be unloaded and every hot-reload loads a fresh copy. 8 MB segments
+    reserve 16 MB. The plugins get the same setting (RynthSuite
+    Plugins/Directory.Build.props). Bare hex: the runtime ignores a 0x prefix.
+  -->
+  <ItemGroup>
+    <IlcArg Include="--runtimeopt:GCSegmentSize=800000" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
@@ -38,12 +69,23 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
     <PackageReference Include="Avalonia.Skia" Version="11.2.3" />
     <PackageReference Include="Avalonia.Themes.Simple" Version="11.2.3" />
+    <!-- Overrides Avalonia.FreeDesktop transitive Tmds.DBus.Protocol (NU1903 / GHSA-xrw6-gwf8-vvr9). -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
     <PackageReference Include="Avalonia.AvaloniaEdit" Version="11.2.0" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="..\RynthCore.App\CharacterCacheStore.cs" Link="Shared\CharacterCacheStore.cs" />
     <Compile Include="..\RynthCore.App\SessionStateStore.cs" Link="Shared\SessionStateStore.cs" />
+    <Compile Include="..\RynthCore.App\BuildVersion.cs" Link="Shared\BuildVersion.cs" />
+    <!-- DXT1/3/5 for AC icons in script windows (UI/ScriptWindows/AcIconDecoder.cs); the StatusAgent's decoder (RynthCore's own, MIT). -->
+    <Compile Include="..\RynthCore.StatusAgent\Dat\DxtUtil.cs" Link="Shared\DxtUtil.cs" />
+    <!-- The byte-ring protocol shared with the Decal bridge plugin (docs/DECAL_BRIDGE_PLAN.md). -->
+    <Compile Include="..\RynthCore.DecalBridge\BridgeProtocol.cs" Link="Shared\BridgeProtocol.cs" />
+    <!-- Plugin manifests: read from each plugin DLL before loading it (Plugins/PluginManifestGate.cs). -->
+    <Compile Include="..\RynthCore.PluginSdk\Manifest\*.cs" Link="Shared\Manifest\%(Filename)%(Extension)" />
+    <!-- The SDK's server-message parsers: /rc netmsg log checks them against the live server (Net/ServerMessageStream.cs). -->
+    <Compile Include="..\RynthCore.PluginSdk\Net\*.cs" Link="Shared\Net\%(Filename)%(Extension)" />
   </ItemGroup>
 
   <!-- Prevent trimmer from removing ImGui.NET's DllImport methods -->
@@ -61,6 +103,19 @@
 
   <ItemGroup>
     <BundledNativeDll Include="Native\cimgui.dll" />
+  </ItemGroup>
+
+  <!-- Phosphor icon font (MIT, Assets\Fonts\Phosphor.LICENSE, THIRD-PARTY-NOTICES.md):
+       inside the engine DLL, read by ImGuiFonts.Preload, so no deploy step ships it. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\Fonts\Phosphor.ttf" LogicalName="RynthCore.Engine.Assets.Fonts.Phosphor.ttf" />
+  </ItemGroup>
+
+  <!-- Barlow Semi Condensed, SemiBold and Bold (OFL 1.1, Assets\Fonts\Barlow.LICENSE,
+       THIRD-PARTY-NOTICES.md): the narrow label face plugin windows ask for (GetUiFont Narrow*). -->
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\Fonts\BarlowSemiCondensed-SemiBold.ttf" LogicalName="RynthCore.Engine.Assets.Fonts.BarlowSemiCondensed-SemiBold.ttf" />
+    <EmbeddedResource Include="Assets\Fonts\BarlowSemiCondensed-Bold.ttf" LogicalName="RynthCore.Engine.Assets.Fonts.BarlowSemiCondensed-Bold.ttf" />
   </ItemGroup>
 
   <ItemGroup>
@@ -115,5 +170,11 @@
       DestinationFiles="@(BundledSupportDll->'$(OutputPath)%(Filename)%(Extension)')"
       SkipUnchangedFiles="true" />
   </Target>
+
+  <ItemGroup>
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file in RynthSuite Plugins\Shared. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+    <Compile Include="..\Shared\DumpInProgressRule.cs" Link="Shared\DumpInProgressRule.cs" />
+  </ItemGroup>
 
 </Project>

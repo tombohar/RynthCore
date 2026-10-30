@@ -44,7 +44,9 @@ scratch/
 # Installer build artifacts
 installer/staging/
 installer/Output/
+installer/Releases/
 
 # Process Monitor / debug log dumps (session junk)
 *.PML
 Logfile*.XML
+out/

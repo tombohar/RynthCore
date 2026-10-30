@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 
 namespace RynthCore.App;
 
@@ -12,7 +13,26 @@ internal sealed class LaunchAccountProfile
 
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string AccountName { get; set; } = string.Empty;
-    public string Password { get; set; } = string.Empty;
+
+    /// The saved password, DPAPI-encrypted for the current Windows user (base64, see
+    /// AccountPasswordProtection). Empty = no password saved. Decrypt only when launching:
+    /// TryGetPasswordForLaunch.
+    public string PasswordProtected { get; set; } = string.Empty;
+
+    /// Plain-text "Password" from a settings file written before passwords were encrypted.
+    /// Read only: AppSettingsStore.Load encrypts it into PasswordProtected and clears this, so it
+    /// is never written again (null is skipped on save). Stays set only if encryption failed.
+    [JsonPropertyName("Password")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LegacyPlainPassword { get; set; }
+
+    /// Set when the saved password can't be decrypted on this Windows user (settings copied
+    /// from another user or PC). The UI asks for the password again; launching is refused.
+    [JsonIgnore]
+    public bool PasswordNeedsReentry { get; set; }
+
+    [JsonIgnore]
+    public bool HasSavedPassword => !string.IsNullOrEmpty(PasswordProtected) || !string.IsNullOrEmpty(LegacyPlainPassword);
     public string CharacterName { get; set; } = string.Empty;
     public string Alias { get; set; } = string.Empty;
     public string ServerId { get; set; } = string.Empty;
@@ -65,7 +85,9 @@ internal sealed class LaunchAccountProfile
         {
             Id = Id,
             AccountName = AccountName,
-            Password = Password,
+            PasswordProtected = PasswordProtected,
+            LegacyPlainPassword = LegacyPlainPassword,
+            PasswordNeedsReentry = PasswordNeedsReentry,
             CharacterName = CharacterName,
             Alias = Alias,
             ServerId = ServerId,
@@ -84,7 +106,9 @@ internal sealed class LaunchAccountProfile
     {
         Id = source.Id;
         AccountName = source.AccountName;
-        Password = source.Password;
+        PasswordProtected = source.PasswordProtected;
+        LegacyPlainPassword = source.LegacyPlainPassword;
+        PasswordNeedsReentry = source.PasswordNeedsReentry;
         CharacterName = source.CharacterName;
         Alias = source.Alias;
         ServerId = source.ServerId;
@@ -97,6 +121,73 @@ internal sealed class LaunchAccountProfile
         OnLoginCommandsByCharacter = new Dictionary<string, List<string>>(source.OnLoginCommandsByCharacter, StringComparer.OrdinalIgnoreCase);
         OnLoginWaitMs = source.OnLoginWaitMs;
     }
+
+    /// <summary>Saves a new password (encrypted at once; the plain text is not kept).</summary>
+    public void SetPassword(string? plainText)
+    {
+        PasswordProtected = AccountPasswordProtection.Protect(plainText);
+        LegacyPlainPassword = null;
+        PasswordNeedsReentry = false;
+    }
+
+    /// <summary>
+    /// Reuses <paramref name="source"/>'s saved password (the same account name on another server).
+    /// The encrypted blob is copied as it is, so the plain text is never handled; it is readable
+    /// here because both profiles belong to the same Windows user's settings.
+    /// </summary>
+    public void CopyPasswordFrom(LaunchAccountProfile source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (!string.IsNullOrEmpty(source.LegacyPlainPassword))
+        {
+            SetPassword(source.LegacyPlainPassword);
+            return;
+        }
+        PasswordProtected = source.PasswordProtected;
+        LegacyPlainPassword = null;
+        PasswordNeedsReentry = source.PasswordNeedsReentry;
+    }
+
+    public void ClearPassword()
+    {
+        PasswordProtected = string.Empty;
+        LegacyPlainPassword = null;
+        PasswordNeedsReentry = false;
+    }
+
+    /// <summary>
+    /// The password to hand the client, decrypted now. True with "" when none is saved. False
+    /// (and PasswordNeedsReentry set) when the saved one can't be decrypted on this Windows user;
+    /// the caller must not launch with an empty password instead. Use the result at once and
+    /// don't store it.
+    /// </summary>
+    public bool TryGetPasswordForLaunch(out string password, out string problem)
+    {
+        problem = string.Empty;
+        if (!string.IsNullOrEmpty(LegacyPlainPassword))
+        {
+            password = LegacyPlainPassword;
+            return true;
+        }
+        if (string.IsNullOrEmpty(PasswordProtected))
+        {
+            password = string.Empty;
+            return true;
+        }
+        if (AccountPasswordProtection.TryUnprotect(PasswordProtected, out password))
+        {
+            PasswordNeedsReentry = false;
+            return true;
+        }
+
+        PasswordNeedsReentry = true;
+        problem = PasswordNeedsReentryMessage(AccountName);
+        return false;
+    }
+
+    public static string PasswordNeedsReentryMessage(string? accountName) =>
+        $"The saved password for account '{accountName}' can't be read on this Windows user " +
+        "(settings copied from another user or PC?). Password needs re-entering: edit the account and type it again.";
 
     public override string ToString()
     {

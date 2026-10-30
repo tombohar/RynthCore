@@ -14,12 +14,18 @@ internal static class EndSceneHook
     private const int MaxOffscreenSkipsBeforeFallback = 120;
     private const int OffscreenFallbackDelayMs = 3000;
     private const int UiInitWarmupFrames = 180;
+    // After a hot reload the device and the game have been running all along: a few
+    // frames is enough (180 was ~1 s more of no overlay on every reload).
+    private const int UiInitWarmupFramesReload = 5;
+    private static int WarmupFrames => EntryPoint.InitCount >= 2 ? UiInitWarmupFramesReload : UiInitWarmupFrames;
 
     // ── FPS Governor — set by plugins via API ───────────────────────
     internal static bool FpsLimitEnabled;
     internal static int FpsTargetFocused = 60;
     internal static int FpsTargetBackground = 30;
     private static readonly Stopwatch _fpsTimer = Stopwatch.StartNew();
+    // Video patch: the cap while AC's 3D scene isn't drawn (VideoPatch.FrameCapThisFrame).
+    private static readonly Stopwatch _videoPatchTimer = Stopwatch.StartNew();
     private static bool _fpsLimiterLoggedOnce;
     private static int _fpsDebugCounter;
     private static long _fpsCounterStart;
@@ -46,6 +52,62 @@ internal static class EndSceneHook
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentProcessId();
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateWaitableTimerExW(IntPtr attributes, string? name, uint flags, uint access);
+
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWaitableTimer(IntPtr timer, ref long dueTime, int period, IntPtr completion, IntPtr arg, [MarshalAs(UnmanagedType.Bool)] bool resume);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+
+    [DllImport("winmm.dll")]
+    private static extern uint timeBeginPeriod(uint ms);
+
+    private const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
+    private const uint TIMER_ALL_ACCESS = 0x1F0003;
+    private static IntPtr _frameTimer;
+    private static bool _frameTimerTried;
+
+    /// <summary>
+    /// Waits <paramref name="ms"/> without burning the CPU. The governor used to wait with
+    /// Sleep(0) in a loop when focused (Sleep(0) returns at once when nothing else is ready,
+    /// so a "capped" focused client spun a whole core) and Sleep(1) in the background (15.6 ms
+    /// timer steps, so a 30 fps cap gave 19 fps, 2026-10-03). A high-resolution waitable timer
+    /// (Windows 10 1803+) wakes within about half a millisecond; without one, timeBeginPeriod(1)
+    /// makes Sleep(1) a 1 ms sleep. The last 0.3 ms is a yield loop for accuracy.
+    /// </summary>
+    private static void WaitFrame(double ms)
+    {
+        if (!_frameTimerTried)
+        {
+            _frameTimerTried = true;
+            try { _frameTimer = CreateWaitableTimerExW(IntPtr.Zero, null, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS); } catch { }
+            if (_frameTimer == IntPtr.Zero) { try { timeBeginPeriod(1); } catch { } }
+            RynthLog.D3D9($"EndSceneHook: FPS governor waits with {(_frameTimer != IntPtr.Zero ? "a high-resolution timer" : "1 ms sleeps")}.");
+        }
+
+        long start = Stopwatch.GetTimestamp();
+        double waitMs = ms - 0.3;
+        if (waitMs > 0.5)
+        {
+            if (_frameTimer != IntPtr.Zero)
+            {
+                long due = -(long)(waitMs * 10_000);   // negative = relative, in 100 ns units
+                if (SetWaitableTimer(_frameTimer, ref due, 0, IntPtr.Zero, IntPtr.Zero, false))
+                    WaitForSingleObject(_frameTimer, (uint)Math.Ceiling(waitMs) + 50);
+            }
+            else
+            {
+                while ((Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency < waitMs - 1.0)
+                    Thread.Sleep(1);
+            }
+        }
+        while ((Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency < ms)
+            Thread.Yield();
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int EndSceneDelegate(IntPtr pDevice);
 
@@ -54,6 +116,8 @@ internal static class EndSceneHook
     private static IntPtr _endSceneAddr;
     private static bool _installed;
     private static int _frameCount;
+    /// <summary>Back-buffer frames drawn (offscreen passes - Decal views, VVS, UB - not counted). Resets on reinstall.</summary>
+    internal static int BackBufferFrames => Volatile.Read(ref _frameCount);
     private static int _renderCount;
     private static int _skipCount;
     private static int _uiFrameCount;
@@ -99,6 +163,30 @@ internal static class EndSceneHook
         }
 
         RynthLog.D3D9("EndSceneHook: FAILED - could not discover vtable after all attempts.");
+    }
+
+    /// <summary>
+    /// Decal clients (D3D9Bootstrapper.DecalInProcess): no D3D9 object is created (Decal
+    /// detours Direct3DCreate9 and CreateDevice). AC's device comes from the Decal bridge
+    /// (Decal's public IDecalCore.GetD3DDevice); Decal has swapped its vtable for a copy, so
+    /// d3d9.dll's original vtable is found by matching and d3d9's own EndScene is hooked
+    /// (DecalD3D9.TryResolve). A heap or image scan is not used: it can't tell AC's device
+    /// from the ones Decal plugins create (measured: it picked another device).
+    /// </summary>
+    public static void InstallWithoutDevice(string installSource)
+    {
+        if (_installed)
+            return;
+        ResetInstallState(installSource);
+        DecalD3D9.Enabled = true;
+        // Resolved (read-only) by EntryPoint before it chose this path; never Decal's code.
+        if (!DecalD3D9.TryResolve())
+        {
+            RynthLog.D3D9("EndSceneHook: FAILED - AC's device couldn't be identified through the Decal bridge; no in-game UI in this client.");
+            return;
+        }
+        RynthLog.D3D9($"EndSceneHook: hooking d3d9's own EndScene @ 0x{DecalD3D9.ResolvedEndScene.ToInt32():X8} ({DecalD3D9.Describe(DecalD3D9.ResolvedEndScene)}).");
+        InstallFromEndSceneAddress(DecalD3D9.ResolvedEndScene);
     }
 
     public static void InstallFromDevice(IntPtr pDevice)
@@ -161,6 +249,7 @@ internal static class EndSceneHook
         // Let the render thread return through the trampoline.
         Thread.Sleep(80);
 
+        DeviceResetHook.Uninstall();
         EngineFrameController.Shutdown();
 
         status = MinHook.MH_RemoveHook(_endSceneAddr);
@@ -225,7 +314,12 @@ internal static class EndSceneHook
                 _skipCount++;
 
                 long offscreenElapsedMs = Environment.TickCount64 - _firstOffscreenTick;
-                if (_skipCount < MaxOffscreenSkipsBeforeFallback && offscreenElapsedMs < OffscreenFallbackDelayMs)
+                // Decal clients: Decal's views, VVS and UB render into their own targets every
+                // frame, so an offscreen EndScene is normal there and the fallback below would
+                // draw our UI (and nav rings) into their textures (measured 2026-09-30). Never
+                // fall back with Decal; without Decal nothing changes.
+                if (DecalD3D9.Enabled ||
+                    (_skipCount < MaxOffscreenSkipsBeforeFallback && offscreenElapsedMs < OffscreenFallbackDelayMs))
                     return _originalEndScene!(pDevice);
 
                 _offscreenFilterDisabled = true;
@@ -235,12 +329,23 @@ internal static class EndSceneHook
             _renderCount++;
             _frameCount++;
 
-            // Per-frame chatbox visibility assertion (no-op unless plugin enables suppression).
-            try { ChatHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
-            // Per-frame retail-radar visibility assertion (no-op unless plugin enables suppression).
-            try { RadarHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
-            // Per-frame retail-powerbar visibility assertion (no-op unless plugin enables suppression).
-            try { PowerbarHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
+            // These four call into gameplay-UI panels they cached (gmMainChatUI, the radar, the
+            // powerbar, the vitals bars). AC frees those when it leaves the world; outside the
+            // world (UiFlowHooks: a screen change seen by the UseNewMode hook or the mode poll)
+            // they don't run. Mode not known yet = as before.
+            if (UiFlowHooks.InWorldOrUnknown && !UiFlowHooks.ClientCleanupStarted)
+            {
+                // Per-frame chatbox visibility assertion (no-op unless plugin enables suppression).
+                try { ChatHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
+                // Per-frame retail-radar visibility assertion (no-op unless plugin enables suppression).
+                try { RadarHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
+                // Per-frame retail-powerbar visibility assertion (no-op unless plugin enables suppression).
+                try { PowerbarHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
+                // Per-frame retail health/stamina/mana bars visibility ("Hide retail vitals").
+                try { RetailVitalsHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
+                // Per-frame retail toolbar + shortcut bar visibility ("Hide retail toolbar").
+                try { RetailToolbarHooks.TickHide(); } catch { /* never let this bring down EndScene */ }
+            }
 
             if (_renderCount == 1 && _offscreenFilterDisabled && _skipCount > 0)
             {
@@ -260,20 +365,49 @@ internal static class EndSceneHook
                 IntPtr actualEndScene = Marshal.ReadIntPtr(deviceVtable, DeviceVTableIndex.EndScene * IntPtr.Size);
                 bool match = actualEndScene == _endSceneAddr;
                 RynthLog.D3D9($"EndSceneHook: Device vtable EndScene=0x{actualEndScene:X8}, hooked=0x{_endSceneAddr:X8} — {(match ? "MATCH" : "MISMATCH")}");
+                if (DecalD3D9.Enabled)
+                    DecalD3D9.FirstFrame(pDevice);
 
-                if (!match && actualEndScene != IntPtr.Zero)
+                if (!match && DecalD3D9.Enabled)
                 {
+                    // Decal client: the device's slot is Decal's wrapper (we hooked d3d9's own
+                    // EndScene, which that wrapper calls). Never rehook onto Decal's code.
+                    RynthLog.D3D9($"EndSceneHook: mismatch expected with Decal (slot is {DecalD3D9.Describe(actualEndScene)}) - keeping the d3d9 hook.");
+                }
+                else if (!match && actualEndScene != IntPtr.Zero)
+                {
+                    // Deep-audit finding #8 (2026-06-18): the old sequence
+                    // disabled+REMOVED the old hook (freeing the trampoline
+                    // _originalEndScene points at) BEFORE attempting the new
+                    // install. If the new MH_CreateHook then threw,
+                    // _originalEndScene was never reassigned — it still bound
+                    // the now-freed trampoline — yet the code force-set
+                    // _installed=true and this function's bottom called
+                    // through it: a use-after-free. Fixed order: only remove
+                    // the OLD hook after the NEW one is confirmed installed;
+                    // on failure, re-enable the OLD hook and keep using its
+                    // still-valid trampoline instead of a dangling one.
                     RynthLog.D3D9("EndSceneHook: Rehooking at the device's actual EndScene address.");
-                    MinHook.MH_DisableHook(_endSceneAddr);
-                    MinHook.MH_RemoveHook(_endSceneAddr);
-                    _installed = false;
+                    IntPtr oldAddr = _endSceneAddr;
+                    EndSceneDelegate? oldOriginal = _originalEndScene;
+                    MinHook.MH_DisableHook(oldAddr);
 
                     InstallFromEndSceneAddress(actualEndScene);
                     if (_installed)
+                    {
+                        // New hook confirmed live — safe to free the old
+                        // trampoline now.
+                        MinHook.MH_RemoveHook(oldAddr);
                         return _originalEndScene!(pDevice);
+                    }
 
-                    RynthLog.D3D9("EndSceneHook: Rehook failed — continuing with original hook.");
-                    // Restore state so we don't keep trying
+                    RynthLog.D3D9("EndSceneHook: Rehook failed — restoring original hook.");
+                    // New install failed (InstallFromEndSceneAddress leaves
+                    // _installed=false on failure). Restore the OLD hook
+                    // rather than trust a dangling delegate.
+                    _endSceneAddr = oldAddr;
+                    _originalEndScene = oldOriginal;
+                    MinHook.Enable(oldAddr);
                     _installed = true;
                 }
             }
@@ -282,11 +416,11 @@ internal static class EndSceneHook
             {
                 if (!_warmupLogged)
                 {
-                    RynthLog.D3D9($"EndSceneHook: Backbuffer detected. Warming up {UiInitWarmupFrames} frame(s) before UI init.");
+                    RynthLog.D3D9($"EndSceneHook: Backbuffer detected. Warming up {WarmupFrames} frame(s) before UI init.");
                     _warmupLogged = true;
                 }
 
-                if (_renderCount < UiInitWarmupFrames)
+                if (_renderCount < WarmupFrames)
                     return _originalEndScene!(pDevice);
 
                 _uiActivated = true;
@@ -303,7 +437,7 @@ internal static class EndSceneHook
 
             if (_uiFrameCount == 60 && RynthCore.Engine.Plugins.EngineSettings.EnableImGuiBackend)
                 RynthLog.D3D9("EndSceneHook: 60 UI frames - ImGui is stable.");
-            if (_renderCount == UiInitWarmupFrames && !RynthCore.Engine.Plugins.EngineSettings.EnableImGuiBackend)
+            if (_renderCount == WarmupFrames && !RynthCore.Engine.Plugins.EngineSettings.EnableImGuiBackend)
                 RynthLog.D3D9("EndSceneHook: ImGui backend disabled via engine.json (EnableImGuiBackend=false). Always-on engine work still runs; only ImGui draw calls are skipped.");
 
             // Avalonia compositor: independent of ImGui. Reads the latest
@@ -313,15 +447,24 @@ internal static class EndSceneHook
             // is visible even when ImGui per-frame work is disabled. Driven
             // here exclusively — EngineFrameController.OnEndScene intentionally
             // does NOT call it (avoids double-blit / TryConsume races).
+            // The UI hides between characters: nothing is drawn at character select or
+            // on the way out, and it's back the moment login completes (an engine
+            // reload synthesises login for a player already in the world).
             try
             {
-                OverlayTextureRenderer.Render(pDevice);
+                if (Compatibility.LoginLifecycleHooks.HasObservedLoginComplete)
+                    OverlayTextureRenderer.Render(pDevice);
             }
             catch (Exception ovEx)
             {
                 if (_uiFrameCount < 30)
                     RynthLog.D3D9($"EndSceneHook: OverlayTextureRenderer.Render error: {ovEx.GetType().Name}: {ovEx.Message}");
             }
+
+            // ImGui draw data (in-client panels, plugin overlay windows such as the Mini Remote)
+            // is submitted LAST so it sits on top of the Avalonia layer. Built in OnEndScene;
+            // guarded internally, so an ImGui draw failure can't skip the original EndScene.
+            EngineFrameController.RenderDeferredImGui();
         }
         catch (Exception ex)
         {
@@ -358,8 +501,8 @@ internal static class EndSceneHook
             int targetFps = isFocused ? FpsTargetFocused : FpsTargetBackground;
             double minFrameMs = 1000.0 / Math.Max(targetFps, 1);
 
-            while (_fpsTimer.Elapsed.TotalMilliseconds < minFrameMs)
-                Thread.Sleep(isFocused ? 0 : 1);
+            double leftMs = minFrameMs - _fpsTimer.Elapsed.TotalMilliseconds;
+            if (leftMs > 0) WaitFrame(leftMs);
             _fpsTimer.Restart();
 
             if (!_fpsLimiterLoggedOnce)
@@ -381,6 +524,23 @@ internal static class EndSceneHook
                 _fpsCounterStart = now;
             }
         }
+
+        // ── Video patch frame cap ───────────────────────────────────
+        // While the video patch skips AC's 3D scene, the loop would just spin faster on
+        // an empty frame: cap it (default 15 fps) so the time is slept. Stacks with the
+        // governor above (the lower rate wins); 0 = no cap (off, focused in "unfocused",
+        // outside the world, or /rc video fps 0). Game logic still runs every frame.
+        try
+        {
+            int vpCap = VideoPatch.FrameCapThisFrame();
+            if (vpCap > 0)
+            {
+                double leftMs = 1000.0 / vpCap - _videoPatchTimer.Elapsed.TotalMilliseconds;
+                if (leftMs > 0) WaitFrame(Math.Min(leftMs, 1000.0 / VideoPatchPolicy.MinFrameCapFps));
+            }
+        }
+        catch { /* never let the cap take EndScene down */ }
+        _videoPatchTimer.Restart();
 
         return _originalEndScene!(pDevice);
     }

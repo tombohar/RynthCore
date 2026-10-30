@@ -30,6 +30,11 @@ namespace RynthCore.Engine.Compatibility;
 /// </summary>
 internal static class GameTickHooks
 {
+    /// <summary>Set once the Decal-coexistence plugin pump starts (no EndScene hook in that
+    /// client): the UseTime detour then also runs EngineFrameController.RunHeadlessPrefetch.
+    /// Never set in a client without Decal.</summary>
+    internal static volatile bool HeadlessPrefetch;
+
     private const int UseTimeVa = 0x00411FA0;   // Client::UseTime — thiscall, returns bool in AL
 
     // Client::UseTime returns a bool (AL): AC's main loop drives it as
@@ -44,15 +49,29 @@ internal static class GameTickHooks
 
     private static ThisCallBoolDelegate? _originalUseTime;
     private static ThisCallBoolDelegate? _useTimeDetour;
+    private static IntPtr _originalUseTimePtr;
     private static IntPtr _targetAddress;
     private static int _installed;
     private static int _exitLatch;
+
+    // Native SEH guard around AC's tick (SehTrampoline v4+). A native AV that unwinds into
+    // this managed detour is fatal under CoreCLR; caught natively, it drops one tick instead.
+    // More than MaxTickFaults within TickFaultWindowMs means AC's state is broken rather than
+    // one bad message, so the guard turns itself off and the next fault ends the client.
+    private const int MaxTickFaults = 5;
+    private const long TickFaultWindowMs = 30_000;
+    private static bool _tickGuard;
+    private static int _tickFaults;
+    private static long _tickFaultWindowStart;
 
     // Verified unique + lands exactly at UseTimeVa offline (tools/pe_pattern.py).
     // Replaces the prior warn-only prologue check; null = wildcard (rel32 call operand).
     private static readonly byte?[] UseTimePattern = [ 0x56, 0x8B, 0xF1, 0xE8, null, null, null, null, 0xE8, null, null, null, null, 0x84, 0xC0, 0x74 ];
 
     public static bool IsInstalled => Volatile.Read(ref _installed) != 0;
+
+    /// <summary>Client::UseTime returned 0: AC's game loop is exiting (any exit path).</summary>
+    public static bool GameLoopExiting => Volatile.Read(ref _exitLatch) != 0;
 
     public static void Initialize()
     {
@@ -79,12 +98,14 @@ internal static class GameTickHooks
             _targetAddress = resolved.Address;
             _useTimeDetour = UseTimeDetour;
             IntPtr detourPtr = Marshal.GetFunctionPointerForDelegate(_useTimeDetour);
-            _originalUseTime = Marshal.GetDelegateForFunctionPointer<ThisCallBoolDelegate>(
-                MinHook.HookCreate(_targetAddress, detourPtr));
+            _originalUseTimePtr = MinHook.HookCreate(_targetAddress, detourPtr);
+            _originalUseTime = Marshal.GetDelegateForFunctionPointer<ThisCallBoolDelegate>(_originalUseTimePtr);
+            _tickGuard = SehTrampoline.IsAvailable && SehTrampoline.NativeVersion >= 4;
             Thread.MemoryBarrier();
             MinHook.Enable(_targetAddress);
             Volatile.Write(ref _installed, 1);
-            RynthLog.Compat($"GameTickHooks: Client::UseTime hooked @ 0x{_targetAddress.ToInt32():X8} ({resolved.Detail}) — cast drain on game-logic tick.");
+            RynthLog.Compat($"GameTickHooks: Client::UseTime hooked @ 0x{_targetAddress.ToInt32():X8} ({resolved.Detail}) — cast drain on game-logic tick; " +
+                (_tickGuard ? "native AV guard on." : $"native AV guard OFF (SehTrampoline v{SehTrampoline.NativeVersion}, needs v4)."));
         }
         catch (Exception ex)
         {
@@ -100,6 +121,25 @@ internal static class GameTickHooks
         // wedges before the new generation's EndScene hook installs.
         try { MainThreadHangWatchdog.MainThreadBeatNoFrame(); }
         catch { }
+        // Diag (diag/logoff-origin): 1 Hz sample of the client's own input-idle clock.
+        try { LogoffOriginProbe.SampleIdleOnGameThread(); }
+        catch { }
+        // Refresh TeleportStateHooks' main-thread cache every real game tick. This
+        // detour (unlike EndScene) fires on AC's true main thread in EVERY mode
+        // including Decal-coexistence (no D3D9 hook there) — without this,
+        // off-thread callers of IsPortaling in coexistence mode would see a
+        // perpetually stale cache since nothing else ever reads it on-thread.
+        // The getter itself does the guarded read + cache write; discard the value.
+        bool portaling = false;
+        try { portaling = TeleportStateHooks.IsPortaling; }
+        catch { }
+        // Death / portal space / teleport lines, for lining crashes up with what
+        // the character was doing (PlayerLifecycleLog). Also the world-transition state the
+        // AcMainThreadQueue drains gate on: sampled BEFORE the cast drain below, so a cast queued
+        // as the player dies is held in this same tick, not run into the death.
+        try { PlayerLifecycleLog.SampleOnGameThread(portaling); }
+        catch { }
+
         // Drain any queued cast BEFORE AC's game-logic tick: SelectItem sets AC's
         // selection and the cast initiates, then THIS SAME UseTime call processes it to
         // completion — mimicking AC's natural input -> UseTime flow. (Draining AFTER the
@@ -108,11 +148,26 @@ internal static class GameTickHooks
         // pending. Must never throw into AC's native frame.
         try { AcMainThreadQueue.DrainCasts(); }
         catch { }
+        // Shortcut slots used or changed from RynthCore (AcShortcuts), the same moment AC's own
+        // keys reach the toolbar: before this tick. Alloc-free when nothing is queued.
+        try { AcShortcuts.Drain(); }
+        catch { }
 
         // Run AC's own game-logic + physics + animation pass.
         int result;
-        try { result = _originalUseTime!(thisPtr); }
-        catch { result = 0; }
+        if (_tickGuard)
+        {
+            result = SehTrampoline.GameTickThiscall(_originalUseTimePtr, thisPtr, out bool avCaught,
+                out uint exAddr, out uint dataAddr, out string module);
+            // 0 would end AC's game loop; a dropped tick must keep it running.
+            if (avCaught)
+                result = OnTickFault(exAddr, dataAddr, module);
+        }
+        else
+        {
+            try { result = _originalUseTime!(thisPtr); }
+            catch { result = 0; }
+        }
 
         // ── Game loop is exiting — quiesce BEFORE AC's teardown ──────────────
         // AC's main loop is `do { } while (UseTime() != 0)`; a 0 return means
@@ -160,15 +215,81 @@ internal static class GameTickHooks
         // site) is already post-physics in the frame, so it was never the
         // trigger. (Casts stay PRE-tick above — their selection-timing
         // requirement, and they go through the separate cast slot.)
+        // Re-sample the world-transition state first: a death, a portal entry or a
+        // landblock jump can begin INSIDE AC's tick above, and the pre-tick sample would
+        // let this drain run queued work into it. Edges are logged once whichever sample
+        // sees them.
+        try
+        {
+            bool portalingAfter = false;
+            try { portalingAfter = TeleportStateHooks.IsPortaling; }
+            catch { }
+            PlayerLifecycleLog.SampleOnGameThread(portalingAfter);
+        }
+        catch { }
         try { AcMainThreadQueue.Drain(); }
         catch { }
+        // Main-thread snapshots the pump reads instead of AC memory (player id,
+        // cast gate, pose, ...). Post-tick, so they reflect this tick's physics.
+        try { MainThreadSnapshots.Tick(); }
+        catch { }
+        try { AcShortcuts.ReadTick(); }
+        catch { }
+        try { AcKeymapLive.Tick(); }
+        catch { }
+        try { AcPanels.Drain(); }
+        catch { }
+        // Decal clients only (no EndScene hook): the prefetches EngineFrameController
+        // runs per frame. False for every other client - one flag check.
+        if (HeadlessPrefetch)
+        {
+            try { ImGuiBackend.EngineFrameController.RunHeadlessPrefetch(); }
+            catch { }
+        }
         // Busy watchdog: also post-tick now. Its decrement / cursor-refresh
         // touch m_cBusy, not the motion sequence, so order is immaterial here;
         // keeping all engine-issued mutations after AC's pass is the invariant.
         try { BusyCountHooks.CheckWatchdog(); }
         catch { }
+        // Flight recorder: per-second summary, stall detectors, scheduled automatic dump.
+        try { Net.FlightRecorder.MainTick(); }
+        catch { }
+        // AC's "server has disconnected" screen: close the client after a short wait so a
+        // launcher can relaunch it (EngineSettings.CloseOnServerDisconnect).
+        try { ServerDisconnectClose.MainTick(); }
+        catch { }
 
         // MUST return Client::UseTime's own bool — AC loops do/while on it.
         return result;
+    }
+
+    /// <summary>
+    /// Logs a native AV caught inside Client::UseTime and returns the value the detour hands
+    /// back to AC's loop (always 1: keep running). Turns the guard off once faults exceed
+    /// the budget, so a client with corrupted state still dies instead of spinning.
+    /// </summary>
+    private static int OnTickFault(uint exAddr, uint dataAddr, string module)
+    {
+        long now = Environment.TickCount64;
+        if (_tickFaults == 0 || now - _tickFaultWindowStart > TickFaultWindowMs)
+        {
+            _tickFaultWindowStart = now;
+            _tickFaults = 0;
+        }
+        _tickFaults++;
+
+        string where = module.Length > 0 ? $"{module}+0x{exAddr:X}" : $"0x{exAddr:X8}";
+        try
+        {
+            RynthLog.Error($"GameTickHooks: access violation inside Client::UseTime at {where} (data 0x{dataAddr:X8}); " +
+                $"tick dropped, client kept running (fault {_tickFaults}/{MaxTickFaults} in {TickFaultWindowMs / 1000}s). Full record in native-crash.log.");
+            if (_tickFaults >= MaxTickFaults)
+            {
+                _tickGuard = false;
+                RynthLog.Error("GameTickHooks: Client::UseTime fault budget exhausted; native AV guard OFF for this session.");
+            }
+        }
+        catch { }
+        return 1;
     }
 }

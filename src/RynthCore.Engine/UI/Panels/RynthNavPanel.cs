@@ -1,11 +1,14 @@
 // ============================================================================
 //  RynthCore.Engine — UI/Panels/RynthNavPanel.cs
-//  Avalonia bar panel for the RynthNav plugin (mesh navigation). Bridges to the
-//  plugin DLL via GetProcAddress: polls a status JSON and drives load/test/preview.
+//  Avalonia bar panel for the RynthNav plugin (mesh navigation): shows its
+//  status and drives load/test/preview/go/move. Data goes through UiDataHub
+//  (UI/Data/RynthNavData.cs): UiSources.RynthNav polls the status on the pump
+//  thread and RynthNavCommands runs the actions there; the ImGui face
+//  (ImGui/Panels/RynthNavFace.cs) reads the same snapshot.
 //  This is the only visible RynthNav surface in Decal-coexistence mode (ImGui and
 //  the Nav3D world overlay are both unavailable there).
 //
-//  Bridge exports (resolved from the RynthNav plugin DLL):
+//  Plugin exports (called by the hub):
 //    RynthNavGetStatusJson()        → ANSI JSON status
 //    RynthNavLoadTile()             → load current landblock's baked tile
 //    RynthNavTestQuery()            → FindNearestPoly at the player
@@ -25,28 +28,12 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using RynthCore.Engine.ImGuiBackend;
 using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI.Data;
 
 namespace RynthCore.Engine.UI.Panels;
 
 internal static class RynthNavPanel
 {
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr GetStatusJsonFn();
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void VoidFn();
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void PreviewFn(IntPtr ansiCoord);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void MoveFn(int cmd);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void GotoFn(IntPtr ansiCoord);
-
-    private static GetStatusJsonFn? _getStatus;
-    private static VoidFn? _loadTile;
-    private static VoidFn? _testQuery;
-    private static PreviewFn? _preview;
-    private static MoveFn? _move;
-    private static GotoFn? _goto;
-    private static bool _bindingLogged;
-
     // ── Palette (matches RynthAiPanel) ──────────────────────────────────────────
     private static readonly IBrush ColTeal   = new SolidColorBrush(Color.FromRgb(0x26, 0xD9, 0xE6));
     private static readonly IBrush ColGreen  = new SolidColorBrush(Color.FromRgb(0x40, 0xD9, 0x73));
@@ -68,7 +55,6 @@ internal static class RynthNavPanel
 
     internal static Control Create()
     {
-        TryBind();
 
         var root = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(10), Spacing = 5, MinWidth = 300 };
 
@@ -96,8 +82,8 @@ internal static class RynthNavPanel
 
         // Actions
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 0 };
-        actions.Children.Add(Btn("Load tile", () => { TryBind(); _loadTile?.Invoke(); }));
-        actions.Children.Add(Btn("Test @ me", () => { TryBind(); _testQuery?.Invoke(); }));
+        actions.Children.Add(Btn("Load tile", RynthNavCommands.LoadTile));
+        actions.Children.Add(Btn("Test @ me", RynthNavCommands.TestQuery));
         root.Children.Add(actions);
         root.Children.Add(Sep());
 
@@ -125,106 +111,49 @@ internal static class RynthNavPanel
 
         // Poll the plugin for status (UI thread).
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        long seenVersion = -1;
         timer.Tick += (_, _) =>
         {
-            if (_getStatus == null) TryBind();
-            Refresh();
+            var snap = UiSources.RynthNav.Current;
+            if (snap == null) { if (_dot != null) _dot.Fill = ColMute; return; }
+            if (snap.Version == seenVersion) return;
+            seenVersion = snap.Version;
+            Refresh(snap.Value);
         };
         var outer = new Border { Background = ColShellBg, CornerRadius = new CornerRadius(5), Child = new ScrollViewer { Content = root } };
-        outer.AttachedToVisualTree   += (_, _) => timer.Start();
-        outer.DetachedFromVisualTree += (_, _) => timer.Stop();
+        outer.AttachedToVisualTree += (_, _) =>
+        {
+            UiSources.RynthNav.Subscribe();
+            UiSources.RynthNav.RequestRefresh();
+            timer.Start();
+        };
+        outer.DetachedFromVisualTree += (_, _) =>
+        {
+            timer.Stop();
+            UiSources.RynthNav.Unsubscribe();
+        };
         return outer;
     }
 
-    private static void Refresh()
+    private static void Refresh(RynthNavStatus st)
     {
-        if (_getStatus == null) { if (_dot != null) _dot.Fill = ColMute; return; }
-        IntPtr ptr;
-        try { ptr = _getStatus(); } catch { return; }
-        if (ptr == IntPtr.Zero) return;
-        string? json = Marshal.PtrToStringAnsi(ptr);
-        if (string.IsNullOrEmpty(json)) return;
-
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            var r = doc.RootElement;
-
-            bool hasPose   = r.TryGetProperty("hasPose", out var v) && v.GetInt32() != 0;
-            string lb      = r.TryGetProperty("landblock", out v) ? v.GetString() ?? "----" : "----";
-            double ns      = r.TryGetProperty("ns", out v) ? v.GetDouble() : 0;
-            double ew      = r.TryGetProperty("ew", out v) ? v.GetDouble() : 0;
-            bool loaded    = r.TryGetProperty("tileLoaded", out v) && v.GetInt32() != 0;
-            string loadLb  = r.TryGetProperty("loadedLb", out v) ? v.GetString() ?? "----" : "----";
-            int polys      = r.TryGetProperty("polyCount", out v) ? v.GetInt32() : 0;
-            string status  = r.TryGetProperty("status", out v) ? v.GetString() ?? "" : "";
-            string path    = r.TryGetProperty("lastPath", out v) ? v.GetString() ?? "" : "";
-
-            // Change-detection: only touch a control when its value actually changed,
-            // so an idle panel issues zero invalidations (no GDI-overlay flicker).
-            SetText(_playerVal, hasPose ? $"0x{lb}   {Loc(ns, 'N', 'S')}  {Loc(ew, 'E', 'W')}" : "— no pose —");
-            SetText(_meshVal, loaded ? $"LOADED 0x{loadLb}  ·  {polys} polys" : "not loaded");
-            SetFg(_meshVal, loaded ? ColGreen : ColAmber);
-            SetFill(_dot, loaded ? ColGreen : (hasPose ? ColAmber : ColMute));
-            SetText(_statusVal, status);
-            SetText(_pathVal, string.IsNullOrEmpty(path) ? "" : "↳ " + path);
-
-            int run  = r.TryGetProperty("runState", out v) ? v.GetInt32() : 0;
-            int turn = r.TryGetProperty("turnState", out v) ? v.GetInt32() : 0;
-            SetBg(_fwdBtn,   run == 1 ? ColGreen : ColBtnFill);
-            SetBg(_backBtn,  run == 2 ? ColGreen : ColBtnFill);
-            SetBg(_leftBtn,  turn == -1 ? ColGreen : ColBtnFill);
-            SetBg(_rightBtn, turn == 1 ? ColGreen : ColBtnFill);
-        }
-        catch { /* transient partial JSON — ignore */ }
+        // Change-detection: only touch a control when its value actually changed,
+        // so an idle panel issues zero invalidations (no GDI-overlay flicker).
+        SetText(_playerVal, st.PlayerText);
+        SetText(_meshVal, st.MeshText);
+        SetFg(_meshVal, st.TileLoaded ? ColGreen : ColAmber);
+        SetFill(_dot, st.TileLoaded ? ColGreen : (st.HasPose ? ColAmber : ColMute));
+        SetText(_statusVal, st.Status);
+        SetText(_pathVal, st.PathText);
+        SetBg(_fwdBtn,   st.RunState == 1 ? ColGreen : ColBtnFill);
+        SetBg(_backBtn,  st.RunState == 2 ? ColGreen : ColBtnFill);
+        SetBg(_leftBtn,  st.TurnState == -1 ? ColGreen : ColBtnFill);
+        SetBg(_rightBtn, st.TurnState == 1 ? ColGreen : ColBtnFill);
     }
 
-    private static void Preview()
-    {
-        TryBind();
-        if (_preview == null) return;
-        string txt = _coordBox?.Text ?? "";
-        IntPtr p = Marshal.StringToHGlobalAnsi(txt);
-        try { _preview(p); }
-        finally { Marshal.FreeHGlobal(p); }
-    }
+    private static void Preview() => RynthNavCommands.Preview(_coordBox?.Text ?? "");
 
-    private static void Go()
-    {
-        TryBind();
-        if (_goto == null) return;
-        string txt = _coordBox?.Text ?? "";
-        IntPtr p = Marshal.StringToHGlobalAnsi(txt);
-        try { _goto(p); }
-        finally { Marshal.FreeHGlobal(p); }
-    }
-
-    // ── Plugin binding ──────────────────────────────────────────────────────────
-    private static void TryBind()
-    {
-        LoadedPlugin? plugin = PluginManager.Plugins.FirstOrDefault(
-            p => p.DisplayName.Contains("RynthNav", StringComparison.OrdinalIgnoreCase));
-        if (plugin == null || plugin.ModuleHandle == IntPtr.Zero) return;
-
-        _getStatus ??= Bind<GetStatusJsonFn>(plugin, "RynthNavGetStatusJson");
-        _loadTile  ??= Bind<VoidFn>(plugin, "RynthNavLoadTile");
-        _testQuery ??= Bind<VoidFn>(plugin, "RynthNavTestQuery");
-        _preview   ??= Bind<PreviewFn>(plugin, "RynthNavPreviewPath");
-        _move      ??= Bind<MoveFn>(plugin, "RynthNavMove");
-        _goto      ??= Bind<GotoFn>(plugin, "RynthNavGoto");
-
-        if (!_bindingLogged && _getStatus != null)
-        {
-            _bindingLogged = true;
-            RynthLog.UI("RynthNavPanel: bound RynthNav plugin exports.");
-        }
-    }
-
-    private static T? Bind<T>(LoadedPlugin plugin, string export) where T : Delegate
-    {
-        IntPtr addr = GetProcAddress(plugin.ModuleHandle, export);
-        return addr == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<T>(addr);
-    }
+    private static void Go() => RynthNavCommands.Goto(_coordBox?.Text ?? "");
 
     // ── UI helpers ──────────────────────────────────────────────────────────────
     private static TextBlock ValueRow(StackPanel parent, string label)
@@ -304,7 +233,7 @@ internal static class RynthNavPanel
             VerticalContentAlignment = VerticalAlignment.Center,
         };
         ToolTip.SetTip(b, tip);
-        b.Click += (_, _) => { TryBind(); _move?.Invoke(cmd); };
+        b.Click += (_, _) => RynthNavCommands.Move(cmd);
         return b;
     }
 
@@ -313,6 +242,4 @@ internal static class RynthNavPanel
     private static void SetBg(Button? b, IBrush br) { if (b != null && !ReferenceEquals(b.Background, br)) b.Background = br; }
     private static void SetFill(Ellipse? e, IBrush br) { if (e != null && !ReferenceEquals(e.Fill, br)) e.Fill = br; }
 
-    private static string Loc(double v, char pos, char neg)
-        => v.ToString("F1", CultureInfo.InvariantCulture).TrimStart('-') + (v >= 0 ? pos : neg);
 }

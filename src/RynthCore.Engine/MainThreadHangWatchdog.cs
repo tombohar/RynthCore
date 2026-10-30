@@ -56,8 +56,15 @@ internal static class MainThreadHangWatchdog
     // x86 CONTEXT is 716 bytes; over-allocate for safety. ContextFlags is at offset 0.
     private const int CONTEXT_SIZE = 1232;
 
+    // While a wedge lasts, the "still hung" line is repeated this often.
+    private const long StillHungRepeatMs = 20_000;
+
+    /// <summary>"unhandled ACCESS_VIOLATION at acclient.exe+0x18712F" when the current hang is a crash dialog.</summary>
+    internal static volatile string? CrashCause;
+
     // Stalls longer than this with no EndScene beat = main thread wedged.
-    private const long HangThresholdMs = 4000;
+    // Also the plugin pump's freeze gate (MainThreadFreeze): one signal for both.
+    internal const long HangThresholdMs = 4000;
     // Max stack samples to take during a single hang (1/sec). A permanent freeze
     // shows a stable eip across these = the true wedge; a transient stall logs
     // RECOVERED. Capped to keep the log readable.
@@ -75,6 +82,12 @@ internal static class MainThreadHangWatchdog
 
     /// <summary>Monotonic EndScene frame count since engine init.</summary>
     internal static int FrameCount => _frameCount;
+
+    /// <summary>True once the main thread has beaten (its id is known). Any thread.</summary>
+    internal static bool HasBeaten => _mainThreadId != 0;
+
+    /// <summary>Environment.TickCount64 of the last main-thread beat. Any thread.</summary>
+    internal static long LastBeatTick => Volatile.Read(ref _lastBeatTick);
 
     /// <summary>
     /// Called from EndSceneDetour on AC's main thread, every frame. Must be
@@ -138,6 +151,7 @@ internal static class MainThreadHangWatchdog
         bool inHang = false;
         int  sample = 0;
         long hangStartBeat = 0;
+        long lastStillHungLog = 0;
 
         while (Volatile.Read(ref _running) != 0)
         {
@@ -147,6 +161,13 @@ internal static class MainThreadHangWatchdog
 
                 uint tid = _mainThreadId;
                 if (tid == 0) continue;                       // EndScene hasn't beaten yet
+
+                // The main thread is writing the OUT OF MEMORY full-memory dump (CrashDump,
+                // from MessageBoxHooks). Neither suspend it nor report the wedge yet: the
+                // launcher kills the client on "still hung after", which would cut the dump
+                // short. The hang is detected and reported as usual once the dump is done.
+                if (CrashDump.FullDumpInProgress)
+                    continue;
 
                 long lastBeat = Volatile.Read(ref _lastBeatTick);
                 long stale    = Environment.TickCount64 - lastBeat;
@@ -160,6 +181,16 @@ internal static class MainThreadHangWatchdog
                         hangStartBeat = lastBeat;
                         RynthLog.Info("================================================================");
                         RynthLog.Error($"==== MAIN THREAD HANG DETECTED tid={tid} build={EntryPoint.BuildStamp} initCount={EntryPoint.InitCount} (stalled {stale}ms) ====");
+                        // A modal dialog (AC's error MessageBox) holds the main thread: say which.
+                        string? box = Compatibility.MessageBoxHooks.Describe();
+                        if (box != null) RynthLog.Error($"  hang cause: {box}");
+                        // The plugin pump stuck in (or crashed inside) a plugin call: say which. A
+                        // native fault in a managed plugin's export is fatal and leaves only
+                        // "TickAll" in the event log; this line is written during the ~12 s the
+                        // crash dump takes (2026-10-13: RynthAi's Tick).
+                        string? pump = Plugins.PluginManager.DescribePumpDispatch();
+                        if (pump != null) RynthLog.Error($"  plugin pump: {pump}");
+                        CrashCause = null;
                     }
 
                     if (sample < MaxSamplesPerHang)
@@ -172,10 +203,26 @@ internal static class MainThreadHangWatchdog
                     {
                         sample++;
                         RynthLog.Info($"  (still hung after {MaxSamplesPerHang} samples — suppressing further samples until recovery)");
+                        lastStillHungLog = Environment.TickCount64;
                         // Confirmed permanent wedge (~10s+): write one targeted
                         // minidump for WinDbg post-mortem if the log stack walk
                         // isn't enough. Once per session.
                         TryWriteHangDump(tid, stale);
+                    }
+                    else if (Environment.TickCount64 - lastStillHungLog >= StillHungRepeatMs)
+                    {
+                        // Repeat the confirmation while the wedge lasts. The
+                        // launcher's wedge check reads only the last 16 KB of
+                        // this log, and plugin lines kept coming after the
+                        // 2026-09-28 12:04 crash dialog, pushing the single
+                        // line out of that window: the crashed client was
+                        // never restarted. The launcher also needs the banner
+                        // in that window (it looks for "still hung after" AFTER
+                        // the last "MAIN THREAD HANG DETECTED"), so the repeat
+                        // carries it: the 18:06 death-portal crash sat frozen
+                        // for over an hour with only the bare repeat.
+                        lastStillHungLog = Environment.TickCount64;
+                        RynthLog.Info($"==== MAIN THREAD HANG DETECTED (continuing) ==== (still hung after {MaxSamplesPerHang} samples — stalled {stale / 1000}s{(CrashCause != null ? ", " + CrashCause : "")})");
                     }
                 }
                 else if (inHang)
@@ -203,10 +250,114 @@ internal static class MainThreadHangWatchdog
                 RynthLog.Info("  (hang minidump disabled via EngineSettings.EnableHangMinidump)");
                 return;
             }
+            if (CrashDump.FullDumpWrittenPath is { } full)
+            {
+                RynthLog.Info($"  (hang minidump skipped: the full-memory dump {full} already covers this hang)");
+                return;
+            }
             CrashDump.WriteSelfDump(
                 $"main-thread hang tid={tid} stale={staleMs}ms build={EntryPoint.BuildStamp}", out _);
         }
         catch { /* a diagnostic must never destabilize the host */ }
+    }
+
+    // ── Crash dialogs ─────────────────────────────────────────────────────
+    // An unhandled exception on AC's main thread ends in msvcr70's _XcptFilter
+    // -> kernelbase!UnhandledExceptionFilter -> NtRaiseHardError: Windows'
+    // "Application Error" box, which waits there - a hang to this watchdog.
+    // The exception is still on that frozen stack: UnhandledExceptionFilter's
+    // one argument is the EXCEPTION_POINTERS. Find it by walking the EBP chain
+    // and checking each frame's first argument for a plausible exception
+    // record + x86 CONTEXT, then log the exception and walk the faulting stack.
+    // Read-only, from this thread, while the main thread sits in the dialog:
+    // nothing runs inside exception dispatch (in-process VEH/SUEF handlers are
+    // fatal in NativeAOT; see CrashLogger).
+
+    private const int CTX_OFF_EBP = 180;
+    private const int X86_CONTEXT_BYTES = 716;
+    private const uint CONTEXT_i386 = 0x10000;
+
+    private static void TryLogUnhandledException(IntPtr hangCtx)
+    {
+        try
+        {
+            uint ebp = (uint)Marshal.ReadInt32(hangCtx, CTX_OFF_EBP);
+            for (int frame = 0; frame < 12 && ebp != 0; frame++)
+            {
+                IntPtr f = (IntPtr)(long)ebp;
+                if (!Compatibility.SmartBoxLocator.IsMemoryReadable(f, 12)) return;
+                uint arg0 = (uint)Marshal.ReadInt32(f, 8);
+                if (TryReadExceptionPointers(arg0, out uint rec, out uint ctx))
+                {
+                    LogUnhandled(rec, ctx);
+                    return;
+                }
+                uint next = (uint)Marshal.ReadInt32(f);
+                if (next <= ebp) return;   // the chain must go up the stack
+                ebp = next;
+            }
+        }
+        catch { /* a diagnostic must never destabilize the host */ }
+    }
+
+    private static bool TryReadExceptionPointers(uint ep, out uint rec, out uint ctx)
+    {
+        rec = ctx = 0;
+        if (ep < 0x10000 || !Compatibility.SmartBoxLocator.IsMemoryReadable((IntPtr)(long)ep, 8)) return false;
+        rec = (uint)Marshal.ReadInt32((IntPtr)(long)ep);
+        ctx = (uint)Marshal.ReadInt32((IntPtr)(long)ep, 4);
+        if (rec < 0x10000 || ctx < 0x10000) return false;
+        if (!Compatibility.SmartBoxLocator.IsMemoryReadable((IntPtr)(long)rec, 80)) return false;
+        if (!Compatibility.SmartBoxLocator.IsMemoryReadable((IntPtr)(long)ctx, X86_CONTEXT_BYTES)) return false;
+        uint code = (uint)Marshal.ReadInt32((IntPtr)(long)rec);
+        uint nParams = (uint)Marshal.ReadInt32((IntPtr)(long)rec, 16);
+        uint flags = (uint)Marshal.ReadInt32((IntPtr)(long)ctx);
+        // System errors (0xC0xxxxxx), C++ throw, breakpoint. The looser 0xC0000000
+        // mask let stack garbage through: a normal close logged "exception
+        // code=0xD5000B88 at 0x00000000" (2026-09-28 20:16).
+        bool plausibleCode = (code & 0xFF000000) == 0xC0000000 || code == 0xE06D7363 || code == 0x80000003;
+        return plausibleCode && nParams <= 15 && (flags & CONTEXT_i386) != 0
+            && Marshal.ReadInt32((IntPtr)(long)ctx, 184) != 0;   // Eip
+    }
+
+    private static void LogUnhandled(uint rec, uint ctx)
+    {
+        IntPtr r = (IntPtr)(long)rec;
+        uint code = (uint)Marshal.ReadInt32(r);
+        uint addr = (uint)Marshal.ReadInt32(r, 12);
+        uint nParams = (uint)Marshal.ReadInt32(r, 16);
+        string name = code switch
+        {
+            0xC0000005 => "ACCESS_VIOLATION",
+            0xC000001D => "ILLEGAL_INSTRUCTION",
+            0xC0000094 => "INT_DIVIDE_BY_ZERO",
+            0xC00000FD => "STACK_OVERFLOW",
+            0xC0000409 => "STACK_BUFFER_OVERRUN",
+            0xC0000374 => "HEAP_CORRUPTION",
+            0xE06D7363 => "C++ exception",
+            _ => "exception",
+        };
+        string where = CrashLogger.ResolveCodeAddr((IntPtr)(long)addr);
+        string detail = "";
+        if (code == 0xC0000005 && nParams >= 2)
+        {
+            uint op = (uint)Marshal.ReadInt32(r, 20);
+            uint target = (uint)Marshal.ReadInt32(r, 24);
+            detail = $" — {(op == 0 ? "read of" : op == 1 ? "write to" : op == 8 ? "execute at" : "access to")} 0x{target:X8}";
+        }
+        CrashCause = $"unhandled {name} at {where}";
+        RynthLog.Error($"==== UNHANDLED EXCEPTION on AC's main thread (Windows' error dialog is open): {name} code=0x{code:X8} at 0x{addr:X8} {where}{detail} ====");
+
+        // Walk the faulting stack from a private copy of the CONTEXT.
+        IntPtr copy = Marshal.AllocHGlobal(CONTEXT_SIZE);
+        try
+        {
+            for (int i = 0; i < CONTEXT_SIZE; i += 4) Marshal.WriteInt32(copy, i, 0);
+            for (int i = 0; i < X86_CONTEXT_BYTES; i += 4)
+                Marshal.WriteInt32(copy, i, Marshal.ReadInt32((IntPtr)(long)ctx, i));
+            CrashLogger.DumpExternalContext(copy, "CRASH");
+        }
+        finally { Marshal.FreeHGlobal(copy); }
     }
 
     private static void CaptureMainThreadStack(uint tid, long staleMs, int sampleNum, bool fullStack)
@@ -247,7 +398,12 @@ internal static class MainThreadHangWatchdog
             RynthLog.Info($"  sample#{sampleNum} (stale {staleMs}ms) eip=0x{eip:X8} {CrashLogger.ResolveCodeAddr((IntPtr)eip)}");
 
             if (fullStack)
+            {
                 CrashLogger.DumpExternalContext(ctx, "HANG");
+                // A closing client stalls in ExitProcess, not in a crash dialog.
+                if (!Compatibility.ProcessExitHooks.TerminationIntercepted)
+                    TryLogUnhandledException(ctx);
+            }
         }
         catch (Exception ex)
         {

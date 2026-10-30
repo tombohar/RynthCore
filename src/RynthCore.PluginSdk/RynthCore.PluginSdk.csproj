@@ -18,4 +18,16 @@
     <AssemblyName>RynthCore.PluginSdk</AssemblyName>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- The engine's API version, compiled in so RynthCoreHost.CurrentApiVersion can't drift from it. -->
+    <Compile Include="..\RynthCore.Engine\Plugins\PluginContractVersion.cs" Link="Shared\PluginContractVersion.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Plugin manifests: generated from the plugin's csproj and embedded in its DLL (see the file).
+         Packed as build\RynthCore.PluginSdk.targets so a PackageReference imports it by itself; with
+         a ProjectReference, Directory.Build.targets imports it (RynthSuite\Plugins does). -->
+    <None Include="build\RynthCore.PluginSdk.targets" Pack="true" PackagePath="build\" />
+  </ItemGroup>
+
 </Project>

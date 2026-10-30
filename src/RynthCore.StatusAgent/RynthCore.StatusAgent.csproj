@@ -19,14 +19,21 @@
     <RootNamespace>RynthCore.StatusAgent</RootNamespace>
     <AssemblyName>RynthCore.StatusAgent</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <Version>1.0.0</Version>
+    <!-- Previous release: 1.0.0. -->
+    <Version>1.0.1</Version>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- Screen-stream capture (GDI BitBlt + JPEG encode). Windows-only; the agent is net*-windows. -->
     <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
-    <!-- WebRTC HD video mode: pure-managed RTCPeerConnection + H.264 RTP packetisation (proven in the spike). -->
-    <PackageReference Include="SIPSorcery" Version="8.0.14" />
+    <!-- WebRTC HD video mode: pure-managed RTCPeerConnection + H.264 RTP packetisation (proven in the spike).
+         10.0.14 is the floor: it fixes GHSA-jwjp-4649-v8jp (SCTP SACK) and GHSA-28gm-jrmw-xx93 (RTP/STUN). -->
+    <PackageReference Include="SIPSorcery" Version="10.0.14" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games). Read only; same file in RynthSuite Plugins\Shared. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
   </ItemGroup>
 
 </Project>

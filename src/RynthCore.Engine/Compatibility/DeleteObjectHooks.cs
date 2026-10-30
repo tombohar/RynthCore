@@ -21,6 +21,7 @@ internal static class DeleteObjectHooks
     private static DeleteObjectDelegate? _originalDeleteObject;
     private static DeleteObjectDelegate? _deleteObjectDetour;
     private static IntPtr _targetAddress;
+    private static IntPtr _objectMaint;   // ACCObjectMaint* seen on AC's own deletes (RemoveClientObject)
     private static string _statusMessage = "Not probed yet.";
 
     public static bool IsInstalled { get; private set; }
@@ -68,13 +69,91 @@ internal static class DeleteObjectHooks
     private static int DeleteObjectDetour(IntPtr thisPtr, uint objectId)
     {
         RecursionGuard.Tick("DeleteObjectHooks.DeleteObject");
+        if (thisPtr != IntPtr.Zero) _objectMaint = thisPtr;
         if (objectId != 0)
         {
+            ObjectFreshness.Forget(objectId);
             PaletteCache.Remove(objectId);
+            ClientObjectHooks.ForgetCreateSeed(objectId);
             PluginManager.QueueDeleteObject(objectId);
-            AutoIdService.Evict(objectId);
+            AutoIdService.OnClientRelease(objectId);
         }
 
         return _originalDeleteObject!(thisPtr, objectId);
+    }
+
+    // ── v83 RemoveClientObject: drop a "ghost" from the client (2026-10-12) ──────────────
+    // A ghost is an object the client still draws but the server no longer has for this player
+    // (Drakkon in 0x6146: four Olthoi he stood and swung at for 25 minutes; every attack was
+    // answered by an immediate AttackDone, they never moved and never died). Nothing ever deletes
+    // them: only the server's DeleteObject would, and it doesn't know the client still has them.
+    // This runs the same client function every server DeleteObject ends in -
+    // ACCObjectMaint::DeleteObject(this, id), the one this hook watches - so the client forgets
+    // the object the way it forgets a corpse that decays. If the object is real after all, the
+    // server's next CreateObject for it (when it comes back into view) brings it back.
+    // Refused: no ACCObjectMaint seen yet (no delete since the hook went in), the player, anything
+    // that isn't a creature, players, and any object the server sent a message about in the last
+    // RemoveMinQuietMs (it is real).
+
+    /// <summary>An object the server talked about this recently is never removed.</summary>
+    public const long RemoveMinQuietMs = 5000;
+
+    public enum RemoveResult { Removed = 1, Refused = 0, Unavailable = -1, Queued = 2 }
+
+    /// <summary>True once AC's own DeleteObject has run (the ACCObjectMaint pointer is known).</summary>
+    public static bool CanRemove => IsInstalled && _objectMaint != IntPtr.Zero;
+
+    /// <summary>Why <paramref name="objectId"/> may not be removed, or null when it may.</summary>
+    public static string? RemoveRefusal(uint objectId, long nowMs)
+    {
+        if (objectId == 0) return "no object";
+        uint player = ClientHelperHooks.CachedPlayerId;
+        if (player == 0 || objectId == player) return "the player";
+        if (!ClientObjectHooks.TryGetSnapshotItemType(objectId, out uint type)) return "not in the client's object table";
+        if ((type & 0x10) == 0) return "not a creature";
+        if (ClientObjectHooks.TryGetSnapshotPwdInfo(objectId, out uint bf, out _, out _) && (bf & 0x8) != 0) return "a player";
+        long age = ObjectFreshness.AgeMs(objectId, nowMs);
+        if (age >= 0 && age < RemoveMinQuietMs) return $"the server sent a message about it {age} ms ago";
+        return null;
+    }
+
+    /// <summary>Remove <paramref name="objectId"/> from the client (see above). Off AC's main thread
+    /// it is queued and checked again when it runs.</summary>
+    public static RemoveResult RemoveClientObject(uint objectId, out string? refusal)
+    {
+        refusal = null;
+        if (!CanRemove) { refusal = "the client's DeleteObject isn't bound yet"; return RemoveResult.Unavailable; }
+        refusal = RemoveRefusal(objectId, Environment.TickCount64);
+        if (refusal != null) return RemoveResult.Refused;
+        // PR #8's gate: also queued on the main thread while a death/portal transition holds work
+        // (the queue refuses it then, so the caller sees Refused and asks again later).
+        if (AcMainThreadQueue.MustQueue(teardown: false))
+            return AcMainThreadQueue.EnqueueRemoveClientObject(objectId) ? RemoveResult.Queued : RemoveResult.Refused;
+        return RemoveNow(objectId) ? RemoveResult.Removed : RemoveResult.Refused;
+    }
+
+    /// <summary>AC's main thread: the checks again, then ACCObjectMaint::DeleteObject.</summary>
+    internal static bool RemoveNow(uint objectId)
+    {
+        if (!CanRemove || !MainThreadGuard.IsOnMainThread()) return false;
+        string? why = RemoveRefusal(objectId, Environment.TickCount64);
+        if (why != null)
+        {
+            RynthLog.Compat($"RemoveClientObject 0x{objectId:X8}: not removed - {why}.");
+            return false;
+        }
+        try
+        {
+            // Through the detour's original: the hook's own bookkeeping (plugins' OnDeleteObject,
+            // caches) runs as for a server delete.
+            DeleteObjectDetour(_objectMaint, objectId);
+            RynthLog.Compat($"RemoveClientObject 0x{objectId:X8}: removed from the client (ghost).");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"RemoveClientObject 0x{objectId:X8} failed - {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
     }
 }

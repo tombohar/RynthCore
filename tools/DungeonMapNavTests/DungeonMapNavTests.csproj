@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the Dungeon Map's coordinate mapping (src\RynthCore.Engine\UI\Data\
+    DungeonMapMath.cs, compiled in): screen <-> world through pan, zoom and rotation, world <->
+    RynthAi nav coordinates, a route point's floor by Z, the floor under a click, picking.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>DungeonMapNavTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\DungeonMapMath.cs" Link="Engine\DungeonMapMath.cs" />
+  </ItemGroup>
+
+</Project>

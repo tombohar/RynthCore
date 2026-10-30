@@ -161,6 +161,24 @@ internal static class ClientObjectHooks
     private static uint _cachedLandcell;    // player cell id (landblock = cell >> 16)
     private static float _cachedPx, _cachedPy, _cachedPz;   // [status-export] player cell-local position (for the live map dot)
     private static uint _playerStatsCacheOwner;
+    // Primary attributes 1..6 (index = stype), buffed and raw, and the int64 properties plugins
+    // ask about (TotalExperience 1, AvailableExperience 2, AvailableLuminance 6, MaximumLuminance 7):
+    // main-thread-only Inq* reads, served to the off-thread plugin pump from this snapshot.
+    private static readonly uint[] _cachedAttrBuffed = new uint[7];
+    private static readonly uint[] _cachedAttrRaw = new uint[7];
+    // 1 TotalExperience, 2 AvailableExperience, 6 AvailableLuminance, 7 MaximumLuminance, then
+    // Aelrynth's Bank session totals (custom ids, absent on other servers): 9101 Radiance earned,
+    // 9102 Luminance auto-banked, 9103 Luminance drawn from the bank. RynthTracker reads them.
+    private static readonly uint[] PlayerQuadStypes = { 1u, 2u, 6u, 7u, 9101u, 9102u, 9103u };
+    private static readonly Dictionary<uint, long> _cachedPlayerQuad = new();
+    // Secondary attributes (vitals) by stype 1..6 from InqAttribute2ndBaseLevel: the buffed
+    // maximums RynthAi's getcharvital_buffedmax and RynthLua read.
+    private static readonly uint[] _cachedAttr2nd = new uint[7];
+    // Skill levels by stype 1..54 (InqSkillLevel), buffed and raw.
+    private const int MaxSkillStype = 54;
+    private static readonly int[] _cachedSkillLevelBuffed = new int[MaxSkillStype + 1];
+    private static readonly int[] _cachedSkillLevelRaw = new int[MaxSkillStype + 1];
+    private static readonly bool[] _cachedSkillLevelKnown = new bool[MaxSkillStype + 1];
     private static DateTime _lastPlayerStatsPrefetchUtc = DateTime.MinValue;
     private const int PlayerStatsPrefetchThrottleMs = 1000;
 
@@ -213,9 +231,107 @@ internal static class ClientObjectHooks
     private static readonly object _objectIdentityCacheLock = new();
     private static readonly Dictionary<uint, string> _objectNameCache = new();
     private static readonly Dictionary<uint, uint> _objectTypeCache = new();
+    // Live PublicWeenieDesc _location (CURRENT_WIELDED_LOCATION) per object, so the
+    // off-thread pump reads where an item is wielded from the client, not from an
+    // appraisal/update cache that can be stale after an equip swap.
+    private static readonly Dictionary<uint, int> _objectLocationCache = new();
+    // Live PublicWeenieDesc _stackSize per object: the caches only know a stack the
+    // server sent an update or appraisal for, so an unappraised stack read as 1.
+    private static readonly Dictionary<uint, int> _objectStackCache = new();
     private static DateTime _lastObjectIdentityPrefetchUtc = DateTime.MinValue;
     private static bool _loggedObjectIdentityServe;
     private const int ObjectIdentityPrefetchThrottleMs = 500;
+
+    // Create-time identity seeds. ACCObjectMaint::CreateObject receives the server's
+    // PublicWeenieDesc, which already carries the object's name and ITEM_TYPE before
+    // qualities/appraisal exist. The main-thread snapshot above can't resolve names for
+    // ~10 s after login (qualities not populated yet), so off-thread readers fall back to
+    // these seeds when the snapshot has no entry (or reports type 0). Entries live from
+    // create until delete; the cap only guards against a missed delete hook.
+    private static readonly object _createSeedLock = new();
+    private static readonly Dictionary<uint, string> _createSeedNames = new(1024);
+    private static readonly Dictionary<uint, uint> _createSeedTypes = new(1024);
+    private const int CreateSeedCap = 16384;
+    // PublicWeenieDesc field offsets (Chorizite Weenie.cs; same layout the PWD-direct
+    // fallbacks in TryGetObjectName / TryGetItemType read from the embedded copy).
+    // PwdTypeOffset is declared with the other PublicWeenieDesc offsets further down.
+    private const int PwdNameOffset = 4;
+    private static int _createSeedCount;
+    private static bool _loggedCreateSeedServe;
+
+    // Every id the same walk visited, swapped whole (readers never see a half-built array).
+    private static volatile uint[] _liveObjectIds = Array.Empty<uint>();
+
+    /// <summary>
+    /// Ids of every weenie object the client knew at the last identity snapshot (main-thread
+    /// walk, at most ~0.5 s old). Empty until the first snapshot.
+    /// </summary>
+    public static uint[] LiveObjectIds => _liveObjectIds;
+
+    // ── Snapshot-only reads (monster nameplates) ────────────────────────────
+    // The same main-thread snapshots the off-thread pump is served, readable
+    // from ANY thread without resolving the object: a dictionary lookup, never
+    // an AC call. Used where a few hundred ids are scanned several times a
+    // second (ImGui/MonsterHud), so the live paths' per-id native calls stay out.
+
+    /// <summary>The attackable snapshot's value (main-thread ObjectIsAttackable, ~0.5 s old). False when not sampled.</summary>
+    public static bool TryGetSnapshotAttackable(uint objectId, out bool attackable)
+    {
+        lock (_attackableCacheLock)
+            return _attackableCache.TryGetValue(objectId, out attackable);
+    }
+
+    /// <summary>The identity snapshot's name (~0.5 s old).</summary>
+    public static bool TryGetSnapshotName(uint objectId, out string name)
+    {
+        lock (_objectIdentityCacheLock)
+        {
+            if (_objectNameCache.TryGetValue(objectId, out string? n)) { name = n; return true; }
+        }
+        name = string.Empty;
+        return false;
+    }
+
+    /// <summary>The identity snapshot's ITEM_TYPE flags (~0.5 s old).</summary>
+    public static bool TryGetSnapshotItemType(uint objectId, out uint typeFlags)
+    {
+        lock (_objectIdentityCacheLock)
+            return _objectTypeCache.TryGetValue(objectId, out typeFlags);
+    }
+
+    /// <summary>The position snapshot's cell + landblock-local origin (~0.1 s old).</summary>
+    public static bool TryGetSnapshotPosition(uint objectId, out uint objCellId, out float x, out float y, out float z)
+    {
+        lock (_positionCacheLock)
+        {
+            if (_positionCache.TryGetValue(objectId, out PosEntry p))
+            {
+                objCellId = p.Cell; x = p.X; y = p.Y; z = p.Z;
+                return true;
+            }
+        }
+        objCellId = 0; x = y = z = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// The PWD snapshot's ObjectDescriptionFlags bitfield (BF_PLAYER 0x8, BF_CORPSE
+    /// 0x2000, BF_PORTAL 0x40000, ...), container and wielder (~0.1 s old). Any
+    /// thread: on the main thread too it reads the snapshot, never AC memory
+    /// (the Sense scan, 2026-09-30).
+    /// </summary>
+    public static bool TryGetSnapshotPwdInfo(uint objectId, out uint bitfield, out uint containerId, out uint wielderId)
+    {
+        if (TryGetPwdSnapshot(objectId, out PwdEntry e))
+        {
+            bitfield = e.Bitfield;
+            containerId = e.Container;
+            wielderId = e.Wielder;
+            return true;
+        }
+        bitfield = containerId = wielderId = 0;
+        return false;
+    }
 
     // Position snapshot — mirrors the attackable/identity snapshots, but sampled
     // EVERY EndScene (no throttle) because positions change per-frame. The
@@ -226,9 +342,52 @@ internal static class ClientObjectHooks
     // delegate, struct values) so per-frame capture in the EndScene reverse-
     // P/Invoke can't trigger a GC → NativeAOT fail-fast (the same hazard that
     // moved TickAll off this thread; see EngineFrameController.OnEndScene).
-    private struct PosEntry { public uint Cell; public float X, Y, Z; }
+    // Qw/Qz and State (CPhysicsObj m_state) ride along since 2026-09-30 so the
+    // off-thread TryGetObjectHeading / TryGetObjectPhysicsState are served from
+    // this snapshot too, instead of dereferencing a cached weenie pointer.
+    private struct PosEntry { public uint Cell; public float X, Y, Z, Qw, Qz; public uint State; public bool HasState; }
+
+    // PublicWeenieDesc field snapshot (2026-09-30 main-thread audit). The off-thread
+    // wcid / bitfield / icon / ownership readers used to take a raw weenie pointer
+    // from _weeniePtrFront (up to ~100 ms old) and read the PWD fields live; a
+    // weenie freed and reused in that window passes the page probe and hands the bot
+    // garbage (a wrong door bit, container or wcid), and a decommit between probe and
+    // read is an uncatchable AV. The same 10 Hz main-thread walk now copies the
+    // fields for EVERY id that resolves a weenie (pack items have no position), into
+    // a back/front pair swapped with the pointer maps under _weeniePtrSwapLock.
+    // Struct values in reused dictionaries: zero-alloc in the EndScene walk.
+    // IconOverlay / IconUnderlay ride along since 2026-09-30 (script window item icons).
+    // Since the property-coverage work (2026-09-30) the whole PublicWeenieDesc is copied
+    // (PwdLayout.Size bytes): every CreateObject field (value, burden, useability, radar,
+    // monarch, pet owner, ...) answers off the main thread as the property it came from.
+    [System.Runtime.CompilerServices.InlineArray(PwdLayout.Size)]
+    private struct PwdBytes { private byte _first; }
+    private struct PwdEntry
+    {
+        public PwdBytes Bytes;
+        public readonly uint Wcid => U32(in this, PwdLayout.Wcid);
+        public readonly uint Icon => U32(in this, PwdLayout.Icon);
+        public readonly uint IconOverlay => U32(in this, PwdLayout.IconOverlay);
+        public readonly uint IconUnderlay => U32(in this, PwdLayout.IconUnderlay);
+        public readonly uint Container => U32(in this, PwdLayout.Container);
+        public readonly uint Wielder => U32(in this, PwdLayout.Wielder);
+        public readonly uint Location => U32(in this, PwdLayout.Location);
+        public readonly uint Bitfield => U32(in this, PwdLayout.Bitfield);
+        private static uint U32(in PwdEntry e, int offset)
+            => System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(((ReadOnlySpan<byte>)e.Bytes).Slice(offset));
+    }
+    private static Dictionary<uint, PwdEntry> _pwdFront = new(512);
+    private static Dictionary<uint, PwdEntry> _pwdBack = new(512);
+    private const int PwdWcidOffset = PwdLayout.Wcid, PwdIconOffset = PwdLayout.Icon, PwdIconOverlayOffset = PwdLayout.IconOverlay,
+                      PwdIconUnderlayOffset = PwdLayout.IconUnderlay, PwdContainerOffset = PwdLayout.Container,
+                      PwdWielderOffset = PwdLayout.Wielder, PwdLocationOffset = PwdLayout.Location, PwdBitfieldOffset = PwdLayout.Bitfield;
     private static readonly object _positionCacheLock = new();
-    private static readonly Dictionary<uint, PosEntry> _positionCache = new(512);
+    // Double-buffered (2026-10-02): the walk fills _positionBack with no lock held, then the
+    // two swap under _positionCacheLock. Off-thread readers lock only to look up the front.
+    // The walk used to fill the front under the lock, so every plugin position read waited
+    // for the whole walk, and a slow walk (MemoryProbe) held the plugin tick to 4-9 a second.
+    private static Dictionary<uint, PosEntry> _positionCache = new(512);
+    private static Dictionary<uint, PosEntry> _positionBack = new(512);
     private static bool _loggedPositionServe;
     private static readonly Action<uint> _capturePositionDelegate = CapturePositionForId;
     private static DateTime _lastPositionPrefetchUtc = DateTime.MinValue;
@@ -244,16 +403,37 @@ internal static class ClientObjectHooks
     // CObjectMaint READ-AV). The pump must NEVER call _getWeenieObject live; the
     // main-thread position walk records every live id->weeniePtr into
     // _weeniePtrBack, then publishes it to _weeniePtrFront via an atomic swap.
-    // GetWeenieObjectResolve serves _weeniePtrFront off-thread. Double-buffered
+    // (Since 2026-09-30 GetWeenieObjectResolve returns Zero off-thread instead of
+    // serving this map: off-thread readers use value snapshots. The map is kept
+    // for the snapshot diagnostics and swaps with _pwdFront.) Double-buffered
     // so off-thread reads take only the brief swap lock and never block on the
     // walk (the per-frame single-lock walk previously stalled the render thread).
     private static readonly object _weeniePtrSwapLock = new();
     private static Dictionary<uint, IntPtr> _weeniePtrFront = new(512);
     private static Dictionary<uint, IntPtr> _weeniePtrBack = new(512);
+
     // Diagnostic (temporary): periodic snapshot-size log + live-read probe of
     // objects with a position but no cached name. Remove once the missing-
     // monsters cause is pinned. _diagSampleBuf preallocated to stay low-alloc.
     private static DateTime _lastSnapshotDiagUtc = DateTime.MinValue;
+
+    // Time AC's main thread spends in each snapshot walk, reported (and reset) by the
+    // [SnapshotDiag] line every 10 s. The 2026-10-02 frame-rate collapse was these walks
+    // growing with AC's heap; this line is how a log shows whether they stay small.
+    private struct WalkStat
+    {
+        public int Count;
+        public long Ticks, MaxTicks;
+        public void Add(long ticks) { Count++; Ticks += ticks; if (ticks > MaxTicks) MaxTicks = ticks; }
+        public string TakeText()
+        {
+            double toMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            string text = Count == 0 ? "-" : $"{Count}x avg {Ticks * toMs / Count:0.00} max {MaxTicks * toMs:0.00} ms";
+            this = default;
+            return text;
+        }
+    }
+    private static WalkStat _walkPositions, _walkIdentity, _walkAttackable;
     private const int SnapshotDiagThrottleMs = 10000;
     private static readonly uint[] _diagSampleBuf = new uint[16];
     // object_table id collection buffer for the table-comparison diagnostic.
@@ -397,21 +577,28 @@ internal static class ClientObjectHooks
     private const uint PAGE_GUARD = 0x100;
 
     /// <summary>
-    /// Checks if a pointer's memory page is committed and readable via VirtualQuery.
+    /// Checks if a pointer's memory page is committed and not NOACCESS/GUARD.
     /// Critical for NativeAOT where try/catch does NOT catch access violations.
+    /// Answered by <see cref="MemoryProbe"/> (was a VirtualQuery per call, whose cost grows
+    /// with AC's heap under WOW64 - the 2026-10-02 frame-rate collapse; same answer).
     /// </summary>
-    internal static bool IsReadablePointer(IntPtr ptr)
-    {
-        if (ptr == IntPtr.Zero)
-            return false;
-        if (VirtualQuery(ptr, out var mbi, Marshal.SizeOf<MEMORY_BASIC_INFORMATION>()) == 0)
-            return false;
-        if (mbi.State != MEM_COMMIT)
-            return false;
-        if ((mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
-            return false;
-        return true;
-    }
+    internal static bool IsReadablePointer(IntPtr ptr) => MemoryProbe.IsAccessible(ptr);
+
+    /// <summary>
+    /// Like <see cref="IsReadablePointer"/> for a whole span: every page of the span must
+    /// pass (<see cref="MemoryProbe"/>; a span reaching into an uncommitted page fails closed).
+    /// </summary>
+    internal static bool IsReadableSpan(IntPtr ptr, int length) => MemoryProbe.IsAccessible(ptr, length);
+
+    private const uint PAGE_WRITABLE_MASK = 0x04 /*READWRITE*/ | 0x08 /*WRITECOPY*/
+                                          | 0x40 /*EXECUTE_READWRITE*/ | 0x80 /*EXECUTE_WRITECOPY*/;
+
+    /// <summary>
+    /// Like <see cref="IsReadablePointer"/> but also requires a writable page.
+    /// Probe before a raw store into AC memory: under NativeAOT a write AV is not
+    /// catchable, so a freed or read-only target must fail closed instead.
+    /// </summary>
+    internal static bool IsWritablePointer(IntPtr ptr) => MemoryProbe.IsWritable(ptr);
 
     /// <summary>
     /// Stronger check than <see cref="IsReadablePointer"/>: confirms the pointer
@@ -477,8 +664,12 @@ internal static class ClientObjectHooks
     /// CACQualities vtable. Falls back to permissive vtable-in-module
     /// check until we've observed a known-good qualities pointer to learn
     /// the canonical vtable.
+    /// Internal (not private): EnchantmentHooks.ReadEnchantmentsFromQualities
+    /// reuses this exact check (deep-audit finding #23) rather than keeping
+    /// a second, divergent vtable-cache of its own — there's only one
+    /// canonical CACQualities vtable for the whole engine to learn.
     /// </summary>
-    private static bool IsCacQualitiesObject(IntPtr ptr)
+    internal static bool IsCacQualitiesObject(IntPtr ptr)
     {
         if (!TryReadAcObjectVtable(ptr, out IntPtr vtable))
             return false;
@@ -726,9 +917,19 @@ internal static class ClientObjectHooks
     public static bool TryGetVitae(uint playerId, out float value)
     {
         value = 1.0f;
-        // Off-thread: refuse — _getVitaeValue is an AC native call (Class A guard).
+        // Off-thread: _getVitaeValue is an AC native call (Class A guard). The player's vitae
+        // comes from the main-thread snapshot (PrefetchPlayerStats); others refuse.
         if (!MainThreadGuard.IsOnMainThread())
-            return false;
+        {
+            if (playerId == 0 || playerId != ClientHelperHooks.GetPlayerId())
+                return false;
+            lock (_playerStatsCacheLock)
+            {
+                if (_playerStatsCacheOwner != playerId) return false;
+                value = _cachedVitae;
+                return true;
+            }
+        }
         if (_getVitaeValue == null || _getWeenieObject == null)
         {
             if (!Probe() || _getVitaeValue == null || _getWeenieObject == null)
@@ -899,7 +1100,10 @@ internal static class ClientObjectHooks
     {
         buffed = 0;
         training = 0;
-        if (_getWeenieObject == null)
+        // Lazy probe only on AC's main thread: a probe re-binds delegates the main
+        // thread uses and resets SmartBoxLocator's shared candidate list. Off-thread
+        // callers skip it and fall through to the cached-skill serve below.
+        if (_getWeenieObject == null && MainThreadGuard.IsOnMainThread())
         {
             if (!Probe() || _getWeenieObject == null)
                 return false;
@@ -1152,17 +1356,295 @@ internal static class ClientObjectHooks
             if (TryGetObjectPosition(playerId, out uint c, out float fx, out float fy, out float fz) && c != 0)
             { cell = c; px = fx; py = fy; pz = fz; }   // [status-export] cell-local position for the live map dot
 
+            var attrBuffed = new uint[7];
+            var attrRaw = new uint[7];
+            for (uint a = 1; a <= 6; a++)
+            {
+                if (TryGetObjectAttribute(playerId, a, 0, out uint ab)) attrBuffed[a] = ab;
+                if (TryGetObjectAttribute(playerId, a, 1, out uint ar)) attrRaw[a] = ar;
+            }
+            var attr2nd = new uint[7];
+            for (uint a2 = 1; a2 <= 6; a2++)
+                if (TryGetObjectAttribute2ndBaseLevel(playerId, a2, out uint v2)) attr2nd[a2] = v2;
+            var skB = new int[MaxSkillStype + 1];
+            var skR = new int[MaxSkillStype + 1];
+            var skK = new bool[MaxSkillStype + 1];
+            for (uint sk = 1; sk <= MaxSkillStype; sk++)
+            {
+                bool b = TryGetObjectSkillLevel(playerId, sk, 0, out int lb);
+                bool r = TryGetObjectSkillLevel(playerId, sk, 1, out int lr);
+                if (b) skB[sk] = lb;
+                if (r) skR[sk] = lr;
+                skK[sk] = b || r;
+            }
+            var quad = new Dictionary<uint, long>();
+            foreach (uint q in PlayerQuadStypes)
+                if (TryGetObjectQuadProperty(playerId, q, out long qv)) quad[q] = qv;
+
             lock (_playerStatsCacheLock)
             {
+                Array.Copy(attrBuffed, _cachedAttrBuffed, 7);
+                Array.Copy(attrRaw, _cachedAttrRaw, 7);
+                Array.Copy(attr2nd, _cachedAttr2nd, 7);
+                Array.Copy(skB, _cachedSkillLevelBuffed, skB.Length);
+                Array.Copy(skR, _cachedSkillLevelRaw, skR.Length);
+                Array.Copy(skK, _cachedSkillLevelKnown, skK.Length);
+                _cachedPlayerQuad.Clear();
+                foreach (var kv in quad) _cachedPlayerQuad[kv.Key] = kv.Value;
                 _cachedTotalXp = xp; _cachedLuminance = lum; _cachedDeaths = deaths; _cachedVitae = vitae;
                 _cachedEncVal = encVal; _cachedEncCap = encCap; _cachedLandcell = cell;
                 _cachedPx = px; _cachedPy = py; _cachedPz = pz;
                 _playerStatsCacheOwner = playerId;
             }
+
+            SnapshotPlayerQualities(playerId);
         }
         catch (Exception ex)
         {
             RynthLog.Compat($"PrefetchPlayerStats exception: {ex.Message}");
+        }
+    }
+
+    // ── The player's own qualities tables (2026-09-30) ─────────────────────
+    // Every property the client holds for the player, copied from its CBaseQualities hash
+    // tables once a second on AC's main thread (PrefetchPlayerStats): memory reads, no calls
+    // except a one-time layout check through InqInt64/InqFloat. PropertyCaches serves it after
+    // the PlayerDescription record, so the player answers in full even when the engine
+    // started after login (an injected or hot-reloaded engine never saw PlayerDescription).
+    // Raw values, as the server sent them (what UtilityBelt shows), not enchanted.
+    //   CBaseQualities (Chorizite Weenie.cs; offsets match the InqInt/InqInt64/InqBool/
+    //   InqFloat/InqString patterns): +0x08 int, +0x0C int64, +0x10 bool, +0x14 float,
+    //   +0x18 string, +0x1C data id, +0x20 instance id tables.
+    //   PackableHashTable: +0x08 buckets, +0x0C bucket count. PackableHashData<K,V>:
+    //   { K key; V data; next; hashVal }, so 4-byte data at +4 / next +8, 8-byte data
+    //   (int64, double) at +8 / next +16 (MSVC aligns them to 8), a string's buffer at +4.
+    private sealed record OwnedBag(uint Owner, PropertyBag Bag);
+    private static volatile OwnedBag? _playerQualities;
+    private static int _qualitiesInt64Layout, _qualitiesFloatLayout;   // 0 unchecked, 1 verified, -1 refused
+
+    /// <summary>The player's qualities snapshot (~1 s old), or null. Any thread; never touches AC.</summary>
+    internal static PropertyBag? PlayerQualitiesSnapshot(uint playerId)
+    {
+        OwnedBag? b = _playerQualities;
+        return b != null && playerId != 0 && b.Owner == playerId ? b.Bag : null;
+    }
+
+    /// <summary>Logout: the snapshot belongs to the character that left.</summary>
+    internal static void ClearPlayerQualitiesSnapshot() => _playerQualities = null;
+
+    // MAIN THREAD ONLY (PrefetchPlayerStats).
+    private static unsafe void SnapshotPlayerQualities(uint playerId)
+    {
+        if (!TryGetPlayerQualitiesPtr(out IntPtr qualities) || qualities == IntPtr.Zero)
+            return;
+        IntPtr bq = qualities + CBaseQualitiesOffset;
+        PropertyBag? bag = WalkQualitiesBag(qualities, _qualitiesInt64Layout >= 0, _qualitiesFloatLayout >= 0);
+        if (bag == null)
+            return;
+
+        VerifyQualitiesLayout(bq, bag);
+        if (_qualitiesInt64Layout < 0) bag.Int64s.Clear();
+        if (_qualitiesFloatLayout < 0) bag.Floats.Clear();
+        _playerQualities = new OwnedBag(playerId, bag);
+    }
+
+    // Every table of one CACQualities' CBaseQualities, copied (MAIN THREAD ONLY; every node is
+    // page-checked before it is read). The int64 and float tables (8-byte values) only when asked:
+    // their node layout is verified once against AC's own readers (VerifyQualitiesLayout).
+    // Null when the CBaseQualities header isn't readable.
+    private static PropertyBag? WalkQualitiesBag(IntPtr qualities, bool int64s, bool floats)
+    {
+        IntPtr bq = qualities + CBaseQualitiesOffset;
+        if (!IsReadableSpan(bq, 0x24))
+            return null;
+
+        var bag = new PropertyBag();
+        WalkQualitiesTable(Marshal.ReadIntPtr(bq + 0x08), 8, (k, n) => bag.Ints[k] = Marshal.ReadInt32(n + 4));
+        WalkQualitiesTable(Marshal.ReadIntPtr(bq + 0x10), 8, (k, n) => bag.Bools[k] = Marshal.ReadInt32(n + 4) != 0);
+        WalkQualitiesTable(Marshal.ReadIntPtr(bq + 0x1C), 8, (k, n) => bag.DataIds[k] = unchecked((uint)Marshal.ReadInt32(n + 4)));
+        WalkQualitiesTable(Marshal.ReadIntPtr(bq + 0x20), 8, (k, n) => bag.InstanceIds[k] = unchecked((uint)Marshal.ReadInt32(n + 4)));
+        WalkQualitiesTable(Marshal.ReadIntPtr(bq + 0x18), 8, (k, n) =>
+        {
+            IntPtr buf = Marshal.ReadIntPtr(n + 4);   // PStringBase -> PSRefBuffer: +8 length (with NUL), +20 chars
+            if (buf == IntPtr.Zero || !IsReadableSpan(buf, 20)) return;
+            int len = Marshal.ReadInt32(buf + 8);
+            if (len > 1 && len < 4096 && IsReadableSpan(buf + 20, len - 1))
+                bag.Strings[k] = Marshal.PtrToStringAnsi(buf + 20, len - 1) ?? string.Empty;
+        });
+        if (int64s)
+            WalkQualitiesTable(Marshal.ReadIntPtr(bq + 0x0C), 16, (k, n) => bag.Int64s[k] = Marshal.ReadInt64(n + 8));
+        if (floats)
+            WalkQualitiesTable(Marshal.ReadIntPtr(bq + 0x14), 16, (k, n) =>
+            {
+                double v = BitConverter.Int64BitsToDouble(Marshal.ReadInt64(n + 8));
+                if (double.IsFinite(v)) bag.Floats[k] = v;
+            });
+        return bag;
+    }
+
+    // ── v84: every property of one object (GetObjectProperties, ObjectPropertyDump) ──
+    // The client's qualities tables of any object, read on AC's main thread: live when the call
+    // is made there, else the plugin's request is served at the next main-thread tick
+    // (ServeObjectQualitiesRequest, next to PrefetchPlayerStats) and the copy answers off-thread
+    // for a few seconds. One object at a time: it is a diagnostic (/ub propertydump).
+    private sealed record ObjectQualities(uint Owner, PropertyBag? Bag, long AtMs);
+    private static volatile ObjectQualities? _objectQualities;
+    private static uint _objectQualitiesRequest;
+    private const long ObjectQualitiesKeepMs = 5000, ObjectQualitiesRefreshMs = 500;
+
+    /// <summary>
+    /// v84: the client's qualities tables of <paramref name="objectId"/> (null: it has none, or
+    /// not read yet). Off AC's main thread a walk is requested and <paramref name="pending"/> is
+    /// set until the first copy for this object exists. Never touches AC memory off the main thread.
+    /// The bag returned is never changed afterwards (callers only read it).
+    /// </summary>
+    internal static PropertyBag? GetObjectQualitiesForDump(uint objectId, out bool pending, out bool read)
+    {
+        pending = false;
+        read = false;
+        if (objectId == 0)
+            return null;
+        if (MainThreadGuard.IsOnMainThread())
+        {
+            PropertyBag? live = TryWalkObjectQualitiesLive(objectId);
+            read = live != null;
+            return live;
+        }
+        long now = Environment.TickCount64;
+        ObjectQualities? q = _objectQualities;
+        if (q != null && q.Owner == objectId && now - q.AtMs <= ObjectQualitiesKeepMs)
+        {
+            if (now - q.AtMs > ObjectQualitiesRefreshMs)
+                System.Threading.Volatile.Write(ref _objectQualitiesRequest, objectId);
+            read = q.Bag != null;
+            return q.Bag;
+        }
+        System.Threading.Volatile.Write(ref _objectQualitiesRequest, objectId);
+        pending = true;
+        return null;
+    }
+
+    /// <summary>v84: serves a plugin's qualities request (MAIN THREAD; returns at once when there is none).</summary>
+    public static void ServeObjectQualitiesRequest()
+    {
+        if (System.Threading.Volatile.Read(ref _objectQualitiesRequest) == 0 || !MainThreadGuard.IsOnMainThread())
+            return;
+        uint id = System.Threading.Interlocked.Exchange(ref _objectQualitiesRequest, 0);
+        if (id == 0)
+            return;
+        PropertyBag? bag = null;
+        try { bag = TryWalkObjectQualitiesLive(id); }
+        catch (Exception ex) { RynthLog.Compat($"Compat: object qualities walk 0x{id:X8} failed - {ex.GetType().Name}: {ex.Message}"); }
+        _objectQualities = new ObjectQualities(id, bag, Environment.TickCount64);
+    }
+
+    /// <summary>Logout: the copy belongs to the session that ended.</summary>
+    internal static void ClearObjectQualities()
+    {
+        _objectQualities = null;
+        System.Threading.Volatile.Write(ref _objectQualitiesRequest, 0);
+    }
+
+    // MAIN THREAD ONLY: a freshly resolved weenie (never a cached pointer), its qualities pointer,
+    // then the page-checked table walk. Int64 / float tables only once their node layout was
+    // verified on the player's own tables.
+    private static PropertyBag? TryWalkObjectQualitiesLive(uint objectId)
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return null;
+        if (_getWeenieObject == null)
+        {
+            if (!Probe() || _getWeenieObject == null)
+                return null;
+        }
+        try
+        {
+            IntPtr weeniePtr;
+            if (SehTrampoline.IsAvailable)
+            {
+                weeniePtr = SehTrampoline.CdeclPtrUint(_getWeenieObjectPtr, objectId, out bool av);
+                if (av)
+                    return null;
+            }
+            else
+            {
+                weeniePtr = _getWeenieObject(objectId);
+            }
+            if (weeniePtr == IntPtr.Zero || !TryGetQualitiesPtr(weeniePtr, out IntPtr qualities) || qualities == IntPtr.Zero)
+                return null;
+            // Only a real CACQualities (the vtable learned from the player's): no AC calls are made
+            // here, but a sibling object in the qualities slot would read as garbage properties.
+            if (!IsCacQualitiesObject(qualities))
+                return null;
+            return WalkQualitiesBag(qualities, _qualitiesInt64Layout == 1, _qualitiesFloatLayout == 1);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>v84: the CreateObject copy's fields of <paramref name="objectId"/> as properties (the ~0.1 s
+    /// old PublicWeenieDesc snapshot). False when the last walk didn't see it. Any thread; never touches AC.</summary>
+    internal static bool CopyCreateDataProperties(uint objectId, PropertyBag dst)
+    {
+        if (!TryGetPwdSnapshot(objectId, out PwdEntry e))
+            return false;
+        PwdLayout.FillBag(e.Bytes, dst);
+        return true;
+    }
+
+    // The 8-byte node layout is checked once against AC's own readers: a walked value must
+    // equal InqInt64 / InqFloat for the same key (raw or enchanted). A mismatch on every key
+    // refuses that table for the session instead of serving garbage.
+    private static unsafe void VerifyQualitiesLayout(IntPtr bq, PropertyBag bag)
+    {
+        if (_qualitiesInt64Layout == 0 && _inqInt64 != null && bag.Int64s.Count > 0)
+        {
+            bool match = false;
+            foreach (var kv in bag.Int64s)
+            {
+                long v = 0;
+                if (_inqInt64(bq, kv.Key, &v) != 0 && v == kv.Value) { match = true; break; }
+            }
+            _qualitiesInt64Layout = match ? 1 : -1;
+            RynthLog.Compat($"Compat: player qualities int64 layout {(match ? "verified" : "REFUSED (no key matched InqInt64)")} ({bag.Int64s.Count} keys)");
+        }
+        if (_qualitiesFloatLayout == 0 && _inqFloat != null && bag.Floats.Count > 0)
+        {
+            bool match = false;
+            foreach (var kv in bag.Floats)
+            {
+                double raw = 0, enchanted = 0;
+                bool okRaw = _inqFloat(bq, kv.Key, &raw, 1) != 0;
+                bool okEnch = _inqFloat(bq, kv.Key, &enchanted, 0) != 0;
+                if ((okRaw && raw == kv.Value) || (okEnch && enchanted == kv.Value)) { match = true; break; }
+            }
+            _qualitiesFloatLayout = match ? 1 : -1;
+            RynthLog.Compat($"Compat: player qualities float layout {(match ? "verified" : "REFUSED (no key matched InqFloat)")} ({bag.Floats.Count} keys)");
+        }
+    }
+
+    // Walks one PackableHashTable (MAIN THREAD ONLY), bounded like AppraisalHooks' walkers.
+    private static void WalkQualitiesTable(IntPtr table, int nextOffset, Action<uint, IntPtr> onNode)
+    {
+        if (table == IntPtr.Zero || !IsReadableSpan(table, 0x10))
+            return;
+        IntPtr buckets = Marshal.ReadIntPtr(table + 0x08);
+        int bucketCount = Marshal.ReadInt32(table + 0x0C);
+        if (buckets == IntPtr.Zero || bucketCount <= 0 || bucketCount > 65536 || !IsReadableSpan(buckets, bucketCount * 4))
+            return;
+        int total = 0;
+        for (int i = 0; i < bucketCount; i++)
+        {
+            IntPtr node = Marshal.ReadIntPtr(buckets + i * 4);
+            int chain = 0;
+            while (node != IntPtr.Zero && chain++ < 4096 && total++ < 65536)
+            {
+                if (!IsReadableSpan(node, nextOffset + 4)) break;
+                onNode(unchecked((uint)Marshal.ReadInt32(node)), node);
+                node = Marshal.ReadIntPtr(node + nextOffset);
+            }
         }
     }
 
@@ -1181,6 +1663,175 @@ internal static class ClientObjectHooks
             px = _cachedPx; py = _cachedPy; pz = _cachedPz;
             return _playerStatsCacheOwner != 0;
         }
+    }
+
+    // CACQualities::_attribCache (the Chorizite layout: SerializeUsingPackDBObj 0x38 +
+    // CBaseQualities 0x28), just before _skillStatsTable. AttributeCache: vtable, then six
+    // Attribute* (strength .. self) and three SecondaryAttribute* (health, stamina, mana).
+    // Attribute: vtable, _level_from_cp +4, _init_level +8, _cp_spent +12 (16 bytes);
+    // SecondaryAttribute adds _current_level +16. InqAttribute2nd (0x00592D20) reads the
+    // same [this+0x60] cache.
+    private const int AttributeCacheOffset = 0x60;
+    private const int QualitiesEnchantmentRegistryOffset = 0x70;
+
+    /// <summary>
+    /// The Skills panel's reads (PlayerProgressHooks.Prefetch): the player's skill table
+    /// rows, the attribute cache (ranks, innate level, XP spent), buffed and base skills,
+    /// attributes and vital maximums, level, skill credits, XP, luminance and vitae, into
+    /// <paramref name="dst"/>. MAIN THREAD ONLY; every pointer is checked before it is read.
+    /// False (and <paramref name="dst"/> cleared) when the player or its qualities aren't there.
+    /// </summary>
+    internal static unsafe bool ReadPlayerProgressLive(PlayerProgress dst)
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+        dst.Clear();
+        uint playerId = ClientHelperHooks.GetPlayerId();
+        if (playerId == 0)
+            return false;
+        if (_getWeenieObject == null && (!Probe() || _getWeenieObject == null))
+            return false;
+
+        try
+        {
+            if (!TryGetObjectQualitiesPtr(playerId, out IntPtr q))
+                return false;
+            // InqSkill / InqAttribute / InqAttribute2nd with raw 0 read the enchantment
+            // registry at [q+0x70] without a null check (early login): wait for it.
+            if (!IsReadableSpan(q, QualitiesEnchantmentRegistryOffset + 4)
+                || Marshal.ReadIntPtr(q + QualitiesEnchantmentRegistryOffset) == IntPtr.Zero)
+                return false;
+            dst.PlayerId = playerId;
+
+            dst.SkillTableRead = ReadSkillRowsLive(q, dst);
+            dst.AttributeCacheRead = ReadAttributeCacheLive(q, dst);
+
+            if (_inqSkillLevel != null)
+            {
+                for (uint sk = 1; sk <= PlayerProgress.MaxSkill; sk++)
+                {
+                    int buffed = 0, raw = 0;
+                    bool b = _inqSkillLevel(q, sk, &buffed, 0) != 0;
+                    bool r = _inqSkillLevel(q, sk, &raw, 1) != 0;
+                    dst.SkillLevelKnown[sk] = b || r;
+                    dst.SkillBuffed[sk] = b ? buffed : raw;
+                    dst.SkillBase[sk] = r ? raw : buffed;
+                }
+            }
+            if (_inqAttribute != null)
+            {
+                for (uint a = 1; a <= 6; a++)
+                {
+                    uint v = 0;
+                    if (_inqAttribute(q, a, &v, 0) != 0) dst.AttrBuffed[a] = v;
+                    v = 0;
+                    if (_inqAttribute(q, a, &v, 1) != 0) dst.AttrBase[a] = v;
+                }
+            }
+            if (_inqAttribute2ndBaseLevel != null)
+            {
+                // STypeAttribute2nd maximums: 1 health, 3 stamina, 5 mana. raw 0 applies
+                // EnchantAttribute2nd (decompile of 0x00592D20); raw 1 is the base maximum.
+                for (uint i = 1; i <= 3; i++)
+                {
+                    uint stype = i * 2 - 1, v = 0;
+                    if (_inqAttribute2ndBaseLevel(q, stype, &v, 0) != 0) dst.VitalBuffed[i] = v;
+                    v = 0;
+                    if (_inqAttribute2ndBaseLevel(q, stype, &v, 1) != 0) dst.VitalBase[i] = v;
+                }
+            }
+
+            if (TryGetObjectIntProperty(playerId, 25u, out int level)) dst.Level = level;              // PropertyInt.Level
+            if (TryGetObjectIntProperty(playerId, 24u, out int credits)) dst.SkillCredits = credits;   // AvailableSkillCredits
+            if (TryGetObjectQuadProperty(playerId, 1u, out long total)) dst.TotalXp = total;           // TotalExperience
+            if (TryGetObjectQuadProperty(playerId, 2u, out long avail)) dst.UnassignedXp = avail;      // AvailableExperience
+            if (TryGetObjectQuadProperty(playerId, 6u, out long lum)) dst.Luminance = lum;             // AvailableLuminance
+            if (TryGetObjectQuadProperty(playerId, 7u, out long maxLum)) dst.MaxLuminance = maxLum;    // MaximumLuminance
+            if (TryGetVitae(playerId, out float vitae)) dst.Vitae = vitae;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"ReadPlayerProgressLive exception: {ex.Message}");
+            dst.Clear();
+            return false;
+        }
+    }
+
+    /// <summary>The skill table at [q+0x64] into dst's skill rows (class, XP spent, ranks, innate). Main thread.</summary>
+    private static bool ReadSkillRowsLive(IntPtr q, PlayerProgress dst)
+    {
+        IntPtr tableFieldPtr = q + SkillStatsTableOffset;
+        if (!IsReadablePointer(tableFieldPtr))
+            return false;
+        IntPtr skillTablePtr = Marshal.ReadIntPtr(tableFieldPtr);
+        // Marshal's layout, as PrefetchPlayerSkills reads it (the proven path).
+        if (skillTablePtr == IntPtr.Zero || !IsReadableSpan(skillTablePtr, Marshal.SizeOf<PackableHashTableUInt32SkillNative>()))
+            return false;
+        PackableHashTableUInt32SkillNative table = Marshal.PtrToStructure<PackableHashTableUInt32SkillNative>(skillTablePtr);
+        if (table.TableSize == 0 || table.TableSize > 4096 || table.Buckets == IntPtr.Zero
+            || !IsReadableSpan(table.Buckets, (int)table.TableSize * IntPtr.Size))
+            return false;
+
+        int nodeSize = Marshal.SizeOf<PackableHashDataUInt32SkillNative>();
+        int total = 0;
+        for (uint b = 0; b < table.TableSize; b++)
+        {
+            IntPtr nodePtr = Marshal.ReadIntPtr(table.Buckets + unchecked((int)(b * (uint)IntPtr.Size)));
+            int guard = 0;
+            while (nodePtr != IntPtr.Zero && guard++ < 512 && total++ < 4096)
+            {
+                if (!IsReadableSpan(nodePtr, nodeSize))
+                    break;
+                PackableHashDataUInt32SkillNative node = Marshal.PtrToStructure<PackableHashDataUInt32SkillNative>(nodePtr);
+                if (node.Key >= 1 && node.Key <= PlayerProgress.MaxSkill)
+                {
+                    dst.SkillInTable[node.Key] = true;
+                    dst.SkillClass[node.Key] = node.Data.AdvancementClass;
+                    dst.SkillXpSpent[node.Key] = node.Data.PracticePoints;
+                    dst.SkillRanks[node.Key] = node.Data.LevelFromPracticePoints;
+                    dst.SkillInit[node.Key] = node.Data.InitialLevel;
+                }
+                nodePtr = node.Next;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>The attribute cache at [q+0x60] into dst's attribute and vital rows. Main thread.</summary>
+    private static bool ReadAttributeCacheLive(IntPtr q, PlayerProgress dst)
+    {
+        IntPtr cacheFieldPtr = q + AttributeCacheOffset;
+        if (!IsReadablePointer(cacheFieldPtr))
+            return false;
+        IntPtr cache = Marshal.ReadIntPtr(cacheFieldPtr);
+        if (cache == IntPtr.Zero || !IsReadableSpan(cache, 40))
+            return false;
+        bool any = false;
+        for (int i = 0; i < 9; i++)
+        {
+            IntPtr a = Marshal.ReadIntPtr(cache + 4 + i * 4);
+            int size = i < 6 ? 16 : 20;
+            if (a == IntPtr.Zero || !IsReadableSpan(a, size) || !SmartBoxLocator.IsPointerInModule(Marshal.ReadIntPtr(a)))
+                continue;
+            uint ranks = unchecked((uint)Marshal.ReadInt32(a + 4));
+            uint init = unchecked((uint)Marshal.ReadInt32(a + 8));
+            uint spent = unchecked((uint)Marshal.ReadInt32(a + 12));
+            if (i < 6)
+            {
+                dst.AttrRanks[i + 1] = ranks;
+                dst.AttrInit[i + 1] = init;
+                dst.AttrXpSpent[i + 1] = spent;
+            }
+            else
+            {
+                dst.VitalRanks[i - 5] = ranks;
+                dst.VitalInit[i - 5] = init;
+                dst.VitalXpSpent[i - 5] = spent;
+            }
+            any = true;
+        }
+        return any;
     }
 
     /// <summary>
@@ -1308,9 +1959,19 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectSkillLevel(uint objectId, uint skillStype, int raw, out int level)
     {
         level = 0;
-        // Off-thread: refuse — _inqSkillLevel is an AC native call (Class A guard).
+        // Off-thread: _inqSkillLevel is an AC native call (Class A guard). The player's own
+        // skill levels come from the main-thread snapshot (PrefetchPlayerStats); others refuse.
         if (!MainThreadGuard.IsOnMainThread())
-            return false;
+        {
+            if (skillStype < 1 || skillStype > MaxSkillStype || objectId == 0 || objectId != ClientHelperHooks.GetPlayerId())
+                return false;
+            lock (_playerStatsCacheLock)
+            {
+                if (_playerStatsCacheOwner != objectId || !_cachedSkillLevelKnown[skillStype]) return false;
+                level = raw != 0 ? _cachedSkillLevelRaw[skillStype] : _cachedSkillLevelBuffed[skillStype];
+                return true;
+            }
+        }
         if (_inqSkillLevel == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqSkillLevel == null || _getWeenieObject == null)
@@ -1337,9 +1998,19 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectAttribute(uint objectId, uint stype, int raw, out uint value)
     {
         value = 0;
-        // Off-thread: refuse — _inqAttribute is an AC native call (Class A guard).
+        // Off-thread: _inqAttribute is an AC native call (Class A guard). The player's own
+        // attributes come from the main-thread snapshot (PrefetchPlayerStats); others refuse.
         if (!MainThreadGuard.IsOnMainThread())
-            return false;
+        {
+            if (stype < 1 || stype > 6 || objectId == 0 || objectId != ClientHelperHooks.GetPlayerId())
+                return false;
+            lock (_playerStatsCacheLock)
+            {
+                if (_playerStatsCacheOwner != objectId) return false;
+                value = raw != 0 ? _cachedAttrRaw[stype] : _cachedAttrBuffed[stype];
+                return value != 0;
+            }
+        }
         if (_inqAttribute == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqAttribute == null || _getWeenieObject == null)
@@ -1365,6 +2036,13 @@ internal static class ClientObjectHooks
     public static bool TryGetPlayerQualitiesPtr(out IntPtr qualitiesPtr)
     {
         qualitiesPtr = IntPtr.Zero;
+        // Main thread only. The hot-reload / Decal-coexistence init threads call this
+        // through PlayerVitalsHooks.TryReseedFromCurrentPlayer (EntryPoint); off the
+        // main thread TryGetQualitiesPtr refused anyway, so they always got false.
+        // Returning first skips the pointless lookup; the real reseed happens on the
+        // main thread in TryGetObjectQualitiesPtr's lazy path.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_getWeenieObject == null)
         {
             if (!Probe() || _getWeenieObject == null)
@@ -1393,6 +2071,10 @@ internal static class ClientObjectHooks
     public static bool TryGetWeenieObjectPtr(uint objectId, out IntPtr ptr)
     {
         ptr = IntPtr.Zero;
+        // A raw weenie pointer is only meaningful on AC's main thread (off-thread the
+        // resolver returns Zero); refusing here also keeps the lazy Probe on-thread.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
         if (_getWeenieObject == null)
         {
             if (!Probe() || _getWeenieObject == null)
@@ -1422,6 +2104,19 @@ internal static class ClientObjectHooks
         containerID = 0;
         wielderID = 0;
         location = 0;
+        // Off AC's main thread (plugin pump: RynthAi WorldObjectCache / loot / wield,
+        // RynthLua, GetContainerContents): the PWD snapshot from the 10 Hz main-thread
+        // walk. A miss (not walked yet, or gone) is false, as a cache miss in the
+        // weenie-pointer map was before. Never reads AC memory off-thread.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            if (!TryGetPwdSnapshot(objectId, out PwdEntry e))
+                return false;
+            containerID = e.Container;
+            wielderID = e.Wielder;
+            location = e.Location;
+            return true;
+        }
         if (_getWeenieObject == null)
         {
             if (!Probe() || _getWeenieObject == null)
@@ -1454,6 +2149,116 @@ internal static class ClientObjectHooks
     }
 
     /// <summary>
+    /// Reads one 4-byte field of an object's PublicWeenieDesc by its offset from the
+    /// start of the PWD (e.g. +56 _type, +60 _value, +96 _stackSize, +116 _burden; layout
+    /// in Chorizite Weenie.cs:1734, same base as <see cref="TryGetObjectOwnershipInfo"/>).
+    /// MAIN THREAD ONLY: off the main thread it returns false without touching AC memory
+    /// (a snapshot-cached weenie pointer can be freed and reused under us). Both ends of
+    /// the read are page-probed, so a bad pointer fails closed instead of faulting.
+    /// Used by vendor trading to read item value/burden for pack items, whose qualities
+    /// pointer is null (so InqInt can't serve them).
+    /// </summary>
+    internal static bool TryReadPwdInt32(uint objectId, int pwdFieldOffset, out int value)
+    {
+        value = 0;
+        if (pwdFieldOffset < 0 || pwdFieldOffset > 172 || (pwdFieldOffset & 3) != 0)
+            return false;
+        // Off-thread: served from the main-thread PWD byte snapshot, never from AC memory.
+        if (!MainThreadGuard.IsOnMainThread())
+            return TryGetPwdSnapshotRawInt32(objectId, pwdFieldOffset, out value);
+        if (_getWeenieObject == null)
+        {
+            if (!Probe() || _getWeenieObject == null)
+                return false;
+        }
+        if (_weeniePhysicsObjOffset < 0)
+            return false;
+        try
+        {
+            IntPtr weeniePtr = _getWeenieObject(objectId);
+            if (weeniePtr == IntPtr.Zero)
+                return false;
+            IntPtr fieldAddr = weeniePtr + _weeniePhysicsObjOffset + 4 + pwdFieldOffset;
+            if (!IsReadablePointer(fieldAddr) || !IsReadablePointer(fieldAddr + 3))
+                return false;
+            value = Marshal.ReadInt32(fieldAddr);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>An item's PublicWeenieDesc fields, as the Inventory panel shows them.</summary>
+    internal struct ItemPwdFields
+    {
+        public uint Wcid, Icon, Container, Wielder, ValidLocations, Location, Type, Value, Useability,
+            StackSize, MaxStackSize, Bitfield, SpellId;
+        public int ItemsCapacity, Burden, MaterialType;
+        public float Workmanship;
+    }
+
+    // PublicWeenieDesc offsets (Chorizite Weenie.cs:1734; the same base as TryReadPwdInt32).
+    private const int PwdItemsCapacityOffset = 48, PwdTypeOffset = 56, PwdValueOffset = 60, PwdUseabilityOffset = 64,
+        PwdValidLocationsOffset = 40, PwdStackSizeOffset = 96, PwdMaxStackSizeOffset = 100, PwdBurdenOffset = 116,
+        PwdSpellIdOffset = 120, PwdMaterialTypeOffset = 148, PwdWorkmanshipOffset = 152;
+
+    /// <summary>
+    /// Reads every field the Inventory panel needs from an object's PublicWeenieDesc in one
+    /// go: the weenie is resolved once and PWD+12..+155 (wcid through workmanship) is
+    /// page-probed as one span, then plain reads. MAIN THREAD ONLY: off it this returns false
+    /// without touching AC memory. An object that is gone (or not a weenie) is false, never
+    /// a fault, so a caller holding an old id just finds nothing.
+    /// </summary>
+    internal static bool TryReadItemFields(uint objectId, out ItemPwdFields f)
+    {
+        f = default;
+        if (objectId == 0 || !MainThreadGuard.IsOnMainThread())
+            return false;
+        if (_getWeenieObject == null)
+        {
+            if (!Probe() || _getWeenieObject == null)
+                return false;
+        }
+        if (_weeniePhysicsObjOffset < 0)
+            return false;
+        try
+        {
+            IntPtr weeniePtr = _getWeenieObject(objectId);
+            if (weeniePtr == IntPtr.Zero)
+                return false;
+            IntPtr pwd = weeniePtr + _weeniePhysicsObjOffset + 4;
+            if (!IsReadableSpan(pwd + PwdWcidOffset, PwdWorkmanshipOffset + 4 - PwdWcidOffset))
+                return false;
+            f.Wcid = (uint)Marshal.ReadInt32(pwd + PwdWcidOffset);
+            f.Icon = (uint)Marshal.ReadInt32(pwd + PwdIconOffset);
+            f.Container = (uint)Marshal.ReadInt32(pwd + PwdContainerOffset);
+            f.Wielder = (uint)Marshal.ReadInt32(pwd + PwdWielderOffset);
+            f.ValidLocations = (uint)Marshal.ReadInt32(pwd + PwdValidLocationsOffset);
+            f.Location = (uint)Marshal.ReadInt32(pwd + PwdLocationOffset);
+            f.ItemsCapacity = Marshal.ReadInt32(pwd + PwdItemsCapacityOffset);
+            f.Type = (uint)Marshal.ReadInt32(pwd + PwdTypeOffset);
+            f.Value = (uint)Marshal.ReadInt32(pwd + PwdValueOffset);
+            f.Useability = (uint)Marshal.ReadInt32(pwd + PwdUseabilityOffset);
+            f.StackSize = (uint)Marshal.ReadInt32(pwd + PwdStackSizeOffset);
+            f.MaxStackSize = (uint)Marshal.ReadInt32(pwd + PwdMaxStackSizeOffset);
+            f.Bitfield = (uint)Marshal.ReadInt32(pwd + PwdBitfieldOffset);
+            f.Burden = Marshal.ReadInt32(pwd + PwdBurdenOffset);
+            f.SpellId = (uint)Marshal.ReadInt32(pwd + PwdSpellIdOffset);
+            f.MaterialType = Marshal.ReadInt32(pwd + PwdMaterialTypeOffset);
+            f.Workmanship = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(pwd + PwdWorkmanshipOffset));
+            if (float.IsNaN(f.Workmanship) || f.Workmanship < 0 || f.Workmanship > 100) f.Workmanship = 0;
+            return true;
+        }
+        catch
+        {
+            f = default;
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Reads PublicWeenieDesc._wcid directly from the weenie struct.
     /// Returns the Weenie Class ID (WCID) for the given object.
     /// Layout: ACCWeenieObject + _phys_obj_offset + 4 = start of PublicWeenieDesc.
@@ -1462,6 +2267,15 @@ internal static class ClientObjectHooks
     public static bool TryGetObjectWcid(uint objectId, out uint wcid)
     {
         wcid = 0;
+        // Off-thread (RynthAi ExpressionEngine / WorldObjectCache, RynthLua): the PWD
+        // snapshot (<= ~100 ms old; a wcid never changes for an object).
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            if (!TryGetPwdSnapshot(objectId, out PwdEntry e))
+                return false;
+            wcid = e.Wcid;
+            return true;
+        }
         if (_getWeenieObject == null)
         {
             if (!Probe() || _getWeenieObject == null)
@@ -1495,6 +2309,16 @@ internal static class ClientObjectHooks
     public static bool TryGetObjectBitfield(uint objectId, out uint bitfield)
     {
         bitfield = 0;
+        // Off-thread (RynthAi DoorInteractionController's BF_DOOR check, player
+        // filters): the PWD snapshot (<= ~100 ms old). MonsterHud (main thread)
+        // keeps the live read below.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            if (!TryGetPwdSnapshot(objectId, out PwdEntry e))
+                return false;
+            bitfield = e.Bitfield;
+            return true;
+        }
         if (_getWeenieObject == null)
         {
             if (!Probe() || _getWeenieObject == null)
@@ -1716,6 +2540,19 @@ internal static class ClientObjectHooks
         {
             lock (_objectIdentityCacheLock)
             {
+                // A zero snapshot value means qualities weren't populated when the walk
+                // ran; prefer the create-time descriptor type in that case.
+                if (_objectTypeCache.TryGetValue(objectId, out typeFlags) && typeFlags != 0)
+                    return true;
+            }
+            if (TryGetCreateSeedType(objectId, out uint seeded))
+            {
+                typeFlags = seeded;
+                return true;
+            }
+            // Snapshot hit with flags=0 is still an answer (static scenery often has no type).
+            lock (_objectIdentityCacheLock)
+            {
                 if (_objectTypeCache.TryGetValue(objectId, out typeFlags))
                     return true;
             }
@@ -1727,6 +2564,7 @@ internal static class ClientObjectHooks
             if (!Probe() || _inqType == null || _getWeenieObject == null)
                 return false;
         }
+        bool inqOk = false;
         try
         {
             IntPtr weeniePtr;
@@ -1769,7 +2607,12 @@ internal static class ClientObjectHooks
                 {
                     typeFlags = _inqType(weeniePtr);
                 }
-                return true;
+                // Qualities of a never-appraised world object (a portal) can hold type 0;
+                // the type the server sent in CreateObject is in the PWD below. Portals
+                // were missing from the radar and /ub usel until clicked (2026-09-29).
+                if (typeFlags != 0)
+                    return true;
+                inqOk = true;
             }
 
             // PWD.type is set up by network packets independently of qualities.
@@ -1785,7 +2628,9 @@ internal static class ClientObjectHooks
                 if (IsReadablePointer(typeAddr))
                 {
                     typeFlags = (uint)Marshal.ReadInt32(typeAddr);
-                    return true;
+                    if (typeFlags != 0)
+                        return true;
+                    inqOk = true;
                 }
             }
         }
@@ -1795,12 +2640,13 @@ internal static class ClientObjectHooks
         }
 
         // Last resort: appraisal cache from IdentifyObject responses.
-        if (AppraisalHooks.TryGetCachedIntProperty(objectId, 1 /* STypeInt.ItemType */, out int cachedType))
+        if (AppraisalHooks.TryGetCachedIntProperty(objectId, 1 /* STypeInt.ItemType */, out int cachedType) && cachedType != 0)
         {
             typeFlags = unchecked((uint)cachedType);
             return true;
         }
-        return false;
+        typeFlags = 0;
+        return inqOk;   // read fine, the type just isn't known yet
     }
 
     /// <summary>
@@ -1815,8 +2661,35 @@ internal static class ClientObjectHooks
     {
         value = 0;
 
-        // Appraisal cache covers objects where m_pQualities is null (doors, inventory items, etc.)
-        if (AppraisalHooks.TryGetCachedIntProperty(objectId, stype, out value))
+        // STACK_SIZE: the client's own copy is the truth (it follows every split,
+        // merge and use); the caches below only know stacks the server sent a
+        // property update or appraisal for. Live on the main thread, snapshot off it.
+        if (stype == 12)
+        {
+            if (TryReadPwdInt32(objectId, 96, out value) && value > 0) return true;
+            lock (_objectIdentityCacheLock)
+            {
+                if (_objectStackCache.TryGetValue(objectId, out value)) return true;
+            }
+            value = 0;
+        }
+
+
+        // The player's current burden off the main thread: the PrefetchPlayerStats snapshot.
+        if (stype == 5 && !MainThreadGuard.IsOnMainThread() && objectId != 0 && objectId == ClientHelperHooks.GetPlayerId())
+        {
+            lock (_playerStatsCacheLock)
+            {
+                if (_playerStatsCacheOwner == objectId) { value = _cachedEncVal; return true; }
+            }
+        }
+
+        // The property caches (PropertyCaches: the player's PlayerDescription + private
+        // updates, else the last identify, then public updates). They cover objects whose
+        // m_pQualities is null (doors, inventory items), and server updates for
+        // never-appraised objects (an essence's uses after a use or refill) are newer than
+        // the PublicWeenieDesc copy read below.
+        if (PropertyCaches.TryGetInt(objectId, stype, out value))
             return true;
 
         if (_getWeenieObject == null)
@@ -1828,7 +2701,8 @@ internal static class ClientObjectHooks
         // Fast path: stypes whose values live in PublicWeenieDesc.
         // PWD starts at weenie + _phys_obj_offset + 4. Layout (Chorizite Weenie.cs:1734):
         //   +28 _containerID, +32 _wielderID, +40 _valid_locations, +44 _location,
-        //   +48 _itemsCapacity, +52 _containersCapacity, +96 _stackSize, +100 _maxStackSize,
+        //   +48 _itemsCapacity, +52 _containersCapacity, +76 _effects, +88 _structure, +92 _maxStructure,
+        //   +96 _stackSize, +100 _maxStackSize,
         //   +148 _material_type
         // CBaseQualities::InqInt fails for inventory/corpse items (m_pQualities is null on pack wienies).
         // Any stype whose value lives in PWD must be served from here instead.
@@ -1840,43 +2714,43 @@ internal static class ClientObjectHooks
             10  => 44,   // CURRENT_WIELDED_LOCATION → _location
             11  => 100,  // MAX_STACK_SIZE → _maxStackSize
             12  => 96,   // STACK_SIZE → _stackSize
+            18  => 76,   // UI_EFFECTS → _effects (a pet essence's element)
+            91  => 92,   // MAX_STRUCTURE → _maxStructure
+            92  => 88,   // STRUCTURE → _structure (uses left on kits, essences)
             131 => 148,  // MATERIAL_TYPE → _material_type (4 bytes, int)
             _   => -1,
         };
 
-        if (pwdFieldOffset >= 0 && _weeniePhysicsObjOffset >= 0)
+        // Deep-audit finding #24 (2026-06-18): this PWD fast path used to run
+        // BEFORE the IsOnMainThread check below, dereferencing a weenie
+        // pointer captured on a <=100ms-stale main-thread walk with raw
+        // Marshal.ReadInt32. IsReadablePointer catches an unmapped page but
+        // not a freed-then-reallocated one (TOCTOU) — off-thread that risks
+        // feeding a garbage property value into loot/salvage logic. Hoisted
+        // the gate up here (same place the InqInt fallback already gates) so
+        // the fast path only ever runs on the main thread; off-thread
+        // callers fall through to the appraisal cache only (already checked
+        // above) rather than touching AC memory directly.
+        if (!MainThreadGuard.IsOnMainThread())
         {
-            try
+            // Off the main thread the PWD copy of CURRENT_WIELDED_LOCATION comes from the
+            // identity snapshot. Only after the caches above: the PWD _location can stay 0
+            // for an item wielded after it was created (a Longbow in hand read 0).
+            if (stype == 10)
             {
-                IntPtr weeniePtr = _getWeenieObject(objectId);
-                if (weeniePtr == IntPtr.Zero)
-                    return false;
-
-                int pwdBase = _weeniePhysicsObjOffset + 4;
-                IntPtr fieldAddr = weeniePtr + pwdBase + pwdFieldOffset;
-                // Page-probe BOTH ends of the 4-byte read span (mirrors
-                // TryGetObjectOwnershipInfo's dual-end probe): a freed-but-decommitted
-                // weenie whose field straddles a committed/decommitted page boundary is
-                // an uncatchable AV under NativeAOT; the catch below only covers
-                // null-page faults. All stypes served here are Marshal.ReadInt32
-                // (4 bytes), so the span is [fieldAddr, fieldAddr+3].
-                if (!IsReadablePointer(fieldAddr) || !IsReadablePointer(fieldAddr + 3))
-                    return false;
-
-                value = Marshal.ReadInt32(fieldAddr);
-                return true;
+                lock (_objectIdentityCacheLock)
+                {
+                    if (_objectLocationCache.TryGetValue(objectId, out value))
+                        return true;
+                }
+                value = 0;
             }
-            catch
-            {
-                return false;
-            }
+            // Every other CreateObject field (value, burden, capacity, useability, ...) from the
+            // PWD snapshot, the way an unidentified object's properties reach UtilityBelt.
+            return TryGetPwdSnapshotInt(objectId, stype, out value);
         }
 
-        // Fall through to CBaseQualities::InqInt for stypes not in PWD.
-        // Off-thread: refuse the native fallback — racing with main-thread
-        // qualities teardown produces the Class A 0x67E779 AV.
-        if (!MainThreadGuard.IsOnMainThread())
-            return false;
+        // CBaseQualities::InqInt for stypes not in PWD.
         if (_inqInt == null)
         {
             if (!Probe() || _inqInt == null)
@@ -1888,28 +2762,24 @@ internal static class ClientObjectHooks
             if (weeniePtr == IntPtr.Zero)
                 return false;
 
-            if (!TryGetQualitiesPtr(weeniePtr, out IntPtr qualitiesPtr))
-                return false;
-
-            IntPtr baseQualitiesPtr = qualitiesPtr + CBaseQualitiesOffset;
-            if (!IsReadablePointer(baseQualitiesPtr))
-                return false;
-
-            int retval = 0;
-            int result = _inqInt(baseQualitiesPtr, stype, &retval, 0, 1);
-
-            if (result != 0)
+            if (TryGetQualitiesPtr(weeniePtr, out IntPtr qualitiesPtr))
             {
-                value = retval;
-                return true;
+                IntPtr baseQualitiesPtr = qualitiesPtr + CBaseQualitiesOffset;
+                if (IsReadablePointer(baseQualitiesPtr))
+                {
+                    int retval = 0;
+                    int result = _inqInt(baseQualitiesPtr, stype, &retval, 0, 1);
+                    if (result != 0)
+                    {
+                        value = retval;
+                        return true;
+                    }
+                }
             }
 
-            // Fallback: network property cache (covers static world objects like doors
-            // where m_pQualities is null and InqInt returns 0).
-            if (PropertyUpdateHooks.TryGetCachedIntProperty(objectId, stype, out value))
-                return true;
-
-            return false;
+            // Fallback (no qualities, or InqInt doesn't know it): the rest of the
+            // PublicWeenieDesc, as off the main thread (the caches were read above).
+            return TryGetPwdSnapshotInt(objectId, stype, out value);
         }
         catch
         {
@@ -1923,24 +2793,78 @@ internal static class ClientObjectHooks
     /// fast-path. DataID properties otherwise go through a qualities table that is
     /// null for inventory/pack items (InqDataID would fail), so we bypass it. PWD is
     /// network-populated, so this works on UNequipped items with no qualities pointer
-    /// and no appraisal — no main-thread native call (the weenie ptr is served from
-    /// the off-thread double-buffered snapshot when not on AC's main thread).
-    /// Supported stype: Icon=8 (PWD._iconID at +16). Layout per the _type reader
-    /// above: WeenieDesc(4) + _name(4) + _plural_name(4) + _wcid(4) = 16 → _iconID.
-    /// (Generic switch so _iconOverlayID(+20) / _iconUnderlayID(+24) can extend it
-    /// later without a new bridge.)
+    /// and no appraisal — no native call. Off AC's main thread the value comes from
+    /// the PWD field snapshot the 10 Hz main-thread walk takes (since 2026-09-30).
+    /// Supported stypes: Icon=8 (PWD._iconID at +16), IconOverlay=50 (_iconOverlayID
+    /// at +20) and IconUnderlay=52 (_iconUnderlayID at +24; both since 2026-09-30).
+    /// Layout per the _type reader above: WeenieDesc(4) + _name(4) + _plural_name(4) +
+    /// _wcid(4) = 16 → _iconID. 0 in the overlay/underlay fields means "none".
     /// </summary>
     public static bool TryGetObjectDataIdProperty(uint objectId, uint stype, out uint dataId)
+    {
+        if (TryGetPwdIconDataId(objectId, stype, out dataId))
+            return true;
+        // Every other data id (2026-09-30): the property caches (identify DID table,
+        // PlayerDescription, UpdatePropertyDataID), then the rest of the PWD (Spell 28).
+        if (PropertyCaches.TryGetDataId(objectId, stype, out dataId))
+            return true;
+        return TryGetPwdSnapshotDataId(objectId, stype, out dataId);
+    }
+
+    /// <summary>
+    /// v73: a STypeIID (PropertyInstanceId) property - another object's id. Any thread; never
+    /// touches AC memory off the main thread. Container (2) and Wielder (3) come from the
+    /// client's own PublicWeenieDesc first (the client moves items itself; the snapshot follows
+    /// it), then the property caches (the player's PlayerDescription and private updates:
+    /// allegiance, monarch, patron, ...; public UpdatePropertyInstanceID), then the rest of the
+    /// PWD (Monarch 26, HouseOwner 32, PetOwner 44). A zero id answers nothing.
+    /// </summary>
+    public static bool TryGetObjectInstanceIdProperty(uint objectId, uint stype, out uint value)
+    {
+        value = 0;
+        if (objectId == 0 || stype == 0)
+            return false;
+        if (stype is 2 or 3 && TryGetObjectOwnershipInfo(objectId, out uint container, out uint wielder, out _))
+        {
+            value = stype == 2 ? container : wielder;
+            if (value != 0) return true;
+        }
+        if (PropertyCaches.TryGetInstanceId(objectId, stype, out value) && value != 0)
+            return true;
+        return TryGetPwdSnapshotInstanceId(objectId, stype, out value);
+    }
+
+    private static bool TryGetPwdIconDataId(uint objectId, uint stype, out uint dataId)
     {
         dataId = 0;
 
         int pwdFieldOffset = stype switch
         {
-            8 => 16,    // PropertyDataId.Icon → _iconID
+            8 => PwdIconOffset,              // PropertyDataId.Icon → _iconID
+            50 => PwdIconOverlayOffset,      // PropertyDataId.IconOverlay → _iconOverlayID
+            52 => PwdIconUnderlayOffset,     // PropertyDataId.IconUnderlay → _iconUnderlayID
             _ => -1,
         };
         if (pwdFieldOffset < 0)
             return false;
+
+        // Off AC's main thread (RynthAi icons, AutoVendorManager): the PWD snapshot
+        // from the 10 Hz main-thread walk. Reading PWD through the cached weenie
+        // pointer here was the deep-audit #24 TOCTOU (a freed, reused weenie still
+        // passes the page probe). Blank icons are worse than a 100 ms old one, so
+        // serve the copy rather than refusing.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            if (!TryGetPwdSnapshot(objectId, out PwdEntry e))
+                return false;
+            dataId = pwdFieldOffset switch
+            {
+                PwdIconOffset => e.Icon,
+                PwdIconOverlayOffset => e.IconOverlay,
+                _ => e.IconUnderlay,
+            };
+            return true;
+        }
 
         if (_getWeenieObject == null)
         {
@@ -1984,6 +2908,26 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectDoubleProperty(uint objectId, uint stype, out double value)
     {
         value = 0;
+
+        // Deep-audit finding #24 (2026-06-18): same TOCTOU class as
+        // TryGetObjectIntProperty above — this PWD fast path used to run
+        // before the IsOnMainThread check, raw-dereferencing a
+        // possibly-stale weenie pointer off-thread. Hoisted the gate up
+        // before the fast path; no appraisal-cache fallback exists for this
+        // stype today, so off-thread callers now just get false instead of
+        // an unguarded read. (2026-09-30: also ahead of the lazy Probe, which
+        // must not run off-thread.)
+        //
+        // 2026-09-30: the property caches hold float properties too (the identify message's
+        // float table and armour/weapon profiles, PlayerDescription, UpdatePropertyFloat), so
+        // objects answer off-thread like their int, bool and string properties do. Before,
+        // every off-thread double read failed. UseRadius / CooldownDuration / workmanship of
+        // an unidentified object come from the PWD snapshot.
+        if (PropertyCaches.TryGetFloat(objectId, stype, out value))
+            return true;
+        if (!MainThreadGuard.IsOnMainThread())
+            return TryGetPwdSnapshotFloat(objectId, stype, out value);
+
         if (_getWeenieObject == null)
         {
             if (!Probe() || _getWeenieObject == null)
@@ -2012,9 +2956,7 @@ internal static class ClientObjectHooks
             catch { return false; }
         }
 
-        // Off-thread: refuse the InqFloat native fallback (Class A guard).
-        if (!MainThreadGuard.IsOnMainThread())
-            return false;
+        // (IsOnMainThread already checked above, before the PWD fast path.)
         if (_inqFloat == null)
         {
             if (!Probe() || _inqFloat == null)
@@ -2026,20 +2968,21 @@ internal static class ClientObjectHooks
             if (weeniePtr == IntPtr.Zero)
                 return false;
 
-            if (!TryGetQualitiesPtr(weeniePtr, out IntPtr qualitiesPtr))
-                return false;
-
-            IntPtr baseQualitiesPtr = qualitiesPtr + CBaseQualitiesOffset;
-            if (!IsReadablePointer(baseQualitiesPtr))
-                return false;
-
-            double retval = 0;
-            int result = _inqFloat(baseQualitiesPtr, stype, &retval, 0);
-            if (result == 0)
-                return false;
-
-            value = retval;
-            return true;
+            if (TryGetQualitiesPtr(weeniePtr, out IntPtr qualitiesPtr))
+            {
+                IntPtr baseQualitiesPtr = qualitiesPtr + CBaseQualitiesOffset;
+                if (IsReadablePointer(baseQualitiesPtr))
+                {
+                    double retval = 0;
+                    int result = _inqFloat(baseQualitiesPtr, stype, &retval, 0);
+                    if (result != 0)
+                    {
+                        value = retval;
+                        return true;
+                    }
+                }
+            }
+            return TryGetPwdSnapshotFloat(objectId, stype, out value);
         }
         catch
         {
@@ -2054,9 +2997,19 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectQuadProperty(uint objectId, uint stype, out long value)
     {
         value = 0;
-        // Off-thread: refuse — _inqInt64 is an AC native call (Class A guard).
+        // The property caches first (2026-09-30): the player's PlayerDescription + private
+        // updates, an identified object's int64 table, public UpdatePropertyInt64.
+        if (PropertyCaches.TryGetInt64(objectId, stype, out value))
+            return true;
+        // Off-thread: _inqInt64 is an AC native call (Class A guard). The player's experience and
+        // luminance come from the main-thread snapshot (PrefetchPlayerStats); others refuse.
         if (!MainThreadGuard.IsOnMainThread())
-            return false;
+        {
+            if (objectId == 0 || objectId != ClientHelperHooks.GetPlayerId())
+                return false;
+            lock (_playerStatsCacheLock)
+                return _playerStatsCacheOwner == objectId && _cachedPlayerQuad.TryGetValue(stype, out value);
+        }
         if (_inqInt64 == null)
         {
             if (!Probe() || _inqInt64 == null)
@@ -2098,9 +3051,19 @@ internal static class ClientObjectHooks
     public static unsafe bool TryGetObjectAttribute2ndBaseLevel(uint objectId, uint stype, out uint value)
     {
         value = 0;
-        // Off-thread: refuse — _inqAttribute2ndBaseLevel is an AC native call (Class A guard).
+        // Off-thread: _inqAttribute2ndBaseLevel is an AC native call (Class A guard). The player's
+        // own values come from the main-thread snapshot (PrefetchPlayerStats); others refuse.
         if (!MainThreadGuard.IsOnMainThread())
-            return false;
+        {
+            if (stype < 1 || stype > 6 || objectId == 0 || objectId != ClientHelperHooks.GetPlayerId())
+                return false;
+            lock (_playerStatsCacheLock)
+            {
+                if (_playerStatsCacheOwner != objectId) return false;
+                value = _cachedAttr2nd[stype];
+                return value != 0;
+            }
+        }
         if (_inqAttribute2ndBaseLevel == null)
         {
             if (!Probe() || _inqAttribute2ndBaseLevel == null)
@@ -2137,21 +3100,15 @@ internal static class ClientObjectHooks
     {
         value = false;
 
-        // Appraisal cache covers inventory items where m_pQualities is null
-        // (CBaseQualities::InqBool always returns 0 for such objects).
-        if (AppraisalHooks.TryGetCachedBoolProperty(objectId, stype, out value))
+        // The property caches cover inventory items where m_pQualities is null
+        // (CBaseQualities::InqBool always returns 0 for such objects), the player's own
+        // record and public updates (PropertyCaches; pure dictionary reads).
+        if (PropertyCaches.TryGetBool(objectId, stype, out value))
             return true;
 
         // Off-thread: refuse — _inqBool is an AC native call (Class A guard).
-        // PropertyUpdateHooks cache fallback also gated below — only the
-        // safe network-cache lookup is allowed off-thread there.
         if (!MainThreadGuard.IsOnMainThread())
-        {
-            // Allow the network-property cache to serve off-thread (pure dict read).
-            if (PropertyUpdateHooks.TryGetCachedBoolProperty(objectId, stype, out value))
-                return true;
             return false;
-        }
         if (_inqBool == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqBool == null || _getWeenieObject == null)
@@ -2199,14 +3156,16 @@ internal static class ClientObjectHooks
     {
         value = string.Empty;
 
-        // Appraisal cache covers inventory items where m_pQualities is null
-        // (CBaseQualities::InqString always returns 0 for such objects).
-        if (AppraisalHooks.TryGetCachedStringProperty(objectId, stype, out value))
+        // The property caches cover inventory items where m_pQualities is null
+        // (CBaseQualities::InqString always returns 0 for such objects), the player's own
+        // record (PlayerDescription) and UpdatePropertyString (PropertyCaches).
+        if (PropertyCaches.TryGetString(objectId, stype, out value))
             return true;
 
-        // Off-thread: refuse — _inqString is an AC native call (Class A guard).
+        // Off-thread: refuse — _inqString is an AC native call (Class A guard). The name
+        // (PropertyString.Name, 1) of any object comes from the identity snapshot.
         if (!MainThreadGuard.IsOnMainThread())
-            return false;
+            return stype == 1 && TryGetSnapshotName(objectId, out value) && value.Length > 0;
         if (_inqString == null || _getWeenieObject == null)
         {
             if (!Probe() || _inqString == null || _getWeenieObject == null)
@@ -2389,14 +3348,16 @@ internal static class ClientObjectHooks
         if ((DateTime.UtcNow - _lastAttackablePrefetchUtc).TotalMilliseconds < AttackablePrefetchThrottleMs)
             return;
         _lastAttackablePrefetchUtc = DateTime.UtcNow;
+        long walkT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var probeScope = MemoryProbe.BeginWalk(); // one page query per page per walk (MemoryProbe)
 
         try
         {
-            var snapshot = new Dictionary<uint, bool>();
-            int n = CObjectMaintHooks.EnumerateLiveWeenieObjectIds(id =>
-            {
-                snapshot[id] = ComputeAttackableOnMainThread(id);
-            });
+            // Scratch reused across walks (main thread only): the walk used to allocate a new
+            // dictionary and closure every 500 ms on AC's thread, growing with the object count.
+            var snapshot = _attackableScratch;
+            snapshot.Clear();
+            int n = CObjectMaintHooks.EnumerateLiveWeenieObjectIds(_captureAttackableDelegate);
             if (n <= 0)
                 return; // walk failed/empty — keep the last good snapshot
 
@@ -2420,6 +3381,35 @@ internal static class ClientObjectHooks
         {
             RynthLog.Compat($"PrefetchAttackable exception: {ex.Message}");
         }
+        finally
+        {
+            _walkAttackable.Add(System.Diagnostics.Stopwatch.GetTimestamp() - walkT0);
+        }
+    }
+
+    // Main-thread scratch for the attackable / identity walks (see PrefetchAttackable).
+    private static readonly Dictionary<uint, bool> _attackableScratch = new(1024);
+    private static readonly Dictionary<uint, string> _identityNameScratch = new(1024);
+    private static readonly Dictionary<uint, uint> _identityTypeScratch = new(1024);
+    private static readonly Dictionary<uint, int> _identityLocScratch = new(1024);
+    private static readonly Dictionary<uint, int> _identityStackScratch = new(1024);
+    private static readonly List<uint> _identityIdScratch = new(1024);
+    private static readonly Action<uint> _captureAttackableDelegate = CaptureAttackableForId;
+    private static readonly Action<uint> _captureIdentityDelegate = CaptureIdentityForId;
+
+    private static void CaptureAttackableForId(uint id) => _attackableScratch[id] = ComputeAttackableOnMainThread(id);
+
+    private static void CaptureIdentityForId(uint id)
+    {
+        _identityIdScratch.Add(id);
+        if (TryGetObjectName(id, out string nm) && nm.Length > 0)
+            _identityNameScratch[id] = nm;
+        if (TryGetItemType(id, out uint typeFlags))
+            _identityTypeScratch[id] = typeFlags;
+        if (TryReadPwdInt32(id, 44, out int loc))
+            _identityLocScratch[id] = loc;
+        if (TryReadPwdInt32(id, 96, out int stack) && stack > 0)
+            _identityStackScratch[id] = stack;
     }
 
     public static void PrefetchObjectIdentity()
@@ -2429,19 +3419,20 @@ internal static class ClientObjectHooks
         if ((DateTime.UtcNow - _lastObjectIdentityPrefetchUtc).TotalMilliseconds < ObjectIdentityPrefetchThrottleMs)
             return;
         _lastObjectIdentityPrefetchUtc = DateTime.UtcNow;
+        long walkT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var probeScope = MemoryProbe.BeginWalk(); // one page query per page per walk (MemoryProbe)
 
         try
         {
-            var nameSnap = new Dictionary<uint, string>();
-            var typeSnap = new Dictionary<uint, uint>();
+            // Scratch reused across walks (main thread only), as PrefetchAttackable.
+            var nameSnap = _identityNameScratch;
+            var typeSnap = _identityTypeScratch;
+            var locSnap = _identityLocScratch;
+            var stackSnap = _identityStackScratch;
+            var idSnap = _identityIdScratch;
+            nameSnap.Clear(); typeSnap.Clear(); locSnap.Clear(); stackSnap.Clear(); idSnap.Clear();
 
-            int n = CObjectMaintHooks.EnumerateLiveWeenieObjectIds(id =>
-            {
-                if (TryGetObjectName(id, out string nm) && nm.Length > 0)
-                    nameSnap[id] = nm;
-                if (TryGetItemType(id, out uint typeFlags))
-                    typeSnap[id] = typeFlags;
-            });
+            int n = CObjectMaintHooks.EnumerateLiveWeenieObjectIds(_captureIdentityDelegate);
 
             if (n <= 0)
                 return; // walk failed/empty — keep the last good snapshot
@@ -2454,7 +3445,14 @@ internal static class ClientObjectHooks
                 _objectTypeCache.Clear();
                 foreach (var kv in typeSnap)
                     _objectTypeCache[kv.Key] = kv.Value;
+                _objectLocationCache.Clear();
+                foreach (var kv in locSnap)
+                    _objectLocationCache[kv.Key] = kv.Value;
+                _objectStackCache.Clear();
+                foreach (var kv in stackSnap)
+                    _objectStackCache[kv.Key] = kv.Value;
             }
+            _liveObjectIds = idSnap.ToArray();
 
             if (!_loggedObjectIdentityServe)
             {
@@ -2466,6 +3464,105 @@ internal static class ClientObjectHooks
         {
             RynthLog.Compat($"PrefetchObjectIdentity exception: {ex.Message}");
         }
+        finally
+        {
+            _walkIdentity.Add(System.Diagnostics.Stopwatch.GetTimestamp() - walkT0);
+        }
+    }
+
+    /// <summary>
+    /// Records an object's name and ITEM_TYPE straight from the PublicWeenieDesc passed
+    /// to ACCObjectMaint::CreateObject. Called from the create hook on AC's main thread,
+    /// after the original returns. The descriptor is server data that exists before the
+    /// object's qualities do, so this makes names/types readable off-thread immediately
+    /// instead of after the first successful identity snapshot (~10 s at login).
+    /// Every read is pointer-validated; a bad descriptor simply records nothing.
+    /// </summary>
+    internal static void SeedIdentityFromCreate(uint objectId, IntPtr weenieDesc)
+    {
+        if (objectId == 0 || weenieDesc == IntPtr.Zero)
+            return;
+
+        try
+        {
+            // PublicWeenieDesc derives from PackObj, so a real descriptor starts with an
+            // acclient.exe vtable; reject anything else before reading fields.
+            if (!LooksLikeAcHeapObject(weenieDesc))
+                return;
+
+            bool gotName = TryReadPwdString(weenieDesc, PwdNameOffset, out string name);
+
+            uint typeFlags = 0;
+            IntPtr typeAddr = weenieDesc + PwdTypeOffset;
+            bool gotType = IsReadablePointer(typeAddr);
+            if (gotType)
+                typeFlags = unchecked((uint)Marshal.ReadInt32(typeAddr));
+
+            if (!gotName && (!gotType || typeFlags == 0))
+                return;
+
+            lock (_createSeedLock)
+            {
+                // Safety valve for a missed delete: drop everything rather than grow forever.
+                // The live snapshot covers anything still in the world.
+                if (_createSeedNames.Count >= CreateSeedCap || _createSeedTypes.Count >= CreateSeedCap)
+                {
+                    _createSeedNames.Clear();
+                    _createSeedTypes.Clear();
+                }
+                if (gotName)
+                    _createSeedNames[objectId] = name;
+                if (gotType && typeFlags != 0)
+                    _createSeedTypes[objectId] = typeFlags;
+            }
+
+            int seedNo = System.Threading.Interlocked.Increment(ref _createSeedCount);
+            // First few samples let a log reader confirm the descriptor offsets resolve
+            // to sensible names/types on this client build.
+            if (seedNo <= 5)
+                RynthLog.Compat($"[CreateSeed] #{seedNo} 0x{objectId:X8} name='{(gotName ? name : "")}' type=0x{typeFlags:X8}");
+            if (!_loggedCreateSeedServe && seedNo >= 50)
+            {
+                _loggedCreateSeedServe = true;
+                int names, types;
+                lock (_createSeedLock) { names = _createSeedNames.Count; types = _createSeedTypes.Count; }
+                RynthLog.Compat($"ClientObjectHooks: create-descriptor identity seeds active — {names} names, {types} types captured at CreateObject.");
+            }
+        }
+        catch
+        {
+            // Descriptor read failures are non-fatal; the periodic snapshot still runs.
+        }
+    }
+
+    /// <summary>Drops create-time seeds for a deleted object (called from the delete hook).</summary>
+    internal static void ForgetCreateSeed(uint objectId)
+    {
+        lock (_createSeedLock)
+        {
+            _createSeedNames.Remove(objectId);
+            _createSeedTypes.Remove(objectId);
+        }
+    }
+
+    private static bool TryGetCreateSeedName(uint objectId, out string name)
+    {
+        lock (_createSeedLock)
+        {
+            if (_createSeedNames.TryGetValue(objectId, out string? seeded) && seeded.Length > 0)
+            {
+                name = seeded;
+                return true;
+            }
+        }
+        name = string.Empty;
+        return false;
+    }
+
+    private static bool TryGetCreateSeedType(uint objectId, out uint typeFlags)
+    {
+        lock (_createSeedLock)
+            return _createSeedTypes.TryGetValue(objectId, out typeFlags);
     }
 
     public static bool TryGetObjectName(uint objectId, out string name)
@@ -2483,6 +3580,10 @@ internal static class ClientObjectHooks
                     return true;
                 }
             }
+            // Snapshot miss (login burst / object newer than the last walk): serve the
+            // name captured from the create descriptor.
+            if (TryGetCreateSeedName(objectId, out name))
+                return true;
             name = string.Empty;
             return false;
         }
@@ -2660,6 +3761,36 @@ internal static class ClientObjectHooks
         if (!TryGetWeenieObjectPtr(objectId, out IntPtr weeniePtr))
             return false;
 
+        return ReadPhysicsFromWeenie(objectId, weeniePtr, out objCellId, out x, out y, out z, out _, out _, out _, out _);
+    }
+
+    /// <summary>
+    /// Reads cell/origin plus the heading quaternion's qw/qz and CPhysicsObj m_state
+    /// from a weenie pointer resolved on the main thread. MAIN THREAD ONLY (callers:
+    /// <see cref="ReadObjectPositionLive"/> and the <see cref="PrefetchPositions"/> walk).
+    /// </summary>
+    private static bool ReadPhysicsFromWeenie(
+        uint objectId,
+        IntPtr weeniePtr,
+        out uint objCellId,
+        out float x,
+        out float y,
+        out float z,
+        out float qw,
+        out float qz,
+        out uint state,
+        out bool hasState)
+    {
+        objCellId = 0;
+        x = y = z = 0;
+        qw = 1f;
+        qz = 0;
+        state = 0;
+        hasState = false;
+
+        if (weeniePtr == IntPtr.Zero || _weeniePhysicsObjOffset < 0)
+            return false;
+
         try
         {
             IntPtr physicsObj = Marshal.ReadIntPtr(weeniePtr + _weeniePhysicsObjOffset);
@@ -2672,7 +3803,11 @@ internal static class ClientObjectHooks
             // read below would AV in NativeAOT, bypassing try/catch. IsReadablePointer
             // catches the unmapped-page case; the vtable module check catches any
             // garbage-but-mapped value.
-            if (!IsReadablePointer(physicsObj))
+            // One VirtualQuery covers the object head through m_state (+0xA8); if the
+            // span happens to straddle two regions, fall back to the old head-only
+            // probe and leave m_state unknown for this pass.
+            bool spanOk = IsReadableSpan(physicsObj, PhysicsStateOffset + 4);
+            if (!spanOk && !IsReadablePointer(physicsObj))
                 return false;
 
             IntPtr vtable = Marshal.ReadIntPtr(physicsObj);
@@ -2684,6 +3819,13 @@ internal static class ClientObjectHooks
             x = ReadFloat(pos + PositionOriginXOffset);
             y = ReadFloat(pos + PositionOriginYOffset);
             z = ReadFloat(pos + PositionOriginZOffset);
+            qw = ReadFloat(pos + PositionQwOffset);
+            qz = ReadFloat(pos + PositionQzOffset);
+            if (spanOk)
+            {
+                state = unchecked((uint)Marshal.ReadInt32(physicsObj + PhysicsStateOffset));
+                hasState = true;
+            }
             return true;
         }
         catch (Exception ex)
@@ -2693,6 +3835,14 @@ internal static class ClientObjectHooks
         }
     }
 
+    // Heading (0–360°, clockwise, 0 = North) from a yaw quaternion's qw/qz. Same
+    // formula as NavigationEngine / CorpseOpenController.
+    private static float HeadingFromQuaternion(float qw, float qz)
+    {
+        double physYawDeg = 2.0 * Math.Atan2(qz, qw) * (180.0 / Math.PI);
+        return (float)(((-physYawDeg) % 360.0 + 720.0) % 360.0);
+    }
+
     /// <summary>
     /// Samples every live object's position on AC's main thread (EndScene path)
     /// into <see cref="_positionCache"/>, which the off-thread plugin pump reads
@@ -2700,9 +3850,9 @@ internal static class ClientObjectHooks
     /// volatile) and ZERO-ALLOC: the dict is reused (Clear + re-add of struct
     /// values) and the per-id callback is a cached delegate, so this never
     /// allocates inside the EndScene reverse-P/Invoke (which would risk the
-    /// NativeAOT GC fail-fast that moved TickAll off this thread). The lock is
-    /// held across the walk to stay zero-alloc; the pump's per-id read contends
-    /// only briefly. Walk runs every frame, so a transient empty (walk failure)
+    /// NativeAOT GC fail-fast that moved TickAll off this thread). Two reused
+    /// dictionaries swap after the walk (still zero-alloc), so the pump's per-id
+    /// read never waits for the walk. Walk runs every frame, so a transient empty (walk failure)
     /// self-heals next frame — no last-good retention needed (unlike the
     /// throttled attackable/identity snapshots).
     /// </summary>
@@ -2713,6 +3863,8 @@ internal static class ClientObjectHooks
         if ((DateTime.UtcNow - _lastPositionPrefetchUtc).TotalMilliseconds < PositionPrefetchThrottleMs)
             return;
         _lastPositionPrefetchUtc = DateTime.UtcNow;
+        long walkT0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        using var probeScope = MemoryProbe.BeginWalk(); // one page query per page per walk (MemoryProbe)
         if (_weeniePhysicsObjOffset < 0)
         {
             ProbePhysObjOffset();
@@ -2722,18 +3874,23 @@ internal static class ClientObjectHooks
 
         try
         {
-            lock (_positionCacheLock)
-            {
-                _positionCache.Clear();
-                _weeniePtrBack.Clear();
-                CObjectMaintHooks.EnumerateLiveWeenieObjectIds(_capturePositionDelegate);
-            }
+            // Back buffers are main-thread only: fill them with no lock held.
+            _positionBack.Clear();
+            _weeniePtrBack.Clear();
+            _pwdBack.Clear();
+            CObjectMaintHooks.EnumerateLiveWeenieObjectIds(_capturePositionDelegate);
 
-            // Publish the freshly-walked id->weeniePtr map to off-thread readers
-            // (GetWeenieObjectResolve). The swap is brief and is NOT held during
-            // the walk, so the pump's resolver reads never stall on the walk.
+            lock (_positionCacheLock)
+                (_positionCache, _positionBack) = (_positionBack, _positionCache);
+
+            // Publish the freshly-walked id->weeniePtr map and the PWD field copy
+            // to off-thread readers together. The swap is brief and is NOT held
+            // during the walk, so the pump's reads never stall on the walk.
             lock (_weeniePtrSwapLock)
+            {
                 (_weeniePtrFront, _weeniePtrBack) = (_weeniePtrBack, _weeniePtrFront);
+                (_pwdFront, _pwdBack) = (_pwdBack, _pwdFront);
+            }
 
             if (!_loggedPositionServe && _positionCache.Count > 0)
             {
@@ -2746,6 +3903,10 @@ internal static class ClientObjectHooks
         catch (Exception ex)
         {
             RynthLog.Compat($"PrefetchPositions exception: {ex.Message}");
+        }
+        finally
+        {
+            _walkPositions.Add(System.Diagnostics.Stopwatch.GetTimestamp() - walkT0);
         }
     }
 
@@ -2772,6 +3933,8 @@ internal static class ClientObjectHooks
             lock (_objectIdentityCacheLock) { nameN = _objectNameCache.Count; typeN = _objectTypeCache.Count; }
             lock (_weeniePtrSwapLock) ptrN = _weeniePtrFront.Count;
             RynthLog.Compat($"[SnapshotDiag] pos={posN} attackable={atkN}({atkTrue} atk) names={nameN} types={typeN} ptr={ptrN}");
+            var (fastPages, slowCalls, slowMs) = MemoryProbe.TakeStats();
+            RynthLog.Compat($"[SnapshotDiag] walks (main thread, last 10 s): positions {_walkPositions.TakeText()}; identity {_walkIdentity.TakeText()}; attackable {_walkAttackable.TakeText()}; memory probes {fastPages} pages fast, {slowCalls} VirtualQuery ({slowMs:0.0} ms){(MemoryProbe.FastPathActive ? "" : " FAST PATH OFF")}");
 
             // Compare CObjectMaint's physics tables — object_table (+0x84) and
             // null_object_table (+0x9C, objects with pending/null weenie) —
@@ -2816,19 +3979,147 @@ internal static class ClientObjectHooks
     }
 
     // Cached delegate target for PrefetchPositions' enumerate. Runs on the main
-    // thread under _positionCacheLock; reads the live position and stores it.
+    // thread (no lock: it fills the back buffer); reads the live position and stores it.
     // Method group is cached in _capturePositionDelegate so the enumerate call
     // allocates no closure per frame.
     private static void CapturePositionForId(uint id)
     {
         // Resolve natively here (we are on AC's main thread, so the CObjectMaint
-        // walk is safe) and stash the ptr so the off-thread pump can resolve it
-        // via GetWeenieObjectResolve without walking AC's table itself.
+        // walk is safe). The pointer map only feeds the snapshot diagnostics now;
+        // the pump reads the VALUES copied below (PWD fields, position, state).
         IntPtr weeniePtr = _getWeenieObjectNative != null ? _getWeenieObjectNative(id) : IntPtr.Zero;
-        if (weeniePtr != IntPtr.Zero)
-            _weeniePtrBack[id] = weeniePtr;
-        if (ReadObjectPositionLive(id, out uint cell, out float x, out float y, out float z))
-            _positionCache[id] = new PosEntry { Cell = cell, X = x, Y = y, Z = z };
+        if (weeniePtr == IntPtr.Zero)
+            return;
+        _weeniePtrBack[id] = weeniePtr;
+        // PWD fields for every weenie (pack items included: they have no position).
+        if (TryReadPwdFieldsLive(weeniePtr, out PwdEntry pwd))
+            _pwdBack[id] = pwd;
+        // Reuses the pointer resolved above (the old path resolved it a second time
+        // through TryGetWeenieObjectPtr, which on this thread is the same native call).
+        if (ReadPhysicsFromWeenie(id, weeniePtr, out uint cell, out float x, out float y, out float z,
+                                  out float qw, out float qz, out uint state, out bool hasState))
+            _positionBack[id] = new PosEntry { Cell = cell, X = x, Y = y, Z = z, Qw = qw, Qz = qz, State = state, HasState = hasState };
+    }
+
+    // One probe over the whole PublicWeenieDesc (PwdLayout.Size bytes), then one copy.
+    // MAIN THREAD ONLY (the PrefetchPositions walk, with a freshly resolved pointer).
+    private static unsafe bool TryReadPwdFieldsLive(IntPtr weeniePtr, out PwdEntry entry)
+    {
+        entry = default;
+        if (weeniePtr == IntPtr.Zero || _weeniePhysicsObjOffset < 0)
+            return false;
+        try
+        {
+            IntPtr pwd = weeniePtr + _weeniePhysicsObjOffset + 4;
+            if (!IsReadableSpan(pwd, PwdLayout.Size))
+                return false;
+            new ReadOnlySpan<byte>((void*)pwd, PwdLayout.Size).CopyTo(entry.Bytes);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // Off-thread PWD lookup (brief swap lock, no AC memory).
+    private static bool TryGetPwdSnapshot(uint objectId, out PwdEntry entry)
+    {
+        lock (_weeniePtrSwapLock)
+            return _pwdFront.TryGetValue(objectId, out entry);
+    }
+
+    // The snapshot's CreateObject fields as properties (PwdLayout: a zero field answers nothing).
+    private static bool TryGetPwdSnapshotInt(uint objectId, uint stype, out int value)
+    {
+        value = 0;
+        return PwdLayout.IntOffset(stype) >= 0 && TryGetPwdSnapshot(objectId, out PwdEntry e)
+            && PwdLayout.TryGetInt(e.Bytes, stype, out value);
+    }
+
+    /// <summary>
+    /// Off-thread read of one 4-byte PWD field by raw offset (the <see cref="TryReadPwdInt32"/>
+    /// contract) from the main-thread snapshot. False for objects the last walk didn't see.
+    /// </summary>
+    private static bool TryGetPwdSnapshotRawInt32(uint objectId, int pwdFieldOffset, out int value)
+    {
+        value = 0;
+        if (pwdFieldOffset < 0 || pwdFieldOffset + 4 > PwdLayout.Size)
+            return false;
+        if (!TryGetPwdSnapshot(objectId, out PwdEntry e))
+            return false;
+        value = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(((ReadOnlySpan<byte>)e.Bytes).Slice(pwdFieldOffset));
+        return true;
+    }
+
+    private static bool TryGetPwdSnapshotFloat(uint objectId, uint stype, out double value)
+    {
+        value = 0;
+        return stype is 54 or 167 or 280 && TryGetPwdSnapshot(objectId, out PwdEntry e)
+            && PwdLayout.TryGetFloat(e.Bytes, stype, out value);
+    }
+
+    private static bool TryGetPwdSnapshotDataId(uint objectId, uint stype, out uint value)
+    {
+        value = 0;
+        return PwdLayout.DataIdOffset(stype) >= 0 && TryGetPwdSnapshot(objectId, out PwdEntry e)
+            && PwdLayout.TryGetDataId(e.Bytes, stype, out value);
+    }
+
+    private static bool TryGetPwdSnapshotInstanceId(uint objectId, uint stype, out uint value)
+    {
+        value = 0;
+        return PwdLayout.InstanceIdOffset(stype) >= 0 && TryGetPwdSnapshot(objectId, out PwdEntry e)
+            && PwdLayout.TryGetInstanceId(e.Bytes, stype, out value);
+    }
+
+    /// <summary>The PWD snapshot has been filled at least once (AutoId: an object missing from it may still come).</summary>
+    internal static bool HasPwdSnapshot
+    {
+        get { lock (_weeniePtrSwapLock) return _pwdFront.Count > 0; }
+    }
+
+    /// <summary>The object holds items (ItemsCapacity, stype 6, &gt; 0 in the PWD snapshot: a pack, a chest).</summary>
+    internal static bool IsContainerInSnapshot(uint objectId) =>
+        TryGetPwdSnapshotInt(objectId, 6, out int capacity) && capacity > 0;
+
+    /// <summary>
+    /// EquipmentTracker's start: the ids the PWD snapshot shows as wielded by <paramref name="playerId"/>
+    /// in no container, with their location. Both fields must agree: the wielder alone stays on an
+    /// item after it went into a pack (2026-10-17). Off-thread safe (snapshot only).
+    /// </summary>
+    internal static void CollectWieldedFromSnapshot(uint playerId, List<(uint Id, uint Loc)> dest)
+    {
+        lock (_weeniePtrSwapLock)
+        {
+            foreach (KeyValuePair<uint, PwdEntry> kv in _pwdFront)
+            {
+                if (kv.Key == playerId) continue;
+                if (kv.Value.Wielder == playerId && kv.Value.Container == 0 && kv.Value.Location != 0)
+                    dest.Add((kv.Key, kv.Value.Location));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Off-thread helper for UpdateObjectInventoryHooks: writes the ids whose PWD
+    /// container or wielder is <paramref name="containerId"/> from the main-thread
+    /// snapshot, under one lock, with no AC access. Returns the count written.
+    /// </summary>
+    internal static int CollectOwnedIdsFromSnapshot(uint containerId, Span<uint> dest)
+    {
+        int found = 0;
+        lock (_weeniePtrSwapLock)
+        {
+            foreach (KeyValuePair<uint, PwdEntry> kv in _pwdFront)
+            {
+                if (found >= dest.Length) break;
+                if (kv.Key == containerId) continue;
+                if (kv.Value.Container == containerId || kv.Value.Wielder == containerId)
+                    dest[found++] = kv.Key;
+            }
+        }
+        return found;
     }
 
     /// <summary>
@@ -2843,8 +4134,15 @@ internal static class ClientObjectHooks
     {
         if (MainThreadGuard.IsOnMainThread())
             return _getWeenieObjectNative != null ? _getWeenieObjectNative(objectId) : IntPtr.Zero;
-        lock (_weeniePtrSwapLock)
-            return _weeniePtrFront.TryGetValue(objectId, out IntPtr p) ? p : IntPtr.Zero;
+        // Off the main thread: never hand out a raw AC object pointer (2026-09-30).
+        // It used to serve _weeniePtrFront, but a pointer up to ~100 ms old can be
+        // freed and reused before the caller dereferences it (the use-after-free
+        // class behind the old PWD / physics / enchantment reads). Every off-thread
+        // reader is now served from a value snapshot (identity, position, PWD
+        // fields, enchantments) before it gets here, so Zero only makes any
+        // remaining or future caller fail closed. _weeniePtrFront stays for the
+        // snapshot diagnostics.
+        return IntPtr.Zero;
     }
 
     // CPhysicsObj::m_state offset — confirmed from Ghidra set_state disasm: MOV [ESI+0xa8], EAX
@@ -2857,6 +4155,23 @@ internal static class ClientObjectHooks
     public static bool TryGetObjectPhysicsState(uint objectId, out uint state)
     {
         state = 0;
+
+        // Off AC's main thread (RynthAi DoorInteractionController's ETHEREAL check,
+        // meta expressions): m_state from the position snapshot (<= ~100 ms old).
+        // The live path below dereferenced a cached, possibly freed weenie and its
+        // CPhysicsObj from the pump. A miss is false, as before.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            lock (_positionCacheLock)
+            {
+                if (_positionCache.TryGetValue(objectId, out PosEntry p) && p.HasState)
+                {
+                    state = p.State;
+                    return true;
+                }
+            }
+            return false;
+        }
 
         if (_weeniePhysicsObjOffset < 0)
         {
@@ -2898,6 +4213,22 @@ internal static class ClientObjectHooks
     {
         headingDegrees = 0;
 
+        // Off AC's main thread (meta getheading, CorpseOpenController): the heading
+        // from the position snapshot's quaternion (<= ~100 ms old). The live path
+        // below read a cached weenie's CPhysicsObj vtable with no probe at all.
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            lock (_positionCacheLock)
+            {
+                if (_positionCache.TryGetValue(objectId, out PosEntry p))
+                {
+                    headingDegrees = HeadingFromQuaternion(p.Qw, p.Qz);
+                    return true;
+                }
+            }
+            return false;
+        }
+
         if (_weeniePhysicsObjOffset < 0)
         {
             ProbePhysObjOffset();
@@ -2914,6 +4245,10 @@ internal static class ClientObjectHooks
             if (physicsObj == IntPtr.Zero)
                 return false;
 
+            // Same guard as TryGetObjectPhysicsState / ReadPhysicsFromWeenie.
+            if (!IsReadablePointer(physicsObj))
+                return false;
+
             IntPtr vtable = Marshal.ReadIntPtr(physicsObj);
             if (!SmartBoxLocator.IsPointerInModule(vtable))
                 return false;
@@ -2922,9 +4257,7 @@ internal static class ClientObjectHooks
             float qw = ReadFloat(pos + PositionQwOffset);
             float qz = ReadFloat(pos + PositionQzOffset);
 
-            // Same formula as NavigationEngine / CorpseOpenController
-            double physYawDeg = 2.0 * Math.Atan2(qz, qw) * (180.0 / Math.PI);
-            headingDegrees = (float)(((-physYawDeg) % 360.0 + 720.0) % 360.0);
+            headingDegrees = HeadingFromQuaternion(qw, qz);
             return true;
         }
         catch
@@ -2946,6 +4279,11 @@ internal static class ClientObjectHooks
     /// </summary>
     private static void ProbePhysObjOffset()
     {
+        // Main thread only: it walks the SmartBox player and scans 0x200 bytes of
+        // the player weenie. PrefetchPositions (main thread) runs it anyway.
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+
         if (!SmartBoxLocator.TryGetPlayer(out IntPtr playerPhysObj, out uint playerId, out _))
             return;
 

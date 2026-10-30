@@ -85,6 +85,8 @@ internal static class RadarHooks
     private static GmRadarUIDrawChildrenDelegate? _drawChildrenDetour;
 
     private static IntPtr _gmRadarUIInstance;
+    // Logoff requested, logout not yet complete: the radar is being freed (see ChatHooks).
+    private static volatile bool _logoffInProgress;
     private static IntPtr _uiElementSetVisibleAddress;
     private static IntPtr _uiElementGetSurfaceBoxAddress;
     private static bool _hookInstalled;
@@ -205,7 +207,7 @@ internal static class RadarHooks
     private static void DrawObjectsDetour(IntPtr thisPtr, IntPtr uiSurface)
     {
         RecursionGuard.Tick("RadarHooks.DrawObjects");
-        if (thisPtr != IntPtr.Zero)
+        if (thisPtr != IntPtr.Zero && !_logoffInProgress)
             _gmRadarUIInstance = thisPtr;
 
         int hit = Interlocked.Increment(ref _drawObjectsHits);
@@ -231,7 +233,7 @@ internal static class RadarHooks
     private static void DrawChildrenDetour(IntPtr thisPtr, IntPtr clipRect, IntPtr clipInside, IntPtr boxArray, IntPtr uiSurface)
     {
         RecursionGuard.Tick("RadarHooks.DrawChildren");
-        if (thisPtr != IntPtr.Zero)
+        if (thisPtr != IntPtr.Zero && !_logoffInProgress)
             _gmRadarUIInstance = thisPtr;
 
         int hit = Interlocked.Increment(ref _drawChildrenHits);
@@ -292,9 +294,17 @@ internal static class RadarHooks
         }
     }
 
+    /// <summary>A logoff was requested: drop the radar before AC frees it (see ChatHooks.OnLogoffRequested).</summary>
+    public static void OnLogoffRequested()
+    {
+        _logoffInProgress = true;
+        _gmRadarUIInstance = IntPtr.Zero;
+    }
+
     public static void ResetCachedInstance()
     {
         _gmRadarUIInstance = IntPtr.Zero;
+        _logoffInProgress = false;
         _isHiddenAsserted = false;
     }
 
@@ -309,6 +319,9 @@ internal static class RadarHooks
         x0 = y0 = x1 = y1 = 0;
         IntPtr inst = _gmRadarUIInstance;
         if (inst == IntPtr.Zero)
+            return false;
+        // Outside the world AC has freed the radar panel this points at (UiFlowHooks).
+        if (!UiFlowHooks.InWorldOrUnknown || UiFlowHooks.ClientCleanupStarted)
             return false;
         if (_uiElementGetSurfaceBoxAddress == IntPtr.Zero)
             return false;

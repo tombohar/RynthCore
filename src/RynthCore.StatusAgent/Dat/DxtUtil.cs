@@ -1,442 +1,172 @@
-// #region License
-// /*
-// Microsoft Public License (Ms-PL)
-// MonoGame - Copyright © 2009 The MonoGame Team
-// 
-// All rights reserved.
-// 
-// This license governs use of the accompanying software. If you use the software, you accept this license. If you do not
-// accept the license, do not use the software.
-// 
-// 1. Definitions
-// The terms "reproduce," "reproduction," "derivative works," and "distribution" have the same meaning here as under 
-// U.S. copyright law.
-// 
-// A "contribution" is the original software, or any additions or changes to the software.
-// A "contributor" is any person that distributes its contribution under this license.
-// "Licensed patents" are a contributor's patent claims that read directly on its contribution.
-// 
-// 2. Grant of Rights
-// (A) Copyright Grant- Subject to the terms of this license, including the license conditions and limitations in section 3, 
-// each contributor grants you a non-exclusive, worldwide, royalty-free copyright license to reproduce its contribution, prepare derivative works of its contribution, and distribute its contribution or any derivative works that you create.
-// (B) Patent Grant- Subject to the terms of this license, including the license conditions and limitations in section 3, 
-// each contributor grants you a non-exclusive, worldwide, royalty-free license under its licensed patents to make, have made, use, sell, offer for sale, import, and/or otherwise dispose of its contribution in the software or derivative works of the contribution in the software.
-// 
-// 3. Conditions and Limitations
-// (A) No Trademark License- This license does not grant you rights to use any contributors' name, logo, or trademarks.
-// (B) If you bring a patent claim against any contributor over patents that you claim are infringed by the software, 
-// your patent license from such contributor to the software ends automatically.
-// (C) If you distribute any portion of the software, you must retain all copyright, patent, trademark, and attribution 
-// notices that are present in the software.
-// (D) If you distribute any portion of the software in source code form, you may do so only under this license by including 
-// a complete copy of this license with your distribution. If you distribute any portion of the software in compiled or object 
-// code form, you may only do so under a license that complies with this license.
-// (E) The software is licensed "as-is." You bear the risk of using it. The contributors give no express warranties, guarantees
-// or conditions. You may have additional consumer rights under your local laws which this license cannot change. To the extent
-// permitted under your local laws, the contributors exclude the implied warranties of merchantability, fitness for a particular
-// purpose and non-infringement.
-// */
-// #endregion License
+// ============================================================================
+//  RynthCore.StatusAgent - Dat/DxtUtil.cs
+//  DXT1 / DXT3 / DXT5 (BC1 / BC2 / BC3) block decompression to RGBA bytes.
+//  Written for RynthCore (MIT) on 2026-10-05 from the public S3TC / DirectX
+//  block-compression format description:
 //
+//    Images are stored as 4 x 4 pixel blocks, left to right, top to bottom.
+//    Colour block (8 bytes, the whole of a DXT1 block and the second half of
+//    a DXT3/DXT5 block): two RGB565 end-point colours c0, c1 (uint16 each),
+//    then 16 two-bit indices, one per pixel, row by row, low bits first.
+//      DXT1, c0 > c1:  index 2 = (2*c0 + c1) / 3, index 3 = (c0 + 2*c1) / 3
+//      DXT1, c0 <= c1: index 2 = (c0 + c1) / 2,   index 3 = transparent black
+//      DXT3 / DXT5 always use the four-colour form.
+//    DXT3 alpha (first 8 bytes): 16 explicit four-bit alphas, low nibble first.
+//    DXT5 alpha (first 8 bytes): end points a0, a1 (one byte each), then 16
+//    three-bit indices (48 bits, little-endian, low bits first):
+//      a0 > a1:  indices 2..7 = 6 interpolated values between a0 and a1
+//      a0 <= a1: indices 2..5 = 4 interpolated values, 6 = 0, 7 = 255
+//
+//  Used by the agent's IconDecoder and, linked, by the engine's
+//  UI/ScriptWindows/AcIconDecoder.cs (and RynthSuite's ScriptWindows tests).
+// ============================================================================
 
-namespace ACE.DatLoader
+using System;
+using System.IO;
+
+namespace RynthCore.Imaging
 {
-    using System.IO;
-
+    /// <summary>DXT1/3/5 decompression; output is width * height * 4 bytes, R, G, B, A.</summary>
     public static class DxtUtil
     {
-        internal static byte[] DecompressDxt1(byte[] imageData, int width, int height)
+        internal static byte[] DecompressDxt1(byte[] imageData, int width, int height) =>
+            Decompress(imageData, width, height, BlockKind.Dxt1);
+
+        internal static byte[] DecompressDxt1(Stream imageStream, int width, int height) =>
+            DecompressDxt1(ReadAll(imageStream), width, height);
+
+        internal static byte[] DecompressDxt3(byte[] imageData, int width, int height) =>
+            Decompress(imageData, width, height, BlockKind.Dxt3);
+
+        internal static byte[] DecompressDxt3(Stream imageStream, int width, int height) =>
+            DecompressDxt3(ReadAll(imageStream), width, height);
+
+        internal static byte[] DecompressDxt5(byte[] imageData, int width, int height) =>
+            Decompress(imageData, width, height, BlockKind.Dxt5);
+
+        internal static byte[] DecompressDxt5(Stream imageStream, int width, int height) =>
+            DecompressDxt5(ReadAll(imageStream), width, height);
+
+        private enum BlockKind { Dxt1, Dxt3, Dxt5 }
+
+        private static byte[] ReadAll(Stream s)
         {
-            using (MemoryStream imageStream = new MemoryStream(imageData))
-                return DecompressDxt1(imageStream, width, height);
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            return ms.ToArray();
         }
 
-        internal static byte[] DecompressDxt1(Stream imageStream, int width, int height)
+        private static byte[] Decompress(byte[] src, int width, int height, BlockKind kind)
         {
-            byte[] imageData = new byte[width * height * 4];
+            if (width <= 0 || height <= 0) return Array.Empty<byte>();
+            var rgba = new byte[width * height * 4];
+            int blockBytes = kind == BlockKind.Dxt1 ? 8 : 16;
+            int blocksX = (width + 3) / 4, blocksY = (height + 3) / 4;
 
-            using (BinaryReader imageReader = new BinaryReader(imageStream))
+            Span<byte> palette = stackalloc byte[16];   // 4 colours x RGBA
+            Span<byte> alpha = stackalloc byte[16];     // per pixel (DXT3/5)
+            Span<byte> alphaTable = stackalloc byte[8]; // DXT5 end points + interpolated
+            int at = 0;
+            for (int by = 0; by < blocksY; by++)
             {
-                int blockCountX = (width + 3) / 4;
-                int blockCountY = (height + 3) / 4;
-
-                for (int y = 0; y < blockCountY; y++)
+                for (int bx = 0; bx < blocksX; bx++, at += blockBytes)
                 {
-                    for (int x = 0; x < blockCountX; x++)
+                    if (at + blockBytes > src.Length) return rgba; // short data: the rest stays clear
+                    int colourAt = at;
+                    bool hasAlphaBlock = kind != BlockKind.Dxt1;
+                    if (kind == BlockKind.Dxt3)
                     {
-                        DecompressDxt1Block(imageReader, x, y, blockCountX, width, height, imageData);
-                    }
-                }
-            }
-
-            return imageData;
-        }
-
-        private static void DecompressDxt1Block(BinaryReader imageReader, int x, int y, int blockCountX, int width, int height, byte[] imageData)
-        {
-            ushort c0 = imageReader.ReadUInt16();
-            ushort c1 = imageReader.ReadUInt16();
-
-            byte r0, g0, b0;
-            byte r1, g1, b1;
-            ConvertRgb565ToRgb888(c0, out r0, out g0, out b0);
-            ConvertRgb565ToRgb888(c1, out r1, out g1, out b1);
-
-            uint lookupTable = imageReader.ReadUInt32();
-
-            for (int blockY = 0; blockY < 4; blockY++)
-            {
-                for (int blockX = 0; blockX < 4; blockX++)
-                {
-                    byte r = 0, g = 0, b = 0, a = 255;
-                    uint index = (lookupTable >> 2 * (4 * blockY + blockX)) & 0x03;
-
-                    if (c0 > c1)
-                    {
-                        switch (index)
+                        for (int i = 0; i < 16; i++)
                         {
-                            case 0:
-                                r = r0;
-                                g = g0;
-                                b = b0;
-                                break;
-                            case 1:
-                                r = r1;
-                                g = g1;
-                                b = b1;
-                                break;
-                            case 2:
-                                r = (byte)((2 * r0 + r1) / 3);
-                                g = (byte)((2 * g0 + g1) / 3);
-                                b = (byte)((2 * b0 + b1) / 3);
-                                break;
-                            case 3:
-                                r = (byte)((r0 + 2 * r1) / 3);
-                                g = (byte)((g0 + 2 * g1) / 3);
-                                b = (byte)((b0 + 2 * b1) / 3);
-                                break;
+                            int nibble = (src[at + (i >> 1)] >> ((i & 1) * 4)) & 0xF;
+                            alpha[i] = (byte)(nibble * 17);
                         }
+                        colourAt += 8;
+                    }
+                    else if (kind == BlockKind.Dxt5)
+                    {
+                        byte a0 = src[at], a1 = src[at + 1];
+                        alphaTable[0] = a0;
+                        alphaTable[1] = a1;
+                        if (a0 > a1)
+                        {
+                            for (int i = 1; i <= 6; i++) alphaTable[i + 1] = (byte)(((7 - i) * a0 + i * a1) / 7);
+                        }
+                        else
+                        {
+                            for (int i = 1; i <= 4; i++) alphaTable[i + 1] = (byte)(((5 - i) * a0 + i * a1) / 5);
+                            alphaTable[6] = 0;
+                            alphaTable[7] = 255;
+                        }
+                        ulong bits = 0;
+                        for (int i = 0; i < 6; i++) bits |= (ulong)src[at + 2 + i] << (8 * i);
+                        for (int i = 0; i < 16; i++) alpha[i] = alphaTable[(int)((bits >> (3 * i)) & 7)];
+                        colourAt += 8;
+                    }
+
+                    ushort c0 = (ushort)(src[colourAt] | (src[colourAt + 1] << 8));
+                    ushort c1 = (ushort)(src[colourAt + 2] | (src[colourAt + 3] << 8));
+                    Expand565(c0, palette.Slice(0, 4));
+                    Expand565(c1, palette.Slice(4, 4));
+                    if (kind != BlockKind.Dxt1 || c0 > c1)
+                    {
+                        for (int ch = 0; ch < 3; ch++)
+                        {
+                            palette[8 + ch] = (byte)((2 * palette[ch] + palette[4 + ch]) / 3);
+                            palette[12 + ch] = (byte)((palette[ch] + 2 * palette[4 + ch]) / 3);
+                        }
+                        palette[11] = 255;
+                        palette[15] = 255;
                     }
                     else
                     {
-                        switch (index)
+                        for (int ch = 0; ch < 3; ch++)
                         {
-                            case 0:
-                                r = r0;
-                                g = g0;
-                                b = b0;
-                                break;
-                            case 1:
-                                r = r1;
-                                g = g1;
-                                b = b1;
-                                break;
-                            case 2:
-                                r = (byte)((r0 + r1) / 2);
-                                g = (byte)((g0 + g1) / 2);
-                                b = (byte)((b0 + b1) / 2);
-                                break;
-                            case 3:
-                                r = 0;
-                                g = 0;
-                                b = 0;
-                                a = 0;
-                                break;
+                            palette[8 + ch] = (byte)((palette[ch] + palette[4 + ch]) / 2);
+                            palette[12 + ch] = 0;
+                        }
+                        palette[11] = 255;
+                        palette[15] = 0;
+                    }
+
+                    uint indices = (uint)(src[colourAt + 4] | (src[colourAt + 5] << 8) | (src[colourAt + 6] << 16) | (src[colourAt + 7] << 24));
+                    for (int py = 0; py < 4; py++)
+                    {
+                        int y = by * 4 + py;
+                        if (y >= height) break;
+                        for (int px = 0; px < 4; px++)
+                        {
+                            int x = bx * 4 + px;
+                            if (x >= width) continue;
+                            int p = py * 4 + px;
+                            int idx = (int)((indices >> (2 * p)) & 3);
+                            int o = (y * width + x) * 4;
+                            rgba[o] = palette[idx * 4];
+                            rgba[o + 1] = palette[idx * 4 + 1];
+                            rgba[o + 2] = palette[idx * 4 + 2];
+                            rgba[o + 3] = hasAlphaBlock ? alpha[p] : palette[idx * 4 + 3];
                         }
                     }
-
-                    int px = (x << 2) + blockX;
-                    int py = (y << 2) + blockY;
-                    if ((px < width) && (py < height))
-                    {
-                        int offset = ((py * width) + px) << 2;
-                        imageData[offset] = r;
-                        imageData[offset + 1] = g;
-                        imageData[offset + 2] = b;
-                        imageData[offset + 3] = a;
-                    }
                 }
             }
+            return rgba;
         }
 
-        internal static byte[] DecompressDxt3(byte[] imageData, int width, int height)
+        // RGB565 to 8-bit channels: v * 255 / max, rounded with the (t + t / 2^n) / 2^n
+        // approximation (t = v * 255 + 2^(n-1)), so the output matches, bit for bit,
+        // the decoder this file replaced.
+        private static void Expand565(ushort c, Span<byte> rgba)
         {
-            using (MemoryStream imageStream = new MemoryStream(imageData))
-                return DecompressDxt3(imageStream, width, height);
+            rgba[0] = Scale((c >> 11) & 0x1F, 5);
+            rgba[1] = Scale((c >> 5) & 0x3F, 6);
+            rgba[2] = Scale(c & 0x1F, 5);
+            rgba[3] = 255;
         }
 
-        internal static byte[] DecompressDxt3(Stream imageStream, int width, int height)
+        private static byte Scale(int v, int bits)
         {
-            byte[] imageData = new byte[width * height * 4];
-
-            using (BinaryReader imageReader = new BinaryReader(imageStream))
-            {
-                int blockCountX = (width + 3) / 4;
-                int blockCountY = (height + 3) / 4;
-
-                for (int y = 0; y < blockCountY; y++)
-                {
-                    for (int x = 0; x < blockCountX; x++)
-                    {
-                        DecompressDxt3Block(imageReader, x, y, blockCountX, width, height, imageData);
-                    }
-                }
-            }
-
-            return imageData;
-        }
-
-        private static void DecompressDxt3Block(BinaryReader imageReader, int x, int y, int blockCountX, int width, int height, byte[] imageData)
-        {
-            byte a0 = imageReader.ReadByte();
-            byte a1 = imageReader.ReadByte();
-            byte a2 = imageReader.ReadByte();
-            byte a3 = imageReader.ReadByte();
-            byte a4 = imageReader.ReadByte();
-            byte a5 = imageReader.ReadByte();
-            byte a6 = imageReader.ReadByte();
-            byte a7 = imageReader.ReadByte();
-
-            ushort c0 = imageReader.ReadUInt16();
-            ushort c1 = imageReader.ReadUInt16();
-
-            byte r0, g0, b0;
-            byte r1, g1, b1;
-            ConvertRgb565ToRgb888(c0, out r0, out g0, out b0);
-            ConvertRgb565ToRgb888(c1, out r1, out g1, out b1);
-
-            uint lookupTable = imageReader.ReadUInt32();
-
-            int alphaIndex = 0;
-            for (int blockY = 0; blockY < 4; blockY++)
-            {
-                for (int blockX = 0; blockX < 4; blockX++)
-                {
-                    byte r = 0, g = 0, b = 0, a = 0;
-
-                    uint index = (lookupTable >> 2 * (4 * blockY + blockX)) & 0x03;
-
-                    switch (alphaIndex)
-                    {
-                        case 0:
-                            a = (byte)((a0 & 0x0F) | ((a0 & 0x0F) << 4));
-                            break;
-                        case 1:
-                            a = (byte)((a0 & 0xF0) | ((a0 & 0xF0) >> 4));
-                            break;
-                        case 2:
-                            a = (byte)((a1 & 0x0F) | ((a1 & 0x0F) << 4));
-                            break;
-                        case 3:
-                            a = (byte)((a1 & 0xF0) | ((a1 & 0xF0) >> 4));
-                            break;
-                        case 4:
-                            a = (byte)((a2 & 0x0F) | ((a2 & 0x0F) << 4));
-                            break;
-                        case 5:
-                            a = (byte)((a2 & 0xF0) | ((a2 & 0xF0) >> 4));
-                            break;
-                        case 6:
-                            a = (byte)((a3 & 0x0F) | ((a3 & 0x0F) << 4));
-                            break;
-                        case 7:
-                            a = (byte)((a3 & 0xF0) | ((a3 & 0xF0) >> 4));
-                            break;
-                        case 8:
-                            a = (byte)((a4 & 0x0F) | ((a4 & 0x0F) << 4));
-                            break;
-                        case 9:
-                            a = (byte)((a4 & 0xF0) | ((a4 & 0xF0) >> 4));
-                            break;
-                        case 10:
-                            a = (byte)((a5 & 0x0F) | ((a5 & 0x0F) << 4));
-                            break;
-                        case 11:
-                            a = (byte)((a5 & 0xF0) | ((a5 & 0xF0) >> 4));
-                            break;
-                        case 12:
-                            a = (byte)((a6 & 0x0F) | ((a6 & 0x0F) << 4));
-                            break;
-                        case 13:
-                            a = (byte)((a6 & 0xF0) | ((a6 & 0xF0) >> 4));
-                            break;
-                        case 14:
-                            a = (byte)((a7 & 0x0F) | ((a7 & 0x0F) << 4));
-                            break;
-                        case 15:
-                            a = (byte)((a7 & 0xF0) | ((a7 & 0xF0) >> 4));
-                            break;
-                    }
-                    ++alphaIndex;
-
-                    switch (index)
-                    {
-                        case 0:
-                            r = r0;
-                            g = g0;
-                            b = b0;
-                            break;
-                        case 1:
-                            r = r1;
-                            g = g1;
-                            b = b1;
-                            break;
-                        case 2:
-                            r = (byte)((2 * r0 + r1) / 3);
-                            g = (byte)((2 * g0 + g1) / 3);
-                            b = (byte)((2 * b0 + b1) / 3);
-                            break;
-                        case 3:
-                            r = (byte)((r0 + 2 * r1) / 3);
-                            g = (byte)((g0 + 2 * g1) / 3);
-                            b = (byte)((b0 + 2 * b1) / 3);
-                            break;
-                    }
-
-                    int px = (x << 2) + blockX;
-                    int py = (y << 2) + blockY;
-                    if ((px < width) && (py < height))
-                    {
-                        int offset = ((py * width) + px) << 2;
-                        imageData[offset] = r;
-                        imageData[offset + 1] = g;
-                        imageData[offset + 2] = b;
-                        imageData[offset + 3] = a;
-                    }
-                }
-            }
-        }
-
-        internal static byte[] DecompressDxt5(byte[] imageData, int width, int height)
-        {
-            using (MemoryStream imageStream = new MemoryStream(imageData))
-                return DecompressDxt5(imageStream, width, height);
-        }
-
-        internal static byte[] DecompressDxt5(Stream imageStream, int width, int height)
-        {
-            byte[] imageData = new byte[width * height * 4];
-
-            using (BinaryReader imageReader = new BinaryReader(imageStream))
-            {
-                int blockCountX = (width + 3) / 4;
-                int blockCountY = (height + 3) / 4;
-
-                for (int y = 0; y < blockCountY; y++)
-                {
-                    for (int x = 0; x < blockCountX; x++)
-                    {
-                        DecompressDxt5Block(imageReader, x, y, blockCountX, width, height, imageData);
-                    }
-                }
-            }
-
-            return imageData;
-        }
-
-        private static void DecompressDxt5Block(BinaryReader imageReader, int x, int y, int blockCountX, int width, int height, byte[] imageData)
-        {
-            byte alpha0 = imageReader.ReadByte();
-            byte alpha1 = imageReader.ReadByte();
-
-            ulong alphaMask = (ulong)imageReader.ReadByte();
-            alphaMask += (ulong)imageReader.ReadByte() << 8;
-            alphaMask += (ulong)imageReader.ReadByte() << 16;
-            alphaMask += (ulong)imageReader.ReadByte() << 24;
-            alphaMask += (ulong)imageReader.ReadByte() << 32;
-            alphaMask += (ulong)imageReader.ReadByte() << 40;
-
-            ushort c0 = imageReader.ReadUInt16();
-            ushort c1 = imageReader.ReadUInt16();
-
-            byte r0, g0, b0;
-            byte r1, g1, b1;
-            ConvertRgb565ToRgb888(c0, out r0, out g0, out b0);
-            ConvertRgb565ToRgb888(c1, out r1, out g1, out b1);
-
-            uint lookupTable = imageReader.ReadUInt32();
-
-            for (int blockY = 0; blockY < 4; blockY++)
-            {
-                for (int blockX = 0; blockX < 4; blockX++)
-                {
-                    byte r = 0, g = 0, b = 0, a = 255;
-                    uint index = (lookupTable >> 2 * (4 * blockY + blockX)) & 0x03;
-
-                    uint alphaIndex = (uint)((alphaMask >> 3 * (4 * blockY + blockX)) & 0x07);
-                    if (alphaIndex == 0)
-                    {
-                        a = alpha0;
-                    }
-                    else if (alphaIndex == 1)
-                    {
-                        a = alpha1;
-                    }
-                    else if (alpha0 > alpha1)
-                    {
-                        a = (byte)(((8 - alphaIndex) * alpha0 + (alphaIndex - 1) * alpha1) / 7);
-                    }
-                    else if (alphaIndex == 6)
-                    {
-                        a = 0;
-                    }
-                    else if (alphaIndex == 7)
-                    {
-                        a = 0xff;
-                    }
-                    else
-                    {
-                        a = (byte)(((6 - alphaIndex) * alpha0 + (alphaIndex - 1) * alpha1) / 5);
-                    }
-
-                    switch (index)
-                    {
-                        case 0:
-                            r = r0;
-                            g = g0;
-                            b = b0;
-                            break;
-                        case 1:
-                            r = r1;
-                            g = g1;
-                            b = b1;
-                            break;
-                        case 2:
-                            r = (byte)((2 * r0 + r1) / 3);
-                            g = (byte)((2 * g0 + g1) / 3);
-                            b = (byte)((2 * b0 + b1) / 3);
-                            break;
-                        case 3:
-                            r = (byte)((r0 + 2 * r1) / 3);
-                            g = (byte)((g0 + 2 * g1) / 3);
-                            b = (byte)((b0 + 2 * b1) / 3);
-                            break;
-                    }
-
-                    int px = (x << 2) + blockX;
-                    int py = (y << 2) + blockY;
-                    if ((px < width) && (py < height))
-                    {
-                        int offset = ((py * width) + px) << 2;
-                        imageData[offset] = r;
-                        imageData[offset + 1] = g;
-                        imageData[offset + 2] = b;
-                        imageData[offset + 3] = a;
-                    }
-                }
-            }
-        }
-
-        private static void ConvertRgb565ToRgb888(ushort color, out byte r, out byte g, out byte b)
-        {
-            int temp;
-
-            temp = (color >> 11) * 255 + 16;
-            r = (byte)((temp / 32 + temp) / 32);
-            temp = ((color & 0x07E0) >> 5) * 255 + 32;
-            g = (byte)((temp / 64 + temp) / 64);
-            temp = (color & 0x001F) * 255 + 16;
-            b = (byte)((temp / 32 + temp) / 32);
+            int t = v * 255 + (1 << (bits - 1));
+            return (byte)(((t >> bits) + t) >> bits);
         }
     }
 }

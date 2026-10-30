@@ -1,0 +1,3 @@
+# Byte for byte: a patch with CRLF line endings no longer applies.
+*.patch -text
+*.dll binary

@@ -89,29 +89,7 @@ internal static class CObjectMaintHooks
         int count = 0;
         try
         {
-            for (uint i = 0; i < tableSize; i++)
-            {
-                IntPtr bucketSlot = buckets + (int)(i * 4);
-                if (!SmartBoxLocator.IsMemoryReadable(bucketSlot, 4))
-                    break;
-                IntPtr node = Marshal.ReadIntPtr(bucketSlot);
-
-                int chainGuard = 0;
-                while (node != IntPtr.Zero && chainGuard++ < MaxChainPerBucket)
-                {
-                    if (!SmartBoxLocator.IsMemoryReadable(node + HASHBASEDATA_ID_OFFSET, 4))
-                        break;
-                    uint id = (uint)Marshal.ReadInt32(node + HASHBASEDATA_ID_OFFSET);
-                    if (id != 0)
-                    {
-                        visit(id);
-                        count++;
-                    }
-                    if (!SmartBoxLocator.IsMemoryReadable(node + HASHBASEDATA_HASH_NEXT_OFFSET, 4))
-                        break;
-                    node = Marshal.ReadIntPtr(node + HASHBASEDATA_HASH_NEXT_OFFSET);
-                }
-            }
+            WalkBuckets(buckets, tableSize, visit, ref count);
         }
         catch (Exception ex)
         {
@@ -120,6 +98,44 @@ internal static class CObjectMaintHooks
         }
 
         return count;
+    }
+
+    /// <summary>
+    /// The bucket/chain walk both enumerators share. One probe covers the whole bucket array
+    /// and one covers each node's hash_next + id (adjacent, +4..+12), where the walk used to
+    /// probe every bucket slot and each node twice: a table of 4096 buckets cost 4096+ probes
+    /// per walk, ten walks a second (2026-10-02 flood fix; see MemoryProbe). When a combined
+    /// probe fails it falls back to the old per-slot / per-field probes, so the walk stops at
+    /// exactly the same place as before on bad memory. <paramref name="count"/> is by ref so a
+    /// visitor that throws still leaves the partial count (the callers' old behaviour).
+    /// </summary>
+    private static void WalkBuckets(IntPtr buckets, uint tableSize, Action<uint> visit, ref int count)
+    {
+        bool arrayReadable = SmartBoxLocator.IsMemoryReadable(buckets, (int)(tableSize * 4));
+        for (uint i = 0; i < tableSize; i++)
+        {
+            IntPtr bucketSlot = buckets + (int)(i * 4);
+            if (!arrayReadable && !SmartBoxLocator.IsMemoryReadable(bucketSlot, 4))
+                break;
+            IntPtr node = Marshal.ReadIntPtr(bucketSlot);
+
+            int chainGuard = 0;
+            while (node != IntPtr.Zero && chainGuard++ < MaxChainPerBucket)
+            {
+                bool nodeReadable = SmartBoxLocator.IsMemoryReadable(node + HASHBASEDATA_HASH_NEXT_OFFSET, 8);
+                if (!nodeReadable && !SmartBoxLocator.IsMemoryReadable(node + HASHBASEDATA_ID_OFFSET, 4))
+                    break;
+                uint id = (uint)Marshal.ReadInt32(node + HASHBASEDATA_ID_OFFSET);
+                if (id != 0)
+                {
+                    visit(id);
+                    count++;
+                }
+                if (!nodeReadable && !SmartBoxLocator.IsMemoryReadable(node + HASHBASEDATA_HASH_NEXT_OFFSET, 4))
+                    break;
+                node = Marshal.ReadIntPtr(node + HASHBASEDATA_HASH_NEXT_OFFSET);
+            }
+        }
     }
 
     // DIAGNOSTIC (temporary): same walk as EnumerateLiveWeenieObjectIds but over
@@ -151,29 +167,7 @@ internal static class CObjectMaintHooks
         int count = 0;
         try
         {
-            for (uint i = 0; i < tableSize; i++)
-            {
-                IntPtr bucketSlot = buckets + (int)(i * 4);
-                if (!SmartBoxLocator.IsMemoryReadable(bucketSlot, 4))
-                    break;
-                IntPtr node = Marshal.ReadIntPtr(bucketSlot);
-
-                int chainGuard = 0;
-                while (node != IntPtr.Zero && chainGuard++ < MaxChainPerBucket)
-                {
-                    if (!SmartBoxLocator.IsMemoryReadable(node + HASHBASEDATA_ID_OFFSET, 4))
-                        break;
-                    uint id = (uint)Marshal.ReadInt32(node + HASHBASEDATA_ID_OFFSET);
-                    if (id != 0)
-                    {
-                        visit(id);
-                        count++;
-                    }
-                    if (!SmartBoxLocator.IsMemoryReadable(node + HASHBASEDATA_HASH_NEXT_OFFSET, 4))
-                        break;
-                    node = Marshal.ReadIntPtr(node + HASHBASEDATA_HASH_NEXT_OFFSET);
-                }
-            }
+            WalkBuckets(buckets, tableSize, visit, ref count);
         }
         catch (Exception ex)
         {

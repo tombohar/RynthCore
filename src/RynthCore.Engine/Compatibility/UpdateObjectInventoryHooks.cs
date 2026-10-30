@@ -92,10 +92,19 @@ internal static class UpdateObjectInventoryHooks
     private static void UpdateObjectInventoryDetour(IntPtr thisPtr, uint objectId, IntPtr newInventory)
     {
         _originalUpdateObjectInventory!(thisPtr, objectId, newInventory);
-        if (objectId == 0)
-            return;
 
-        PluginManager.QueueUpdateObjectInventory(objectId);
+        // Deep-audit finding #12 (2026-06-18): every sibling server-dispatch
+        // detour (UpdateObjectServerDispatchHooks, VectorUpdateServerDispatchHooks,
+        // SmartBoxHooks) wraps its queue call; this one didn't — an escaping
+        // throw here (e.g. OOM during the queue's lock+Enqueue) fail-fasts the
+        // client. Call-through stays outside the try, matching the fix note.
+        try
+        {
+            if (objectId != 0)
+                PluginManager.QueueUpdateObjectInventory(objectId);
+            InventoryModel.MarkDirty();   // Inventory panel: capture again soon (one volatile write)
+        }
+        catch { }
     }
 
     public static unsafe int GetContainerContents(uint containerId, uint* itemIds, int maxCount)
@@ -180,9 +189,42 @@ internal static class UpdateObjectInventoryHooks
     /// </summary>
     private static int ScanByContainerId(uint containerId, Span<uint> itemIds)
     {
+        // Off AC's main thread (host GetContainerContentsFn on the plugin pump): one
+        // pass over the main-thread PWD snapshot under a single lock, no AC memory.
+        // Per-id TryGetObjectOwnershipInfo would serve the same snapshot but take the
+        // lock once per id; the fixed-range fallback below (65k ids) is pointless
+        // off-thread, so an empty snapshot just means "nothing yet".
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            int n = ClientObjectHooks.CollectOwnedIdsFromSnapshot(containerId, itemIds);
+            itemIds[..n].Sort();   // same ascending order as below
+            return n;
+        }
+
+        // Check every object the client knows, from the identity snapshot. The old fixed
+        // range stopped at 0x8000FFFF, but a server hands out ids well past that once it
+        // has run a while, so newer items (and packs, with everything in them) were
+        // invisible to the bot: no bundles to craft from, inventory lookups finding nothing.
+        uint[] live = ClientObjectHooks.LiveObjectIds;
+        if (live.Length > 0)
+        {
+            int found = 0;
+            foreach (uint id in live)
+            {
+                if (found >= itemIds.Length) break;
+                if (id == containerId) continue;
+                if (!ClientObjectHooks.TryGetObjectOwnershipInfo(id, out uint c, out uint w, out _))
+                    continue;
+                if (c == containerId || w == containerId)
+                    itemIds[found++] = id;
+            }
+            itemIds[..found].Sort();   // same ascending order the range scan gave
+            return found;
+        }
+
         int written = 0;
 
-        // Scan dynamic object range (0x80000001 – 0x8000FFFF)
+        // No snapshot yet: scan the first dynamic object range (0x80000001 – 0x8000FFFF)
         for (uint id = 0x80000001; id <= 0x8000FFFF && written < itemIds.Length; id++)
         {
             if (id == containerId) continue;
@@ -235,17 +277,5 @@ internal static class UpdateObjectInventoryHooks
     private const uint PageNoAccess = 0x01;
     private const uint PageGuard = 0x100;
 
-    private static bool IsReadablePointer(IntPtr ptr)
-    {
-        if (ptr == IntPtr.Zero)
-            return false;
-
-        if (VirtualQuery(ptr, out MEMORY_BASIC_INFORMATION mbi, Marshal.SizeOf<MEMORY_BASIC_INFORMATION>()) == 0)
-            return false;
-
-        if (mbi.State != MemCommit)
-            return false;
-
-        return (mbi.Protect & (PageNoAccess | PageGuard)) == 0;
-    }
+    private static bool IsReadablePointer(IntPtr ptr) => MemoryProbe.IsAccessible(ptr);
 }

@@ -13,28 +13,51 @@ public unsafe sealed class RynthPluginRuntime<TPlugin>
     private int _exceptionCount;
     private const int MaxLoggedExceptions = 20;
 
+    // Init results besides the plugin's own Initialize() return value. The
+    // engine treats any non-zero result as "Init failed" (PluginManager marks
+    // the plugin failed, logs the code, and never ticks or shuts it down).
+    public const int InitNullApi = 9;
+    public const int InitApiTooOld = 10;
+    public const int InitThrew = 11;
+
     public TPlugin? Plugin => _plugin;
     public bool IsInitialized => _initialized && _plugin != null;
 
+    // Init and Shutdown are called straight from [UnmanagedCallersOnly]
+    // exports: an exception escaping them takes acclient.exe down (NativeAOT
+    // fails fast), so both catch everything and log.
     public int Init(RynthCoreApiNative* api)
     {
         if (api == null)
-            return 9;
+            return InitNullApi;
 
-        var plugin = new TPlugin();
-        RynthCoreApiNative hostApi = *api;
+        TPlugin? plugin = null;
+        try
+        {
+            plugin = new TPlugin();
+            RynthCoreApiNative hostApi = *api;
 
-        if (hostApi.Version < plugin.MinimumApiVersion)
-            return 10;
+            if (hostApi.Version < plugin.MinimumApiVersion)
+                return InitApiTooOld;
 
-        plugin.Attach(hostApi);
-        int result = plugin.Initialize();
-        if (result != 0)
-            return result;
+            plugin.Attach(hostApi);
+            int result = plugin.Initialize();
+            if (result != 0)
+                return result;
 
-        _plugin = plugin;
-        _initialized = true;
-        return 0;
+            _plugin = plugin;
+            _initialized = true;
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            // Shutdown isn't called on a plugin whose Init failed, and isn't
+            // attempted here either: on a half-initialized plugin it could
+            // do more harm (e.g. save settings it never loaded).
+            try { plugin?.LogInternal($"[RynthCore] Initialize threw {ex.GetType().Name}: {ex.Message} - plugin not started."); }
+            catch { }
+            return InitThrew;
+        }
     }
 
     public void Shutdown()
@@ -45,6 +68,11 @@ public unsafe sealed class RynthPluginRuntime<TPlugin>
         try
         {
             _plugin!.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            try { _plugin?.LogInternal($"[RynthCore] Shutdown threw {ex.GetType().Name}: {ex.Message}"); }
+            catch { }
         }
         finally
         {
@@ -249,6 +277,53 @@ public unsafe sealed class RynthPluginRuntime<TPlugin>
         if (!IsInitialized) return;
         try { _plugin!.OnEnchantmentRemoved(enchantmentId); }
         catch (Exception ex) { LogException("OnEnchantmentRemoved", ex); }
+    }
+
+    // ── v77 UI callbacks ─────────────────────────────────────────────────
+    // Exports: RynthPluginOnScreenChanged(int, int), RynthPluginOnClientCleanup(),
+    // RynthPluginOnTooltipShow(uint, uint), RynthPluginOnTooltipHide(),
+    // RynthPluginOnDragStart(uint, uint, uint), RynthPluginOnItemDropped(uint, uint, uint); all cdecl.
+
+    public void OnScreenChanged(int oldMode, int newMode)
+    {
+        if (!IsInitialized) return;
+        try { _plugin!.OnScreenChanged(oldMode, newMode); }
+        catch (Exception ex) { LogException("OnScreenChanged", ex); }
+    }
+
+    public void OnClientCleanup()
+    {
+        if (!IsInitialized) return;
+        try { _plugin!.OnClientCleanup(); }
+        catch (Exception ex) { LogException("OnClientCleanup", ex); }
+    }
+
+    public void OnTooltipShow(uint objectId, uint spellId)
+    {
+        if (!IsInitialized) return;
+        try { _plugin!.OnTooltipShow(objectId, spellId); }
+        catch (Exception ex) { LogException("OnTooltipShow", ex); }
+    }
+
+    public void OnTooltipHide()
+    {
+        if (!IsInitialized) return;
+        try { _plugin!.OnTooltipHide(); }
+        catch (Exception ex) { LogException("OnTooltipHide", ex); }
+    }
+
+    public void OnDragStart(uint objectId, uint spellId, uint iconId)
+    {
+        if (!IsInitialized) return;
+        try { _plugin!.OnDragStart(objectId, spellId, iconId); }
+        catch (Exception ex) { LogException("OnDragStart", ex); }
+    }
+
+    public void OnItemDropped(uint objectId, uint spellId, uint targetElementId)
+    {
+        if (!IsInitialized) return;
+        try { _plugin!.OnItemDropped(objectId, spellId, targetElementId); }
+        catch (Exception ex) { LogException("OnItemDropped", ex); }
     }
 
     private void LogException(string method, Exception ex)

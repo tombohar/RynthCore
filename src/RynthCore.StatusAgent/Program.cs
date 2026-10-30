@@ -53,12 +53,40 @@ if (publisher.Enabled)
 else
     AgentLog.Info("No endpoint configured -> LOCAL PRINT-ONLY mode (nothing is sent anywhere).");
 
+// The client's spell table (portal.dat), loaded once in the background: names + icons for the Buffs tab.
+var spells = new SpellTableService(cfg.IconDatPath);
+// The landscape map (cell.dat -> one cached JPEG), rendered on the first /worldmap request.
+var worldMap = new WorldMapService(cfg.CellDatPath, cfg.StatusDirectory);
+// RynthNav's Atlas (NavData\locations.json), searched for the phone's Travel tab.
+var navAtlas = new NavAtlasService(cfg.NavAtlasPath);
+
 // Opt-in pull endpoint: an app can fetch status with no backend.
 LocalStatusServer? server = null;
 WebRtcVideoService? video = null;   // HD WebRTC video mode (opt-in); disposed in finally
 IconService? icons = null;          // item-icon decoder (GET /icon); disposed in finally
-if (cfg.ServeHttp)
+string? serveTokenProblem = cfg.ServeHttp ? ServeGuard.TokenProblem(cfg.ServePrefix, cfg.ServeToken) : null;
+if (cfg.ServeHttp && string.IsNullOrWhiteSpace(cfg.ServeToken))
 {
+    // Same rule as DrakBot's remote: no token, no server, loopback included. The server can show
+    // the game screens, click in them and close clients.
+    AgentLog.Warn("ServeHttp is on but ServeToken is empty, so the status server stays off.");
+    AgentLog.Warn($"Set \"ServeToken\" in {configPath} and restart the agent. Use the same token as your");
+    AgentLog.Warn("DrakBot remote and one DrakRemote entry shows both.");
+}
+else if (serveTokenProblem != null)
+{
+    // A bind other PCs reach (LAN, Tailscale) needs a token that can't be guessed.
+    AgentLog.Warn($"ServeHttp is on but {serveTokenProblem}, so the status server stays off.");
+    AgentLog.Warn($"Put a longer \"ServeToken\" in {configPath} (a random 24+ characters) and restart the agent.");
+}
+else if (cfg.ServeHttp)
+{
+    if (!ServeGuard.IsLoopbackPrefix(cfg.ServePrefix))
+    {
+        // HttpListener here is plain HTTP: the token and the screens cross the network unencrypted.
+        AgentLog.Warn($"ServePrefix {cfg.ServePrefix} is reachable from other PCs over plain HTTP: use it only");
+        AgentLog.Warn("inside an encrypted network (Tailscale/WireGuard VPN), never forwarded to the internet.");
+    }
     string? commandDir = cfg.EnableRemoteControl ? Path.Combine(cfg.StatusDirectory, "commands") : null;
     VideoSocketService? videoSocket = null;
     if (cfg.EnableVideoStream)
@@ -72,7 +100,7 @@ if (cfg.ServeHttp)
     MapService maps = new MapService(cfg.MapsDirectory);
     server = new LocalStatusServer(cfg.ServePrefix, cfg.ServeToken, commandDir,
                                    cfg.EnableScreenStream, cfg.StreamQuality, cfg.StreamIntervalMs, video, videoSocket,
-                                   runArchive, cfg.StatusDirectory, icons, maps);
+                                   runArchive, cfg.StatusDirectory, icons, maps, worldMap, navAtlas);
     if (server.TryStart(out string serveErr))
     {
         AgentLog.Info($"Serving status at {cfg.ServePrefix}status (GET){(string.IsNullOrEmpty(cfg.ServeToken) ? "" : ", token required")}.");
@@ -114,6 +142,10 @@ const int DebounceMs = 50;
 int fallbackMs = Math.Max(1, cfg.IntervalSeconds) * 1000;
 using var dirty = new SemaphoreSlim(0, 1);
 FileSystemWatcher? watcher = opts.Once ? null : TryArmStatusWatcher(cfg.StatusDirectory, dirty);
+// The cycle's summary line: logged when the clients or their states change, else every SummaryEveryMs.
+string _lastSummaryShape = "";
+long _lastSummaryMs = 0;
+const long SummaryEveryMs = 10 * 60_000;
 
 try
 {
@@ -151,7 +183,7 @@ return 0;
 // One status cycle: read all client status, roll it up, and serve / file / POST it.
 async Task RunCycleAsync()
 {
-    List<ClientStatus> clients = StatusReader.ReadAll(cfg);
+    List<ClientStatus> clients = StatusReader.ReadAll(cfg, spells);
     runArchive.Observe(clients);   // fold this cycle into per-session run history (started/updated/finished)
     var payload = new AggregatePayload
     {
@@ -159,17 +191,34 @@ async Task RunCycleAsync()
         AgentVersion = version,
         GeneratedAtUtc = DateTimeOffset.UtcNow,
         ClientCount = clients.Count,
+        // What works on this PC, so the phone stops assuming DrakBot-era "everything".
+        Capabilities = RemoteParity.Capabilities(cfg,
+            iconDat: File.Exists(cfg.IconDatPath),
+            dungeonMaps: Directory.Exists(cfg.MapsDirectory),
+            worldMap: worldMap.Available,
+            characterSheets: clients.Any(c => File.Exists(Path.Combine(cfg.StatusDirectory, $"RynthCore.{c.Pid}.character.json"))),
+            navAtlas: navAtlas.Available,
+            raiseXp: clients.Any(c => c.RaiseXp)),
         Clients = clients,
     };
 
     // Serialize once; reuse the bytes for serve / file / POST.
     byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(payload, AgentJsonContext.Default.AggregatePayload);
 
-    AgentLog.Info(Summarize(clients));
+    // The summary only when who's there or their state changes, and every 10 minutes: logged every
+    // cycle (several a second; fps and plug numbers differ each time) it filled the disk (2026-10-12).
+    string shape = SummaryShape(clients);
+    if (shape != _lastSummaryShape || Environment.TickCount64 - _lastSummaryMs >= SummaryEveryMs)
+    {
+        _lastSummaryShape = shape;
+        _lastSummaryMs = Environment.TickCount64;
+        AgentLog.Info(Summarize(clients));
+    }
     if (opts.Verbose)
         AgentLog.Debug(System.Text.Encoding.UTF8.GetString(bytes));
 
     server?.UpdateLatest(bytes);
+    server?.UpdateRaiseClients(clients);
 
     if (cfg.WriteAggregateFile)
     {
@@ -214,6 +263,9 @@ static FileSystemWatcher? TryArmStatusWatcher(string statusDir, SemaphoreSlim si
         return null;
     }
 }
+
+static string SummaryShape(List<ClientStatus> clients) =>
+    string.Join("|", clients.Select(c => $"{c.Pid}:{c.Character}:{c.State}"));
 
 static string Summarize(List<ClientStatus> clients)
 {

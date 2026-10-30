@@ -17,12 +17,12 @@ internal static partial class StatusReader
     [GeneratedRegex(@"hb #\d+ up=(\d+)s fps=(-?\d+) plug=(-?\d+)/s ws=(\d+)MB login=(\d+)")]
     private static partial Regex HeartbeatRegex();
 
-    public static List<ClientStatus> ReadAll(AgentConfig cfg)
+    public static List<ClientStatus> ReadAll(AgentConfig cfg, SpellTableService? spells = null)
     {
         var clients = new List<ClientStatus>();
         var seenPids = new HashSet<int>();
 
-        ReadStatusFiles(cfg, clients, seenPids);
+        ReadStatusFiles(cfg, clients, seenPids, spells);
 
         if (cfg.UseHeartbeatLogFallback)
             ReadHeartbeatLogs(cfg, clients, seenPids);
@@ -33,27 +33,23 @@ internal static partial class StatusReader
 
     // ── Rich source: per-client status JSON files ───────────────────────────
 
-    private static void ReadStatusFiles(AgentConfig cfg, List<ClientStatus> clients, HashSet<int> seenPids)
+    private static void ReadStatusFiles(AgentConfig cfg, List<ClientStatus> clients, HashSet<int> seenPids, SpellTableService? spells)
     {
         string dir = cfg.StatusDirectory;
         if (!Directory.Exists(dir))
             return;
 
+        var listed = new List<string>();
         foreach (string path in SafeEnumerate(dir, "RynthCore.*.status.json"))
         {
             int pid = ParsePidFromName(Path.GetFileName(path), ".status.json");
             if (pid <= 0) continue;
+            listed.Add(path);
 
-            StatusFileModel? model;
-            try
-            {
-                model = JsonSerializer.Deserialize(File.ReadAllText(path), AgentJsonContext.Default.StatusFileModel);
-            }
-            catch (Exception ex)
-            {
-                AgentLog.Debug($"status file '{path}' unreadable: {ex.Message}");
-                continue;
-            }
+            // Shared read, and the last good parse when this one catches the file mid-write: a client is
+            // never left out of a snapshot just because its file was being replaced (see StatusFileCache).
+            StatusFileModel? model = StatusFileCache.Read(path,
+                text => JsonSerializer.Deserialize(text, AgentJsonContext.Default.StatusFileModel), DateTime.UtcNow);
             if (model == null) continue;
 
             double ageSec = AgeSeconds(model.Ts, path);
@@ -64,6 +60,7 @@ internal static partial class StatusReader
             if (!alive && ageSec > cfg.DropDeadAfterSeconds)
             {
                 try { File.Delete(path); } catch { }
+                StatusFileCache.Forget(path);
                 continue;
             }
 
@@ -149,8 +146,22 @@ internal static partial class StatusReader
             cs.XpSession = model.XpSession;
             cs.BurdenPct = model.BurdenPct;
             cs.Area = model.Area;
-            cs.Landblock = model.Landblock; cs.Indoor = model.Indoor;   // [status-export] live map-dot
+            // [status-export] live map-dot. The landblock goes out in DrakBot's full form ("XXYY0000"), the
+            // one DrakRemote matches against its floor plans (see RemoteParity.LandblockFull).
+            cs.Landblock = RemoteParity.LandblockFull(model.Landblock); cs.Indoor = model.Indoor;
             cs.Wx = model.Wx; cs.Wy = model.Wy; cs.Pz = model.Pz;
+            // The engine writes wx/wy indoors only; the plugin's "opos" has them outdoors too (world map dot).
+            if (!model.Indoor && model.Opos is { } pos && (pos.Wx != 0 || pos.Wy != 0)) { cs.Wx = pos.Wx; cs.Wy = pos.Wy; }
+            cs.Heading = model.Opos?.Heading;
+            // The player's enchantments, named from portal.dat's spell table (the Buffs tab).
+            cs.Enchantments = RemoteParity.Enchantments(model.Enchantments,
+                id => spells != null && spells.TryGet(id, out var info) ? info : null);
+            // The last phone travel (RynthNav) and how it stands.
+            cs.Travel = RemoteParity.Travel(model.Travel, cs.RecentChat, cs.Indoor, cs.Wx, cs.Wy);
+            // Raising from the Skills tab: what the plugin reports; Program clears it without remote control.
+            cs.RaiseXp = model.RaiseXp && cfg.EnableRemoteControl;
+            // RynthRemote 0.4+: the movement protocol it speaks (2 = keep-alives + dead-man); 0 when absent.
+            cs.MoveProto = model.MoveProto;
             cs.LastIssue = model.LastIssue;
             cs.LastIssueAgeSec = model.LastIssueAgeSec;
             // Window state (for the app to show a "minimized — restore on PC" placeholder instead of a
@@ -160,6 +171,7 @@ internal static partial class StatusReader
             clients.Add(cs);
             seenPids.Add(pid);
         }
+        StatusFileCache.ForgetAllBut(listed);
     }
 
     // ── Basic fallback: tail each per-client heartbeat log ──────────────────

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the engine's incoming-chat hold (src\RynthCore.Engine\Compatibility\
+    IncomingChatHold.cs, compiled in): when a line is held for the plugins' verdict, when it
+    prints at once, the order held lines print in, eaten lines, the timeout, flushing, and the
+    "a plugin threw, so the line shows" rule. Nothing native: no AC, no engine state.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ChatHoldTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\IncomingChatHold.cs" Link="Engine\IncomingChatHold.cs" />
+  </ItemGroup>
+
+</Project>

@@ -18,6 +18,7 @@ internal static class ChatCallbackHooks
 
     private const int PsRefBufferWideDataOffset = 20;
     private const int MaxIncomingChatChars = 1024;
+    private const int MaxDataLineChars = 65536;
     private const int IncomingChatAddTextToScrollVa = 0x005649F0;
     private const int IncomingChatWrapperVa = 0x0058A000;
     private const int OutgoingChatVa = 0x005821A0;
@@ -70,6 +71,19 @@ internal static class ChatCallbackHooks
     private static int _incomingChatSuppressionEnabled;
     private static int _incomingCallCount;
 
+    // ── Held incoming chat (IncomingChatHold.cs) ─────────────────────────────
+    // AddTextToScroll lines wait for the plugins' verdict before AC prints them, so a
+    // line a plugin eats never reaches AC's chat window. Main-thread only, except the
+    // beats and the switch.
+    private static readonly HeldChatQueue _held = new();
+    private static readonly Action<HeldChatLine> _printHeld = PrintHeldLine;
+    private static bool _incomingByPattern;      // AddTextToScroll itself was found by its pattern
+    private static bool _replayReady;            // PStringBase<wchar_t> ctor/dtor/null buffer found by pattern
+    private static int _holdSwitch = 1;          // /rc chathold on|off (not saved; on at every start)
+    private static long _drainBeatMs;            // last AcMainThreadQueue.Drain on AC's main thread
+    private static int _eatLogCount;
+    [ThreadStatic] private static int _replayDepth;   // inside our own print of a held line
+
     // Captured live from the outgoing-chat detour so we can re-invoke AC's outgoing
     // chat function DIRECTLY (deterministic) instead of simulating keystrokes into
     // the native chat bar. Keystroke simulation depends on the bar's open/closed
@@ -116,6 +130,9 @@ internal static class ChatCallbackHooks
             {
                 incomingVerified = true;
                 incomingStatus = $"0x{_incomingAddress.ToInt32():X8} ({incomingMode})";
+                if (_originalIncomingChatAddTextPtr != IntPtr.Zero)
+                    _replayReady = _incomingByPattern && TryPrepareReplay(textSection);
+                RynthLog.Compat($"Compat: incoming chat hold {(_replayReady ? "ready" : "unavailable (lines print before plugins hear them, as before)")}.");
             }
 
             if (EnableOutgoingHook && !OutgoingInstalled)
@@ -237,6 +254,7 @@ internal static class ChatCallbackHooks
             unsafe
             {
                 _incomingAddress = resolved.Address;
+                _incomingByPattern = resolved.Source == HookResolver.ResolveSource.PatternScan;
                 delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint, uint, IntPtr, int> pDetour = &IncomingChatAddTextDetour;
                 MinHook.Hook(_incomingAddress, (IntPtr)pDetour, out _originalIncomingChatAddTextPtr);
             }
@@ -277,23 +295,202 @@ internal static class ChatCallbackHooks
     private static unsafe int IncomingChatAddTextDetour(IntPtr thisPtr, IntPtr text, uint chatType, uint unknown, IntPtr stringInfo)
     {
         RecursionGuard.Tick("ChatCallbackHooks.IncomingChatAddText");
-        // 1. Read string BEFORE original — buffer may be freed after
-        string? line = (text != IntPtr.Zero) ? ReadIncomingChatLine(text, chatType) : null;
-
-        // 2. Call original
         var pOriginal = (delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint, uint, IntPtr, int>)_originalIncomingChatAddTextPtr;
+
+        // 1. Read string BEFORE original — buffer may be freed after
+        bool truncated = false;
+        string? raw = (text != IntPtr.Zero) ? ReadIncomingChatRaw(text, chatType, out truncated) : null;
+        string? line = raw?.TrimEnd('\r', '\n');
+
+        // 1b. The engine's own server-data replies (Aelrynth /mastery-data it asked for):
+        // not drawn, not held and not passed on. Every caller of AddTextToScroll ignores its
+        // return value (all 394 call sites in the retail client, checked 2026-10-01).
+        // Not inside our own reprint of a held line: that line was already offered here when
+        // it first arrived (and wasn't ours, or it wouldn't have been held), so offering it
+        // again could take a stale line for the answer to a request sent since.
+        if (line != null && _replayDepth == 0 && EatOwnReply(line, chatType))
+            return 0;
+
+        // 2. Hold the line until the plugins have heard it (IncomingChatHold.cs): AC prints it
+        //    from the next main-thread drain unless a plugin eats it. Anything unexpected here
+        //    falls through to the old path: print now, plugins hear it afterwards.
+        ChatHoldDecision decision = ChatHoldDecision.PassThrough;
+        bool handedOver = false;   // QueueChatWindowText already saw the line (engine HUD feed and plugins)
+        try
+        {
+            decision = DecideHold(raw, truncated, stringInfo);
+            if (decision == ChatHoldDecision.Hold)
+            {
+                var held = new HeldChatLine(raw!, chatType, unknown, thisPtr, Environment.TickCount64);
+                handedOver = true;
+                if (PluginManager.QueueChatWindowText(line, chatType, held))
+                {
+                    _held.Add(held);
+                    return 1; // what AddTextToScroll returns for a line it handled
+                }
+                decision = ChatHoldDecision.FlushThenPassThrough; // plugins aren't taking chat right now
+            }
+            if (decision == ChatHoldDecision.FlushThenPassThrough)
+                ReleaseHeld(flushAll: true);
+        }
+        catch
+        {
+            // Fall through and print. (If the line was handed over, it isn't handed over twice.)
+        }
+
+        // 3. Call original
         int result = pOriginal(thisPtr, text, chatType, unknown, stringInfo);
 
-        // 3. Queue AFTER original returns — game state is consistent
-        if (line != null)
+        // 4. Queue AFTER original returns — game state is consistent
+        if (line != null && !handedOver)
             QueueIncomingChatLine(line, chatType);
 
         return result;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static string? ReadIncomingChatLine(IntPtr pStringBase, uint chatType)
+    private static bool EatOwnReply(string line, uint chatType)
     {
+        // Server replies only: a line in a player's chat type is someone typing "~ael1 ..." or
+        // "Unknown command: ..." to feed the readers or hide their own chat.
+        if (Net.ChatOrigin.IsPlayerAuthored(chatType)) return false;
+        try { return MasteryFeed.OnIncomingLine(line) || VaultFeed.OnIncomingLine(line); }
+        catch { return false; }
+    }
+
+    /// <summary>Hold this line, print it now, or print everything held and then it. AC's main thread or not.</summary>
+    private static ChatHoldDecision DecideHold(string? raw, bool truncated, IntPtr stringInfo)
+    {
+        bool onMain = MainThreadGuard.IsOnMainThread();
+        bool replaying = _replayDepth > 0;
+
+        // Lines whose verdict is in print first, so a line printed now keeps its place after them.
+        if (onMain && !replaying && _held.Count > 0)
+            ReleaseHeld(flushAll: false);
+
+        var inputs = new ChatHoldInputs(
+            Enabled: HoldActive,
+            Disarmed: AcMainThreadQueue.IsDisarmed,
+            OnMainThread: onMain,
+            Replaying: replaying,
+            HasText: !string.IsNullOrEmpty(raw),
+            Truncated: truncated,
+            HasStringInfo: stringInfo != IntPtr.Zero,
+            NowMs: Environment.TickCount64,
+            PumpBeatMs: PluginManager.ChatPumpBeatMs,
+            DrainBeatMs: Volatile.Read(ref _drainBeatMs),
+            HeldCount: _held.Count);
+        return HeldChatQueue.Decide(inputs);
+    }
+
+    private static bool HoldActive => _replayReady && Volatile.Read(ref _holdSwitch) != 0;
+
+    /// <summary>
+    /// Called by AcMainThreadQueue.Drain (Client::UseTime and EndScene, AC's main thread): the
+    /// beat that says held lines will be printed, then prints the ones that may print now.
+    /// After teardown starts it prints everything still held.
+    /// </summary>
+    internal static void OnMainThreadDrain(bool disarmed)
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        if (!disarmed)
+            Volatile.Write(ref _drainBeatMs, Environment.TickCount64);
+        if (_held.Count == 0 || _replayDepth > 0)
+            return;
+        try { ReleaseHeld(flushAll: disarmed || !HoldActive); }
+        catch { }
+    }
+
+    /// <summary>Prints held lines that may print now (AC's main thread, never inside our own print).</summary>
+    private static void ReleaseHeld(bool flushAll)
+    {
+        long eatenBefore = _held.EatenTotal;
+        long lateBefore = _held.TimedOutTotal;
+        _held.Release(Environment.TickCount64, flushAll, _printHeld);
+
+        if (_held.EatenTotal != eatenBefore && _eatLogCount < 5)
+        {
+            _eatLogCount++;
+            RynthLog.Compat($"Compat: chat hold kept {_held.EatenTotal - eatenBefore} line(s) a plugin ate out of AC's chat window (total {_held.EatenTotal}).");
+        }
+        if (_held.TimedOutTotal != lateBefore && _held.TimedOutTotal <= 5)
+            RynthLog.Compat($"Compat: chat hold printed {_held.TimedOutTotal - lateBefore} line(s) without a plugin verdict after {HeldChatQueue.HoldTimeoutMs} ms (plugin pump slow; total {_held.TimedOutTotal}).");
+    }
+
+    /// <summary>Prints one held line through AC's own AddTextToScroll, exactly as it came in.</summary>
+    private static unsafe void PrintHeldLine(HeldChatLine h)
+    {
+        var pOriginal = (delegate* unmanaged[Thiscall]<IntPtr, IntPtr, uint, uint, IntPtr, int>)_originalIncomingChatAddTextPtr;
+        _replayDepth++;
+        try
+        {
+            fixed (char* chars = h.Raw) // .NET strings end in a NUL, as the PStringBase ctor needs
+            {
+                var wide = OutgoingWidePString.Create((ushort*)chars);
+                try
+                {
+                    // StringInfo is always null here: lines that came with one are never held.
+                    pOriginal(h.This, (IntPtr)(&wide), h.ChatType, h.Unknown, IntPtr.Zero);
+                }
+                finally { wide.Dispose(); }
+            }
+        }
+        finally { _replayDepth--; }
+    }
+
+    /// <summary>
+    /// Holding needs to build AC strings itself to print a held line: the PStringBase&lt;wchar_t&gt;
+    /// ctor, dtor and empty buffer, all found by pattern (never a guessed address).
+    /// </summary>
+    private static bool TryPrepareReplay(AcClientTextSection textSection)
+    {
+        try
+        {
+            var ctor = HookResolver.Resolve(textSection, "ChatCallback.PStringW_ctor", PatWidePStringCtor, 0x00402730);
+            var dtor = HookResolver.Resolve(textSection, "ChatCallback.PStringW_dtor", PatWidePStringDtor, 0x004011B0);
+            var nul = HookResolver.ResolveData(textSection, "ChatCallback.PStringW_NullBuffer", PatXrefWideNullBuffer, 2, 0x00818340);
+            if (ctor.Source != HookResolver.ResolveSource.PatternScan
+                || dtor.Source != HookResolver.ResolveSource.PatternScan
+                || nul.Source != HookResolver.ResolveSource.PatternScan)
+                return false;
+            // Resolve OutgoingWidePString's statics now, not on AC's thread at the first held line.
+            return OutgoingWidePString.Warm();
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"Compat: chat hold setup failed - {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>/rc chathold on|off.</summary>
+    internal static void SetHoldEnabled(bool on) => Volatile.Write(ref _holdSwitch, on ? 1 : 0);
+
+    internal static bool HoldSwitchOn => Volatile.Read(ref _holdSwitch) != 0;
+
+    /// <summary>One line for /rc chathold status.</summary>
+    internal static string HoldStatusText()
+    {
+        string state = !IncomingInstalled ? "unavailable (incoming chat isn't hooked; in Decal bridge mode Decal owns it)"
+            : !_replayReady ? "unavailable (the client's string functions weren't found, or another hook sits on AddTextToScroll)"
+            : HoldSwitchOn ? "ON" : "OFF";
+        return $"Chat hold is {state}. Since start: {_held.HeldTotal} held, {_held.ShownTotal} shown, " +
+               $"{_held.EatenTotal} eaten by plugins, {_held.TimedOutTotal} shown late (no verdict in {HeldChatQueue.HoldTimeoutMs} ms), " +
+               $"{_held.PrintFailedTotal} print errors; {_held.Count} waiting now.";
+    }
+
+    /// <summary>
+    /// Reads the line exactly as AC got it (line breaks kept). <paramref name="truncated"/> is
+    /// true when it is longer than <see cref="MaxIncomingChatChars"/>: plugins get the first
+    /// part, as before, but such a line is never held (it couldn't be printed back whole).
+    /// A server data line ("~ael1 ...") is read in full instead (up to
+    /// <see cref="MaxDataLineChars"/>) but still reports truncated, so it is never held either.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string? ReadIncomingChatRaw(IntPtr pStringBase, uint chatType, out bool truncated)
+    {
+        truncated = false;
         try
         {
             // PStringBase<ushort> is a 4-byte struct: a single pointer to
@@ -311,16 +508,32 @@ internal static class ChatCallbackHooks
                     break;
                 length++;
             }
+            // Lines this long are never held (chat-eat's limit, unchanged): they print at once
+            // and plugins hear them afterwards, as before. Set from the usual cap BEFORE the
+            // data-line read below, so a long data line read in full still counts as too long.
+            truncated = length >= MaxIncomingChatChars;
 
-            string? line = length > 0
-                ? Marshal.PtrToStringUni(charData, length)?.TrimEnd('\r', '\n')
-                : null;
+            // A server data line ("~ael1 {json}", one line for every skill) runs past the
+            // usual cap: read it to its terminator, up to 64K characters.
+            if (length == MaxIncomingChatChars
+                && MasteryWire.IsDataLine(Marshal.PtrToStringUni(charData, 40)))
+            {
+                while (length < MaxDataLineChars)
+                {
+                    short ch = Marshal.ReadInt16(charData, length * 2);
+                    if (ch == 0)
+                        break;
+                    length++;
+                }
+            }
+
+            string? raw = length > 0 ? Marshal.PtrToStringUni(charData, length) : null;
 
             int count = Interlocked.Increment(ref _incomingCallCount);
             if (count <= 0)
                 RynthLog.Verbose($"Compat: incoming chat #{count} type={chatType} len={length}");
 
-            return line;
+            return raw;
         }
         catch { return null; }
     }
@@ -338,6 +551,7 @@ internal static class ChatCallbackHooks
         try
         {
             string? line = ReadWidePString(text);
+            LogoffOriginProbe.RecordChat($"AC OutgoingChat src={commandSource}", line);
 
             // Capture the chat-manager 'this' + command source from the live submit
             // so ChatCommandDispatcher can re-invoke this function directly later.
@@ -349,12 +563,18 @@ internal static class ChatCallbackHooks
 
             // RynthCore engine commands (/rc ...) — consume before plugins or
             // AC see the line so the user never broadcasts "/rc resetbar" and
-            // a hidden overlay bar stays recoverable.
-            if (RynthCoreChatCommands.TryHandle(line))
+            // a hidden overlay bar stays recoverable. Typed by the player: every
+            // reply goes to chat.
+            if (RynthCoreChatCommands.TryHandle(line, ChatCommandOrigin.Player))
                 return 1;
 
-            if (PluginManager.DispatchChatBarEnter(line))
-                return 1;
+            // A /rc line a plugin runs while it handles this one (RynthAi's /ra videopatch) is the
+            // player's too, so it answers in chat.
+            using (RynthCoreChatCommands.PlayerLine())
+            {
+                if (PluginManager.DispatchChatBarEnter(line))
+                    return 1;
+            }
 
             return _originalOutgoingChat!(thisPtr, text, commandSource);
         }
@@ -568,6 +788,7 @@ internal static class ChatCallbackHooks
         foreach (char c in line)
             if (c < 0x20 && c != '\t')
                 return false; // never feed AC control chars
+        LogoffOriginProbe.RecordChat("OutgoingChat direct", line);
 
         try
         {
@@ -639,6 +860,17 @@ internal static class ChatCallbackHooks
                 Ctor(&value, pChars);
             return value;
         }
+
+        /// <summary>From a NUL-terminated buffer the caller keeps pinned for the call.</summary>
+        public static OutgoingWidePString Create(ushort* chars)
+        {
+            var value = new OutgoingWidePString { CharBuffer = Marshal.ReadIntPtr(NullWideBufferVa) };
+            Ctor(&value, chars);
+            return value;
+        }
+
+        /// <summary>Runs the static resolution now; true when all three addresses are set.</summary>
+        public static bool Warm() => NullWideBufferVa != IntPtr.Zero && Ctor != null && Dtor != null;
 
         public void Dispose()
         {

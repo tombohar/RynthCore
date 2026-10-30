@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the bar declutter work (2026-10-18; Skills-under-Oracle idea from Silentkelpie, rynth PR 6):
+    - ShownLatch + OracleSkillsEmbed (src\RynthCore.Engine\ImGui\Panels, compiled in): the embedded Skills face is
+      shown exactly once per visible stretch and hidden exactly once (redraws, tab switches, Clear, window closed,
+      idle sweep, double Clear, hide without show, two threads), so its Progression subscription never leaks;
+      and when the Oracle tabs count as reachable (the Skills bar icon / routing rule).
+    - InventoryTitleLayout (src\RynthCore.Engine\UI): the Classic Inventory title bar at widths 300/360/480,
+      scales 1 / 1.5 / 2, Vault on and off: no button off the bar or overlapping another, Vault always there,
+      the title keeps room or is elided; plus the Modern header's icons / menu / none choice.
+    No ImGui, no files. Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>BarDeclutterTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\Panels\ShownLatch.cs" Link="Engine\ShownLatch.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\Panels\OracleSkillsEmbed.cs" Link="Engine\OracleSkillsEmbed.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\InventoryTitleLayout.cs" Link="Engine\InventoryTitleLayout.cs" />
+  </ItemGroup>
+
+</Project>

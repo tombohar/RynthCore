@@ -19,6 +19,7 @@ using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
+using RynthCore.Install;
 
 namespace RynthCore.Loader;
 
@@ -31,7 +32,8 @@ public static class EntryPoint
     // Unified log path — must stay in sync with RynthCore.Engine.LogPaths.
     // The loader cannot reference the engine assembly (it loads it
     // dynamically), so the constants are mirrored here.
-    private const string UnifiedLogDirectory = @"C:\Games\RynthCore\Logs";
+    // A property, not a field: resolved when the first log line is written, never in the type initializer.
+    private static string UnifiedLogDirectory => RynthCore.Install.RynthInstallPaths.CoreLogsDir; // C:\Games\RynthCore\Logs by default
     private const string UnifiedLogFileName = "RynthCore.log";
     /// <summary>
     /// Subdirectory beside the loader where reload-generation copies of the
@@ -380,6 +382,19 @@ public static class EntryPoint
                 }
             }
 
+            // Address-space gate. Every reload leaves the old engine and plugin
+            // copies mapped (NativeAOT can't unload) and costs hundreds of MB of
+            // acclient's 4 GB; below this the next reload, or the play after it,
+            // runs the client out and it dies without a trace (2026-09-28 13:57,
+            // measured 600-670 MB per reload). Refuse and ask for a restart.
+            long freeMb = FreeAddressSpaceMb();
+            if (freeMb >= 0 && freeMb < MinFreeMbForReload)
+            {
+                Log($"ReloadWatcher: reload REFUSED - only {freeMb} MB of address space free (need {MinFreeMbForReload} MB). Restart the client to load the new engine.", "WRN");
+                NotifyReloadRefused(freeMb);
+                continue;
+            }
+
             // CAS gate. The watcher thread is the only caller, so this should
             // never trip — but if it ever does (a future code path signals
             // reload reentrantly, or someone adds a second watcher) we'd
@@ -416,6 +431,61 @@ public static class EntryPoint
             }
         }
     }
+
+    private const long MinFreeMbForReload = 1200;
+
+    /// <summary>Free (unreserved) address space in MB, or -1 if it can't be read.</summary>
+    private static long FreeAddressSpaceMb()
+    {
+        try
+        {
+            long free = 0;
+            long addr = 0x10000;
+            int size = Marshal.SizeOf<MEMORY_BASIC_INFORMATION>();
+            while (addr < 0xFFFF0000L)
+            {
+                if (VirtualQuery((IntPtr)addr, out MEMORY_BASIC_INFORMATION mbi, (IntPtr)size) == IntPtr.Zero)
+                    break;
+                long region = (long)(ulong)mbi.RegionSize;
+                if (region <= 0) break;
+                if (mbi.State == MEM_FREE) free += region;
+                addr = (long)(ulong)mbi.BaseAddress + region;
+            }
+            return free / (1024 * 1024);
+        }
+        catch { return -1; }
+    }
+
+    /// <summary>Tells the running engine, which says so in chat (engines without the export just skip it).</summary>
+    private static void NotifyReloadRefused(long freeMb)
+    {
+        IntPtr module = _engineModule;
+        if (module == IntPtr.Zero) return;
+        IntPtr fn = GetProcAddress(module, "RynthCoreReloadRefused");
+        if (fn == IntPtr.Zero) return;
+        try { Marshal.GetDelegateForFunctionPointer<ReloadRefusedFn>(fn)((int)freeMb); }
+        catch (Exception ex) { Log($"ReloadWatcher: RynthCoreReloadRefused threw {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint ReloadRefusedFn(int freeMb);
+
+    private const uint MEM_FREE = 0x10000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORY_BASIC_INFORMATION
+    {
+        public IntPtr BaseAddress;
+        public IntPtr AllocationBase;
+        public uint AllocationProtect;
+        public IntPtr RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr VirtualQuery(IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, IntPtr dwLength);
 
     private static void Reload()
     {

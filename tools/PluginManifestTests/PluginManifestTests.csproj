@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline tests for plugin manifests:
+      - parsing and checks (src\RynthCore.PluginSdk\Manifest, from the SDK);
+      - the engine's gate (src\RynthCore.Engine\Plugins\PluginManifestGate.cs, compiled in):
+        engine API refusals, required/optional dependencies, load order, plugins without one;
+      - reading the embedded resource from real PE files (a manifest embedded into a copy of
+        this test's own DLL with UpdateResource, as the build does);
+      - the SDK's API version can't drift: RynthCoreHost.CurrentApiVersion, the SDK's table size
+        (RynthCoreApiNative vs the engine's RynthCoreAPI, compiled in) and the build targets'
+        RynthCoreSdkApiVersion all match PluginContractVersion.Current;
+      - PluginPaths de-duplication (src\RynthCore.Engine\Plugins\PluginPathDedupe.cs, compiled in):
+        the same DLL listed twice (any case or slashes) loads once; the same file name from two
+        folders keeps the first and warns.
+    Extra arguments are plugin DLLs to read and check (e.g. a RynthSuite publish folder's).
+    Never loads a plugin, never touches %APPDATA% or C:\Games.
+    Run: dotnet run -c Release [plugin.dll ...]  (arguments after a double dash)   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>PluginManifestTests</RootNamespace>
+    <NoWarn>$(NoWarn);CS0649;CS0169</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <ProjectReference Include="..\..\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The engine's side: its table, its version and its manifest gate. -->
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\PluginContract.cs" Link="Engine\PluginContract.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\PluginContractVersion.cs" Link="Engine\PluginContractVersion.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\PluginManifestGate.cs" Link="Engine\PluginManifestGate.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\PluginPathDedupe.cs" Link="Engine\PluginPathDedupe.cs" />
+  </ItemGroup>
+
+</Project>

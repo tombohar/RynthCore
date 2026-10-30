@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Step 2 of the creature size table (see ..\README.md): reads each Setup (model) from client_portal.dat
+       with ACE's own dat reader. Needs a built ACE server; point AcBin at its bin folder if it is elsewhere. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <AcBin Condition="'$(AcBin)' == ''">C:\Projects\ACE\Source\ACE.Server\bin\x64\Release\net10.0</AcBin>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="ACE.DatLoader"><HintPath>$(AcBin)\ACE.DatLoader.dll</HintPath></Reference>
+    <Reference Include="ACE.Common"><HintPath>$(AcBin)\ACE.Common.dll</HintPath></Reference>
+    <Reference Include="ACE.Entity"><HintPath>$(AcBin)\ACE.Entity.dll</HintPath></Reference>
+    <Reference Include="log4net"><HintPath>$(AcBin)\log4net.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

@@ -82,6 +82,23 @@ internal static class LogoBypassHooks
             return;
         }
 
+        // An engine hot reload (gen 2+) runs this step long before the reload marks the login
+        // complete, while the character stands in the world. The early burst then clicked
+        // (350, 100) up to 12 times, 400 ms apart, into the 3D view: AC reads two clicks that
+        // close together as a double-click and USES whatever is under that spot, so a door or a
+        // corpse there opened, closed, opened... "before the bot is on" (2026-10-04). The logo
+        // screens only exist when the client starts, so a reload never needs a dismiss click.
+        if (EntryPoint.InitCount >= 2)
+        {
+            RynthLog.Compat($"LogoBypass: engine hot reload (initCount={EntryPoint.InitCount}) - the client is past the logo screens, no dismiss clicks.");
+            return;
+        }
+        if (IsInGameWorld(out string where))
+        {
+            RynthLog.Compat($"LogoBypass: the client is already in the game world ({where}) - no dismiss clicks.");
+            return;
+        }
+
         _started = true;
         lock (StateLock)
         {
@@ -90,12 +107,7 @@ internal static class LogoBypassHooks
             _recommendedAutoLoginTick = 0;
         }
 
-        var thread = new Thread(BypassThread)
-        {
-            Name = "RynthCore.LogoBypass",
-            IsBackground = true
-        };
-        thread.Start();
+        EngineThreads.Start("RynthCore.LogoBypass", BypassThread);
 
         RynthLog.Compat("LogoBypass: Started - waiting for post-connect or character-list signal before dismiss clicks.");
     }
@@ -151,7 +163,8 @@ internal static class LogoBypassHooks
             if (LoginLifecycleHooks.HasObservedLoginComplete)
                 return;
             SendDismissInput(hwnd);
-            Thread.Sleep(EarlyBurstIntervalMs);
+            if (!EngineThreads.Sleep(EarlyBurstIntervalMs))
+                return;
         }
     }
 
@@ -204,7 +217,8 @@ internal static class LogoBypassHooks
             if (found != IntPtr.Zero)
                 return found;
 
-            Thread.Sleep(HwndPollMs);
+            if (!EngineThreads.Sleep(HwndPollMs))
+                return IntPtr.Zero;
             elapsed += HwndPollMs;
         }
 
@@ -221,13 +235,14 @@ internal static class LogoBypassHooks
             {
                 if (TryTakeDueDismissClick())
                     SendDismissInput(hwnd);
-                else
-                    Thread.Sleep(IdlePollMs);
+                else if (!EngineThreads.Sleep(IdlePollMs))
+                    break;
             }
         }
         finally
         {
-            string reason = LoginLifecycleHooks.HasObservedLoginComplete ? "login complete" : "timeout";
+            string reason = LoginLifecycleHooks.HasObservedLoginComplete ? "login complete"
+                : EngineThreads.Stopping ? "engine shutdown" : "timeout";
             RynthLog.Verbose($"LogoBypass: Stopped ({reason}).");
         }
     }
@@ -249,8 +264,40 @@ internal static class LogoBypassHooks
         }
     }
 
+    private static int _withheldClicks;
+
+    /// <summary>
+    /// True when the character is in the game world: AC's UI flow is in GamePlayUI, or the
+    /// login has completed. A click there lands in the 3D view, where two of them make a
+    /// double-click that uses the object under the cursor.
+    /// </summary>
+    private static bool IsInGameWorld(out string where)
+    {
+        where = "";
+        if (LoginLifecycleHooks.HasObservedLoginComplete) { where = "login complete"; return true; }
+        try
+        {
+            if (CharacterManagementHooks.TryGetCurrentMode(out int mode) && mode == GamePlayUIMode)
+            {
+                where = $"UI mode 0x{mode:X8} (GamePlayUI)";
+                return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private const int GamePlayUIMode = 0x10000008;   // same value CharacterCaptureHooks checks
+
     private static void SendDismissInput(IntPtr hwnd)
     {
+        // Last guard before every click: never into the game world (see Start).
+        if (IsInGameWorld(out string where))
+        {
+            if (Interlocked.Increment(ref _withheldClicks) == 1)
+                RynthLog.Compat($"LogoBypass: dismiss click withheld - the client is in the game world ({where}).");
+            return;
+        }
         IntPtr lParam = MakeLParam(DismissClickX, DismissClickY);
         PostMessage(hwnd, WM_MOUSEMOVE, IntPtr.Zero, lParam);
         PostMessage(hwnd, WM_LBUTTONDOWN, (IntPtr)0x0001, lParam);

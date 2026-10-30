@@ -1,0 +1,2 @@
+# Applied with git apply to an LF checkout: keep the bytes as committed.
+*.patch -text

@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the engine half of the "Add to loot profile" attribute checklist (taken
+    2026-10-19): the popup's DTOs (UI\Data\LootEditData.cs) must read what RynthAi's LootEditWire
+    writes and write what it reads, and an older RynthAi (no attributes) must leave the popup on
+    its single "Include T11 attributes" box. Reaches the internal types by reflection (the
+    engine has no test seam). x86, like the engine: needs the x86 .NET runtime.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Platforms>x86</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>LootAddWireTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.Engine\RynthCore.Engine.csproj" />
+  </ItemGroup>
+
+</Project>

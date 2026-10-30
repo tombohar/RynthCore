@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for how the engine's chat commands answer (src\RynthCore.Engine\Compatibility\
+    ChatCommandReplies.cs, compiled in; Hotkeys\HotkeyModel.cs for the /rc hotkey parser): every
+    /rc verb with a valid and an invalid form (the check made before a command runs: unknown verbs
+    and arguments a verb can't take answer with the usage), where a reply goes (chat for the player,
+    the log only for a script's success, chat for every failure) and its colour, the reply texts,
+    and a read of RynthCoreChatCommands.cs: the verb list matches TryHandle both ways and every
+    reply goes through the one writer. The dispatcher itself needs the live engine, so it isn't run.
+    Reads only the source tree. Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ChatCommandReplyTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ChatCommandReplies.cs" Link="Engine\ChatCommandReplies.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ChatRateLimiter.cs" Link="Engine\ChatRateLimiter.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Hotkeys\HotkeyModel.cs" Link="Engine\HotkeyModel.cs" />
+  </ItemGroup>
+
+</Project>

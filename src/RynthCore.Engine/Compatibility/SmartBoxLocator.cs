@@ -42,29 +42,10 @@ internal static class SmartBoxLocator
     /// Uses VirtualQuery — safe to call on any address including unmapped pages.
     /// Critical for NativeAOT where AccessViolationException cannot be caught.
     /// </summary>
-    public static bool IsMemoryReadable(IntPtr address, int size)
-    {
-        if (address == IntPtr.Zero || size <= 0)
-            return false;
-
-        if (VirtualQuery(address, out MEMORY_BASIC_INFORMATION mbi,
-                Marshal.SizeOf<MEMORY_BASIC_INFORMATION>()) == 0)
-            return false;
-
-        if (mbi.State != MEM_COMMIT)
-            return false;
-        if ((mbi.Protect & PAGE_NOACCESS) != 0)
-            return false;
-        if ((mbi.Protect & PAGE_GUARD) != 0)
-            return false;
-        if ((mbi.Protect & READABLE_MASK) == 0)
-            return false;
-
-        // Ensure the committed region covers the full requested range
-        int regionEnd = mbi.BaseAddress.ToInt32() + mbi.RegionSize.ToInt32();
-        int requestEnd = address.ToInt32() + size;
-        return requestEnd <= regionEnd;
-    }
+    public static bool IsMemoryReadable(IntPtr address, int size) => MemoryProbe.IsReadable(address, size);
+    // Was a VirtualQuery per call (one per CObjectMaint hash bucket and two per node in the
+    // snapshot walks); see MemoryProbe for why that collapsed the frame rate once AC's heap grew.
+    // Same rule: committed, not NOACCESS/GUARD, readable, the whole span (64-bit arithmetic).
 
     public static bool IsInitialized { get; private set; }
     public static int CandidateCount => _smartboxStaticCandidates.Count;

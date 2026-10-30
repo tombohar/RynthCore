@@ -6,7 +6,6 @@
 
 using System;
 using System.Numerics;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using ImGuiNET;
 using RynthCore.Engine.D3D9;
@@ -17,34 +16,41 @@ internal static unsafe class DX9Backend
 {
     private static readonly Guid IID_IUnknown = new("00000000-0000-0000-C000-000000000046");
 
-    // ─── Native ImDrawData layout (pre-1.90 cimgui, x86) ─────────────
-    // Our cimgui.dll uses the old layout where CmdLists is a raw pointer (4 bytes)
-    // rather than ImVector (12 bytes). All offsets confirmed by memory dump.
-    private static Vector2 GetDisplayPos(IntPtr drawDataNative)
+    // Draw data is read through ImGui.NET's native structs (ImDrawData,
+    // ImDrawList, ImDrawCmd). That is only valid because Native\cimgui.dll is
+    // the exact 1.91.6 build ImGui.NET 1.91.6.1 was generated against;
+    // ImGuiSelfTest refuses to start ImGui if the loaded DLL is anything else.
+
+    // Converted-vertex scratch buffer, grown on demand and reused every frame
+    // (no per-frame native allocation on AC's thread). Freed in Shutdown.
+    private static CustomVertex* _vtxScratch;
+    private static int _vtxScratchCapacity;
+
+    private static CustomVertex* EnsureVertexScratch(int needed)
     {
-        float x = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(drawDataNative, 20));
-        float y = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(drawDataNative, 24));
-        return new Vector2(x, y);
+        if (needed > _vtxScratchCapacity)
+        {
+            int cap = _vtxScratchCapacity == 0 ? 8192 : _vtxScratchCapacity;
+            while (cap < needed) cap *= 2;
+            if (_vtxScratch != null) NativeMemory.Free(_vtxScratch);
+            _vtxScratch = (CustomVertex*)NativeMemory.Alloc((nuint)cap, (nuint)sizeof(CustomVertex));
+            _vtxScratchCapacity = cap;
+        }
+        return _vtxScratch;
     }
-    private static Vector2 GetDisplaySize(IntPtr drawDataNative)
-    {
-        float x = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(drawDataNative, 28));
-        float y = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(drawDataNative, 32));
-        return new Vector2(x, y);
-    }
-    private static int GetCmdListsCount(IntPtr drawDataNative)
-    {
-        return Marshal.ReadInt32(drawDataNative, 4);
-    }
-    private static IntPtr GetCmdListsArray(IntPtr drawDataNative)
-    {
-        return Marshal.ReadIntPtr(drawDataNative, 16);
-    }
+
+    // ── Diagnostics (/rc imgui diag): what the last RenderDrawData did ──
+    private static int _diagLists, _diagVtx, _diagCmds, _diagDraws, _diagSkipped, _diagFailed, _diagLastHr;
+    private static long _diagFrames;
+
+    public static string DescribeLastFrame() =>
+        $"render: initialized={_initialized} frames={_diagFrames} lastFrame lists={_diagLists} vtx={_diagVtx} cmds={_diagCmds} draws={_diagDraws} skipped={_diagSkipped} failedDraws={_diagFailed} lastFailHr=0x{_diagLastHr:X8} fontTex=0x{_fontTexture:X8}";
 
     // ─── D3D9 constants ───────────────────────────────────────────────
     private const uint D3DPT_TRIANGLELIST = 4;
     private const uint D3DFMT_INDEX16 = 101;
     private const uint D3DFMT_A8R8G8B8 = 21;
+    private const uint D3DFMT_DXT1 = 0x31545844;       // the FourCC 'DXT1'
     private const uint D3DPOOL_MANAGED = 1;
     private const uint D3DUSAGE_DYNAMIC = 0x200;
     private const uint D3DPOOL_DEFAULT = 0;
@@ -125,24 +131,41 @@ internal static unsafe class DX9Backend
     // D3DSAMPLERSTATETYPE
     private const uint D3DSAMP_MINFILTER = 5;
     private const uint D3DSAMP_MAGFILTER = 6;
+    private const uint D3DSAMP_ADDRESSU = 1;
+    private const uint D3DSAMP_ADDRESSV = 2;
+    private const uint D3DSAMP_MIPFILTER = 7;
+    private const uint D3DTADDRESS_CLAMP = 3;
+    private const uint D3DTEXF_NONE = 0;
+    private const uint D3DRS_WRAP0 = 128;
 
     // D3DTEXTUREFILTERTYPE
-    private const uint D3DTEXF_LINEAR = 2;
+    private const uint D3DTEXF_LINEAR = 2, D3DTEXF_POINT = 1;
+    // Draw-list callbacks this renderer understands besides ResetRenderState (see IconSampling): the sampler
+    // for the draw commands that follow, until the next one or the end of the list.
+
 
     // FVF: xyz (3 floats) + diffuse (uint) + 1 tex coord (2 floats)
     private const uint D3DFVF_XYZ = 0x002;
     private const uint D3DFVF_DIFFUSE = 0x040;
     private const uint D3DFVF_TEX1 = 0x100;
-    private const uint D3DFVF_CUSTOM = D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1;
+    private const uint D3DFVF_XYZRHW = 0x004;
+    private const uint D3DFVF_CUSTOM = D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1;
+    private const uint D3DRS_VERTEXBLEND = 151;
+    private const uint D3DRS_CLIPPLANEENABLE = 152;
 
     // D3DBLENDOP
     private const uint D3DBLENDOP_ADD = 1;
 
     // ─── Vertex structure (D3D9 layout) ───────────────────────────────
     [StructLayout(LayoutKind.Sequential)]
+    // Pre-transformed (screen-space) vertices, like VitalHud and the Avalonia
+    // quad. The first in-game test drew ImGui with XYZ vertices through the
+    // fixed-function transform stage and nothing appeared, although every
+    // draw call succeeded: state AC leaves in that stage (user clip planes,
+    // vertex blending) can discard the geometry. XYZRHW skips it entirely.
     private struct CustomVertex
     {
-        public float X, Y, Z;
+        public float X, Y, Z, Rhw;
         public uint Col;   // ARGB
         public float U, V;
     }
@@ -358,6 +381,11 @@ internal static unsafe class DX9Backend
         if (!CreateFontTexture(pDevice))
             return false;
 
+        // Draw lists may exceed 64K vertices (radar walls); with this flag ImGui
+        // splits them into commands that carry a VtxOffset, which
+        // RenderDrawData applies, so 16-bit indices stay valid.
+        ImGuiNET.ImGui.GetIO().BackendFlags |= ImGuiBackendFlags.RendererHasVtxOffset;
+
         _initialized = true;
         RynthLog.Render("DX9Backend: ImGui resources initialized.");
         return true;
@@ -372,11 +400,18 @@ internal static unsafe class DX9Backend
 
     public static void Shutdown()
     {
+        ReleaseRetiredFontTexture();
         if (_fontTexture != IntPtr.Zero)
         {
             var release = GetTexMethod<ReleaseD>(_fontTexture, TextureVTableIndex.Release);
             release(_fontTexture);
             _fontTexture = IntPtr.Zero;
+        }
+        if (_vtxScratch != null)
+        {
+            NativeMemory.Free(_vtxScratch);
+            _vtxScratch = null;
+            _vtxScratchCapacity = 0;
         }
         _initialized = false;
         _coreInitialized = false;
@@ -466,21 +501,54 @@ internal static unsafe class DX9Backend
     public static void RenderDrawData(ImDrawDataPtr drawData, IntPtr pDevice)
     {
         if (!_initialized) return;
-        if (drawData.NativePtr == null) return;
+        ImDrawData* dd = drawData.NativePtr;
+        if (dd == null) return;
+        RenderLists((ImDrawList**)dd->CmdLists.Data, dd->CmdListsCount, dd->TotalVtxCount, dd->DisplayPos, dd->DisplaySize,
+            pDevice, midFrame: false);
+    }
 
-        IntPtr ddNative = (IntPtr)drawData.NativePtr;
-        int cmdListsCount = GetCmdListsCount(ddNative);
-        Vector2 displaySize = GetDisplaySize(ddNative);
-        Vector2 displayPos = GetDisplayPos(ddNative);
+    /// <summary>
+    /// Renders one draw list built outside ImGui's draw data (UnderUiLayer: the
+    /// world overlays drawn at AC's 3D→UI transition, in the middle of AC's frame).
+    /// Same state save/restore as <see cref="RenderDrawData"/>, plus the few
+    /// states a 3D pass can leave that the UI pass at EndScene never does.
+    /// Doesn't count in /rc imgui diag. AC's render thread.
+    /// </summary>
+    public static void RenderDrawList(ImDrawList* list, Vector2 displaySize, IntPtr pDevice)
+    {
+        if (!_initialized || list == null || pDevice == IntPtr.Zero) return;
+        RenderLists(&list, 1, -1, Vector2.Zero, displaySize, pDevice, midFrame: true);
+    }
 
+    /// <param name="totalVtx">For the diagnostics; -1: not a frame of ImGui's own (not counted).</param>
+    private static void RenderLists(ImDrawList** cmdLists, int cmdListsCount, int totalVtx, Vector2 displayPos, Vector2 displaySize,
+        IntPtr pDevice, bool midFrame)
+    {
         if (cmdListsCount == 0) return;
         if (displaySize.X <= 0 || displaySize.Y <= 0) return;
+        if (cmdLists == null) return;
 
-        IntPtr cmdListsArray = GetCmdListsArray(ddNative);
-        if (cmdListsArray == IntPtr.Zero) return;
+        if (totalVtx >= 0)
+        {
+            _diagFrames++;
+            _diagLists = cmdListsCount; _diagVtx = totalVtx;
+            _diagCmds = 0; _diagDraws = 0; _diagSkipped = 0; _diagFailed = 0;
+        }
 
-        if (false && _logCount < 3)
-            RynthLog.Render($"DX9: Rendering {cmdListsCount} lists, display={displaySize.X}x{displaySize.Y}");
+        // Mid-frame only (the 3D pass's leftovers): texture-coordinate wrapping,
+        // and sampler 0's addressing and mip filter.
+        uint oldWrap0 = 0, oldSamp0AddrU = 0, oldSamp0AddrV = 0, oldSamp0Mip = 0;
+        if (midFrame)
+        {
+            _getRenderState!(pDevice, D3DRS_WRAP0, out oldWrap0);
+            _getSamplerState!(pDevice, 0, D3DSAMP_ADDRESSU, out oldSamp0AddrU);
+            _getSamplerState!(pDevice, 0, D3DSAMP_ADDRESSV, out oldSamp0AddrV);
+            _getSamplerState!(pDevice, 0, D3DSAMP_MIPFILTER, out oldSamp0Mip);
+            _setRenderState!(pDevice, D3DRS_WRAP0, 0);
+            _setSamplerState!(pDevice, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+            _setSamplerState!(pDevice, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+            _setSamplerState!(pDevice, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        }
 
         // ── Manual state save ────────────────────────────────────────
         D3DVIEWPORT9 oldVp = default;
@@ -500,6 +568,7 @@ internal static unsafe class DX9Backend
         uint oldFillMode = 0, oldZWriteEnable = 0, oldAlphaTestEnable = 0;
         uint oldClipping = 0, oldRangeFog = 0, oldSpecular = 0;
         uint oldSrcBlendAlpha = 0, oldDestBlendAlpha = 0;
+        uint oldVertexBlend = 0, oldClipPlanes = 0;
         uint oldTss0TexCoordIdx = 0, oldTss0TexTransFlags = 0;
         // Stream source and index buffer — DrawIndexedPrimitiveUP sets these to NULL internally
         IntPtr oldStreamData = IntPtr.Zero;
@@ -548,6 +617,8 @@ internal static unsafe class DX9Backend
         _getRenderState!(pDevice, D3DRS_SPECULARENABLE, out oldSpecular);
         _getRenderState!(pDevice, D3DRS_SRCBLENDALPHA, out oldSrcBlendAlpha);
         _getRenderState!(pDevice, D3DRS_DESTBLENDALPHA, out oldDestBlendAlpha);
+        _getRenderState!(pDevice, D3DRS_VERTEXBLEND, out oldVertexBlend);
+        _getRenderState!(pDevice, D3DRS_CLIPPLANEENABLE, out oldClipPlanes);
         _getTexStageState!(pDevice, 0, D3DTSS_TEXCOORDINDEX, out oldTss0TexCoordIdx);
         _getTexStageState!(pDevice, 0, D3DTSS_TEXTURETRANSFORMFLAGS, out oldTss0TexTransFlags);
         _getStreamSource!(pDevice, 0, out oldStreamData, out oldStreamOffset, out oldStreamStride);
@@ -555,153 +626,96 @@ internal static unsafe class DX9Backend
 
         try
         {
-            // Set up render state with correct display size
-            if (false && _logCount < 3) RynthLog.Render("DX9: step SetupRenderState");
             SetupRenderStateNative(pDevice, displayPos, displaySize);
-            if (false && _logCount < 3) RynthLog.Render("DX9: step SetupRenderState done");
 
-            // ── Native ImDrawCmd offsets (imgui.h 1.91.6, x86) ──────────
-            // +0  ClipRect (4 floats, 16 bytes)
-            // +16 TextureId (ptr, 4 bytes)
-            // +20 VtxOffset (uint32)
-            // +24 IdxOffset (uint32)
-            // +28 ElemCount (uint32)
-            // +32 UserCallback (ptr, 4 bytes)
-            // +36 UserCallbackData (ptr, 4 bytes)
-            // Total = 40 bytes. The C# ImDrawCmd wrapper adds UserCallbackDataSize
-            // and UserCallbackDataOffset (8 more bytes = 48), but the native cimgui.dll
-            // does NOT have those fields. We read at stride 40 to match the native layout.
-            const int CmdStride = 40;
             const int ResetRenderStateSentinel = -8; // ImDrawCallback_ResetRenderState
 
             for (int n = 0; n < cmdListsCount; n++)
             {
-                IntPtr listPtr = Marshal.ReadIntPtr(cmdListsArray, n * IntPtr.Size);
-                if (listPtr == IntPtr.Zero) continue;
+                ImDrawList* list = cmdLists[n];
+                if (list == null) continue;
 
-                // Read ImDrawList fields directly from native memory.
-                // ImDrawList starts with three ImVectors (each 12 bytes: Size/Capacity/Data).
-                //   [0]  CmdBuffer  — ImVector<ImDrawCmd>
-                //   [12] IdxBuffer  — ImVector<ImDrawIdx>
-                //   [24] VtxBuffer  — ImVector<ImDrawVert>
-                int cmdCount = Marshal.ReadInt32(listPtr, 0);   // CmdBuffer.Size
-                IntPtr cmdData = Marshal.ReadIntPtr(listPtr, 8);  // CmdBuffer.Data
-                int idxCount = Marshal.ReadInt32(listPtr, 12);  // IdxBuffer.Size
-                IntPtr idxBase = Marshal.ReadIntPtr(listPtr, 20); // IdxBuffer.Data
-                int vtxCount = Marshal.ReadInt32(listPtr, 24);  // VtxBuffer.Size
-                IntPtr vtxBase = Marshal.ReadIntPtr(listPtr, 32); // VtxBuffer.Data
-
-                if (false && _logCount < 3)
-                    RynthLog.Render($"DX9: list[{n}] vtx={vtxCount} idx={idxCount} cmds={cmdCount}");
+                int vtxCount = list->VtxBuffer.Size;
+                int cmdCount = list->CmdBuffer.Size;
                 if (vtxCount == 0 || cmdCount == 0) continue;
 
-                // One-time stride diagnostic — log what each cmd stride gives for cmd[1]
-                if (false && _logCount == 0 && n == 0 && cmdCount >= 2)
-                {
-                    RynthLog.Render($"DX9: C# ImDrawCmd size = {Unsafe.SizeOf<ImDrawCmd>()}");
-                    for (int ts = 32; ts <= 64; ts += 4)
-                    {
-                        IntPtr tp = cmdData + ts;
-                        uint te = (uint)Marshal.ReadInt32(tp, 28);
-                        float tx = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(tp, 0));
-                        float tz = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(tp, 8));
-                        uint tcb = (uint)Marshal.ReadInt32(tp, 32);
-                        RynthLog.Render($"DX9: stride={ts}: elems={te} clipX={tx} clipZ={tz} cb=0x{tcb:X8}");
-                    }
-                }
+                ImDrawVert* srcVtx = (ImDrawVert*)list->VtxBuffer.Data;
+                ushort* idxBase = (ushort*)list->IdxBuffer.Data;
+                ImDrawCmd* cmds = (ImDrawCmd*)list->CmdBuffer.Data;
 
-                // One-time vertex diagnostic — verify ImDrawVert layout
-                if (false && _logCount == 0 && n == 0)
-                {
-                    RynthLog.Render($"DX9: C# ImDrawVert size = {Unsafe.SizeOf<ImDrawVert>()}");
-                    // Read first 3 vertices as raw bytes to verify layout
-                    for (int vi = 0; vi < Math.Min(3, vtxCount); vi++)
-                    {
-                        IntPtr vp = vtxBase + vi * Unsafe.SizeOf<ImDrawVert>();
-                        float px = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(vp, 0));
-                        float py = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(vp, 4));
-                        float ux = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(vp, 8));
-                        float uy = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(vp, 12));
-                        uint col = (uint)Marshal.ReadInt32(vp, 16);
-                        RynthLog.Render($"DX9: vtx[{vi}] pos=({px},{py}) uv=({ux},{uy}) col=0x{col:X8}");
-                    }
-                }
-
-                CustomVertex* vtxBuf = (CustomVertex*)NativeMemory.Alloc((nuint)(vtxCount * sizeof(CustomVertex)));
-                ImDrawVert* srcVtx = (ImDrawVert*)vtxBase;
-
+                // ImGui vertices are pos/uv/RGBA; D3D9's FVF wants xyz/ARGB/uv.
+                CustomVertex* vtxBuf = EnsureVertexScratch(vtxCount);
                 for (int i = 0; i < vtxCount; i++)
                 {
-                    vtxBuf[i].X = srcVtx[i].pos.X;
-                    vtxBuf[i].Y = srcVtx[i].pos.Y;
+                    // Screen pixels relative to the viewport; -0.5 is D3D9's
+                    // half-pixel offset (the XYZ path put it in the projection).
+                    vtxBuf[i].X = srcVtx[i].pos.X - displayPos.X - 0.5f;
+                    vtxBuf[i].Y = srcVtx[i].pos.Y - displayPos.Y - 0.5f;
                     vtxBuf[i].Z = 0f;
+                    vtxBuf[i].Rhw = 1f;
                     uint c = srcVtx[i].col;
                     vtxBuf[i].Col = (c & 0xFF00FF00) | ((c & 0x00FF0000) >> 16) | ((c & 0x000000FF) << 16);
                     vtxBuf[i].U = srcVtx[i].uv.X;
                     vtxBuf[i].V = srcVtx[i].uv.Y;
                 }
 
-                if (false && _logCount < 3) RynthLog.Render($"DX9: list[{n}] vertex copy done");
-
                 for (int cmdI = 0; cmdI < cmdCount; cmdI++)
                 {
-                    IntPtr cmdPtr = cmdData + cmdI * CmdStride;
+                    ImDrawCmd* cmd = &cmds[cmdI];
 
-                    // Read fields at known native offsets
-                    float clipX = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(cmdPtr, 0));
-                    float clipY = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(cmdPtr, 4));
-                    float clipZ = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(cmdPtr, 8));
-                    float clipW = BitConverter.Int32BitsToSingle(Marshal.ReadInt32(cmdPtr, 12));
-                    IntPtr textureId = Marshal.ReadIntPtr(cmdPtr, 16);
-                    uint nativeIdxOff = (uint)Marshal.ReadInt32(cmdPtr, 24);
-                    uint elemCount = (uint)Marshal.ReadInt32(cmdPtr, 28);
-                    IntPtr userCallback = Marshal.ReadIntPtr(cmdPtr, 32);
-
-                    if (userCallback != IntPtr.Zero)
+                    if (cmd->UserCallback != IntPtr.Zero)
                     {
-                        if (false && _logCount < 3)
-                            RynthLog.Render($"DX9: cmd[{cmdI}] CALLBACK elems={elemCount} cb=0x{userCallback:X}");
-                        if ((int)userCallback == ResetRenderStateSentinel)
+                        int cb = (int)cmd->UserCallback;
+                        if (cb == ResetRenderStateSentinel)
                             SetupRenderStateNative(pDevice, displayPos, displaySize);
-                        // Non-sentinel callbacks: skip (no draw data, ElemCount expected 0)
+                        else if (cb == IconSampling.PointSentinel || cb == IconSampling.LinearSentinel)
+                        {
+                            uint f = cb == IconSampling.PointSentinel ? D3DTEXF_POINT : D3DTEXF_LINEAR;
+                            _setSamplerState!(pDevice, 0, D3DSAMP_MINFILTER, f);
+                            _setSamplerState!(pDevice, 0, D3DSAMP_MAGFILTER, f);
+                        }
+                        // Other callbacks are not supported (no managed callbacks
+                        // from inside the render path); they carry no geometry.
                         continue;
                     }
 
-                    if (elemCount == 0)
-                    {
-                        if (false && _logCount < 3)
-                            RynthLog.Render($"DX9: cmd[{cmdI}] ZERO-ELEM skip tex=0x{textureId:X}");
-                        continue;
-                    }
+                    uint elemCount = cmd->ElemCount;
+                    _diagCmds++;
+                    if (elemCount == 0) continue;
 
-                    if (false && _logCount < 3)
-                        RynthLog.Render($"DX9: cmd[{cmdI}] tex=0x{textureId:X} elems={elemCount} clip={clipX},{clipY},{clipZ},{clipW}");
-
+                    Vector4 clip = cmd->ClipRect;
                     RECT sr;
-                    sr.Left = (int)(clipX - displayPos.X);
-                    sr.Top = (int)(clipY - displayPos.Y);
-                    sr.Right = (int)(clipZ - displayPos.X);
-                    sr.Bottom = (int)(clipW - displayPos.Y);
+                    sr.Left = (int)(clip.X - displayPos.X);
+                    sr.Top = (int)(clip.Y - displayPos.Y);
+                    sr.Right = (int)(clip.Z - displayPos.X);
+                    sr.Bottom = (int)(clip.W - displayPos.Y);
+                    // Inside the viewport (0,0,displaySize; set above): a pop-out's picture is
+                    // only part of its ImGui display, so a full-display clip rect reaches past
+                    // it on every side. Nothing outside the viewport is drawn anyway.
+                    if (sr.Left < 0) sr.Left = 0;
+                    if (sr.Top < 0) sr.Top = 0;
+                    if (sr.Right > (int)displaySize.X) sr.Right = (int)displaySize.X;
+                    if (sr.Bottom > (int)displaySize.Y) sr.Bottom = (int)displaySize.Y;
+                    if (sr.Right <= sr.Left || sr.Bottom <= sr.Top) { _diagSkipped++; continue; }
                     _setScissorRect!(pDevice, &sr);
-                    _setTexture!(pDevice, 0, textureId);
+                    _setTexture!(pDevice, 0, cmd->TextureId);
 
-                    ushort* pIdxData = (ushort*)idxBase + nativeIdxOff;
-                    if (false && _logCount < 3)
-                        RynthLog.Render($"DX9: cmd[{cmdI}] DrawIndexedPrimUP primCount={elemCount / 3}");
-                    _drawIndexedPrimUP!(pDevice,
-                        D3DPT_TRIANGLELIST, 0, (uint)vtxCount,
+                    // DrawIndexedPrimitiveUP has no base-vertex argument, so the
+                    // command's VtxOffset is applied by offsetting the vertex pointer.
+                    uint vtxOffset = cmd->VtxOffset;
+                    if (vtxOffset >= (uint)vtxCount) { _diagSkipped++; continue; }
+                    int hr = _drawIndexedPrimUP!(pDevice,
+                        D3DPT_TRIANGLELIST, 0, (uint)vtxCount - vtxOffset,
                         elemCount / 3,
-                        (IntPtr)pIdxData, D3DFMT_INDEX16,
-                        (IntPtr)vtxBuf, (uint)sizeof(CustomVertex));
-                    if (false && _logCount < 3) RynthLog.Render($"DX9: cmd[{cmdI}] draw done");
+                        (IntPtr)(idxBase + cmd->IdxOffset), D3DFMT_INDEX16,
+                        (IntPtr)(vtxBuf + vtxOffset), (uint)sizeof(CustomVertex));
+                    _diagDraws++;
+                    if (hr < 0) { _diagFailed++; _diagLastHr = hr; }
                 }
-
-                NativeMemory.Free(vtxBuf);
             }
         }
         finally
         {
-            _logCount++;
             // ── Manual state restore ─────────────────────────────────
             _setRenderState!(pDevice, D3DRS_CULLMODE, oldCull);
             _setRenderState!(pDevice, D3DRS_LIGHTING, oldLighting);
@@ -745,10 +759,19 @@ internal static unsafe class DX9Backend
             _setRenderState!(pDevice, D3DRS_SPECULARENABLE, oldSpecular);
             _setRenderState!(pDevice, D3DRS_SRCBLENDALPHA, oldSrcBlendAlpha);
             _setRenderState!(pDevice, D3DRS_DESTBLENDALPHA, oldDestBlendAlpha);
+            _setRenderState!(pDevice, D3DRS_VERTEXBLEND, oldVertexBlend);
+            _setRenderState!(pDevice, D3DRS_CLIPPLANEENABLE, oldClipPlanes);
             _setTexStageState!(pDevice, 0, D3DTSS_TEXCOORDINDEX, oldTss0TexCoordIdx);
             _setTexStageState!(pDevice, 0, D3DTSS_TEXTURETRANSFORMFLAGS, oldTss0TexTransFlags);
             _setStreamSource!(pDevice, 0, oldStreamData, oldStreamOffset, oldStreamStride);
             _setIndices!(pDevice, oldIndexBuffer);
+            if (midFrame)
+            {
+                _setRenderState!(pDevice, D3DRS_WRAP0, oldWrap0);
+                _setSamplerState!(pDevice, 0, D3DSAMP_ADDRESSU, oldSamp0AddrU);
+                _setSamplerState!(pDevice, 0, D3DSAMP_ADDRESSV, oldSamp0AddrV);
+                _setSamplerState!(pDevice, 0, D3DSAMP_MIPFILTER, oldSamp0Mip);
+            }
 
             // Release COM refs we obtained
             if (oldTexture != IntPtr.Zero)
@@ -842,28 +865,35 @@ internal static unsafe class DX9Backend
         // FVF — SetStreamSource is NOT called here; DrawIndexedPrimitiveUP uses user-memory
         // pointers directly and does not require a bound vertex stream.
         _setFVF!(dev, D3DFVF_CUSTOM);
+        _setRenderState!(dev, D3DRS_VERTEXBLEND, 0);      // D3DVBF_DISABLE
+        _setRenderState!(dev, D3DRS_CLIPPLANEENABLE, 0);  // no user clip planes
 
-        // Orthographic projection — D3D9 pixel centers are at +0.5 (not +0.0 like D3D10+)
-        float L = displayPos.X + 0.5f;
-        float R = displayPos.X + displaySize.X + 0.5f;
-        float T = displayPos.Y + 0.5f;
-        float B = displayPos.Y + displaySize.Y + 0.5f;
+        // No transforms: XYZRHW vertices are already in viewport pixels (see CustomVertex).
+    }
 
-        D3DMATRIX identity;
-        identity.M11 = 1; identity.M12 = 0; identity.M13 = 0; identity.M14 = 0;
-        identity.M21 = 0; identity.M22 = 1; identity.M23 = 0; identity.M24 = 0;
-        identity.M31 = 0; identity.M32 = 0; identity.M33 = 1; identity.M34 = 0;
-        identity.M41 = 0; identity.M42 = 0; identity.M43 = 0; identity.M44 = 1;
+    /// <summary>
+    /// After the font atlas was rebuilt: replace the font texture. Render thread.
+    /// The old texture is kept one more frame: UnderUiLayer's list from the frame
+    /// before may still be drawn by this frame's fallback, and it names the old one.
+    /// </summary>
+    public static bool RebuildFontTexture(IntPtr pDevice)
+    {
+        ReleaseRetiredFontTexture();
+        _retiredFontTexture = _fontTexture;
+        _fontTexture = IntPtr.Zero;
+        return CreateFontTexture(pDevice);
+    }
 
-        D3DMATRIX projection;
-        projection.M11 = 2f / (R - L); projection.M12 = 0f; projection.M13 = 0f; projection.M14 = 0f;
-        projection.M21 = 0f; projection.M22 = 2f / (T - B); projection.M23 = 0f; projection.M24 = 0f;
-        projection.M31 = 0f; projection.M32 = 0f; projection.M33 = 0.5f; projection.M34 = 0f;
-        projection.M41 = (L + R) / (L - R); projection.M42 = (T + B) / (B - T); projection.M43 = 0.5f; projection.M44 = 1f;
+    // The font texture a rebuild replaced; released at the next frame's build.
+    private static IntPtr _retiredFontTexture;
 
-        _setTransform!(dev, D3DTS_WORLD, &identity);
-        _setTransform!(dev, D3DTS_VIEW, &identity);
-        _setTransform!(dev, D3DTS_PROJECTION, &projection);
+    /// <summary>Releases the texture the last rebuild replaced. Render thread, at the start of a frame's build.</summary>
+    public static void ReleaseRetiredFontTexture()
+    {
+        if (_retiredFontTexture == IntPtr.Zero) return;
+        var release = GetTexMethod<ReleaseD>(_retiredFontTexture, TextureVTableIndex.Release);
+        release(_retiredFontTexture);
+        _retiredFontTexture = IntPtr.Zero;
     }
 
     private static bool CreateFontTexture(IntPtr pDevice)
@@ -922,25 +952,92 @@ internal static unsafe class DX9Backend
         // Store texture ID for ImGui
         io.Fonts.SetTexID(_fontTexture);
 
-        // Force native TexID write — managed wrapper can mismatch on x86
-        nint texId = io.Fonts.TexID;
-        unsafe
-        {
-            byte* ioPtr = (byte*)ImGuiNET.ImGui.GetIO().NativePtr;
-            IntPtr fontsPtr = *(IntPtr*)(ioPtr + 36);
-            *(IntPtr*)(fontsPtr + 4) = _fontTexture;
-        }
-        if (texId == 0)
-        {
-            unsafe
-            {
-                byte* ioPtr = (byte*)ImGuiNET.ImGui.GetIO().NativePtr;
-                IntPtr fontsPtr = *(IntPtr*)(ioPtr + 36);
-                *(IntPtr*)(fontsPtr + 4) = _fontTexture;
-            }
-        }
+        // The glyphs are baked and uploaded: the atlas's input data is no longer read. ImGui
+        // copies the whole TTF into the atlas for every font it adds (main font, Segoe UI
+        // Symbol and Phosphor per size, ~3.8 MB each), so with the panel text sizes in use
+        // that was ~400 MB kept for the life of the atlas (2026-10-15, [Mem] lines). Every
+        // re-bake builds a fresh atlas from ImGuiFonts' own copies, and the pixels and TexReady
+        // stay, so nothing needs it back.
+        Compatibility.MemoryUse.Mark("font atlas uploaded");
+        io.Fonts.ClearInputData();
+        Compatibility.MemoryUse.Mark("font input data freed");
         return true;
     }
+
+    /// <summary>
+    /// A managed-pool A8R8G8B8 texture (it survives a device reset) holding RGBA pixels
+    /// (script window icons). Zero on failure. AC's render thread, after <see cref="InitCore"/>.
+    /// </summary>
+    public static IntPtr CreateTextureRgba(IntPtr pDevice, int width, int height, ReadOnlySpan<byte> rgba)
+    {
+        if (_createTexture == null || pDevice == IntPtr.Zero || width <= 0 || height <= 0
+            || rgba.Length < width * height * 4)
+            return IntPtr.Zero;
+        int hr = _createTexture(pDevice, (uint)width, (uint)height, 1, 0,
+            D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, out IntPtr tex, IntPtr.Zero);
+        if (hr < 0 || tex == IntPtr.Zero)
+            return IntPtr.Zero;
+
+        var lockRect = GetTexMethod<TexLockRectD>(tex, TextureVTableIndex.LockRect);
+        var unlockRect = GetTexMethod<TexUnlockRectD>(tex, TextureVTableIndex.UnlockRect);
+        D3DLOCKED_RECT locked;
+        if (lockRect(tex, 0, &locked, IntPtr.Zero, 0) < 0 || locked.pBits == IntPtr.Zero)
+        {
+            ReleaseComObject(tex);
+            return IntPtr.Zero;
+        }
+        byte* dst = (byte*)locked.pBits;
+        for (int y = 0; y < height; y++)
+        {
+            ReadOnlySpan<byte> srcRow = rgba.Slice(y * width * 4, width * 4);
+            byte* dstRow = dst + y * locked.Pitch;
+            for (int x = 0; x < width; x++)
+            {
+                int i = x * 4;
+                dstRow[i + 0] = srcRow[i + 2]; // B
+                dstRow[i + 1] = srcRow[i + 1]; // G
+                dstRow[i + 2] = srcRow[i + 0]; // R
+                dstRow[i + 3] = srcRow[i + 3]; // A
+            }
+        }
+        unlockRect(tex, 0);
+        return tex;
+    }
+
+    /// <summary>
+    /// A managed-pool DXT1 texture (4x4 blocks of 8 bytes: two RGB565 colours and sixteen 2-bit indices, a sixth
+    /// of A8R8G8B8's size) holding <paramref name="blocks"/> as they are: <paramref name="width"/> x
+    /// <paramref name="height"/> a multiple of 4, (w/4) * (h/4) * 8 bytes, top row of blocks first (the World
+    /// Map's tiles). Zero on failure or when the device can't make DXT1. AC's render thread.
+    /// </summary>
+    public static IntPtr CreateTextureDxt1(IntPtr pDevice, int width, int height, ReadOnlySpan<byte> blocks)
+    {
+        int rowBytes = width / 4 * 8, rows = height / 4;
+        if (_createTexture == null || pDevice == IntPtr.Zero || width <= 0 || height <= 0 || width % 4 != 0 || height % 4 != 0
+            || blocks.Length < rowBytes * rows)
+            return IntPtr.Zero;
+        int hr = _createTexture(pDevice, (uint)width, (uint)height, 1, 0,
+            D3DFMT_DXT1, D3DPOOL_MANAGED, out IntPtr tex, IntPtr.Zero);
+        if (hr < 0 || tex == IntPtr.Zero)
+            return IntPtr.Zero;
+
+        var lockRect = GetTexMethod<TexLockRectD>(tex, TextureVTableIndex.LockRect);
+        var unlockRect = GetTexMethod<TexUnlockRectD>(tex, TextureVTableIndex.UnlockRect);
+        D3DLOCKED_RECT locked;
+        if (lockRect(tex, 0, &locked, IntPtr.Zero, 0) < 0 || locked.pBits == IntPtr.Zero)
+        {
+            ReleaseComObject(tex);
+            return IntPtr.Zero;
+        }
+        byte* dst = (byte*)locked.pBits;
+        for (int y = 0; y < rows; y++)       // the pitch of a compressed surface is the bytes of one row of blocks
+            blocks.Slice(y * rowBytes, rowBytes).CopyTo(new Span<byte>(dst + y * locked.Pitch, rowBytes));
+        unlockRect(tex, 0);
+        return tex;
+    }
+
+    /// <summary>Releases a texture made by <see cref="CreateTextureRgba"/>. AC's render thread.</summary>
+    public static void ReleaseTexture(IntPtr tex) => ReleaseComObject(tex);
 
     private static void CacheDelegates(IntPtr pDevice)
     {
@@ -1060,6 +1157,59 @@ internal static unsafe class DX9Backend
         _navTrigReady = true;
     }
 
+    // AC's 3D view viewport, read at EndScene (AC has put it back by then; the EndScene
+    // fallback has always drawn the markers with it). AC's render thread only.
+    private static D3DVIEWPORT9 _sceneViewport;
+    private static bool _hasSceneViewport;
+
+    /// <summary>
+    /// EndScene, before anything of ours touches the viewport: remembers AC's 3D view
+    /// viewport for <see cref="RenderNav3D(IntPtr, bool)"/> at the UI pass, where AC has
+    /// set a full-screen one. AC's render thread.
+    /// </summary>
+    public static void CaptureSceneViewport(IntPtr pDevice)
+    {
+        if (!_coreInitialized || _getViewport == null || pDevice == IntPtr.Zero) return;
+        D3DVIEWPORT9 vp;
+        if (_getViewport(pDevice, &vp) >= 0 && vp.Width > 0 && vp.Height > 0)
+        {
+            _sceneViewport = vp;
+            _hasSceneViewport = true;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="RenderNav3D(IntPtr)"/>; with <paramref name="sceneViewport"/> (AC's UI
+    /// pass) the markers draw in AC's 3D view viewport (from the last EndScene) when the
+    /// current one differs, and the current one is put back afterwards.
+    /// </summary>
+    public static void RenderNav3D(IntPtr pDevice, bool sceneViewport)
+    {
+        if (!sceneViewport || !_hasSceneViewport || !_coreInitialized || pDevice == IntPtr.Zero ||
+            _getViewport == null || _setViewport == null)
+        {
+            RenderNav3D(pDevice);
+            return;
+        }
+        D3DVIEWPORT9 current;
+        if (_getViewport(pDevice, &current) < 0)
+        {
+            RenderNav3D(pDevice);
+            return;
+        }
+        D3DVIEWPORT9 scene = _sceneViewport;
+        bool same = current.X == scene.X && current.Y == scene.Y && current.Width == scene.Width &&
+                    current.Height == scene.Height && current.MinZ == scene.MinZ && current.MaxZ == scene.MaxZ;
+        if (same)
+        {
+            RenderNav3D(pDevice);
+            return;
+        }
+        _setViewport(pDevice, &scene);
+        try { RenderNav3D(pDevice); }
+        finally { _setViewport(pDevice, &current); }
+    }
+
     public static void RenderNav3D(IntPtr pDevice)
     {
         // Nav3D only needs the cached function pointers + nav trig + GameMatrixCapture;
@@ -1067,7 +1217,11 @@ internal static unsafe class DX9Backend
         // core init flag so this path runs even when EnableImGuiBackend=false.
         if (!_coreInitialized || pDevice == IntPtr.Zero) return;
         if (!D3D9.GameMatrixCapture.HasCapturedFrame) return;
-        if (D3D9.Nav3DRenderer.RingCount == 0 && D3D9.Nav3DRenderer.LineCount == 0 && D3D9.Nav3DRenderer.TriangleCount == 0) return;
+        // One snapshot of the committed frame for the whole draw (the pump may
+        // commit a new one meanwhile; this one stays intact for a tick).
+        D3D9.Nav3DRenderer.NavBuffer frame = D3D9.Nav3DRenderer.Ready;
+        int triCount = frame.TriCount, lineCount = frame.LineCount, ringCount = frame.RingCount;
+        if (ringCount == 0 && lineCount == 0 && triCount == 0) return;
 
         EnsureNavTrig();
 
@@ -1163,39 +1317,33 @@ internal static unsafe class DX9Backend
             // vertex buffer and submitted in a single DrawPrimitiveUP — at
             // high slope-radius settings we can have 4000+ triangles per
             // frame, and one DP-UP per triangle was visibly frame-dropping.
-            int triCount = D3D9.Nav3DRenderer.TriangleCount;
             if (triCount > 0)
             {
                 EnsureNavTriBatch(triCount * 3);
                 NavVertex* batch = (NavVertex*)_navTriBatch;
                 for (int i = 0; i < triCount; i++)
                 {
-                    D3D9.Nav3DRenderer.GetTriangle(i,
-                        out float x1, out float y1, out float z1,
-                        out float x2, out float y2, out float z2,
-                        out float x3, out float y3, out float z3, out uint color);
+                    uint color = frame.TriColor[i];
                     int b = i * 3;
-                    batch[b    ].X = x1; batch[b    ].Y = y1; batch[b    ].Z = z1; batch[b    ].Col = color;
-                    batch[b + 1].X = x2; batch[b + 1].Y = y2; batch[b + 1].Z = z2; batch[b + 1].Col = color;
-                    batch[b + 2].X = x3; batch[b + 2].Y = y3; batch[b + 2].Z = z3; batch[b + 2].Col = color;
+                    batch[b    ].X = frame.TriX1[i]; batch[b    ].Y = frame.TriY1[i]; batch[b    ].Z = frame.TriZ1[i]; batch[b    ].Col = color;
+                    batch[b + 1].X = frame.TriX2[i]; batch[b + 1].Y = frame.TriY2[i]; batch[b + 1].Z = frame.TriZ2[i]; batch[b + 1].Col = color;
+                    batch[b + 2].X = frame.TriX3[i]; batch[b + 2].Y = frame.TriY3[i]; batch[b + 2].Z = frame.TriZ3[i]; batch[b + 2].Col = color;
                 }
                 _drawPrimUP!(pDevice, D3DPT_TRIANGLELIST, (uint)triCount, (IntPtr)batch, (uint)sizeof(NavVertex));
             }
 
             // Draw lines (extruded XZ-plane quads — for edges/strips)
-            for (int i = 0; i < D3D9.Nav3DRenderer.LineCount; i++)
+            for (int i = 0; i < lineCount; i++)
             {
-                D3D9.Nav3DRenderer.GetLine(i, out float x1, out float y1, out float z1,
-                    out float x2, out float y2, out float z2, out float thick, out uint color);
-                DrawNavLine(pDevice, x1, y1, z1, x2, y2, z2, thick, color);
+                DrawNavLine(pDevice, frame.LineX1[i], frame.LineY1[i], frame.LineZ1[i],
+                    frame.LineX2[i], frame.LineY2[i], frame.LineZ2[i], frame.LineThick[i], frame.LineColor[i]);
             }
 
             // Draw rings
-            for (int i = 0; i < D3D9.Nav3DRenderer.RingCount; i++)
+            for (int i = 0; i < ringCount; i++)
             {
-                D3D9.Nav3DRenderer.GetRing(i, out float x, out float y, out float z,
-                    out float radius, out float thick, out float height, out uint color);
-                DrawNavRing(pDevice, x, y, z, radius, thick, height, color);
+                DrawNavRing(pDevice, frame.RingX[i], frame.RingY[i], frame.RingZ[i],
+                    frame.RingRadius[i], frame.RingThick[i], frame.RingHeight[i], frame.RingColor[i]);
             }
 
             if (_nav3DLogCount == 0)

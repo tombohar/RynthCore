@@ -41,10 +41,15 @@ internal static class ChatFileDispatcher
 
     private const int DebounceMs = 200;
 
-    public static string FilePath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "RynthCore",
-        "dispatch.txt");
+    // RYNTHCORE_DISPATCH_FILE gives a test client its own file: the default one is
+    // watched by every running client.
+    public static string FilePath =>
+        Environment.GetEnvironmentVariable("RYNTHCORE_DISPATCH_FILE") is { Length: > 0 } overridePath
+            ? overridePath
+            : Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "RynthCore",
+                "dispatch.txt");
 
     public static void Start()
     {

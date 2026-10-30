@@ -19,8 +19,11 @@ internal static class PluginLoader
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool FreeLibrary(IntPtr hModule);
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr GetModuleHandleW(string lpModuleName);
+
+    // Managed plugins (CoreCLR engine) answer from their export map; see ManagedPlugins.
+    private static IntPtr GetProcAddress(IntPtr hModule, string lpProcName) => ManagedPlugins.GetProcAddress(hModule, lpProcName);
 
     /// <summary>
     /// Scans <paramref name="pluginsDir"/> for *.dll files, loads each one,
@@ -86,6 +89,14 @@ internal static class PluginLoader
     /// </summary>
     public static void Unload(LoadedPlugin plugin)
     {
+        // Release managed thunks first so the module ref-count can drop to zero on FreeLibrary.
+        plugin.ClearResolvedDelegates();
+
+        if (ManagedPlugins.IsManagedHandle(plugin.ModuleHandle))
+        {
+            ManagedPlugins.Unload(plugin.ModuleHandle);   // a managed plugin really goes away
+            return;
+        }
         if (plugin.ModuleHandle != IntPtr.Zero)
         {
             RynthLog.Verbose($"PluginLoader: Skipping FreeLibrary on {plugin.FileName} (NativeAOT — module pages leaked intentionally).");
@@ -308,22 +319,40 @@ internal static class PluginLoader
         RynthLog.Verbose($"PluginLoader: Loading {fileName}...");
 
         string shadowPath;
-        try
+        IntPtr handle;
+        bool reused = false;
+        if (ManagedPlugins.IsManagedAssembly(sourcePath))
         {
-            shadowPath = CreateShadowCopy(sourcePath, sessionShadowDir);
+            // A managed plugin: loaded fresh (from streams, no shadow copy) into its own
+            // collectible context every time; nothing to reuse, nothing leaked.
+            shadowPath = sourcePath;
+            handle = ManagedPlugins.Load(sourcePath);
+            if (handle == IntPtr.Zero)
+                return null;
         }
-        catch (Exception ex)
+        else if (reused = TryFindLoadedCopy(sourcePath, sessionShadowDir, out handle, out shadowPath))
         {
-            RynthLog.Plugin($"PluginLoader: FAILED to stage {fileName} ({ex.Message})");
-            return null;
+            RynthLog.Plugin($"PluginLoader: {fileName} unchanged - reusing the copy already loaded from '{shadowPath}' (no new runtime).");
         }
+        else
+        {
+            try
+            {
+                shadowPath = CreateShadowCopy(sourcePath, sessionShadowDir);
+            }
+            catch (Exception ex)
+            {
+                RynthLog.Plugin($"PluginLoader: FAILED to stage {fileName} ({ex.Message})");
+                return null;
+            }
 
-        IntPtr handle = LoadLibraryW(shadowPath);
-        if (handle == IntPtr.Zero)
-        {
-            int err = Marshal.GetLastWin32Error();
-            RynthLog.Plugin($"PluginLoader: FAILED to load {fileName} (Win32 error {err})");
-            return null;
+            handle = LoadLibraryW(shadowPath);
+            if (handle == IntPtr.Zero)
+            {
+                int err = Marshal.GetLastWin32Error();
+                RynthLog.Plugin($"PluginLoader: FAILED to load {fileName} (Win32 error {err})");
+                return null;
+            }
         }
 
         // Resolve required exports
@@ -333,7 +362,8 @@ internal static class PluginLoader
         if (initPtr == IntPtr.Zero || shutdownPtr == IntPtr.Zero)
         {
             RynthLog.Plugin($"PluginLoader: {fileName} missing required exports (RynthPluginInit/RynthPluginShutdown) — skipping.");
-            FreeLibrary(handle);
+            if (ManagedPlugins.IsManagedHandle(handle)) ManagedPlugins.Unload(handle);
+            else if (!reused) FreeLibrary(handle);
             return null;
         }
 
@@ -479,6 +509,14 @@ internal static class PluginLoader
         if (renderPtr != IntPtr.Zero)
             plugin.Render = Marshal.GetDelegateForFunctionPointer<PluginRenderDelegate>(renderPtr);
 
+        IntPtr renderOverlayPtr = GetProcAddress(handle, "RynthPluginRenderOverlay");
+        if (renderOverlayPtr != IntPtr.Zero)
+            plugin.RenderOverlay = Marshal.GetDelegateForFunctionPointer<PluginRenderDelegate>(renderOverlayPtr);
+
+        // Called through a function pointer (PluginManager.RenderEmbed), so no delegate here.
+        plugin.RenderEmbedPtr = GetProcAddress(handle, "RynthPluginRenderEmbed");
+        plugin.SectionsJsonPtr = GetProcAddress(handle, "RynthPluginGetSectionsJson");
+
         // Read name/version from the plugin if available
         if (plugin.GetName != null)
         {
@@ -493,12 +531,71 @@ internal static class PluginLoader
             if (strPtr != IntPtr.Zero)
                 plugin.VersionString = Marshal.PtrToStringAnsi(strPtr) ?? "";
         }
+        // The DLL's version resource is stamped at release time with the release and commit;
+        // the plugins' own RynthPluginVersion strings are hand-written and never change.
+        string fileVersion = RynthCore.App.BuildVersion.OfFile(
+            plugin.SourceFilePath.Length > 0 ? plugin.SourceFilePath : plugin.FilePath);
+        if (fileVersion.Length > 0)
+            plugin.VersionString = fileVersion;
 
         string ver = string.IsNullOrEmpty(plugin.VersionString) ? "" : $" v{plugin.VersionString}";
         string caps = BuildCapsList(plugin);
         RynthLog.Verbose($"PluginLoader: {plugin.DisplayName}{ver} loaded ({caps})");
 
         return plugin;
+    }
+
+    /// <summary>
+    /// A copy of <paramref name="sourcePath"/> that an earlier engine generation (or
+    /// plugin rescan) of this process loaded and that is byte-for-byte the same
+    /// file: re-initialize that module instead of loading a new one. A NativeAOT
+    /// DLL can never be unloaded, so every fresh copy keeps a whole runtime and its
+    /// GC heap in acclient's 4 GB for good; before this an engine hot-reload
+    /// loaded all six plugins again and cost ~600 MB (2026-09-28). A plugin's
+    /// RynthPluginRuntime builds a new plugin object on every Init, so a reused
+    /// module starts clean apart from its static caches.
+    /// </summary>
+    private static bool TryFindLoadedCopy(string sourcePath, string sessionShadowDir, out IntPtr handle, out string shadowPath)
+    {
+        handle = IntPtr.Zero;
+        shadowPath = "";
+        try
+        {
+            string fileName = Path.GetFileName(sourcePath);
+            string? root = Path.GetDirectoryName(sessionShadowDir);
+            if (root == null || !Directory.Exists(root)) return false;
+            string mine = Path.GetFullPath(sessionShadowDir);
+            var sourceInfo = new FileInfo(sourcePath);
+            byte[]? source = null;
+
+            foreach (string dir in Directory.GetDirectories(root, $"session-*-pid{Environment.ProcessId}-*"))
+            {
+                if (string.Equals(Path.GetFullPath(dir), mine, StringComparison.OrdinalIgnoreCase)) continue;
+                string candidate = Path.Combine(dir, fileName);
+                var info = new FileInfo(candidate);
+                if (!info.Exists || info.Length != sourceInfo.Length) continue;
+                IntPtr h = GetModuleHandleW(candidate);
+                if (h == IntPtr.Zero) continue;
+                source ??= ReadShared(sourcePath);
+                if (!source.AsSpan().SequenceEqual(ReadShared(candidate))) continue;
+                handle = h;
+                shadowPath = candidate;
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Plugin($"PluginLoader: reuse check for {Path.GetFileName(sourcePath)} failed ({ex.GetType().Name}: {ex.Message}) - loading a new copy.");
+        }
+        return false;
+    }
+
+    private static byte[] ReadShared(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var bytes = new byte[fs.Length];
+        fs.ReadExactly(bytes);
+        return bytes;
     }
 
     private static string PrepareShadowDirectory(string shadowRootDir, int generation)

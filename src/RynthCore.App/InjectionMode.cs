@@ -14,4 +14,10 @@ internal enum InjectionMode
     /// account runs against Decal + UBService + VTank or whatever Decal plugins
     /// the user has registered.</summary>
     Decal = 1,
+
+    /// <summary>Decal first, then RynthCore in the same client ("Decal + RynthCore"). The
+    /// engine takes chat from Decal through the RynthCore Decal bridge, which the launcher
+    /// registers for this Windows user before the launch (DecalBridgeRegistration;
+    /// docs/DECAL_BRIDGE_PLAN.md).</summary>
+    DecalBridge = 2,
 }

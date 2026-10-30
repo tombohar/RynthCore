@@ -7,6 +7,12 @@ using RynthCore.Engine.Hooking;
 
 namespace RynthCore.Engine.Compatibility;
 
+// 2026-10-15: back on the kernel32 exports. SilentKelpie's 2026-10-14 change hooked only the
+// acclient.exe and MSVCR70 CreateFile import slots, but AC opens its data files with
+// CreateFileW by another route: no .dat open reached the hook, the first client on that
+// engine held a data file without sharing it, and every client started after it stopped
+// with "Can't open the data files" (2026.10.15.2 / .3). Only .dat paths are changed; every
+// other CreateFile (Direct3D, drivers) passes through untouched with its last-error kept.
 /// <summary>
 /// IAT-hooks acclient.exe's <c>kernel32!CreateFileW</c> and <c>CreateFileA</c>
 /// imports to force maximally-permissive share semantics on AC's data files.
@@ -402,8 +408,10 @@ internal static class DatFileShareHooks
             && path.EndsWith(DatExtension, StringComparison.OrdinalIgnoreCase);
     }
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint GetLastError();
+    // Puts back the Win32 last-error the real CreateFile set, so the caller reads its own answer
+    // (the detour's managed work in between may change it; SilentKelpie's 2026-10-14 fix).
+    [DllImport("kernel32.dll", EntryPoint = "SetLastError")]
+    private static extern void SetWin32LastError(uint dwErrCode);
 
     private static IntPtr CreateFileWDetour(
         IntPtr lpFileName,
@@ -437,15 +445,18 @@ internal static class DatFileShareHooks
 
         IntPtr result = _wOriginal!(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
             dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+        // Captured by the SetLastError=true delegate; the caller may read it even on success.
+        int lastError = Marshal.GetLastPInvokeError();
 
         if (isAnyDatExt)
         {
-            uint err = result == new IntPtr(-1) ? GetLastError() : 0;
+            uint err = result == new IntPtr(-1) ? (uint)lastError : 0;
             string fname = Path.GetFileName(path!);
             string note = isDat ? "filtered" : "passthrough";
             RynthLog.Info($"Compat: DAT share - W [{note}]: {fname} access=0x{origAccess:X8}->0x{dwDesiredAccess:X8} share=0x{origShare:X}->0x{dwShareMode:X} result=0x{result.ToInt32():X8}{(err != 0 ? $" GetLastError={err}" : "")}");
         }
 
+        SetWin32LastError((uint)lastError);
         return result;
     }
 
@@ -481,15 +492,18 @@ internal static class DatFileShareHooks
 
         IntPtr result = _aOriginal!(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
             dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+        // Captured by the SetLastError=true delegate; the caller may read it even on success.
+        int lastError = Marshal.GetLastPInvokeError();
 
         if (isAnyDatExt)
         {
-            uint err = result == new IntPtr(-1) ? GetLastError() : 0;
+            uint err = result == new IntPtr(-1) ? (uint)lastError : 0;
             string fname = Path.GetFileName(path!);
             string note = isDat ? "filtered" : "passthrough";
             RynthLog.Info($"Compat: DAT share - A [{note}]: {fname} access=0x{origAccess:X8}->0x{dwDesiredAccess:X8} share=0x{origShare:X}->0x{dwShareMode:X} result=0x{result.ToInt32():X8}{(err != 0 ? $" GetLastError={err}" : "")}");
         }
 
+        SetWin32LastError((uint)lastError);
         return result;
     }
 }

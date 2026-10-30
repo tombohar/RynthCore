@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Payload</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Contracts must come from the default ALC: don't copy it next to the payload. -->
+    <ProjectReference Include="..\Contracts\Contracts.csproj" Private="false" />
+  </ItemGroup>
+</Project>

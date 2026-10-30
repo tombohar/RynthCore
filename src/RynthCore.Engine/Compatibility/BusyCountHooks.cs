@@ -99,8 +99,25 @@ internal static class BusyCountHooks
     // CheckWatchdog on the main thread (post-tick). ≤1 tick latency —
     // irrelevant for a 2-5s watchdog; coalesces bursts for free.
     private static int _forceResetRequested;
+    private static string _forceResetRequestedWhy = "";
 
-    public static void ForceResetBusyCount(bool clearMotion = false)
+    /// <summary>
+    /// The engine count to 0, and the plugins told: one busy-decremented event per unit dropped
+    /// (2026-10-06). ForceResetBusyCount's catch-up decrements go through the trampoline (no
+    /// detour, no event) and the resyncs below wrote the count straight, so the plugins' mirrors
+    /// (RynthAi's _busyCount, which gates buffs, combat and corpse opens) stayed up and their own
+    /// watchdogs fired a second reset 5-10 s later (Silentkelpie's analysis; verified).
+    /// </summary>
+    private static void DropShadowTo0()
+    {
+        int was = Interlocked.Exchange(ref _netBusyCount, 0);
+        for (int i = 0; i < was && i < 64; i++)
+            PluginManager.QueueBusyCountDecremented();
+    }
+
+    private static int ReadRealBusySigned() => TryReadRealBusy(out int v) ? v : int.MinValue;
+
+    public static void ForceResetBusyCount(bool clearMotion = false, string why = "plugin request (host ForceResetBusyCount)")
     {
         // ⚠ MAIN THREAD ONLY (2026-06-12 cross-incident forensics, top-ranked
         // corruption writer): the plugin host API called this raw from the
@@ -112,7 +129,9 @@ internal static class BusyCountHooks
         // Off-thread callers latch a request consumed post-tick instead.
         if (!MainThreadGuard.IsOnMainThread())
         {
+            _forceResetRequestedWhy = why;
             Interlocked.Exchange(ref _forceResetRequested, 1);
+            Net.FlightRecorder.Mark(Net.FlightMark.BusyForceClearAsk, text: "off the game thread: latched for the next tick");
             return;
         }
 
@@ -131,15 +150,34 @@ internal static class BusyCountHooks
         }
 
         int was = _netBusyCount;
+        // Every reset is logged with who asked (2026-10-06; Silentkelpie's analysis counted 38
+        // silent "(was real 0, shadow 0)" resets in 15 minutes).
+        try { RynthLog.Compat($"BusyCountHooks: force-reset by {why}: real {ReadRealBusySigned()}, engine count {was} -> 0."); } catch { }
 
-        if (_originalDecrementBusyCount != null)
+        // Decrement exactly what the REAL field holds, never past zero. This used
+        // to call the original decrement max(shadow, 3) times: with the real field
+        // already 0 (AC's UseDone decrements it inline, which the shadow never
+        // sees) that walked it to -1..-3 before the write below put it back.
+        // m_cBusy only drives the cursor (UpdateCursorState: != 0 = busy cursor),
+        // so this was never the item-action lock, but there is no reason to
+        // write below zero. See ClientActionGates for the gates AC really checks.
+        int real = Marshal.ReadInt32(_lastThisPtr + OffsetMCBusy);
+        Net.FlightRecorder.Mark(Net.FlightMark.BusyForceClear, unchecked((uint)real), unchecked((uint)was),
+            text: clearMotion ? "with the motion flush" : "");
+        if (_originalDecrementBusyCount != null && real > 0)
         {
-            int calls = Math.Max(was, 3);
-            for (int i = 0; i < calls && i < 20; i++)
+            for (int i = 0; i < real && i < 20; i++)
                 _originalDecrementBusyCount(_lastThisPtr);
         }
 
-        Interlocked.Exchange(ref _netBusyCount, 0);
+        DropShadowTo0();
+        // Nothing of the old count is left for the reconciler (a late UseDone just finds 0).
+        lock (_directLock)
+        {
+            _directPending.Clear();
+            _directLeak = 0;
+            _pendingCastBusyDelta = 0;
+        }
 
         try { Marshal.WriteInt32(_lastThisPtr + OffsetMCBusy, 0); }
         catch { /* non-fatal */ }
@@ -171,11 +209,73 @@ internal static class BusyCountHooks
             catch { /* non-fatal */ }
         }
 
-        RynthLog.Verbose($"Compat: force-reset busy count (was {was})");
+        RynthLog.Verbose($"Compat: force-reset busy count (was real {real}, shadow {was})");
+    }
+
+    // ── Negative m_cBusy repair ─────────────────────────────────────────────
+    // AC never takes m_cBusy below what it added; only a zeroing of ours can:
+    // a force-clear (or the direct-action reconciler) zeroes a count whose
+    // action is still in flight, then the server's UseDone decrements it
+    // inline (Handle_Item::UseDone, not through DecrementBusyCount) to -1.
+    // The real-field watchdog only looks at > 0, so the negative value stayed
+    // for the session: a permanent busy cursor. Repair it after a short grace.
+    private static long _realBusyNegativeSince;
+    private static long _negativeRepairCount;
+    private const long NegativeBusyRepairMs = 2_000;
+    public static long NegativeRepairCount => Interlocked.Read(ref _negativeRepairCount);
+    public static int ShadowBusyCount => Volatile.Read(ref _netBusyCount);
+    public static int PendingReconcileDelta => _pendingCastBusyDelta;
+
+    /// <summary>Read AC's real m_cBusy. False when the ClientUISystem isn't known/readable.</summary>
+    public static bool TryReadRealBusy(out int value)
+    {
+        value = 0;
+        IntPtr p = _lastThisPtr;
+        if (p == IntPtr.Zero || !ClientObjectHooks.IsReadablePointer(p + OffsetMCBusy))
+            return false;
+        try { value = Marshal.ReadInt32(p + OffsetMCBusy); return true; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// If AC's m_cBusy is negative, set it to 0 and refresh the cursor. Main
+    /// thread only (returns false elsewhere). <paramref name="was"/> is the
+    /// value found.
+    /// </summary>
+    public static bool RepairNegativeBusy(out int was)
+    {
+        was = 0;
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+        IntPtr p = _lastThisPtr;
+        if (!TryReadRealBusy(out was) || was >= 0)
+            return false;
+        if (!ClientObjectHooks.IsWritablePointer(p + OffsetMCBusy))
+            return false;
+
+        Marshal.WriteInt32(p + OffsetMCBusy, 0);
+        DropShadowTo0();
+        Interlocked.Increment(ref _negativeRepairCount);
+        Net.FlightRecorder.Mark(Net.FlightMark.BusyNegativeRepair, unchecked((uint)was));
+        if (_updateCursorStateAddress != IntPtr.Zero)
+        {
+            try
+            {
+                var updateCursor = Marshal.GetDelegateForFunctionPointer<UpdateCursorStateDelegate>(_updateCursorStateAddress);
+                updateCursor(p);
+            }
+            catch { /* non-fatal */ }
+        }
+        return true;
     }
 
     public static void Initialize()
     {
+        // The item-action gates (pending request / attacking flag) resolve on
+        // their own; they don't need the busy-count hooks below.
+        try { ClientActionGates.Initialize(); }
+        catch (Exception ex) { RynthLog.Compat($"ClientActionGates: init threw {ex.GetType().Name}: {ex.Message}"); }
+
         if (IsInstalled)
             return;
 
@@ -264,7 +364,14 @@ internal static class BusyCountHooks
     // stopped firing for 30+ min while ChangeCombatMode was re-sent and 191
     // "too busy" refusals piled up, yet zero force-clears — classic desync.)
     private static long _realBusyPositiveTickMs;
-    private const long RealBusyWatchdogTimeoutMs = 4_000;
+    // 2026-10-06: was 4 s with no other condition, which zeroed the count of actions the
+    // server had not answered yet (a corpse walk, a 2.4 s kit, a 3.5 s vital cast) many times
+    // an hour. m_cBusy only drives the cursor (see ClientActionGates), so this is a cursor
+    // clean-up and runs only once the server has demonstrably gone quiet: the count positive
+    // for RealBusyWatchdogTimeoutMs AND no UseDone at all for RealBusyServerSilentMs AND no
+    // cast gesture animating.
+    private const long RealBusyWatchdogTimeoutMs = 12_000;
+    private const long RealBusyServerSilentMs = 12_000;
 
     private static int ReadRealBusy()
     {
@@ -289,34 +396,117 @@ internal static class BusyCountHooks
     public static void ResetSession()
     {
         _lastThisPtr = IntPtr.Zero;
+        // The next session's ClientUISystem starts at 0, and so does our copy (2026-10-28). Kept,
+        // a count left up by a logout mid-action stayed up for good: the watchdog can't clear it
+        // without the pointer, switches itself off, and is armed again only by a 0 -> 1 step, so
+        // GetBusyState answered "busy" until the client restarted (the item bar refused every use
+        // after a relog; RynthAi's waiting-on-the-server test reads the same count).
+        Interlocked.Exchange(ref _netBusyCount, 0);
+        Volatile.Write(ref _busyBecamePositiveTickMs, 0);
         Volatile.Write(ref _realBusyPositiveTickMs, 0);
-        _pendingCastBusyDelta = 0;
-        _pendingCastGestureSeen = false;
+        _realBusyNegativeSince = 0;
+        lock (_directLock)
+        {
+            _pendingCastBusyDelta = 0;
+            _directPending.Clear();
+            _directLeak = 0;
+        }
+        Volatile.Write(ref _lastUseDoneTickMs, 0);
+        try { ClientActionGates.ResetTracking(); } catch { }
     }
 
-    // ── Direct-action busy reconciliation (source fix for the per-action leak) ──
-    // The engine's direct AC calls — casts (FreeHandsAndCastSpell / CastSpell)
-    // AND item actions (UseObject corpse-open / equip / item-use, UseObjectOn) —
-    // make AC increment m_cBusy synchronously, but they never register the queued
-    // action whose completion handler performs the matching decrements (that
-    // lives in the player-initiated flow we bypass). Result: EVERY such call
-    // leaked busy, caught only downstream by watchdogs (casts: 4322 plugin-side
-    // clears in one 10h soak; corpse opens: a force-clear every ~2s during loot
-    // grinds). Source fix: measure the real m_cBusy delta synchronously around
-    // the call (both run on AC's main thread, nothing interleaves, so the delta
-    // is exactly ours), then once the action GESTURE has completed
-    // ([CMI+0x80] empties — a use-reach is a sequenced motion just like a cast
-    // wind-up) — or after a timeout if it never starts (server refusal) — invoke
-    // the REAL DecrementBusyCount exactly delta times through the HOOKED entry,
-    // so the shadow counter and plugin busy events stay in sync. Deterministic,
-    // no ClearAllCommands side effects, never touches counts owned by others.
-    // A single accumulator serves both casts and item actions (all are
-    // engine-issued busy that should clear at the next gesture-end).
-    private static int _pendingCastBusyDelta;
-    private static long _pendingCastIssuedAtMs;
-    private static bool _pendingCastGestureSeen;
+    // ── UseDone: AC's own decrement (2026-10-06) ─────────────────────────────
+    // AC pairs every client action with the server's answer: sending a use or a cast
+    // increments m_cBusy (ClientUISystem::IncrementBusyCount, e.g. after
+    // CM_Magic::Event_CastUntargetedSpell @0x00567CB0), and the server's UseDone
+    // (GameEvent 0x01C7) decrements it INLINE in ClientUISystem::Handle_Item::UseDone
+    // (@0x005656A0: [ui+0x14]-1, UpdateCursorState at 0) - not through
+    // DecrementBusyCount, so neither this file's shadow count nor the plugins' mirrors
+    // ever saw it. That blind spot is where "busy count stuck" came from: the shadow
+    // climbed after every use and cast, and the plugin and the watchdogs below then
+    // force-cleared AC's REAL count while the server still owed answers (each later
+    // UseDone drove it to -1: ~190 negative repairs an hour on 10-05/10-06). The engine's
+    // direct UseObject / UseObjectOn / CastSpell go through the same client functions,
+    // so their busy is answered the same way: the reconciler below must not decrement it
+    // a second time.
+    // SmartBoxHooks calls this for every inbound UseDone, on AC's main thread, before AC
+    // handles it: the shadow and the plugin mirrors take the same -1 AC is about to take,
+    // and one unit of direct-action reconcile is dropped (AC pairs it itself).
+    private static long _lastUseDoneTickMs;
+    private static int _lateUseDone;
+    private static long _useDoneMirrored;
+    public static long UseDoneMirrorCount => Interlocked.Read(ref _useDoneMirrored);
+
+    public static void OnUseDone()
+    {
+        Volatile.Write(ref _lastUseDoneTickMs, Environment.TickCount64);
+        // The flight recorder shows AC's inline -1 as an ordinary decrement: real after it, shadow after ours.
+        if (TryReadRealBusy(out int realBefore))
+        {
+            Net.FlightRecorder.Mark(Net.FlightMark.BusyDecrement, unchecked((uint)(realBefore - 1)),
+                unchecked((uint)Math.Max(0, Volatile.Read(ref _netBusyCount) - 1)));
+            // Nothing is counted for this answer (its action was reconciled or reset already, or the
+            // count was never raised): AC's -1 makes the count negative. Swallow it at the next tick
+            // instead of after the 2 s grace below.
+            if (realBefore <= 0)
+                Volatile.Write(ref _lateUseDone, 1);
+        }
+        // AC pairs this UseDone with the oldest direct action still waiting for one: drop one
+        // unit of its delta from the reconciler (a FreeHandsAndCastSpell that added 2 keeps
+        // its unanswered second unit, which is a real leak and is reconciled).
+        lock (_directLock)
+        {
+            if (_directPending.Count > 0)
+            {
+                var e = _directPending.Dequeue();
+                _pendingCastBusyDelta = Math.Max(0, _pendingCastBusyDelta - 1);
+                if (e.Delta > 1)
+                    _directLeak += e.Delta - 1;
+            }
+        }
+        int now;
+        int was;
+        do
+        {
+            was = Volatile.Read(ref _netBusyCount);
+            if (was <= 0) return;   // nothing of ours to pair (a player action we never counted, or already 0)
+            now = was - 1;
+        }
+        while (Interlocked.CompareExchange(ref _netBusyCount, now, was) != was);
+        Interlocked.Increment(ref _useDoneMirrored);
+        if (now <= 0)
+            Volatile.Write(ref _busyBecamePositiveTickMs, 0);
+        PluginManager.QueueBusyCountDecremented();
+    }
+
+    // ── Direct-action busy reconciliation ─────────────────────────────────────
+    // The engine's direct AC calls (casts via FreeHandsAndCastSpell / CastSpell, and
+    // UseObject / UseObjectOn) raise m_cBusy synchronously; the delta is measured around
+    // the call (both on AC's main thread, so it is exactly ours).
+    // 2026-10-06: this used to decrement the whole delta as soon as the gesture ended or
+    // 4 s passed, on the belief that nothing else would - but AC's UseDone handler does
+    // (see OnUseDone), so every answered action was decremented twice and the real count
+    // went to -1 until the negative repair below (~190 an hour). Now each direct action
+    // waits in _directPending for ITS UseDone (OnUseDone takes one unit off), and only
+    // what no UseDone will answer is decremented here:
+    //   * the part of a delta above 1 (FreeHandsAndCastSpell readies the wand +1 and casts
+    //     +1; the server answers the cast only), once no gesture animates;
+    //   * an action with no UseDone after DirectActionAnswerMs (a wield gets none; a
+    //     refusal the client never heard about), once no gesture animates.
+    // A late UseDone after that still drives the count to -1; the negative repair stays.
+    private readonly struct DirectAction
+    {
+        public readonly long IssuedAtMs;
+        public readonly int Delta;
+        public DirectAction(long at, int delta) { IssuedAtMs = at; Delta = delta; }
+    }
+    private static readonly System.Collections.Generic.Queue<DirectAction> _directPending = new();
+    private static readonly object _directLock = new();   // ResetSession can come from another thread
+    private static int _directLeak;
+    private static int _pendingCastBusyDelta;   // what the reconciler may still decrement (display + clamp)
     private static int _reconcileLogCount;
-    private const long CastBusyReconcileTimeoutMs = 4_000;
+    // The longest answer in 3.7 h of healthy logs was 5.0 s (a vital cast; corpse walks 3.7 s).
+    private const long DirectActionAnswerMs = 6_000;
 
     /// <summary>Snapshot the real m_cBusy immediately before a direct cast/item-action call (-1 = unreadable).</summary>
     public static int CaptureRealBusyForCast() => ReadRealBusy();
@@ -332,36 +522,41 @@ internal static class BusyCountHooks
         if (after < 0) return;
         int delta = after - busyBefore;
         if (delta <= 0) return;
-        _pendingCastBusyDelta += delta;
-        _pendingCastIssuedAtMs = Environment.TickCount64;
-        _pendingCastGestureSeen = false;
+        lock (_directLock)
+        {
+            _pendingCastBusyDelta += delta;
+            _directPending.Enqueue(new DirectAction(Environment.TickCount64, delta));
+            while (_directPending.Count > 64) _directLeak += _directPending.Dequeue().Delta;   // never unbounded
+        }
+    }
+
+    private static bool CastGestureAnimating()
+    {
+        try { return PlayerPhysicsHooks.TryGetCastGestureInProgress(out bool g) && g; }
+        catch { return false; }
     }
 
     private static void ReconcileCastBusy(long now)
     {
-        int pending = _pendingCastBusyDelta;
+        int pending;
+        lock (_directLock)
+        {
+            // Actions the server never answered in time join the unanswered part.
+            while (_directPending.Count > 0 && now - _directPending.Peek().IssuedAtMs > DirectActionAnswerMs)
+                _directLeak += _directPending.Dequeue().Delta;
+            pending = _directLeak;
+        }
         if (pending <= 0) return;
 
-        bool gesture = false;
-        try { if (!PlayerPhysicsHooks.TryGetCastGestureInProgress(out gesture)) gesture = false; }
-        catch { gesture = false; }
+        // Never mid-gesture: the action's own animation is what it is still doing.
+        if (CastGestureAnimating())
+            return;
 
-        if (gesture)
+        lock (_directLock)
         {
-            // Cast animation running — completion is the decrement point.
-            _pendingCastGestureSeen = true;
-            return;
+            _directLeak = Math.Max(0, _directLeak - pending);
+            _pendingCastBusyDelta = Math.Max(0, _pendingCastBusyDelta - pending);
         }
-
-        // Decrement once the observed gesture has ENDED, or after the timeout
-        // when no gesture was ever seen (refused cast / instant failure). The
-        // timeout matches the real-field watchdog window, so worst case this
-        // path is no slower than the old crutch.
-        if (!_pendingCastGestureSeen && now - _pendingCastIssuedAtMs <= CastBusyReconcileTimeoutMs)
-            return;
-
-        _pendingCastBusyDelta = 0;
-        _pendingCastGestureSeen = false;
 
         IntPtr p = _lastThisPtr;
         if (p == IntPtr.Zero || _decrementTargetAddress == IntPtr.Zero) return;
@@ -381,6 +576,7 @@ internal static class BusyCountHooks
             var dec = Marshal.GetDelegateForFunctionPointer<BusyCountDelegate>(_decrementTargetAddress);
             for (int i = 0; i < n; i++) dec(p);
             Interlocked.Increment(ref _reconcileCount);
+            Net.FlightRecorder.Mark(Net.FlightMark.BusyReconcile, (uint)n, unchecked((uint)ReadRealBusy()));
             if (_reconcileLogCount < 50 || _reconcileLogCount % 100 == 0)
                 RynthLog.Compat($"BusyCountHooks: direct-action busy reconciled — decremented {n} (real now {ReadRealBusy()}, total reconciles {_reconcileLogCount + 1}).");
             _reconcileLogCount++;
@@ -397,6 +593,29 @@ internal static class BusyCountHooks
     public static void CheckWatchdog()
     {
         long now = Environment.TickCount64;
+
+        // The gates AC actually checks before an item use/move/equip (pending
+        // inventory request, attacking flag). Runs on every call — before each
+        // inbound game event and after each tick — so the attacking flag's
+        // zero window between AttackDone and the next CommenceAttack is seen.
+        if (MainThreadGuard.IsOnMainThread())
+        {
+            try { ClientActionGates.Tick(now, PlayerLifecycleLog.InWorldTransition); }
+            catch { }
+        }
+
+        // Dead or portaling (and just after): the busy count moves on its own
+        // while AC rebuilds the world, and force-clearing it then writes into
+        // AC mid-transition — every death today crashed inside AC during the
+        // death portal (2026-09-28). Restart the timers so a genuinely stuck
+        // count is judged afresh once the world has settled.
+        if (PlayerLifecycleLog.InWorldTransition)
+        {
+            Volatile.Write(ref _realBusyPositiveTickMs, 0);
+            if (Volatile.Read(ref _busyBecamePositiveTickMs) != 0)
+                Volatile.Write(ref _busyBecamePositiveTickMs, now);
+            return;
+        }
 
         // ── Real-field watchdog (catches counter desync) ─────────────────────
         // Trust AC's REAL m_cBusy over our shadow counter: when they diverge a
@@ -416,7 +635,7 @@ internal static class BusyCountHooks
             // Consume any off-thread force-reset request (plugin watchdogs):
             // the actual clear runs HERE, on the main thread.
             if (Interlocked.Exchange(ref _forceResetRequested, 0) == 1)
-                ForceResetBusyCount();
+                ForceResetBusyCount(why: _forceResetRequestedWhy + " (latched from off the game thread)");
 
             int realBusy = ReadRealBusy();
             if (realBusy > 0)
@@ -427,11 +646,15 @@ internal static class BusyCountHooks
                     Volatile.Write(ref _realBusyPositiveTickMs, now);
                 }
                 else if (now - sinceR > RealBusyWatchdogTimeoutMs
+                         && now - Volatile.Read(ref _lastUseDoneTickMs) > RealBusyServerSilentMs
+                         && !CastGestureAnimating()
                          && now - Volatile.Read(ref _lastWatchdogFireTickMs) > BusyWatchdogCooldownMs)
                 {
                     Volatile.Write(ref _lastWatchdogFireTickMs, now);
-                    RynthLog.Compat($"BusyCountHooks: REAL m_cBusy stuck at {realBusy} for {now - sinceR}ms (counter={_netBusyCount}) — force-clearing desync.");
-                    ForceResetBusyCount();
+                    long silent = now - Volatile.Read(ref _lastUseDoneTickMs);
+                    RynthLog.Compat($"BusyCountHooks: REAL m_cBusy at {realBusy} for {now - sinceR}ms with no UseDone from the server for {(silent > 3_600_000 ? "ever" : silent + "ms")} (counter={_netBusyCount}) — resetting the cursor count (the server is quiet; nothing is waiting on it).");
+                    Net.FlightRecorder.Mark(Net.FlightMark.BusyWatchdog, (uint)realBusy, unchecked((uint)_netBusyCount), (uint)(now - sinceR), "real m_cBusy positive, server quiet");
+                    ForceResetBusyCount(why: "the engine's real-count watchdog (server quiet)");
                     Volatile.Write(ref _realBusyPositiveTickMs, 0);
                     Volatile.Write(ref _busyBecamePositiveTickMs, 0);
                     return;
@@ -444,6 +667,46 @@ internal static class BusyCountHooks
                 // stretch caused an instant force-clear when reads resumed
                 // (e.g. first beat after the next login).
                 Volatile.Write(ref _realBusyPositiveTickMs, 0);
+            }
+
+            // Negative real field (ReadRealBusy folds every negative into its -1
+            // "unreadable" sentinel, so read it directly). See RepairNegativeBusy.
+            bool haveReal = TryReadRealBusy(out int signedBusy);
+            bool lateUseDone = Interlocked.Exchange(ref _lateUseDone, 0) == 1;
+            if (haveReal && signedBusy < 0 && lateUseDone && RepairNegativeBusy(out int lateNeg))
+            {
+                _realBusyNegativeSince = 0;
+                RynthLog.Compat($"BusyCountHooks: a UseDone came with nothing counted for it; m_cBusy {lateNeg} -> 0 at once.");
+            }
+            else if (haveReal && signedBusy < 0)
+            {
+                if (_realBusyNegativeSince == 0)
+                    _realBusyNegativeSince = now;
+                else if (now - _realBusyNegativeSince >= NegativeBusyRepairMs && RepairNegativeBusy(out int neg))
+                {
+                    _realBusyNegativeSince = 0;
+                    RynthLog.Compat($"BusyCountHooks: REAL m_cBusy was negative ({neg}) — reset to 0 (a zeroed count's own UseDone arrived later).");
+                }
+            }
+            else
+            {
+                _realBusyNegativeSince = 0;
+            }
+
+            // Counter-based watchdog below: the shadow counter never sees AC's
+            // inline UseDone decrement, so it reads "stuck" after nearly every use
+            // and cast even though the real field is back at 0. When the real
+            // field is readable and idle, just resync the shadow — force-clearing
+            // there only zeroed the next in-flight action (thousands of needless
+            // force-clears a session). A real field > 0 is the real-field
+            // watchdog's job above.
+            long shadowSince = Volatile.Read(ref _busyBecamePositiveTickMs);
+            if (shadowSince != 0 && haveReal && signedBusy <= 0
+                && now - shadowSince >= BusyWatchdogTimeoutMs)
+            {
+                DropShadowTo0();
+                Volatile.Write(ref _busyBecamePositiveTickMs, 0);
+                return;
             }
         }
 
@@ -465,7 +728,8 @@ internal static class BusyCountHooks
 
         Volatile.Write(ref _lastWatchdogFireTickMs, now);
         RynthLog.Compat($"BusyCountHooks: watchdog auto-resetting — busy stuck at {_netBusyCount} for {elapsed}ms.");
-        ForceResetBusyCount();
+        Net.FlightRecorder.Mark(Net.FlightMark.BusyWatchdog, unchecked((uint)ReadRealBusy()), unchecked((uint)_netBusyCount), (uint)elapsed, "engine count stuck");
+        ForceResetBusyCount(why: "the engine's count watchdog (real count unreadable)");
         Volatile.Write(ref _busyBecamePositiveTickMs, 0);
     }
 
@@ -479,6 +743,7 @@ internal static class BusyCountHooks
         catch (Exception ex) { try { RynthLog.Compat($"BusyCountHooks: Increment original threw {ex.GetType().Name}: {ex.Message}"); } catch { } throw; }
         Interlocked.Increment(ref _incrementDispatchCount);
         int after = Interlocked.Increment(ref _netBusyCount);
+        Net.FlightRecorder.Mark(Net.FlightMark.BusyIncrement, unchecked((uint)Marshal.ReadInt32(thisPtr + OffsetMCBusy)), unchecked((uint)after));
         if (after == 1)
             Volatile.Write(ref _busyBecamePositiveTickMs, Environment.TickCount64);
         PluginManager.QueueBusyCountIncremented();
@@ -495,6 +760,7 @@ internal static class BusyCountHooks
         catch (Exception ex) { try { RynthLog.Compat($"BusyCountHooks: Decrement original threw {ex.GetType().Name}: {ex.Message}"); } catch { } throw; }
         Interlocked.Increment(ref _decrementDispatchCount);
         int after = Interlocked.Decrement(ref _netBusyCount);
+        Net.FlightRecorder.Mark(Net.FlightMark.BusyDecrement, unchecked((uint)Marshal.ReadInt32(thisPtr + OffsetMCBusy)), unchecked((uint)after));
         if (after <= 0)
             Volatile.Write(ref _busyBecamePositiveTickMs, 0);
         PluginManager.QueueBusyCountDecremented();

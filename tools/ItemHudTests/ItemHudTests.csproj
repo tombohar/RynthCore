@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the Item Count and Mini Remote panels' pure logic (2026-10-05):
+    src\RynthCore.Engine\UI\Data\ItemHudModel.cs, compiled in. The carried count (stacks
+    summed, any case, worn too), which carried item a remote slot uses (same object, else the
+    largest stack with its name), the per-character edits, and the item_huds.txt round-trip
+    (sections per character, slots, unknown lines kept, bad values). No file I/O, no AC.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ItemHudTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ItemHudModel.cs" Link="Engine\ItemHudModel.cs" />
+  </ItemGroup>
+
+</Project>

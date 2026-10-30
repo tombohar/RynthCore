@@ -81,6 +81,9 @@ internal static class CreateObjectHooks
         if (count <= 0)
             RynthLog.Verbose($"Compat: create object #{count} id=0x{objectId:X8} ptr=0x{result.ToInt32():X8}");
 
+        // Capture name/type from the create descriptor BEFORE the plugin is told about the
+        // object, so its off-thread classifier can read them on the very first attempt.
+        ClientObjectHooks.SeedIdentityFromCreate(objectId, weenieDesc);
         PluginManager.QueueCreateObject(objectId);
         AutoIdService.Enqueue(objectId);
         return result;

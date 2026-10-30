@@ -165,6 +165,19 @@ GROUPS = {
     "TimeSyncHooks": [
         ("ClientNet_HandleTimeSynch", 0x005448F0),
     ],
+    "UiFlowHooks": [
+        ("UIFlow_UseNewMode", 0x00479AA0), ("Client_Cleanup", 0x004118D0),
+    ],
+    "UiElementHooks": [
+        ("UIElementManager_StartTooltip", 0x0045DF70), ("UIElementManager_ResetTooltip", 0x0045C440),
+        ("UIElementManager_CheckTooltip", 0x0045B7C0), ("UIElementManager_StartDragandDrop", 0x0045E120),
+        ("UIElement_CatchDroppedItem", 0x00461860), ("UIElement_ItemList_InqDropIconInfo", 0x004E3380),
+    ],
+    "PlayerTrade": [
+        ("Event_OpenTradeNegotiations", 0x006AE260), ("Event_AddToTrade", 0x006AE030),
+        ("Event_ResetTrade", 0x006AE330), ("Event_CloseTradeNegotiations", 0x006AE140),
+        ("ClientTradeSystem_AcceptTrade", 0x0056E7A0), ("ClientTradeSystem_DeclineTrade", 0x0056E7C0),
+    ],
 }
 
 def best_pattern(text_b, text_base, va, off):
@@ -188,6 +201,7 @@ GROUPS_DATA = [
     ("s_selected_id", 0x00871E54), ("s_previous_selected_id", 0x00871E58),
     ("split_amount", 0x0081D7EC), ("total_stack", 0x0081D7F0),
     ("PStringChar_s_NullBuffer", 0x008EF11C), ("PStringWide_s_NullBuffer", 0x00818340),
+    ("ClientTradeSystem_s_pTradeSystem", 0x0087174C),
     ("RecvFrom_slot", 0x007935AC),
 ]
 
@@ -297,7 +311,10 @@ def _compat_dir():
 
 def parse_engine_patterns():
     srcs = {}
-    for f in glob.glob(os.path.join(_compat_dir(), "*.cs")):
+    # Compatibility/ holds nearly every hook; D3D9/AcUiPassHook.cs (RenderUI::RenderObjects)
+    # and D3D9/VideoPatch.cs (SmartBox::RenderNormalMode) live with the render code.
+    engine_dir = os.path.dirname(_compat_dir())
+    for f in glob.glob(os.path.join(_compat_dir(), "*.cs")) + glob.glob(os.path.join(engine_dir, "D3D9", "*.cs")):
         with open(f, "r", encoding="utf-8") as fh:
             # Strip // line comments so commas / brackets inside an inline disasm
             # comment (e.g. `0x84, 0xC0  // MOV AL,[ESP+4]; TEST AL,AL`) can't corrupt

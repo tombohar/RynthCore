@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline tests for the launcher's folder checks and Recovery Actions > Fix folder permissions
+    (src/RynthCore.App/FolderAccess.cs, compiled in): the write probe and read-only count, the
+    elevated step's command line, which folders it refuses, junctions not followed, the
+    Controlled folder access event parsing. Only a temp folder is written. Permissions are NEVER
+    changed: Repair runs with changePermissions: false (its read-only part only).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>FolderAccessTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../src/RynthCore.App/FolderAccess.cs" Link="App/FolderAccess.cs" />
+  </ItemGroup>
+
+</Project>

@@ -123,26 +123,49 @@ internal static class ScreenCapture
     /// Device::WndProc dispatches WM_LBUTTONDOWN/etc by lParam, never GetCursorPos), so this drives both the
     /// 2D UI and 3D-world hit-test WITHOUT moving the real cursor or stealing focus, even when the window is
     /// backgrounded/occluded — multibox-safe. Returns false if the window is missing or minimized.
-    public static bool TryClick(int pid, double u, double v, string? button)
+    public enum ClickResult { Posted, NotFound, Minimized, NoClientArea, PostFailed }
+
+    /// <summary>What one tap did: where it went in the client area (and how big that is), or why not.</summary>
+    public readonly record struct ClickOutcome(ClickResult Result, int X, int Y, int Width, int Height)
+    {
+        public string Reason => Result switch
+        {
+            ClickResult.Posted => "posted",
+            ClickResult.NotFound => "no game window for that pid",
+            ClickResult.Minimized => "the game window is minimized",
+            ClickResult.NoClientArea => "the game window has no client area",
+            _ => "PostMessage failed",
+        };
+    }
+
+    // Give the game a frame between the move and the press, and between press and release: RynthCore
+    // can throttle a background client (Background FPS, 5..60), and a move + press + release that all land
+    // inside one frame can read to AC as a press at the old cursor spot, or as nothing at all.
+    private const int MoveSettleMs = 60;
+    private const int PressHoldMs = 90;
+
+    public static ClickOutcome TryClick(int pid, double u, double v, string? button)
     {
         EnsureDpiAware();
-        if (!TryFindWindow(pid, out IntPtr hwnd, out bool minimized) || minimized || hwnd == IntPtr.Zero) return false;
-        if (!GetClientRect(hwnd, out RECT cr)) return false;
+        if (!TryFindWindow(pid, out IntPtr hwnd, out bool minimized) || hwnd == IntPtr.Zero)
+            return new ClickOutcome(minimized ? ClickResult.Minimized : ClickResult.NotFound, 0, 0, 0, 0);
+        if (!GetClientRect(hwnd, out RECT cr)) return new ClickOutcome(ClickResult.NoClientArea, 0, 0, 0, 0);
         int cw = cr.Right - cr.Left, ch = cr.Bottom - cr.Top;
-        if (cw < 2 || ch < 2) return false;
-        int x = (int)Math.Round(Math.Clamp(u, 0, 1) * (cw - 1));
-        int y = (int)Math.Round(Math.Clamp(v, 0, 1) * (ch - 1));
-        IntPtr lParam = (IntPtr)unchecked((uint)((y << 16) | (x & 0xFFFF)));
+        if (cw < 2 || ch < 2) return new ClickOutcome(ClickResult.NoClientArea, 0, 0, cw, ch);
+        var (x, y) = RemoteParity.ClickPoint(u, v, cw, ch);
+        IntPtr lParam = RemoteParity.MouseLParam(x, y);
         bool right = string.Equals(button, "right", StringComparison.OrdinalIgnoreCase);
+        IntPtr held = (IntPtr)(right ? MK_RBUTTON : MK_LBUTTON);
         try
         {
-            PostMessage(hwnd, WM_MOUSEMOVE, IntPtr.Zero, lParam);
-            PostMessage(hwnd, right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN, (IntPtr)(right ? 0x0002 : 0x0001), lParam);
-            System.Threading.Thread.Sleep(80);   // brief down→up so AC registers a click, not a drag
+            if (!PostMessage(hwnd, WM_MOUSEMOVE, IntPtr.Zero, lParam)) return new ClickOutcome(ClickResult.PostFailed, x, y, cw, ch);
+            System.Threading.Thread.Sleep(MoveSettleMs);
+            PostMessage(hwnd, right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN, held, lParam);
+            System.Threading.Thread.Sleep(PressHoldMs);   // down→up apart so AC registers a click, not a drag
             PostMessage(hwnd, right ? WM_RBUTTONUP : WM_LBUTTONUP, IntPtr.Zero, lParam);
-            return true;
+            return new ClickOutcome(ClickResult.Posted, x, y, cw, ch);
         }
-        catch { return false; }
+        catch { return new ClickOutcome(ClickResult.PostFailed, x, y, cw, ch); }
     }
 
     /// Pick the game window for this pid: the largest visible, non-minimized acclient-class window. The
@@ -198,6 +221,7 @@ internal static class ScreenCapture
     [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hWnd, out RECT r);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
     private const uint WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205;
+    private const int MK_LBUTTON = 0x0001, MK_RBUTTON = 0x0002;
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);

@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for your own RynthVision plate's options (2026-10-27, a player on Discord: "how do I unlock and
+    move the vitals bar", "options to turn off the shadow things", "debuffs on you as icons"):
+      src\RynthCore.Engine\ImGui\MonsterHud\MonsterHudSettings.cs - the four look switches (track, damage trail,
+        text outline, number band) and "Debuffs on you" default on, an older nameplate_settings.txt without them
+        loads them on, each round-trips; SetSelfLocked (Settings > UI > Vitals, Vision, /rv plates self unlock)
+        fixes a following plate on screen when it unlocks it;
+      src\RynthCore.Engine\ImGui\MonsterHud\SelfDebuffs.cs (+ DebuffIcon.cs) - which spells on you get an icon:
+        harmful only, cooldowns / expired / never-ending entries dropped, one per category (the last to end),
+        one icon per kind (count + soonest end), kind order, "+N" overflow, server time to Stopwatch ticks.
+      src\RynthCore.Engine\ImGui\MonsterHud\PlateMetrics.cs - your plate's lengths (2026-10-28, "Your debuff
+        icon size"): at 100 % the bars, name room, debuff row, measured height and screen clamp are the old
+        expressions exactly; at any size the measured height includes the scaled row, the clamp keeps the row
+        (and an enlarged row's ends) on screen; the setting defaults 100, an older file loads 100, it round-trips.
+    All compiled in; no game, no engine. No file I/O: the background writer is a stub that never runs its work.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>SelfPlateTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\MonsterHudSettings.cs" Link="Engine\MonsterHudSettings.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\DebuffIcon.cs" Link="Engine\DebuffIcon.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\SelfDebuffs.cs" Link="Engine\SelfDebuffs.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\PlateMetrics.cs" Link="Engine\PlateMetrics.cs" />
+  </ItemGroup>
+
+</Project>

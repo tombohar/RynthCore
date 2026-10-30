@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The engine's memory probe (src\RynthCore.Engine\Compatibility\MemoryProbe.cs, compiled in)
+    without AC: (1) it must answer exactly like the old VirtualQuery checks for committed,
+    untouched, reserved, freed, guard, no-access, read-only and cross-page memory; (2) a
+    benchmark of the main-thread snapshot walk's probes (CObjectMaint bucket walk + the
+    per-object position/PWD probes) against a large committed heap like AC's in a crowded
+    dungeon, old VirtualQuery probes vs MemoryProbe.
+
+    x86 on purpose: the cost that broke the client is VirtualQuery under WOW64 (a 32-bit
+    process on 64-bit Windows). Needs the x86 .NET runtime (C:\Program Files (x86)\dotnet).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+         dotnet run -c Release, then heap sizes in MB after the usual separator (default 4 16 64)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>FloodProbeBench</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\MemoryProbe.cs" Link="Engine\MemoryProbe.cs" />
+  </ItemGroup>
+
+</Project>

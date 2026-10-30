@@ -106,19 +106,30 @@ internal static class ClientActionHooks
         return CombatActionHooks.CastSpell(targetId, spellId);
     }
 
+    // Movement calls below are the plugin API's only way in (PluginManager's callbacks), so each
+    // one is traced here with the calling plugin: RynthLog.Move, behind RynthLog.MoveTraceEnabled.
+    private static string MoveArg(System.FormattableString s) =>
+        RynthLog.MoveTraceEnabled ? System.FormattableString.Invariant(s) : "";
+
     public static bool DoMovement(uint motion, float speed = 1.0f, int holdKey = MovementActionHooks.HoldKeyRun)
     {
-        return MovementActionHooks.DoMovement(motion, speed, holdKey);
+        bool ok = MovementActionHooks.DoMovement(motion, speed, holdKey);
+        RynthLog.Move("DoMovement", MoveArg($"0x{motion:X8}, {speed:0.##}, {holdKey}"), ok, a: motion, b: (uint)holdKey);
+        return ok;
     }
 
     public static bool StopMovement(uint motion, int holdKey = MovementActionHooks.HoldKeyRun)
     {
-        return MovementActionHooks.StopMovement(motion, holdKey);
+        bool ok = MovementActionHooks.StopMovement(motion, holdKey);
+        RynthLog.Move("StopMovement", MoveArg($"0x{motion:X8}, {holdKey}"), ok, a: motion, b: (uint)holdKey);
+        return ok;
     }
 
     public static bool JumpNonAutonomous(float extent)
     {
-        return MovementActionHooks.JumpNonAutonomous(extent);
+        bool ok = MovementActionHooks.JumpNonAutonomous(extent);
+        RynthLog.Move("JumpNonAutonomous", MoveArg($"{extent:0.##}"), ok);
+        return ok;
     }
 
     public static bool SetAutonomyLevel(uint level)
@@ -128,48 +139,66 @@ internal static class ClientActionHooks
 
     public static bool SetAutoRun(bool enabled)
     {
-        return CommandInterpreterHooks.SetAutoRun(enabled);
+        bool ok = CommandInterpreterHooks.SetAutoRun(enabled);
+        RynthLog.Move("SetAutoRun", enabled ? "True" : "False", ok, a: enabled ? 1u : 0u);
+        return ok;
     }
 
     public static bool TapJump()
     {
-        return CommandInterpreterHooks.TapJump();
+        bool ok = CommandInterpreterHooks.TapJump();
+        RynthLog.Move("TapJump", "", ok);
+        return ok;
     }
 
     public static bool CommenceJump()
     {
-        return CommandInterpreterHooks.CommenceJump();
+        bool ok = CommandInterpreterHooks.CommenceJump();
+        RynthLog.Move("CommenceJump", "", ok);
+        return ok;
     }
 
     public static bool DoJump(bool autonomous)
     {
-        return CommandInterpreterHooks.DoJump(autonomous);
+        bool ok = CommandInterpreterHooks.DoJump(autonomous);
+        RynthLog.Move("DoJump", autonomous ? "True" : "False", ok);
+        return ok;
     }
 
     public static bool LaunchJumpWithMotion(bool shift, bool holdW, bool holdX, bool holdZ, bool holdC)
     {
-        return PlayerPhysicsHooks.LaunchJumpWithMotion(shift, holdW, holdX, holdZ, holdC);
+        bool ok = PlayerPhysicsHooks.LaunchJumpWithMotion(shift, holdW, holdX, holdZ, holdC);
+        RynthLog.Move("LaunchJumpWithMotion", MoveArg($"shift={shift}, w={holdW}, x={holdX}, z={holdZ}, c={holdC}"), ok);
+        return ok;
     }
 
     public static bool SetMotion(uint motion, bool enabled)
     {
-        return CommandInterpreterHooks.SetMotion(motion, enabled);
+        bool ok = CommandInterpreterHooks.SetMotion(motion, enabled);
+        RynthLog.Move("SetMotion", MoveArg($"0x{motion:X8}, {enabled}"), ok, a: motion, b: enabled ? 1u : 0u);
+        return ok;
     }
 
     public static bool StopCompletely()
     {
-        return CommandInterpreterHooks.StopCompletely();
+        bool ok = CommandInterpreterHooks.StopCompletely();
+        RynthLog.Move("StopCompletely", "", ok);
+        return ok;
     }
 
     public static bool TurnToHeading(float headingDegrees)
     {
         // Direct quaternion write — instant snap, most reliable (uses proven SmartBox offsets).
         // Equivalent to old Decal Actions.Heading = value.
-        if (PlayerPhysicsHooks.SetPlayerHeadingDirect(headingDegrees))
-            return true;
-
-        // Fallback: command interpreter gradual turn
-        return CommandInterpreterHooks.TurnToHeading(headingDegrees);
+        // Off AC's main thread (plugin pump) SetPlayerHeadingDirect only parks the
+        // heading in AcMainThreadQueue's coalesced slot and returns true; the snap
+        // (and the no-player CommandInterpreter fallback below) run in Drain.
+        bool ok = PlayerPhysicsHooks.SetPlayerHeadingDirect(headingDegrees)
+                  // Fallback: command interpreter gradual turn
+                  || CommandInterpreterHooks.TurnToHeading(headingDegrees);
+        // Successive turns from one caller collapse into one line whatever the angle (nav steers every tick).
+        RynthLog.Move("TurnToHeading", MoveArg($"{headingDegrees:0.0}"), ok, collapseByKind: true);
+        return ok;
     }
 
     public static bool TryGetPlayerHeading(out float headingDegrees)

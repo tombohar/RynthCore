@@ -40,6 +40,16 @@ internal static class PlayerVitalsHooks
     internal static void ResetSession()
     {
         KnownPlayerQualitiesPtr = IntPtr.Zero;
+        // The off-thread base-vitals copy belongs to the old character.
+        lock (CacheLock)
+        {
+            _baseVitalsHp = _baseVitalsStam = _baseVitalsMana = 0;
+            _baseVitalsOwner = IntPtr.Zero;
+            // The vitals snapshot is the old character's too. Kept, the next character showed
+            // its health until a vital changed, and the login seed's "highest max seen" rule
+            // kept the old character's larger maximums for good (2026-10-01).
+            _snapshot = default;
+        }
         // Creature health is keyed by object id — ids don't survive the
         // session, and without this clear the 1024-entry cap filled over a
         // long session and every NEW creature was silently never tracked.
@@ -324,6 +334,80 @@ internal static class PlayerVitalsHooks
 
         IntPtr ptr = KnownPlayerQualitiesPtr;
         if (ptr == IntPtr.Zero)
+            return false;
+
+        // Off AC's main thread (host GetPlayerBaseVitalsFn on the pump: RynthAi meta
+        // getcharvital_base, RynthLua): serve the main-thread copy. Calling
+        // CACQualities::InqAttribute2nd here walked the player's attribute table
+        // while the main thread can rebuild it (the 0x00416C86 class). Base max only
+        // changes when XP is spent or gear/augs change, so ~1 s old is fine. The
+        // copy must belong to the current qualities object (a relog swaps it).
+        if (!MainThreadGuard.IsOnMainThread())
+        {
+            lock (CacheLock)
+            {
+                if (_baseVitalsOwner != ptr)
+                    return false;
+                baseMaxHp = _baseVitalsHp;
+                baseMaxStam = _baseVitalsStam;
+                baseMaxMana = _baseVitalsMana;
+            }
+            return baseMaxHp > 0 || baseMaxStam > 0 || baseMaxMana > 0;
+        }
+
+        return TryReadPlayerBaseVitalsLive(ptr, out baseMaxHp, out baseMaxStam, out baseMaxMana);
+    }
+
+    // Main-thread base-vitals copy for the off-thread path above. Separate from the
+    // vital snapshot and from ClientObjectHooks.PrefetchPlayerStats on purpose: it
+    // must not change either one's semantics.
+    private static uint _baseVitalsHp, _baseVitalsStam, _baseVitalsMana;
+    private static IntPtr _baseVitalsOwner;
+    private static long _nextBaseVitalsPrefetchMs;
+    private const int BaseVitalsPrefetchIntervalMs = 1000;
+
+    /// <summary>
+    /// Main thread only (MainThreadSnapshots.Tick). Refreshes the base-vitals copy
+    /// about once a second from the live qualities table.
+    /// </summary>
+    internal static void PrefetchBaseVitals()
+    {
+        if (!MainThreadGuard.IsOnMainThread() || _inqAttribute2ndStruct == null)
+            return;
+        IntPtr ptr = KnownPlayerQualitiesPtr;
+        if (ptr == IntPtr.Zero)
+            return;
+
+        // A new qualities object (login / relog / reseed) is read within ~250 ms
+        // rather than waiting out the 1 s refresh, so off-thread callers see values
+        // about as soon as they did when the read was live.
+        long now = Environment.TickCount64;
+        if (now < _nextBaseVitalsPrefetchMs)
+            return;
+        bool ownerCurrent;
+        lock (CacheLock) ownerCurrent = _baseVitalsOwner == ptr;
+        _nextBaseVitalsPrefetchMs = now + (ownerCurrent ? BaseVitalsPrefetchIntervalMs : 250);
+
+        if (!ClientObjectHooks.IsCacQualitiesObject(ptr))
+            return;
+
+        if (TryReadPlayerBaseVitalsLive(ptr, out uint hp, out uint stam, out uint mana))
+        {
+            lock (CacheLock)
+            {
+                _baseVitalsHp = hp;
+                _baseVitalsStam = stam;
+                _baseVitalsMana = mana;
+                _baseVitalsOwner = ptr;
+            }
+        }
+    }
+
+    // The live read (unchanged from the pre-2026-09-30 body). MAIN THREAD ONLY.
+    private static unsafe bool TryReadPlayerBaseVitalsLive(IntPtr ptr, out uint baseMaxHp, out uint baseMaxStam, out uint baseMaxMana)
+    {
+        baseMaxHp = baseMaxStam = baseMaxMana = 0;
+        if (!MainThreadGuard.IsOnMainThread() || _inqAttribute2ndStruct == null || ptr == IntPtr.Zero)
             return false;
 
         try

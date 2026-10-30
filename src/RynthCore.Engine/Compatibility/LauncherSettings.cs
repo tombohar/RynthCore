@@ -8,7 +8,8 @@ internal static class LauncherSettings
 {
     private static readonly object Sync = new();
     private static bool _loaded;
-    private static bool _allowMultipleClients;
+    // The launcher's own default (AppSettings.AllowMultipleClients, on since 2026-10-14) until it has saved one.
+    private static bool _allowMultipleClients = true;
     private static string _statusMessage = "Launcher settings not loaded.";
 
     public static bool AllowMultipleClientsEnabled

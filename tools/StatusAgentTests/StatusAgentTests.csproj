@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the StatusAgent's DrakRemote parity pieces (src\RynthCore.StatusAgent, compiled in):
+    landblock ids in the form DrakRemote matches, tap-to-click coordinate mapping, the capabilities block,
+    enchantments named from the spell table (a hand-made SpellTable file), the world map renderer (made-up
+    landblocks), the RynthRemote plugin's status additions read back, and the JSON names the phone expects.
+    No game, no network, no token. Optional: pass a portal.dat / cell.dat path to also read the real ones
+    (read-only).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>StatusAgentTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.StatusAgent\AgentConfig.cs" Link="Agent\AgentConfig.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\AgentLog.cs" Link="Agent\AgentLog.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\Models.cs" Link="Agent\Models.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\RemoteParity.cs" Link="Agent\RemoteParity.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\SpellTableService.cs" Link="Agent\SpellTableService.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\WorldMapService.cs" Link="Agent\WorldMapService.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\NavAtlasService.cs" Link="Agent\NavAtlasService.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\Dat\DatDatabase.cs" Link="Agent\Dat\DatDatabase.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\StatusFileCache.cs" Link="Agent\StatusFileCache.cs" />
+    <Compile Include="..\..\src\RynthCore.StatusAgent\ServeGuard.cs" Link="Agent\ServeGuard.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the engine-robustness pass, the pure parts compiled in:
+      PendingIdQueue.cs        the RequestId slot merges a pending appraisal for the same object
+      AutoIdEligibility.cs     no re-appraisal within 10 min of a client release; server delete
+                               re-arms; the map stays bounded
+      MainThreadFreezeRule.cs  plugin ticks pause while AC's main thread is frozen
+      WorldTransitionState.cs  queued game actions are held through a death / portal / landblock
+                               jump, then stale ones dropped while stops and cancels still run
+      AddressSpace.cs          the largest-free-block fold (and one live walk of this process)
+      ActionRing.cs            the action ring itself: teardown reserve, refusal in a transition
+      CastStopRules.cs         a cast waits for a movement stop queued at or before it
+      MutatorGate.cs           queue-or-call for every mutator (plus a source scan of the call sites)
+      ReleasedObjectRetention  identify data kept 10 min after a client release
+      DumpInProgressRule.cs    the launcher holds its wedge kill while an OOM dump is written (capped)
+      CastSlot.cs              the cast slot refuses during a world transition
+      CrashExitRule.cs         which exit codes are crash exits (not ExitProcess(-1))
+      AutoIdPolicy.cs          AutoIdMode All/Limited/Off: class, minimum age, post-transition defer
+      AutoIdDrain.cs           the AutoId backlog against a fake world: login sweep, cold snapshot,
+                               refused sends kept, bounds
+      IdRequester.cs           the engine-send marker that tags every engine 0xC8
+      DumpBudget.cs            the full OOM dump needs free space and a cap on dumps across clients
+      PumpGuards.cs            TickAll's own steps are caught (logged once, then counted); the hang
+                               report names the plugin call the pump is inside; PluginShutdownGate:
+                               plugins are shut down only once the pump stopped (plus source scans
+                               of EngineLifecycle's step order and ShutdownAll's gate)
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>EngineRobustnessTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\PendingIdQueue.cs" Link="Engine\PendingIdQueue.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AutoIdEligibility.cs" Link="Engine\AutoIdEligibility.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\MainThreadFreezeRule.cs" Link="Engine\MainThreadFreezeRule.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\WorldTransitionState.cs" Link="Engine\WorldTransitionState.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AddressSpace.cs" Link="Engine\AddressSpace.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ActionRing.cs" Link="Engine\ActionRing.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\CastStopRules.cs" Link="Engine\CastStopRules.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\MutatorGate.cs" Link="Engine\MutatorGate.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ReleasedObjectRetention.cs" Link="Engine\ReleasedObjectRetention.cs" />
+    <Compile Include="..\..\src\Shared\DumpInProgressRule.cs" Link="Shared\DumpInProgressRule.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\CastSlot.cs" Link="Engine\CastSlot.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\CrashExitRule.cs" Link="Engine\CrashExitRule.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AutoIdPolicy.cs" Link="Engine\AutoIdPolicy.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AutoIdDrain.cs" Link="Engine\AutoIdDrain.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\DumpBudget.cs" Link="Engine\DumpBudget.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Net\IdRequester.cs" Link="Engine\IdRequester.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\PumpGuards.cs" Link="Engine\PumpGuards.cs" />
+  </ItemGroup>
+
+</Project>

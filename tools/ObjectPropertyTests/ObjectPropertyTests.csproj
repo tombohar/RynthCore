@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for plugin API v84 GetObjectProperties (every property of an object, behind
+    RynthAi's /ub propertydump):
+      src\RynthCore.Engine\Compatibility\ObjectPropertyRecord.cs - the engine's merge order (the
+        same as the per-key reads) and its record encoder;
+      src\RynthCore.Engine\Compatibility\PropertyWire.cs - PwdLayout.FillBag (the CreateObject
+        copy as properties);
+      src\RynthCore.PluginSdk\ObjectPropertyTypes.cs (the SDK, referenced) - the parser plugins use.
+    Encoded by the engine's code, parsed by the SDK's: the two can't drift. No game, no engine.
+    The native part (the qualities table walk on AC's main thread) needs a live client.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ObjectPropertyTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\PropertyWire.cs" Link="Engine\PropertyWire.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ObjectPropertyRecord.cs" Link="Engine\ObjectPropertyRecord.cs" />
+  </ItemGroup>
+
+</Project>

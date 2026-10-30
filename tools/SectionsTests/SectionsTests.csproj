@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the Mini Remote's sections (src\RynthCore.Engine\UI\Sections, the pure
+    files compiled in): the per-character server overrides file, the plugin manifest parser and
+    its limits, and the section catalog (core sections, server-scoped contributions, ordering);
+    plugin windows: which are hosted, which take over an engine panel, and the stack check after
+    a plugin's draw (ImGui\ImGuiStackState.cs).
+    IltDetect.cs (with AelrynthWire.cs, which it shares a parser with) supplies the matching a
+    plugin-declared server is detected with. Nothing native: no AC, no engine state.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>SectionsTests</RootNamespace>
+    <!-- ServerStateJson.Write copies into a native (plugin API) buffer. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Sections\ServerForce.cs" Link="Engine\ServerForce.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Sections\SectionManifest.cs" Link="Engine\SectionManifest.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Sections\SectionCatalog.cs" Link="Engine\SectionCatalog.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Sections\WindowPlan.cs" Link="Engine\WindowPlan.cs" />
+    <!-- What a plugin window's draw left on ImGui's stacks (the record ImGuiStackGuard takes). -->
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\ImGuiStackState.cs" Link="Engine\ImGuiStackState.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\IltDetect.cs" Link="Engine\IltDetect.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AelrynthWire.cs" Link="Engine\AelrynthWire.cs" />
+    <!-- The Diagnostics server picker's plan and the plugin API v86 server-state JSON. -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Sections\ServerSelection.cs" Link="Engine\ServerSelection.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Sections\ServerStateJson.cs" Link="Engine\ServerStateJson.cs" />
+    <!-- Installed server plugins the connect host left out: listed in the picker, loaded when forced On. -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Sections\NotLoadedServers.cs" Link="Engine\NotLoadedServers.cs" />
+    <!-- The status feed's / Session Stats' XP and luminance session formula (pure). -->
+  </ItemGroup>
+
+</Project>

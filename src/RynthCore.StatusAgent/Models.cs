@@ -40,6 +40,107 @@ internal sealed class StatusFileModel
     [JsonPropertyName("lastIssue")]         public string? LastIssue { get; set; }
     [JsonPropertyName("lastIssueAgeSec")]   public long LastIssueAgeSec { get; set; } = -1;
     [JsonPropertyName("bot")]               public BotSnapshot? Bot { get; set; }
+    // Added by the RynthRemote plugin 0.3 (DrakRemote parity): the player's enchantments (ids + seconds
+    // left; the agent adds names/icons from portal.dat) and where the character stands, outdoors too.
+    [JsonPropertyName("enchantments")]      public List<EnchantmentIn>? Enchantments { get; set; }
+    [JsonPropertyName("opos")]              public PositionIn? Opos { get; set; }
+    // RynthRemote 0.3: the last travel the phone asked RynthNav for (destination, what the plugin did).
+    [JsonPropertyName("travel")]            public TravelIn? Travel { get; set; }
+    // RynthRemote 0.4: the phone may raise attributes, vitals and skills on this client (engine API v79,
+    // the client's raise senders bound, in the world). The costs ride the character sheet.
+    [JsonPropertyName("raiseXp")]           public bool RaiseXp { get; set; }
+    // RynthRemote 0.4: the hold-to-move protocol it speaks (2 = moveStart {"dir","deadmanMs"} + moveKeepAlive).
+    [JsonPropertyName("moveProto")]         public int MoveProto { get; set; }
+}
+
+/// <summary>The plugin's record of the last phone travel: where to, and "sent" / "stopped" / "refused".</summary>
+internal sealed class TravelIn
+{
+    [JsonPropertyName("dest")]   public string Dest { get; set; } = "";
+    [JsonPropertyName("ns")]     public double? Ns { get; set; }
+    [JsonPropertyName("ew")]     public double? Ew { get; set; }
+    [JsonPropertyName("state")]  public string State { get; set; } = "";
+    [JsonPropertyName("detail")] public string Detail { get; set; } = "";
+    [JsonPropertyName("sentAt")] public DateTimeOffset? SentAt { get; set; }
+}
+
+/// <summary>The phone's travel status: the plugin's record, RynthNav's latest chat note, and how far is left.</summary>
+internal sealed class TravelOut
+{
+    [JsonPropertyName("dest")]     public string Dest { get; set; } = "";
+    [JsonPropertyName("ns")]       public double? Ns { get; set; }
+    [JsonPropertyName("ew")]       public double? Ew { get; set; }
+    /// <summary>sent | arrived | stopped | refused (and "unavailable" when RynthNav isn't loaded).</summary>
+    [JsonPropertyName("state")]    public string State { get; set; } = "";
+    [JsonPropertyName("detail")]   public string Detail { get; set; } = "";
+    [JsonPropertyName("sentAt")]   public DateTimeOffset? SentAt { get; set; }
+    /// <summary>RynthNav's latest "[RynthNav] ..." chat line, without the tag ("walking to Holtburg — ...").</summary>
+    [JsonPropertyName("note")]     public string Note { get; set; } = "";
+    /// <summary>Straight-line distance left in RynthNav's units (yd); null indoors or with no target position.</summary>
+    [JsonPropertyName("distance")] public double? Distance { get; set; }
+}
+
+/// <summary>One enchantment as the plugin writes it: spell id + seconds left (-1 = never lapses).</summary>
+internal sealed class EnchantmentIn
+{
+    [JsonPropertyName("spellId")]          public uint SpellId { get; set; }
+    [JsonPropertyName("secondsRemaining")] public double SecondsRemaining { get; set; }
+}
+
+/// <summary>Where the character stands (plugin "opos"): absolute world units, the dungeon-map frame.</summary>
+internal sealed class PositionIn
+{
+    [JsonPropertyName("cell")]    public string Cell { get; set; } = "";
+    [JsonPropertyName("indoor")]  public bool Indoor { get; set; }
+    [JsonPropertyName("wx")]      public double Wx { get; set; }
+    [JsonPropertyName("wy")]      public double Wy { get; set; }
+    [JsonPropertyName("z")]       public double Z { get; set; }
+    [JsonPropertyName("heading")] public double? Heading { get; set; }
+}
+
+/// <summary>One enchantment as the phone reads it (DrakBot Remote's "enchantments" entry).</summary>
+internal sealed class EnchantmentOut
+{
+    [JsonPropertyName("spellId")]          public uint SpellId { get; set; }
+    [JsonPropertyName("name")]             public string Name { get; set; } = "";
+    [JsonPropertyName("family")]           public uint Family { get; set; }
+    [JsonPropertyName("tier")]             public int Tier { get; set; }
+    [JsonPropertyName("secondsRemaining")] public double SecondsRemaining { get; set; }
+    [JsonPropertyName("beneficial")]       public bool Beneficial { get; set; } = true;
+    [JsonPropertyName("school")]           public uint School { get; set; }
+    [JsonPropertyName("iconId")]           public uint IconId { get; set; }
+}
+
+/// <summary>
+/// What this agent can actually do, sent as "capabilities" so the phone hides what doesn't work here
+/// (without it the app assumes everything the old agent offered). Same names as DrakBot Remote's, plus
+/// "character" (GET /character, the Skills tab) and "worldMap" (GET /worldmap, the landscape map).
+/// </summary>
+internal sealed class AgentCapabilities
+{
+    [JsonPropertyName("inventory")]      public bool Inventory { get; set; }
+    [JsonPropertyName("settings")]       public bool Settings { get; set; }
+    [JsonPropertyName("movement")]       public bool Movement { get; set; }
+    [JsonPropertyName("chat")]           public bool Chat { get; set; }
+    [JsonPropertyName("icons")]          public bool Icons { get; set; }
+    [JsonPropertyName("closeClient")]    public bool CloseClient { get; set; }
+    [JsonPropertyName("video")]          public bool Video { get; set; }
+    [JsonPropertyName("videoMinimized")] public bool VideoMinimized { get; set; }
+    [JsonPropertyName("videoHd")]        public bool VideoHd { get; set; }
+    [JsonPropertyName("click")]          public bool Click { get; set; }
+    [JsonPropertyName("runs")]           public bool Runs { get; set; }
+    [JsonPropertyName("maps")]           public bool Maps { get; set; }
+    [JsonPropertyName("dungeon")]        public bool Dungeon { get; set; }
+    [JsonPropertyName("act")]            public bool Act { get; set; }
+    [JsonPropertyName("nearby")]         public bool Nearby { get; set; }
+    [JsonPropertyName("pick")]           public bool Pick { get; set; }
+    [JsonPropertyName("character")]      public bool Character { get; set; }
+    [JsonPropertyName("worldMap")]       public bool WorldMap { get; set; }
+    /// <summary>GET /nav/search + the travel / travelStop commands (RynthNav through the RynthRemote plugin).</summary>
+    [JsonPropertyName("travel")]         public bool Travel { get; set; }
+    /// <summary>The raise command: spend unassigned XP (and skill credits) from the Skills tab. Needs remote
+    /// control and a client whose RynthRemote plugin reports raiseXp (engine API v79).</summary>
+    [JsonPropertyName("raiseXp")]        public bool RaiseXp { get; set; }
 }
 
 /// <summary>The subset of the RynthAi snapshot the agent surfaces.</summary>
@@ -228,6 +329,17 @@ internal sealed class ClientStatus
     [JsonPropertyName("recentChat")]        public List<ChatLine>? RecentChat { get; set; }
     [JsonPropertyName("lastIssue")]         public string? LastIssue { get; set; }
     [JsonPropertyName("lastIssueAgeSec")]   public long LastIssueAgeSec { get; set; } = -1;
+    /// <summary>Every enchantment on the character, soonest to lapse first (null = the plugin doesn't say).</summary>
+    [JsonPropertyName("enchantments")]      public List<EnchantmentOut>? Enchantments { get; set; }
+    /// <summary>Facing in degrees (0 = north, clockwise) when the plugin reports it, for the map's arrow.</summary>
+    [JsonPropertyName("heading")]           public double? Heading { get; set; }
+    /// <summary>The last phone travel and how it stands (null when none this session).</summary>
+    [JsonPropertyName("travel")]            public TravelOut? Travel { get; set; }
+    /// <summary>This client takes the raise command (its plugin says so and remote control is on).</summary>
+    [JsonPropertyName("raiseXp")]           public bool RaiseXp { get; set; }
+    /// <summary>The hold-to-move protocol this client's plugin speaks: 2 = keep-alives and a dead-man
+    /// (the phone then sends moveKeepAlive), 0 = the old repeated moveStart.</summary>
+    [JsonPropertyName("moveProto")]         public int MoveProto { get; set; }
 }
 
 internal sealed class AggregatePayload
@@ -237,6 +349,7 @@ internal sealed class AggregatePayload
     [JsonPropertyName("agentVersion")]   public string AgentVersion { get; set; } = "";
     [JsonPropertyName("generatedAtUtc")] public DateTimeOffset GeneratedAtUtc { get; set; }
     [JsonPropertyName("clientCount")]    public int ClientCount { get; set; }
+    [JsonPropertyName("capabilities")]   public AgentCapabilities? Capabilities { get; set; }
     [JsonPropertyName("clients")]        public List<ClientStatus> Clients { get; set; } = new();
 }
 

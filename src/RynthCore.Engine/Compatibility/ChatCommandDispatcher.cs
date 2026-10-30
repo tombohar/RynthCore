@@ -57,6 +57,8 @@ internal static unsafe class ChatCommandDispatcher
     private const uint WM_KEYUP = 0x0101;
     private const uint WM_CHAR = 0x0102;
     private const int VK_RETURN = 0x0D;
+    /// <summary>ChatMessageType AC prints its own command notices in ("Someone must @tell you first!").</summary>
+    private const int ChatTypeNotice = 0x1A;
 
     /// <summary>
     /// When true, all commands are dispatched via keyboard simulation
@@ -106,20 +108,45 @@ internal static unsafe class ChatCommandDispatcher
         }
     }
 
-    public static bool Dispatch(string? text)
+    /// <summary>A line from a plugin, a command file or the login commands (<see cref="ChatCommandOrigin.Script"/>).</summary>
+    public static bool Dispatch(string? text) => Dispatch(text, ChatCommandOrigin.Script);
+
+    /// <summary>
+    /// Runs a chat line as if typed. <paramref name="origin"/> says who sent it, for the answer of an
+    /// engine /rc command (RynthCoreChatCommands): Player for a RynthCore hotkey, Script for the rest.
+    /// </summary>
+    public static bool Dispatch(string? text, ChatCommandOrigin origin)
     {
         if (string.IsNullOrWhiteSpace(text))
             return false;
+
+        // Deep-audit finding #4 (2026-06-18): this whole function is not
+        // network-only — it runs arbitrary plugin OnChatBarEnter handlers,
+        // constructs/destructs AC's native PStringBase<char> in AC's heap,
+        // and calls Event_Talk/Event_Emote/etc. directly against AC's live
+        // chat-manager. The old inline comment claiming this was "thread-safe"
+        // was an inherited Decal/VTank assumption that contradicts the
+        // engine's own AcMainThreadQueue design (see the documented
+        // 0x00460D1D chat-buffer write-AV class). Gating here (rather than at
+        // each call site) covers every off-thread caller at once:
+        // OnLoginCommandRunner (ThreadPool), ChatFileDispatcher
+        // (FileSystemWatcher thread), and Host.InvokeChatParser (plugin
+        // export, any thread). The queued call re-invokes this same method
+        // from the drain, where IsOnMainThread is satisfied and the body
+        // below runs directly — so there's only one code path to keep in sync.
+        if (!MainThreadGuard.IsOnMainThread())
+            return AcMainThreadQueue.EnqueueChatCommand(text, origin);
 
         try
         {
             string trimmed = text.Trim();
             if (trimmed.Length == 0) return false;
+            LogoffOriginProbe.RecordChat("ChatCommandDispatcher", trimmed);
 
             // RynthCore engine commands (/rc ...) are handled before plugin
             // pre-dispatch and before any AC chat routing so they work even
             // when the overlay is hidden and no plugin can eat the line.
-            if (RynthCoreChatCommands.TryHandle(trimmed))
+            if (RynthCoreChatCommands.TryHandle(trimmed, origin))
                 return true;
 
             // Expand shorthand: /s → /say, /t → /tell, /e → /emote
@@ -141,7 +168,15 @@ internal static unsafe class ChatCommandDispatcher
                 _inPluginPreDispatch = true;
                 try
                 {
-                    if (PluginManager.DispatchChatBarEnter(trimmed))
+                    // The player's line (a hotkey's /ra command): a /rc line a plugin runs while it
+                    // handles it is the player's too (RynthCoreChatCommands.PlayerLine).
+                    if (origin == ChatCommandOrigin.Player)
+                    {
+                        using (RynthCoreChatCommands.PlayerLine())
+                            if (PluginManager.DispatchChatBarEnter(trimmed))
+                                return true;
+                    }
+                    else if (PluginManager.DispatchChatBarEnter(trimmed))
                         return true;
                 }
                 catch (Exception ex)
@@ -149,6 +184,18 @@ internal static unsafe class ChatCommandDispatcher
                     RynthLog.Compat($"ChatDispatch: plugin pre-dispatch threw on '{trimmed}' - {ex.GetType().Name}: {ex.Message}");
                 }
                 finally { _inPluginPreDispatch = false; }
+            }
+
+            // /reply (/r) and /retell (/rt) become a /tell to the last person who told you
+            // something / you told something (TellMemory.cs says why AC can't do them here).
+            if (TellMemory.Shared.TryRewrite(trimmed, out string? tellLine, out string? tellError))
+            {
+                if (tellLine == null)
+                {
+                    AcMainThreadQueue.EnqueueWriteToChat(tellError!, ChatTypeNotice);
+                    return false;
+                }
+                trimmed = tellLine;
             }
 
             // Direct Chat Input mode — everything goes through keyboard sim
@@ -171,9 +218,11 @@ internal static unsafe class ChatCommandDispatcher
             if (StartsWithCmd(trimmed, "/tell "))
                 return DispatchTell(trimmed.Substring(6));
 
-            // /a message (allegiance channel broadcast)
+            // /a message (allegiance): AC's own chat command, like /f. Event_ChannelBroadcast(1)
+            // got "You do not have permission to talk in that channel" (2026-10-11): the server
+            // gives each allegiance its own Turbine chat room, which only AC's /a knows.
             if (StartsWithCmd(trimmed, "/a "))
-                return DispatchChannelBroadcast(1, trimmed.Substring(3));
+                return DispatchRaw(trimmed);
 
             // /f message (fellowship — no direct Event_*; use the raw chat path)
             if (StartsWithCmd(trimmed, "/f "))
@@ -189,6 +238,35 @@ internal static unsafe class ChatCommandDispatcher
         catch (Exception ex)
         {
             RynthLog.Compat($"ChatDispatch: error - {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Sends a server command quietly: Talk text that starts with '@', which ACE runs as
+    /// a command (GameActionTalk) exactly as it runs a typed "/command" the client
+    /// forwards. Straight to CM_Communication::Event_Talk: no plugin pre-dispatch, no
+    /// chat-bar keystrokes, nothing said aloud. Printable ASCII only. AC's main thread
+    /// only (the Aelrynth mastery feed calls it from MainThreadSnapshots.Tick); refuses
+    /// anywhere else rather than queueing.
+    /// </summary>
+    public static bool SendServerCommand(string atCommand)
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+        if (string.IsNullOrEmpty(atCommand) || atCommand.Length < 2 || atCommand[0] != '@' || atCommand.Length > 200)
+            return false;
+        foreach (char c in atCommand)
+            if (c < 0x20 || c > 0x7E)
+                return false;
+        try
+        {
+            LogoffOriginProbe.RecordChat("ServerCommand", atCommand);
+            return DispatchSay(atCommand);
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Compat($"ChatDispatch: server command '{atCommand}' failed - {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }
@@ -251,6 +329,8 @@ internal static unsafe class ChatCommandDispatcher
         if (targetName.Length == 0 || message.Length == 0)
             return false;
 
+        // AC's /tell would remember this name for its /retell; this call skips AC's parser.
+        TellMemory.Shared.NoteTellSent(targetName);
         var psMsg = LegacyPString.Create(message);
         var psTarget = LegacyPString.Create(targetName);
         try
@@ -292,6 +372,11 @@ internal static unsafe class ChatCommandDispatcher
     /// </summary>
     private static bool DispatchRaw(string command)
     {
+        // Decal bridge mode: AC's outgoing-chat function belongs to Decal (our hook is not
+        // installed) and there is no window subclass for keystrokes, so the line goes to
+        // Decal's InvokeChatParser, which the bridge runs on AC's main thread.
+        if (DecalBridgeHost.Active)
+            return DecalBridgeHost.TryInvokeChatParser(command);
         if (ChatCallbackHooks.TryDispatchDirect(command))
             return true;
         return SimulateChatInput(command);
@@ -303,27 +388,39 @@ internal static unsafe class ChatCommandDispatcher
     /// </summary>
     private static bool SimulateChatInput(string command)
     {
-        // Enter → opens chat input. The WM_CHAR '\r' is required here to complete
-        // AC's chat-bar open transition.
-        IntPtr enterDown = MakeKeyLParam(0x1C, false);
-        IntPtr enterUp = MakeKeyLParam(0x1C, true);
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr('\r'), enterDown);
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYUP, new IntPtr(VK_RETURN), enterUp);
+        LogoffOriginProbe.RecordChat("SimulateChatInput", command);
+        // Deep-audit finding #18 (2026-06-18): SendToGameWndProc drives
+        // CallWindowProcA directly into AC's WndProc — calling that off the
+        // window-owning thread is a cross-thread WndProc re-entry. Dispatch()
+        // gating (finding #4) already closes the two known off-thread paths
+        // into this method, but wrap here too per the fix note ("protect
+        // future callers"): RunOnGameThread inlines with zero overhead when
+        // already on the game thread (the common case, post-#4) and marshals
+        // synchronously otherwise.
+        return ImGuiBackend.Win32Backend.RunOnGameThread(() =>
+        {
+            // Enter → opens chat input. The WM_CHAR '\r' is required here to complete
+            // AC's chat-bar open transition.
+            IntPtr enterDown = MakeKeyLParam(0x1C, false);
+            IntPtr enterUp = MakeKeyLParam(0x1C, true);
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr('\r'), enterDown);
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYUP, new IntPtr(VK_RETURN), enterUp);
 
-        // Type each character
-        foreach (char c in command)
-            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr(c), IntPtr.Zero);
+            // Type each character
+            foreach (char c in command)
+                ImGuiBackend.Win32Backend.SendToGameWndProc(WM_CHAR, new IntPtr(c), IntPtr.Zero);
 
-        // Enter → submit. NO trailing WM_CHAR '\r' here: the WM_KEYDOWN submits and
-        // closes the bar; a '\r' arriving on the now-closed bar re-opens it (the
-        // "lone '\r'" behavior the chat-capture path also guards against), leaving the
-        // bar open so the NEXT command's open-Enter submits an empty bar instead and
-        // the command is lost — the "works once then stops" symptom.
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
-        ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYUP, new IntPtr(VK_RETURN), enterUp);
+            // Enter → submit. NO trailing WM_CHAR '\r' here: the WM_KEYDOWN submits and
+            // closes the bar; a '\r' arriving on the now-closed bar re-opens it (the
+            // "lone '\r'" behavior the chat-capture path also guards against), leaving the
+            // bar open so the NEXT command's open-Enter submits an empty bar instead and
+            // the command is lost — the "works once then stops" symptom.
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYDOWN, new IntPtr(VK_RETURN), enterDown);
+            ImGuiBackend.Win32Backend.SendToGameWndProc(WM_KEYUP, new IntPtr(VK_RETURN), enterUp);
 
-        return true;
+            return true;
+        });
     }
 
     private static IntPtr MakeKeyLParam(byte scanCode, bool keyUp)

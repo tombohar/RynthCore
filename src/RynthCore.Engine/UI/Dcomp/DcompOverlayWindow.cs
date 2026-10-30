@@ -308,6 +308,7 @@ internal sealed class DcompOverlayWindow : Window
             ["Monsters"] = new(MonstersPanel.Create,   true,  460, 480),
             ["Nav"]      = new(NavPanel.Create,        true,  420, 480),
             ["Meta"]     = new(MetaPanel.Create,       true,  460, 480),
+            ["Lua"]      = new(LuaPanel.Create,        true,  460, 560),
         };
     }
 

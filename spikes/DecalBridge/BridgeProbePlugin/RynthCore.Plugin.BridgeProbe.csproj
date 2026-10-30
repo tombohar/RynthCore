@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Spike (Decal bridge): a managed plugin for the CoreCLR engine that logs what it receives.
+       dotnet publish -c Release -o C:\Games\RynthCore\Test\plugins-decal\BridgeProbe -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <AssemblyName>RynthCore.Plugin.BridgeProbe</AssemblyName>
+    <RootNamespace>RynthCore.Plugin.BridgeProbe</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\RynthCore.PluginCore\RynthCore.PluginCore.csproj" />
+    <ProjectReference Include="..\..\..\src\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+  </ItemGroup>
+
+</Project>

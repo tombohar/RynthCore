@@ -42,7 +42,8 @@ internal sealed unsafe class LayeredWindow : IDisposable
     // class because its WndProc points into the unloaded DLL. So bake a
     // per-DLL-load Guid into the name — each engine instance gets a fresh
     // class atom backed by its own WndProc pointer.
-    private static readonly string ClassName = "RynthCoreLayeredPanel_" + Guid.NewGuid().ToString("N");
+    private const string ClassNamePrefix = "RynthCoreLayeredPanel_";
+    private static readonly string ClassName = ClassNamePrefix + Guid.NewGuid().ToString("N");
 
     private const int  WS_POPUP         = unchecked((int)0x80000000);
     private const int  WS_EX_LAYERED    = 0x00080000;
@@ -172,6 +173,15 @@ internal sealed unsafe class LayeredWindow : IDisposable
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    /// <summary>UI deep-dive finding P1-B (2026-07-02): true iff this window's
+    /// native HWND is currently visible (not minimized/hidden). Used by
+    /// FloatingPanelHost.Tick to skip the whole per-tick raster+blit for a
+    /// popout the user can't see anyway.</summary>
+    public bool IsVisible => Hwnd != IntPtr.Zero && IsWindowVisible(Hwnd);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
 
@@ -183,13 +193,21 @@ internal sealed unsafe class LayeredWindow : IDisposable
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern int    ReleaseDC(IntPtr hWnd, IntPtr hDC);
     [DllImport("user32.dll")] private static extern IntPtr SetCapture(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern IntPtr GetCapture();
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
+    private const uint MONITOR_DEFAULTTONEAREST = 2;
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromRect(ref RECT rect, uint flags);
+    [DllImport("user32.dll")] private static extern bool GetMonitorInfoW(IntPtr monitor, ref MONITORINFO info);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool   SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern bool   BringWindowToTop(IntPtr hWnd);
     private const uint GW_OWNER = 4;
     [DllImport("user32.dll")] private static extern bool   ReleaseCapture();
-    [DllImport("user32.dll")] private static extern bool   PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool   AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll")] private static extern uint   GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     [DllImport("user32.dll")] private static extern bool   GetCursorPos(out POINT lpPoint);
@@ -251,9 +269,29 @@ internal sealed unsafe class LayeredWindow : IDisposable
     private static readonly Dictionary<IntPtr, LayeredWindow> _instances = new();
     private static int _hittestDiagCount;
 
+    /// <summary>
+    /// Posted to a panel window to destroy itself. Handled here, before the
+    /// instance lookup, so it runs on whichever thread created the window —
+    /// DestroyWindow only works there. A window created on the overlay thread
+    /// (not the game thread) could not be destroyed by a destroy posted to the
+    /// game thread (ACCESS_DENIED) and stayed on screen: the double dashboard.
+    /// Must not collide with Win32Backend's game-window messages (0x8001-0x8005).
+    /// </summary>
+    private const uint WM_RYNTH_SELF_DESTROY = 0x8051;
+
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static IntPtr StaticWndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
+        // Handled before the instance lookup: Dispose has already removed the
+        // instance by the time this posted message is dispatched.
+        if (msg == WM_RYNTH_SELF_DESTROY)
+        {
+            bool destroyed = DestroyWindow(hwnd);
+            int err = destroyed ? 0 : Marshal.GetLastWin32Error();
+            RynthCore.Engine.RynthLog.Info($"LayeredWindow: self-destroy DestroyWindow(0x{hwnd.ToInt64():X}) = {destroyed} err={err} on thread=0x{GetCurrentThreadId():X}.");
+            return IntPtr.Zero;
+        }
+
         LayeredWindow? self;
         lock (_instancesLock)
             _instances.TryGetValue(hwnd, out self);
@@ -264,18 +302,206 @@ internal sealed unsafe class LayeredWindow : IDisposable
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
+    [DllImport("user32.dll")]
+    private static extern int EnumThreadWindows(uint dwThreadId, delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int> lpfn, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassNameW(IntPtr hWnd, char* lpClassName, int nMaxCount);
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static int CollectThreadWindow(IntPtr hwnd, IntPtr lParam)
+    {
+        if (GCHandle.FromIntPtr(lParam).Target is List<IntPtr> found)
+            found.Add(hwnd);
+        return 1;
+    }
+
+    /// <summary>
+    /// Destroys panel windows owned by the calling thread.
+    /// Must run on AC's game thread — the panels are created there (see
+    /// FloatingPanelHost's RunOnGameThread) and DestroyWindow only works on
+    /// the owning thread.
+    ///
+    /// Synchronous backstop for panels that were never disposed: because the
+    /// engine module is never unloaded, such a panel lives on after shutdown,
+    /// frozen on its last frame, deaf to input, and hidden under the next
+    /// generation's copy of it until that one is moved ("two RynthAi windows").
+    /// (Disposed panels destroy themselves via WM_RYNTH_SELF_DESTROY.)
+    ///
+    /// <paramref name="includeThisGeneration"/>=false spares this engine
+    /// load's own windows (class names carry a per-load Guid) and removes only
+    /// ones an earlier load left behind.
+    /// </summary>
+    [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern int EnumWindows(delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int> lpfn, IntPtr lParam);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentProcessId();
+
+    /// <summary>
+    /// Takes a panel window off the screen at once (never blocks, any thread)
+    /// and asks its own thread to destroy it.
+    /// </summary>
+    internal static bool Retire(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
+        ShowWindowAsync(hwnd, SW_HIDE);
+        return PostMessage(hwnd, WM_RYNTH_SELF_DESTROY, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    // Panel title → the window currently showing it popped out.
+    private static readonly Dictionary<string, IntPtr> _windowByTitle = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Records <paramref name="hwnd"/> as the one popped-out window for
+    /// <paramref name="title"/>; any earlier window for that title is retired.
+    /// A panel can never have two popped-out windows.
+    /// </summary>
+    internal static void ClaimTitle(string title, IntPtr hwnd)
+    {
+        IntPtr prior;
+        lock (_instancesLock)
+        {
+            _windowByTitle.TryGetValue(title, out prior);
+            _windowByTitle[title] = hwnd;
+        }
+        if (prior != IntPtr.Zero && prior != hwnd && IsWindow(prior))
+        {
+            RynthCore.Engine.RynthLog.Info($"LayeredWindow: '{title}' already had window 0x{prior.ToInt64():X}; retiring it for 0x{hwnd.ToInt64():X}.");
+            Retire(prior);
+        }
+    }
+
+    /// <summary>
+    /// The content rects (screen px: left, top, width, height) of every visible panel window.
+    /// They sit above the game window, so nothing drawn in the game frame can show over them.
+    /// </summary>
+    internal static List<(int Left, int Top, int Width, int Height)> VisibleContentRects()
+    {
+        LayeredWindow[] windows;
+        lock (_instancesLock)
+        {
+            windows = new LayeredWindow[_instances.Count];
+            _instances.Values.CopyTo(windows, 0);
+        }
+        var rects = new List<(int, int, int, int)>(windows.Length);
+        foreach (LayeredWindow w in windows)
+            if (w.IsVisible && w.Width > 0 && w.Height > 0)
+                rects.Add((w.ScreenLeft, w.ScreenTop, w.Width, w.Height));
+        return rects;
+    }
+
+    private static readonly HashSet<IntPtr> _sweptLogged = new();
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
+    private static int CollectTopWindow(IntPtr hwnd, IntPtr lParam)
+    {
+        if (GCHandle.FromIntPtr(lParam).Target is List<IntPtr> found)
+            found.Add(hwnd);
+        return 1;
+    }
+
+    /// <summary>
+    /// Every visible panel window of this process that no live LayeredWindow
+    /// owns (it was disposed but survived, or an earlier engine load left it)
+    /// is hidden and destroyed. Live windows are always in _instances, so this
+    /// can't touch an open panel. Any thread; run from the heartbeat.
+    /// </summary>
+    internal static void SweepOrphans()
+    {
+        var found = new List<IntPtr>();
+        GCHandle handle = GCHandle.Alloc(found);
+        try { EnumWindows(&CollectTopWindow, GCHandle.ToIntPtr(handle)); }
+        finally { handle.Free(); }
+
+        uint pid = GetCurrentProcessId();
+        char* buffer = stackalloc char[128];
+        foreach (IntPtr hwnd in found)
+        {
+            GetWindowThreadProcessId(hwnd, out uint winPid);
+            if (winPid != pid || !IsWindowVisible(hwnd)) continue;
+            int length = GetClassNameW(hwnd, buffer, 128);
+            if (length <= 0) continue;
+            if (!new string(buffer, 0, length).StartsWith(ClassNamePrefix, StringComparison.Ordinal)) continue;
+            bool live;
+            lock (_instancesLock) live = _instances.ContainsKey(hwnd);
+            if (live) continue;
+            bool first;
+            lock (_instancesLock) first = _sweptLogged.Add(hwnd);
+            if (first) RynthCore.Engine.RynthLog.Info($"LayeredWindow: orphan panel window 0x{hwnd.ToInt64():X} still visible; hiding and destroying it.");
+            Retire(hwnd);
+        }
+    }
+
+    internal static void DestroyThreadPanelWindows(bool includeThisGeneration)
+    {
+        var found = new List<IntPtr>();
+        GCHandle handle = GCHandle.Alloc(found);
+        try
+        {
+            EnumThreadWindows(GetCurrentThreadId(), &CollectThreadWindow, GCHandle.ToIntPtr(handle));
+        }
+        finally
+        {
+            handle.Free();
+        }
+
+        char* buffer = stackalloc char[128];
+        foreach (IntPtr hwnd in found)
+        {
+            int length = GetClassNameW(hwnd, buffer, 128);
+            if (length <= 0)
+                continue;
+            string className = new(buffer, 0, length);
+            if (!className.StartsWith(ClassNamePrefix, StringComparison.Ordinal))
+                continue;
+            bool thisGeneration = className == ClassName;
+            if (thisGeneration && !includeThisGeneration)
+                continue;
+
+            bool ok = DestroyWindow(hwnd);
+            RynthCore.Engine.RynthLog.Info($"LayeredWindow: DestroyWindow(0x{hwnd.ToInt64():X}) = {ok} — {(thisGeneration ? "still open at shutdown" : "left over from an earlier engine load")}.");
+        }
+    }
+
     // ─── Instance state ────────────────────────────────────────────────────
     public IntPtr Hwnd { get; private set; }
+
+    // The panel ("content") rect on the screen. The HWND can be larger: a popped-out
+    // ImGui panel's window grows a transparent margin while a tooltip or popup reaches
+    // past the panel (Present). The margins are the _inset* fields; they are always 0
+    // for windows fed by UpdatePixels (the Avalonia pop-outs), where the HWND is the
+    // content. Drag band, grip, moves, resizes and EnsureOnScreen all work on the content.
     public int Width { get; private set; }
     public int Height { get; private set; }
     public int ScreenLeft { get; private set; }
     public int ScreenTop { get; private set; }
+
+    private int _insetL, _insetT, _insetR, _insetB;
+
+    /// <summary>The HWND's rect (the content plus its transparent margins).</summary>
+    public int SurfaceLeft => ScreenLeft - _insetL;
+    public int SurfaceTop => ScreenTop - _insetT;
+    public int SurfaceWidth => Width + _insetL + _insetR;
+    public int SurfaceHeight => Height + _insetT + _insetB;
+
+    /// <summary>True while the window is being moved or resized by the mouse.</summary>
+    public bool IsDragging => _dragMode != DragNone;
+
+    /// <summary>
+    /// True: only the content rect takes the mouse; anything drawn in the margins (a
+    /// tooltip) lets clicks through to the window below, like its transparent pixels.
+    /// Set false while the margins hold something clickable (a popup menu).
+    /// </summary>
+    public bool MarginsClickThrough { get; set; } = true;
 
     /// <summary>
     /// Pixel height of the top "drag" region — WM_NCHITTEST returns HTCAPTION
     /// here so the OS handles drag-to-move with no input forwarding needed.
     /// </summary>
     public int CaptionHeight { get; set; } = 24;
+
+    /// <summary>False: no bottom-right resize corner (a window sized to its content, like the bar).</summary>
+    public bool ResizeGripEnabled { get; set; } = true;
 
     /// <summary>
     /// Pixel width of the right portion of the caption that should NOT act
@@ -370,7 +596,13 @@ internal sealed unsafe class LayeredWindow : IDisposable
     private const int DragNone   = 0;
     private const int DragMove   = 1;
     private const int DragResize = 2;
-    private const int GripPx     = 22;   // bottom-right resize hot zone (matches WM_NCHITTEST grip below)
+    // Live-testing finding 2026-09-02: the resize grip was much too large
+    // relative to the rest of the panel chrome (close/redock buttons run
+    // ~14-20px). Shrunk from 22 to 16 here and in the three visual grip
+    // copies in AvaloniaOverlay.cs (BuildResizeGrip + the docked-panel and
+    // popped-out-panel inline copies) so the visible glyph and the actual
+    // clickable hot zone stay matched.
+    private const int GripPx     = 16;   // bottom-right resize hot zone (matches WM_NCHITTEST grip below)
     private const int MinDragW   = 80;   // floor so a resize can't shrink the HWND to nothing
     private const int MinDragH   = 40;
     private int  _dragMode;
@@ -424,8 +656,13 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 // lParam is screen coord — convert to layered-client.
                 int sx = (short)((long)lParam & 0xFFFF);
                 int sy = (short)(((long)lParam >> 16) & 0xFFFF);
-                int cx = sx - ScreenLeft;
-                int cy = sy - ScreenTop;
+                int cx = sx - SurfaceLeft;
+                int cy = sy - SurfaceTop;
+
+                // Outside the content, in a margin holding only a tooltip: not ours.
+                if (MarginsClickThrough && (_insetL | _insetT | _insetR | _insetB) != 0
+                    && (cx < _insetL || cy < _insetT || cx >= _insetL + Width || cy >= _insetT + Height))
+                    return (IntPtr)HTTRANSPARENT;
 
                 // NOTE: we intentionally do NOT return HTBOTTOMRIGHT (resize
                 // grip) or HTCAPTION (move) here. Either would make DefWindowProc
@@ -526,15 +763,16 @@ internal sealed unsafe class LayeredWindow : IDisposable
             {
                 int x = (short)((long)lParam & 0xFFFF);
                 int y = (short)(((long)lParam >> 16) & 0xFFFF);
-                ScreenLeft = x;
-                ScreenTop = y;
+                ScreenLeft = x + _insetL;
+                ScreenTop = y + _insetT;
                 // During the OS HTCAPTION modal drag loop, WM_TIMER can be
                 // suppressed so Tick() / UpdateLayeredWindow may not fire
                 // while the HWND moves. Repaint existing pixels at the new
                 // screen position on every WM_MOVE so the layered visual
                 // tracks the HWND without waiting for the next timer tick.
                 // No pixel copy — just repositions the existing DIB.
-                if (_modalSizeMoveActive)
+                // (Not from inside Present's own UpdateLayeredWindow.)
+                if (_modalSizeMoveActive && !_presenting)
                     PaintExistingPixelsAt(x, y);
                 if (_suppressMoveCallback) break;
                 // Defer the persist callback to drag end (WM_EXITSIZEMOVE) —
@@ -542,14 +780,14 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 if (_modalSizeMoveActive)
                     _pendingMoveNotify = true;
                 else
-                    OnMoved?.Invoke(x, y);
+                    OnMoved?.Invoke(ScreenLeft, ScreenTop);
                 break;
             }
 
             case WM_SIZE:
             {
-                int w = (short)((long)lParam & 0xFFFF);
-                int h = (short)(((long)lParam >> 16) & 0xFFFF);
+                int w = (short)((long)lParam & 0xFFFF) - _insetL - _insetR;
+                int h = (short)(((long)lParam >> 16) & 0xFFFF) - _insetT - _insetB;
                 if (w > 0 && h > 0)
                 {
                     Width = w;
@@ -569,8 +807,9 @@ internal sealed unsafe class LayeredWindow : IDisposable
 
             case WM_LBUTTONDOWN:
             {
-                int cx = (short)((long)lParam & 0xFFFF);
-                int cy = (short)(((long)lParam >> 16) & 0xFFFF);
+                // Client coordinates are the HWND's; the chrome below is the content's.
+                int cx = (short)((long)lParam & 0xFFFF) - _insetL;
+                int cy = (short)(((long)lParam >> 16) & 0xFFFF) - _insetT;
                 RynthCore.Engine.RynthLog.Info($"LayeredWindow(0x{Hwnd.ToInt64():X}): WM_LBUTTONDOWN at layered=({cx},{cy}).");
 
                 // Native chrome-button detection: floating panels live at
@@ -599,7 +838,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
                 // Resize grip (bottom-right). Handle the resize ourselves rather
                 // than via the OS modal loop — see BeginDrag / the WM_NCHITTEST
                 // note. Checked before the caption so the corner wins.
-                if (cx >= Width - GripPx && cy >= Height - GripPx && cx < Width && cy < Height)
+                if (ResizeGripEnabled && cx >= Width - GripPx && cy >= Height - GripPx && cx < Width && cy < Height)
                 {
                     BeginDrag(DragResize);
                     return IntPtr.Zero;
@@ -665,7 +904,12 @@ internal sealed unsafe class LayeredWindow : IDisposable
             case WM_CAPTURECHANGED:
                 // Mouse capture was taken from us (alt-tab, another grab, or our
                 // own ReleaseCapture in EndDrag). Don't leave a drag latched.
-                CancelDragFromCaptureLoss();
+                // lParam is the window gaining capture: this window taking it
+                // again is not a loss (a content drag starts while the press
+                // already holds capture, and SetCapture on the capturing window
+                // still sends this message - it cancelled every content drag).
+                if (lParam != Hwnd)
+                    CancelDragFromCaptureLoss();
                 break;
 
             case WM_DESTROY:
@@ -777,7 +1021,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
     {
         if (_disposed || Hwnd == IntPtr.Zero || _memDc == IntPtr.Zero || _hbm == IntPtr.Zero) return;
         var dstPt = new POINT { X = screenX, Y = screenY };
-        var size   = new SIZE  { CX = Width,  CY = Height };
+        var size   = new SIZE  { CX = SurfaceWidth,  CY = SurfaceHeight };
         var srcPt  = new POINT { X = 0,       Y = 0 };
         var blend  = new BLENDFUNCTION
         {
@@ -790,6 +1034,29 @@ internal sealed unsafe class LayeredWindow : IDisposable
     }
 
     // ─── Custom non-modal move/resize (see the _dragMode fields) ─────────────
+
+    /// <summary>
+    /// Starts moving the window from a press inside the content (a chromeless
+    /// ImGui panel dragged by its own surface). The content saw the button go
+    /// down, so it is sent a button-up at the end of the move.
+    /// </summary>
+    public void BeginContentMove()
+    {
+        if (_disposed || Hwnd == IntPtr.Zero || _dragMode != DragNone) return;
+        _dragFromContent = true;
+        BeginDrag(DragMove);
+    }
+
+    private bool _dragFromContent;
+
+    private void ReleaseContentButton()
+    {
+        if (!_dragFromContent) return;
+        _dragFromContent = false;
+        if (!GetCursorPos(out POINT p)) return;
+        int cx = p.X - SurfaceLeft, cy = p.Y - SurfaceTop;   // HWND client coordinates, like any mouse message
+        ForwardInput(WM_LBUTTONUP, IntPtr.Zero, (IntPtr)((cy << 16) | (cx & 0xFFFF)));
+    }
 
     private void BeginDrag(int mode)
     {
@@ -808,7 +1075,12 @@ internal sealed unsafe class LayeredWindow : IDisposable
         _pendingMoveNotify   = false;
         _pendingResizeNotify = false;
         _lastResizeApplyTick = 0;
-        SetCapture(Hwnd);
+        // A content move starts while the press that began it already holds capture
+        // (WM_LBUTTONDOWN took it). Taking it again sent WM_CAPTURECHANGED, which
+        // ended the drag as soon as it began: popped-out faces that drag by their
+        // own surface (the RynthAi dashboard, the bar) could not be moved.
+        if (GetCapture() != Hwnd)
+            SetCapture(Hwnd);
     }
 
     private void UpdateDrag()
@@ -850,11 +1122,15 @@ internal sealed unsafe class LayeredWindow : IDisposable
         _pendingMoveNotify   = false;
         _pendingResizeNotify = false;
         ReleaseCapture();
+        ReleaseContentButton();
 
         // Persist the final geometry (mirrors what WM_EXITSIZEMOVE used to do
-        // for the OS modal loop).
+        // for the OS modal loop). A move never leaves the window off the screen.
         if (mode == DragMove)
+        {
+            EnsureOnScreen();
             OnMoved?.Invoke(ScreenLeft, ScreenTop);
+        }
         else if (mode == DragResize)
             OnResizeEnd?.Invoke(Width, Height);
     }
@@ -874,10 +1150,63 @@ internal sealed unsafe class LayeredWindow : IDisposable
         _modalSizeMoveActive = false;
         _pendingMoveNotify   = false;
         _pendingResizeNotify = false;
+        ReleaseContentButton();
         if (mode == DragMove)
+        {
+            EnsureOnScreen();
             OnMoved?.Invoke(ScreenLeft, ScreenTop);
+        }
         else if (mode == DragResize)
             OnResizeEnd?.Invoke(Width, Height);
+    }
+
+    /// <summary>
+    /// Pulls a (left, top, width, height) rectangle inside the work area of the
+    /// monitor nearest to it: wholly inside when it fits, else its top-left corner.
+    /// True when it had to move. Any thread.
+    /// </summary>
+    public static bool ClampToWorkArea(ref int left, ref int top, int width, int height)
+    {
+        var r = new RECT { Left = left, Top = top, Right = left + Math.Max(1, width), Bottom = top + Math.Max(1, height) };
+        IntPtr monitor = MonitorFromRect(ref r, MONITOR_DEFAULTTONEAREST);
+        var info = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (monitor == IntPtr.Zero || !GetMonitorInfoW(monitor, ref info)) return false;
+        RECT work = info.rcWork;
+        int x = Math.Clamp(left, work.Left, Math.Max(work.Left, work.Right - width));
+        int y = Math.Clamp(top, work.Top, Math.Max(work.Top, work.Bottom - height));
+        if (x == left && y == top) return false;
+        left = x;
+        top = y;
+        return true;
+    }
+
+    /// <summary>The work area of the monitor nearest a rectangle (screen px). Any thread.</summary>
+    public static bool TryGetWorkArea(int left, int top, int width, int height, out int workLeft, out int workTop, out int workRight, out int workBottom)
+    {
+        workLeft = workTop = workRight = workBottom = 0;
+        var r = new RECT { Left = left, Top = top, Right = left + Math.Max(1, width), Bottom = top + Math.Max(1, height) };
+        IntPtr monitor = MonitorFromRect(ref r, MONITOR_DEFAULTTONEAREST);
+        var info = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (monitor == IntPtr.Zero || !GetMonitorInfoW(monitor, ref info)) return false;
+        workLeft = info.rcWork.Left;
+        workTop = info.rcWork.Top;
+        workRight = info.rcWork.Right;
+        workBottom = info.rcWork.Bottom;
+        return workRight > workLeft && workBottom > workTop;
+    }
+
+    /// <summary>
+    /// Moves the window back inside the nearest monitor's work area when any of
+    /// it is off the screen. No OnMoved (the caller persists). True when it moved.
+    /// The window's thread.
+    /// </summary>
+    public bool EnsureOnScreen()
+    {
+        if (_disposed || Hwnd == IntPtr.Zero || _dragMode != DragNone) return false;   // a drag ends with its own check
+        int x = ScreenLeft, y = ScreenTop;
+        if (!ClampToWorkArea(ref x, ref y, Width, Height)) return false;
+        Move(x, y);
+        return true;
     }
 
     /// <summary>
@@ -892,7 +1221,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
         if (newW < MinDragW) newW = MinDragW;
         if (newH < MinDragH) newH = MinDragH;
         if (newW == Width && newH == Height) return;
-        SetWindowPos(Hwnd, IntPtr.Zero, 0, 0, newW, newH,
+        SetWindowPos(Hwnd, IntPtr.Zero, 0, 0, newW + _insetL + _insetR, newH + _insetT + _insetB,
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
@@ -1028,6 +1357,69 @@ internal sealed unsafe class LayeredWindow : IDisposable
         }
     }
 
+    private bool _presenting;
+
+    /// <summary>
+    /// Shows a picture of <paramref name="surfaceWidth"/> x <paramref name="surfaceHeight"/>
+    /// premultiplied BGRA pixels in which the content (the panel) is the
+    /// <paramref name="contentWidth"/> x <paramref name="contentHeight"/> rect at
+    /// (<paramref name="insetLeft"/>, <paramref name="insetTop"/>); the rest is margin
+    /// (transparent, or a tooltip or popup reaching past the panel). The content stays
+    /// where it is on the screen: the HWND takes the picture's size and moves by the
+    /// margin, all in one UpdateLayeredWindow call, so nothing flickers or jumps.
+    /// The popped-out ImGui panels use this; UpdatePixels (no margins) is the Avalonia
+    /// pop-outs'. The window's thread.
+    /// </summary>
+    public void Present(IntPtr bgraData, int rowPitch, int surfaceWidth, int surfaceHeight,
+        int insetLeft, int insetTop, int contentWidth, int contentHeight)
+    {
+        if (_disposed || Hwnd == IntPtr.Zero || bgraData == IntPtr.Zero) return;
+        if (surfaceWidth <= 0 || surfaceHeight <= 0 || contentWidth <= 0 || contentHeight <= 0) return;
+        int insetRight = surfaceWidth - insetLeft - contentWidth;
+        int insetBottom = surfaceHeight - insetTop - contentHeight;
+        if (insetLeft < 0 || insetTop < 0 || insetRight < 0 || insetBottom < 0) return;
+        // A resize drag outran this picture (it was rendered at the size before the last
+        // step): keep the last one up; the next frame is drawn at the new size.
+        if (_dragMode == DragResize && (contentWidth != Width || contentHeight != Height)) return;
+
+        EnsureDib(surfaceWidth, surfaceHeight);
+        if (_dibBits == IntPtr.Zero) return;
+        int dibStride = _dibWidth * 4;
+        int rowBytes = surfaceWidth * 4;
+        for (int y = 0; y < surfaceHeight; y++)
+            Buffer.MemoryCopy((byte*)bgraData + (long)y * rowPitch, (byte*)_dibBits + (long)y * dibStride, dibStride, rowBytes);
+
+        // The picture's geometry becomes the window's. Set first: the WM_MOVE / WM_SIZE
+        // the update sends read the content back out of the HWND rect with these.
+        _insetL = insetLeft; _insetT = insetTop; _insetR = insetRight; _insetB = insetBottom;
+        Width = contentWidth;
+        Height = contentHeight;
+
+        var dstPt = new POINT { X = ScreenLeft - insetLeft, Y = ScreenTop - insetTop };
+        var size = new SIZE { CX = surfaceWidth, CY = surfaceHeight };
+        var srcPt = new POINT { X = 0, Y = 0 };
+        var blend = new BLENDFUNCTION { BlendOp = AC_SRC_OVER, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = AC_SRC_ALPHA };
+        _suppressMoveCallback = true;
+        _suppressResizeCallback = true;
+        _presenting = true;
+        bool ok;
+        try
+        {
+            ok = UpdateLayeredWindow(Hwnd, IntPtr.Zero, ref dstPt, ref size, _memDc, ref srcPt, 0, ref blend, ULW_ALPHA);
+        }
+        finally
+        {
+            _presenting = false;
+            _suppressMoveCallback = false;
+            _suppressResizeCallback = false;
+        }
+        if (!ok && _updateLogCount < 6)
+        {
+            _updateLogCount++;
+            RynthLog.Info($"LayeredWindow(0x{Hwnd.ToInt64():X}): Present {surfaceWidth}x{surfaceHeight} at ({dstPt.X},{dstPt.Y}) failed, err={Marshal.GetLastWin32Error()}.");
+        }
+    }
+
     private const int GWL_HWNDPARENT = -8;
 
     /// <summary>
@@ -1055,7 +1447,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
         _suppressMoveCallback = true;
         try
         {
-            SetWindowPos(Hwnd, IntPtr.Zero, screenLeft, screenTop, 0, 0,
+            SetWindowPos(Hwnd, IntPtr.Zero, screenLeft - _insetL, screenTop - _insetT, 0, 0,
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
         finally { _suppressMoveCallback = false; }
@@ -1100,34 +1492,100 @@ internal sealed unsafe class LayeredWindow : IDisposable
         if (hwnd != IntPtr.Zero)
         {
             lock (_instancesLock)
+            {
                 _instances.Remove(hwnd);
+                string? owned = null;
+                foreach (var kv in _windowByTitle) if (kv.Value == hwnd) { owned = kv.Key; break; }
+                if (owned != null) _windowByTitle.Remove(owned);
+            }
 
-            // DestroyWindow MUST run on the thread that owns the HWND — Win32
-            // silently no-ops it otherwise. The HWND was created on the game
-            // thread (see FloatingPanelHost ctor's RunOnGameThread wrap), so
-            // marshal the teardown there too. Without this, redocking left
-            // the original floating window visible but orphaned ("frozen
-            // duplicate"). RunOnGameThread inlines if we're already on the
-            // game thread, so this is safe for any caller.
-            try
-            {
-                RynthCore.Engine.ImGuiBackend.Win32Backend.RunOnGameThread(() =>
-                {
-                    bool destroyed = DestroyWindow(hwnd);
-                    int err = destroyed ? 0 : System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-                    RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: DestroyWindow(0x{hwnd.ToInt64():X}) = {destroyed} err={err} on thread=0x{GetCurrentThreadId():X}.");
-                });
-            }
-            catch (Exception ex)
-            {
-                RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: cross-thread DestroyWindow threw {ex.GetType().Name}: {ex.Message}. Falling back to inline call on thread=0x{GetCurrentThreadId():X}.");
-                // Best-effort fallback if RunOnGameThread isn't available
-                // (e.g. early shutdown after Win32Backend already torn down).
-                bool destroyed = DestroyWindow(hwnd);
-                RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: fallback DestroyWindow(0x{hwnd.ToInt64():X}) = {destroyed}.");
-            }
+            // Off the screen now, and ask the window's own thread to destroy it
+            // (works for a window created on any thread, never blocks, and still
+            // works after Win32Backend has unhooked the game WndProc: the post
+            // goes to the panel, not to the game window).
+            if (Retire(hwnd)) { DisposeDib(); return; }
+
+            // The post failed: the window is already gone, or its queue is full.
+            // DestroyWindow only works on the owner thread, so destroy here only
+            // when this thread owns it. The old backup posted the destroy to the
+            // game thread, which fails (ACCESS_DENIED) for a panel created on the
+            // Avalonia UI thread.
+            DestroyIfOwnedHere(hwnd);
         }
 
         DisposeDib();
+    }
+
+    private static void DestroyIfOwnedHere(IntPtr hwnd)
+    {
+        try
+        {
+            uint owner = GetWindowThreadProcessId(hwnd, out _);
+            uint current = GetCurrentThreadId();
+            bool ourClass = false;
+            if (owner != 0)
+            {
+                char* buffer = stackalloc char[128];
+                int length = GetClassNameW(hwnd, buffer, 128);
+                ourClass = length > 0 && new string(buffer, 0, length).StartsWith(ClassNamePrefix, StringComparison.Ordinal);
+            }
+
+            switch (PanelDestroyPlan.Choose(owner, current, ourClass))
+            {
+                case PanelDestroyFallback.DestroyHere:
+                    bool destroyed = DestroyWindow(hwnd);
+                    RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: self-destroy post failed; DestroyWindow(0x{hwnd.ToInt64():X}) on its owner thread 0x{current:X} = {destroyed}.");
+                    break;
+                case PanelDestroyFallback.LeaveHidden:
+                    ShowWindowAsync(hwnd, SW_HIDE);
+                    RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: self-destroy post to 0x{hwnd.ToInt64():X} failed; owner thread 0x{owner:X} is not this one (0x{current:X}), so it is left hidden (destroyed with its thread or by the shutdown sweep).");
+                    break;
+                default:
+                    break; // already gone, nothing to destroy
+            }
+        }
+        catch (Exception ex)
+        {
+            RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: destroy fallback threw {ex.GetType().Name}: {ex.Message}.");
+        }
+    }
+
+    /// <summary>
+    /// Destroys <paramref name="hwnd"/> on the thread that actually owns it, never
+    /// blocking the caller. Inline when the caller is the owner; otherwise posts
+    /// WM_RYNTH_SELF_DESTROY to the window itself so its own WndProc destroys it.
+    /// Posting to the panel (not the game window) works for panels created on
+    /// any thread, and still works after Win32Backend has unhooked the game
+    /// WndProc at shutdown — a post to the game window would be dropped by AC.
+    /// </summary>
+    private static void DestroyOnOwnerThread(IntPtr hwnd)
+    {
+        uint ownerThread = GetWindowThreadProcessId(hwnd, out _);
+        uint currentThread = GetCurrentThreadId();
+
+        if (ownerThread == 0)
+        {
+            // Window already gone (e.g. its owning thread exited, which destroys it).
+            RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: HWND=0x{hwnd.ToInt64():X} no longer exists — nothing to destroy.");
+            return;
+        }
+
+        if (ownerThread == currentThread)
+        {
+            bool destroyed = DestroyWindow(hwnd);
+            int err = destroyed ? 0 : Marshal.GetLastWin32Error();
+            RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: DestroyWindow(0x{hwnd.ToInt64():X}) inline on owner thread=0x{currentThread:X} = {destroyed} err={err}.");
+            return;
+        }
+
+        if (PostMessage(hwnd, WM_RYNTH_SELF_DESTROY, IntPtr.Zero, IntPtr.Zero))
+        {
+            RynthCore.Engine.RynthLog.Info($"LayeredWindow.Dispose: posted self-destroy to HWND=0x{hwnd.ToInt64():X} (owner thread=0x{ownerThread:X}, caller thread=0x{currentThread:X}).");
+            return;
+        }
+
+        // Post failed (queue full or HWND destroyed in the meantime); a cross-thread
+        // DestroyWindow would only fail, so report it rather than attempt it.
+        RynthCore.Engine.RynthLog.Error($"LayeredWindow.Dispose: PostMessage(self-destroy) to HWND=0x{hwnd.ToInt64():X} failed err={Marshal.GetLastWin32Error()} (owner thread=0x{ownerThread:X}).");
     }
 }

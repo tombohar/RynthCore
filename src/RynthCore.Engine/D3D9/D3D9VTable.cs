@@ -421,6 +421,68 @@ internal static unsafe class D3D9VTable
         return null;
     }
 
+    /// <summary>
+    /// Decal clients: Decal gives AC's device its own copy of the vtable (EndScene and Reset
+    /// point into Inject.dll, the rest still into d3d9.dll). This finds the d3d9.dll vtable the
+    /// copy was made from - the vtable in d3d9's image that agrees with the copy in the most
+    /// slots - so the engine can hook d3d9's own functions and never Decal's. Read-only.
+    /// Returns null when no candidate agrees in at least 100 slots.
+    /// </summary>
+    public static IntPtr[]? MatchOriginalDeviceVTable(IntPtr copiedVTable, int numEntries = 119)
+    {
+        IntPtr hModule = GetModuleHandleA("d3d9.dll");
+        if (hModule == IntPtr.Zero || copiedVTable == IntPtr.Zero)
+            return null;
+        if (!TryReadModuleImageSize(hModule, out int imageSize) || imageSize < 0x2000 || imageSize > 50 * 1024 * 1024)
+            return null;
+        var copy = new int[numEntries];
+        for (int i = 0; i < numEntries; i++)
+            copy[i] = Marshal.ReadInt32(copiedVTable, i * 4);
+
+        byte[] image = new byte[imageSize];
+        const int PageSize = 0x1000;
+        for (int off = 0; off < imageSize; off += PageSize)
+        {
+            int chunk = Math.Min(PageSize, imageSize - off);
+            IntPtr addr = IntPtr.Add(hModule, off);
+            if (SmartBoxLocator.IsMemoryReadable(addr, chunk))
+                Marshal.Copy(addr, image, off, chunk);
+        }
+
+        int bestOff = -1, bestMatches = 0;
+        for (int off = 0x1000; off <= imageSize - numEntries * 4; off += 4)
+        {
+            // Cheap reject: QueryInterface and AddRef of the copy must match.
+            if (BitConverter.ToInt32(image, off) != copy[0] || BitConverter.ToInt32(image, off + 4) != copy[1])
+                continue;
+            int matches = 0;
+            for (int i = 0; i < numEntries; i++)
+                if (BitConverter.ToInt32(image, off + i * 4) == copy[i])
+                    matches++;
+            if (matches > bestMatches)
+            {
+                bestMatches = matches;
+                bestOff = off;
+            }
+        }
+        if (bestOff < 0 || bestMatches < 100)
+        {
+            RynthLog.D3D9($"D3D9VTable: no d3d9.dll vtable matches the copied one (best {bestMatches}/{numEntries}).");
+            return null;
+        }
+        var vtable = new IntPtr[numEntries];
+        var differs = new System.Text.StringBuilder();
+        for (int i = 0; i < numEntries; i++)
+        {
+            vtable[i] = new IntPtr(BitConverter.ToInt32(image, bestOff + i * 4));
+            if (vtable[i].ToInt32() != copy[i])
+                differs.Append(' ').Append(i);
+        }
+        RynthLog.D3D9($"D3D9VTable: the copied device vtable came from d3d9+0x{bestOff:X} ({bestMatches}/{numEntries} slots equal; replaced slots:{differs}). " +
+            $"d3d9's EndScene=0x{vtable[DeviceVTableIndex.EndScene]:X8}.");
+        return vtable;
+    }
+
     private static bool IsRecognizedPrologue(byte[] image, int offset)
     {
         byte b = image[offset];

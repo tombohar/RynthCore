@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for RynthChat's /reply + /retell and paste (compiled in):
+    src\RynthCore.Engine\Compatibility\TellMemory.cs - who to reply / retell to, read off the
+    chat lines, and the rewrite of "/r text" into "/tell Name, text";
+    src\RynthCore.Engine\UI\Data\ChatInputPaste.cs - clipboard text made into one input line.
+    Nothing native: no AC, no engine state.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ChatTellTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\TellMemory.cs" Link="Engine\TellMemory.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatInputPaste.cs" Link="Engine\ChatInputPaste.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for RynthChat's rule match modes and standard filters (2026-10-05; idea from
+    Silentkelpie, rynth PR #1): src/RynthCore.Engine/UI/Data/ChatRuleMatching.cs (how a pattern
+    is read: Regex, Contains, Starts with, Ends with), ChatFilterPresets.cs (the ready-made Hide
+    rules) and ChatSettingsDto.cs (rynthchat_settings.json and Export / Import, with the real
+    source-generated serializer), compiled in. A Regex rule must compile and match exactly as
+    before, and a settings file without "mode" must load and save unchanged. Nothing native: no
+    AC, no engine state. Reads the live %APPDATA%\RynthCore\rynthchat_settings.json if there is
+    one (never writes it). Since 2026-10-08 also the per-kind line colours (ChatLineColors.cs):
+    which kind a line is (its "[Tag]", its chat type), the colour order (rule, kind, tab,
+    built-in), defaults exactly as before, and "lineColors" in the settings file.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ChatFilterTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatRuleMatching.cs" Link="Engine\ChatRuleMatching.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatFilterPresets.cs" Link="Engine\ChatFilterPresets.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatSettingsDto.cs" Link="Engine\ChatSettingsDto.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatLineColors.cs" Link="Engine\ChatLineColors.cs" />
+    <!-- 2026-10-19: the retail-chat verdict (a hidden line also stays out of AC's own chat window):
+         the real router, standard filters and verdict, with EngineStubs.cs standing in for the engine. -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatRouting.cs" Link="Engine\ChatRouting.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatRetailVerdict.cs" Link="Engine\ChatRetailVerdict.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Panels\RynthChatPresets.cs" Link="Engine\RynthChatPresets.cs" />
+    <!-- 2026-10-19: re-reading the shared rynthchat_settings.json when another client saved it. -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\SharedFileWatch.cs" Link="Engine\SharedFileWatch.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,129 @@
+diff --git a/TextEditor.cpp b/TextEditor.cpp
+index 013111f..9cd55a1 100644
+--- a/TextEditor.cpp
++++ b/TextEditor.cpp
+@@ -325,13 +325,19 @@ void TextEditor::Paste()
+ void TextEditor::Undo(int aSteps)
+ {
+ 	while (CanUndo() && aSteps-- > 0)
++	{
+ 		mUndoBuffer[--mUndoIndex].Undo(this);
++		++mChangeCount;
++	}
+ }
+ 
+ void TextEditor::Redo(int aSteps)
+ {
+ 	while (CanRedo() && aSteps-- > 0)
++	{
+ 		mUndoBuffer[mUndoIndex++].Redo(this);
++		++mChangeCount;
++	}
+ }
+ 
+ void TextEditor::SetText(const std::string& aText)
+@@ -355,6 +361,7 @@ void TextEditor::SetText(const std::string& aText)
+ 
+ 	mUndoBuffer.clear();
+ 	mUndoIndex = 0;
++	++mChangeCount;
+ 
+ 	Colorize();
+ }
+@@ -392,6 +399,7 @@ void TextEditor::SetTextLines(const std::vector<std::string>& aLines)
+ 
+ 	mUndoBuffer.clear();
+ 	mUndoIndex = 0;
++	++mChangeCount;
+ 
+ 	Colorize();
+ }
+@@ -428,6 +436,11 @@ bool TextEditor::Render(const char* aTitle, bool aParentIsFocused, const ImVec2&
+ 
+ 	ImGui::BeginChild(aTitle, aSize, aBorder, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNavInputs);
+ 
++	if (mFocusRequested)
++	{
++		ImGui::SetWindowFocus();
++		mFocusRequested = false;
++	}
+ 	bool isFocused = ImGui::IsWindowFocused();
+ 	HandleKeyboardInputs(aParentIsFocused);
+ 	HandleMouseInputs();
+@@ -1993,7 +2006,12 @@ void TextEditor::HandleKeyboardInputs(bool aParentIsFocused)
+ 		io.WantCaptureKeyboard = true;
+ 		io.WantTextInput = true;
+ 
+-		if (!mReadOnly && isShortcut && ImGui::IsKeyPressed(ImGuiKey_Z))
++		if (mCompletionKeysHeld && (ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow) ||
++			ImGui::IsKeyPressed(ImGuiKey_PageUp) || ImGui::IsKeyPressed(ImGuiKey_PageDown) ||
++			ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter) ||
++			ImGui::IsKeyPressed(ImGuiKey_Tab) || ImGui::IsKeyPressed(ImGuiKey_Escape)))
++			; // the host's completion list owns these keys
++		else if (!mReadOnly && isShortcut && ImGui::IsKeyPressed(ImGuiKey_Z))
+ 			Undo();
+ 		else if (!mReadOnly && isAltOnly && ImGui::IsKeyPressed(ImGuiKey_Backspace))
+ 			Undo();
+@@ -2238,6 +2256,7 @@ void TextEditor::Render(bool aParentIsFocused)
+ 	}
+ 
+ 	ImVec2 cursorScreenPos = ImGui::GetCursorScreenPos();
++	mTextOrigin = cursorScreenPos;
+ 	mScrollX = ImGui::GetScrollX();
+ 	mScrollY = ImGui::GetScrollY();
+ 	UpdateViewVariables(mScrollX, mScrollY);
+@@ -2549,6 +2568,7 @@ void TextEditor::AddUndo(UndoRecord& aValue)
+ 	mUndoBuffer.resize((size_t)(mUndoIndex + 1));
+ 	mUndoBuffer.back() = aValue;
+ 	++mUndoIndex;
++	++mChangeCount;
+ }
+ 
+ // TODO
+@@ -2687,6 +2707,8 @@ void TextEditor::ColorizeInternal()
+ 	if (mLines.empty() || mLanguageDefinition == nullptr)
+ 		return;
+ 
++	if (mCheckComments && mLanguageDefinition->mTokenizerOwnsComments)
++		mCheckComments = false;
+ 	if (mCheckComments)
+ 	{
+ 		auto endLine = mLines.size();
+diff --git a/TextEditor.h b/TextEditor.h
+index 19ad61b..6883412 100644
+--- a/TextEditor.h
++++ b/TextEditor.h
+@@ -97,6 +97,14 @@ public:
+ 	void ImGuiDebugPanel(const std::string& panelName = "Debug");
+ 	void UnitTests();
+ 
++	// RynthCore (native/cimgui/textedit-rynth.patch): a text change counter, a
++	// hold-off on the keys the host's completion list uses, a focus request,
++	// and access for the C exports in rynth_textedit_ext.cpp.
++	inline unsigned GetChangeCount() const { return mChangeCount; }
++	inline void SetCompletionKeysHeld(bool aValue) { mCompletionKeysHeld = aValue; }
++	inline void RequestFocus() { mFocusRequested = true; }
++	friend struct RynthTextEditAccess;
++
+ private:
+ 	// ------------- Generic utils ------------- //
+ 
+@@ -280,6 +288,7 @@ private:
+ 		TokenizeCallback mTokenize = nullptr;
+ 		std::vector<TokenRegexString> mTokenRegexStrings;
+ 		bool mCaseSensitive = true;
++		bool mTokenizerOwnsComments = false; // RynthCore: skip the whole-text comment scan
+ 
+ 		static const LanguageDefinition& Cpp();
+ 		static const LanguageDefinition& Hlsl();
+@@ -452,6 +461,10 @@ private:
+ 	Palette mPalette;
+ 	LanguageDefinitionId mLanguageDefinitionId;
+ 	const LanguageDefinition* mLanguageDefinition = nullptr;
++	unsigned mChangeCount = 0;
++	bool mCompletionKeysHeld = false;
++	bool mFocusRequested = false;
++	ImVec2 mTextOrigin;
+ 
+ 	inline bool IsHorizontalScrollbarVisible() const { return mCurrentSpaceWidth > mContentWidth; }
+ 	inline bool IsVerticalScrollbarVisible() const { return mCurrentSpaceHeight > mContentHeight; }

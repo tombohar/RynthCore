@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\CreatureSizes.cs" Link="Engine\CreatureSizes.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\CreatureSizes.g.cs" Link="Engine\CreatureSizes.g.cs" />
+  </ItemGroup>
+</Project>

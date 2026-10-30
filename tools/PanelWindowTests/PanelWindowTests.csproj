@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the popped-out panel window destroy backup
+    (src\RynthCore.Engine\UI\PanelDestroyFallback.cs, compiled in): when LayeredWindow.Dispose can't post
+    the self-destroy to a panel, it destroys the window only on its owner thread and only if it is still
+    one of our panel windows; otherwise it leaves it hidden. Never a cross-thread DestroyWindow.
+    No windows are created. Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>PanelWindowTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\PanelDestroyFallback.cs" Link="Engine\PanelDestroyFallback.cs" />
+  </ItemGroup>
+
+</Project>

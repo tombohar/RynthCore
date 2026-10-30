@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the VTank signal the Decal bridge uses (src\RynthCore.Engine\
+    Compatibility\VTankSignal.cs, compiled in): which chat-parser lines count as VTank's
+    documented /vt start and /vt stop, and which chat lines are logged for reference.
+    Nothing native: no AC, no Decal, no VTank.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>VTankWatchTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\VTankSignal.cs" Link="Engine\VTankSignal.cs" />
+  </ItemGroup>
+
+</Project>

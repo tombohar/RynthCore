@@ -25,20 +25,46 @@ internal static class TeleportStateHooks
 
     public static bool IsInstalled => true; // no hook needed — direct memory read
 
+    // Deep-audit finding #14 (2026-06-18): this raw-dereferenced CPlayerSystem
+    // unconditionally, including off AC's main thread — exposed to plugins via
+    // RynthCoreHost.IsPortaling() and polled constantly (NavigationEngine /
+    // RadarWallRenderer / NavMarkerRenderer / ExpressionEngine), some of which
+    // run on the Decal-coexistence pump thread. During relog/teleport teardown
+    // the singleton can be non-null but freed/mid-reassignment — an off-thread
+    // read of that is an uncatchable AV under NativeAOT (a null check alone
+    // doesn't protect against it). Gate to the main thread; off-thread callers
+    // get the last main-thread-observed value instead of touching AC memory.
+    private static volatile bool _cachedIsPortaling;
+
     /// <summary>Returns true while the player is in the teleport/portal transit state.</summary>
     public static unsafe bool IsPortaling
     {
         get
         {
+            if (!MainThreadGuard.IsOnMainThread())
+                return _cachedIsPortaling;
+
             try
             {
+                IntPtr playerSystemAddr = (IntPtr)_playerSystemPtrAddr;
+                if (!ClientObjectHooks.IsReadablePointer(playerSystemAddr))
+                    return _cachedIsPortaling;
                 IntPtr playerSystem = *(IntPtr*)_playerSystemPtrAddr;
-                if (playerSystem == IntPtr.Zero) return false;
-                return *(byte*)(playerSystem + TeleportInProgressOffset) != 0;
+                if (playerSystem == IntPtr.Zero)
+                {
+                    _cachedIsPortaling = false;
+                    return false;
+                }
+                IntPtr flagAddr = playerSystem + TeleportInProgressOffset;
+                if (!ClientObjectHooks.IsReadablePointer(flagAddr))
+                    return _cachedIsPortaling;
+                bool result = *(byte*)flagAddr != 0;
+                _cachedIsPortaling = result;
+                return result;
             }
             catch
             {
-                return false;
+                return _cachedIsPortaling;
             }
         }
     }

@@ -1,0 +1,26 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="RynthCore.App.Avalonia.RollbackDialog"
+        Width="600"
+        SizeToContent="Height"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Title="Roll back"
+        Background="#132028">
+  <Grid RowDefinitions="*,Auto" Margin="18">
+    <StackPanel Spacing="10">
+      <TextBlock x:Name="HeaderText" Foreground="#EAF0F4" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" />
+      <TextBlock Foreground="#9AA8B3" TextWrapping="Wrap"
+                 Text="Pick the release to go back to. Your settings, profiles and accounts stay as they are." />
+      <ScrollViewer MaxHeight="380" VerticalScrollBarVisibility="Auto">
+        <StackPanel x:Name="ReleasesPanel" Spacing="10" />
+      </ScrollViewer>
+      <TextBlock x:Name="HoldText" Foreground="#9AA8B3" TextWrapping="Wrap" />
+    </StackPanel>
+    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
+      <Button x:Name="CancelButton" Content="Cancel" />
+      <Button x:Name="RollbackButton" Content="Go back" IsEnabled="False"
+              Background="#26C1A6" Foreground="#0B1218" FontWeight="SemiBold" />
+    </StackPanel>
+  </Grid>
+</Window>

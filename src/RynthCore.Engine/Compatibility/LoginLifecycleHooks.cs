@@ -30,6 +30,11 @@ internal static class LoginLifecycleHooks
 
     public static bool IsInstalled { get; private set; }
     public static bool HasObservedLoginComplete { get; private set; }
+
+    /// <summary>When login completed (TickCount64), or 0 before it / after a logout. A hot reload
+    /// marks it at the reload. AutoId defers its background appraisals 30 s past it.</summary>
+    public static long LoginCompleteAtMs => System.Threading.Interlocked.Read(ref _loginCompleteAtMs);
+    private static long _loginCompleteAtMs;
     public static string StatusMessage => _statusMessage;
 
     public static event Action? LoginComplete;
@@ -100,6 +105,10 @@ internal static class LoginLifecycleHooks
     public static void ResetObservation()
     {
         HasObservedLoginComplete = false;
+        System.Threading.Interlocked.Exchange(ref _loginCompleteAtMs, 0);
+        // Queued engine work (appraisals, health queries, chat, actions) from this login is stale
+        // for the next one (2026-10-06, AcMainThreadQueue).
+        try { AcMainThreadQueue.NewLoginEpoch(); } catch { }
         _statusMessage = "Awaiting next SendLoginCompleteNotification.";
         _waitingLogged = false;
     }
@@ -134,6 +143,7 @@ internal static class LoginLifecycleHooks
             return;
 
         HasObservedLoginComplete = true;
+        System.Threading.Interlocked.Exchange(ref _loginCompleteAtMs, Environment.TickCount64);
         _statusMessage = $"Login complete observed via {source}.";
         RynthLog.Verbose($"Compat: login complete observed via {source}.");
         LoginComplete?.Invoke();

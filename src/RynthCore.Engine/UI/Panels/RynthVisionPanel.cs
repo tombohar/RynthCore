@@ -1,20 +1,19 @@
 // ============================================================================
 //  RynthCore.Engine — UI/Panels/RynthVisionPanel.cs
-//  Avalonia settings panel for the RynthVision plugin (RynthSuite). Bridges to
-//  the plugin via GetProcAddress on its DLL: reads settings JSON to populate
-//  controls and pushes changes back. Replaces the abandoned in-plugin ImGui UI.
+//  Avalonia settings panel for the RynthVision plugin (RynthSuite): reads the
+//  settings JSON to populate controls and pushes changes back.
 //
-//  Bridge exports (resolved from the RynthVision plugin DLL):
-//    RynthVisionGetSettingsJson()       → ANSI JSON of current settings
-//    RynthVisionSetSettings(char* json) → apply + persist settings
-//    RynthVisionInspectTerrain()        → log terrain types under the player
+//  Data goes through UiDataHub (UI/Data/VisionData.cs): UiSources.Vision polls
+//  RynthVisionGetSettingsJson on the pump thread; VisionCommands saves
+//  (RynthVisionSetSettings) and runs RynthVisionInspectTerrain there. The
+//  ImGui face (ImGui/Panels/VisionFace.cs) reads the same snapshot. Each
+//  change pushes only its own field, like the ImGui face.
 // ============================================================================
 
 using System;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
@@ -23,30 +22,12 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using RynthCore.Engine.ImGuiBackend;
 using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI.Data;
 
 namespace RynthCore.Engine.UI.Panels;
 
 internal static class RynthVisionPanel
 {
-    // ── P/Invoke ──────────────────────────────────────────────────────────────
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate IntPtr GetSettingsJsonFn();
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void SetSettingsFn(IntPtr ansiJson);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate void InspectFn();
-
-    // ── Bridge state ──────────────────────────────────────────────────────────
-
-    private static GetSettingsJsonFn? _getSettings;
-    private static SetSettingsFn? _setSettings;
-    private static InspectFn? _inspect;
-    private static bool _bindingLogged;
-
     // ── Controls (Avalonia UI thread only) ─────────────────────────────────────
 
     private static CheckBox? _cbRadar, _cbSlopes, _cbWater, _cbWaterAnyCorner, _cbWaterImpassableOnly;
@@ -61,6 +42,14 @@ internal static class RynthVisionPanel
     private static bool _suppressPush;
     private static bool _populated;
     private static int _createCounter;
+
+    // The panel's one retry timer (see Create). It also re-runs Populate after
+    // a water-types save: the plugin may normalise the list (empty resets to
+    // the defaults), so the box is refreshed from the first snapshot newer
+    // than _populateAfterVersion.
+    private static DispatcherTimer? _populateTimer;
+    private static int _populateRetries;
+    private static long _populateAfterVersion = -1;
 
     // ── Panel construction ──────────────────────────────────────────────────────
 
@@ -79,6 +68,7 @@ internal static class RynthVisionPanel
         // Populate flips _suppressPush back to false in its finally block.
         _populated = false;
         _suppressPush = true;
+        _populateAfterVersion = -1;
 
         int createN = System.Threading.Interlocked.Increment(ref _createCounter);
         RynthLog.UI($"RynthVisionPanel.Create #{createN}: starting (_populated reset, _suppressPush=true)");
@@ -89,43 +79,41 @@ internal static class RynthVisionPanel
         _cbRadar  = AddCheck(root, "Radar range ring");
         _cbSlopes = AddCheck(root, "Unclimbable slopes");
         _cbWater  = AddCheck(root, "Impassable water");
-        var dungeon = AddCheck(root, "Dungeon lighting (planned)");
-        dungeon.IsEnabled = false;
-        _cbRadar.IsCheckedChanged  += (_, _) => Push();
-        _cbSlopes.IsCheckedChanged += (_, _) => Push();
-        _cbWater.IsCheckedChanged  += (_, _) => Push();
+        _cbRadar.IsCheckedChanged  += (_, _) => Push(VisionKeys.Radar);
+        _cbSlopes.IsCheckedChanged += (_, _) => Push(VisionKeys.Slopes);
+        _cbWater.IsCheckedChanged  += (_, _) => Push(VisionKeys.Water);
 
         root.Children.Add(Header("Colors (hex AARRGGBB)"));
-        (_tbSlope, _swSlope) = AddColorRow(root, "Slope", () => _slopeColor, c => _slopeColor = c);
-        (_tbWater, _swWater) = AddColorRow(root, "Water", () => _waterColor, c => _waterColor = c);
-        (_tbRadar, _swRadar) = AddColorRow(root, "Radar", () => _radarColor, c => _radarColor = c);
+        (_tbSlope, _swSlope) = AddColorRow(root, "Slope", VisionKeys.SlopeColor, () => _slopeColor, c => _slopeColor = c);
+        (_tbWater, _swWater) = AddColorRow(root, "Water", VisionKeys.WaterColor, () => _waterColor, c => _waterColor = c);
+        (_tbRadar, _swRadar) = AddColorRow(root, "Radar", VisionKeys.RadarColor, () => _radarColor, c => _radarColor = c);
 
         root.Children.Add(Header("Tuning"));
-        (_slRange,  _) = AddSlider(root, "Radar range",    24,  300, 0, false);
-        (_slThick,  _) = AddSlider(root, "Ring thickness", 0.5, 6,   1, false);
-        (_slHeight, _) = AddSlider(root, "Ring height (m)",0.5, 30,  1, false);
-        (_slSlopeR, _)    = AddSlider(root, "Slope radius (cells)", 1, 24,   0, true);
-        (_slSlopeFloor, _)= AddSlider(root, "Slope floor Z",        0.30, 0.95, 3, false);
-        (_slSlopeBias, _) = AddSlider(root, "Slope height bias (m)",0.00, 1.00, 2, false);
-        (_slWaterR, _)    = AddSlider(root, "Water radius (cells)", 1, 24,   0, true);
+        (_slRange,  _) = AddSlider(root, "Radar range",    VisionKeys.RadarRange, 24,  300, 0, false);
+        (_slThick,  _) = AddSlider(root, "Ring thickness", VisionKeys.RingThick,  0.5, 6,   1, false);
+        (_slHeight, _) = AddSlider(root, "Ring height (m)",VisionKeys.RingHeight, 0.5, 30,  1, false);
+        (_slSlopeR, _)    = AddSlider(root, "Slope radius (cells)", VisionKeys.SlopeRadius, 1, 24,   0, true);
+        (_slSlopeFloor, _)= AddSlider(root, "Slope floor Z",        VisionKeys.SlopeFloorZ, 0.30, 0.95, 3, false);
+        (_slSlopeBias, _) = AddSlider(root, "Slope height bias (m)",VisionKeys.SlopeBias,   0.00, 1.00, 2, false);
+        (_slWaterR, _)    = AddSlider(root, "Water radius (cells)", VisionKeys.WaterRadius, 1, 24,   0, true);
 
         root.Children.Add(Header("Water terrain types"));
         _cbWaterAnyCorner = AddCheck(root, "Highlight cell if ANY corner is water (else all four)");
-        _cbWaterAnyCorner.IsCheckedChanged += (_, _) => Push();
+        _cbWaterAnyCorner.IsCheckedChanged += (_, _) => Push(VisionKeys.WaterAnyCorner);
         _cbWaterImpassableOnly = AddCheck(root, "Only paint water cells with an unwalkable triangle (real impassable)");
-        _cbWaterImpassableOnly.IsCheckedChanged += (_, _) => Push();
+        _cbWaterImpassableOnly.IsCheckedChanged += (_, _) => Push(VisionKeys.WaterImpassableOnly);
         _tbWaterTypes = new TextBox { Watermark = "18,19,20", FontSize = 11, MinWidth = 120 };
         _tbWaterTypes.GotFocus  += (_, _) => Win32Backend.AvaloniaTextInputActive = true;
-        _tbWaterTypes.LostFocus += (_, _) => { Win32Backend.AvaloniaTextInputActive = false; Push(); };
+        _tbWaterTypes.LostFocus += (_, _) => { Win32Backend.AvaloniaTextInputActive = false; Push(VisionKeys.WaterTypes); };
         var applyBtn = new Button { Content = "Apply", FontSize = 11, Margin = new Thickness(4, 0, 0, 0) };
-        applyBtn.Click += (_, _) => Push();
+        applyBtn.Click += (_, _) => Push(VisionKeys.WaterTypes);
         var wtRow = new StackPanel { Orientation = Orientation.Horizontal };
         wtRow.Children.Add(_tbWaterTypes);
         wtRow.Children.Add(applyBtn);
         root.Children.Add(wtRow);
 
         var inspectBtn = new Button { Content = "Log terrain types here", FontSize = 11, Margin = new Thickness(0, 4, 0, 0) };
-        inspectBtn.Click += (_, _) => { TryBind(); _inspect?.Invoke(); };
+        inspectBtn.Click += (_, _) => VisionCommands.Inspect();
         root.Children.Add(inspectBtn);
 
         // Bind + populate once the plugin DLL is loaded AND the plugin has
@@ -136,14 +124,15 @@ internal static class RynthVisionPanel
         // Retries every 500 ms until Populate succeeds (returns true) or the
         // panel is closed. Caps at 60 retries (~30 s) so we don't spin forever
         // if the plugin never initializes.
-        int retries = 0;
+        _populateRetries = 0;
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _populateTimer?.Stop();
+        _populateTimer = timer;
         timer.Tick += (_, _) =>
         {
             if (_populated) { timer.Stop(); return; }
-            if (++retries > 60) { timer.Stop(); RynthLog.UI("RynthVisionPanel: gave up populating after 30s"); return; }
-            TryBind();
-            if (_getSettings != null && Populate())
+            if (++_populateRetries > 60) { timer.Stop(); RynthLog.UI("RynthVisionPanel: gave up populating after 30s"); return; }
+            if (Populate())
             {
                 _populated = true;
                 timer.Stop();
@@ -151,7 +140,19 @@ internal static class RynthVisionPanel
         };
         timer.Start();
 
-        return new ScrollViewer { Content = root };
+        var scroll = new ScrollViewer { Content = root };
+        scroll.AttachedToVisualTree += (_, _) =>
+        {
+            UiSources.Vision.Subscribe();
+            UiSources.Vision.RequestRefresh();
+            if (!_populated && !timer.IsEnabled) { _populateRetries = 0; timer.Start(); }
+        };
+        scroll.DetachedFromVisualTree += (_, _) =>
+        {
+            timer.Stop();
+            UiSources.Vision.Unsubscribe();
+        };
+        return scroll;
     }
 
     // ── Control factories ───────────────────────────────────────────────────────
@@ -172,7 +173,7 @@ internal static class RynthVisionPanel
         return cb;
     }
 
-    private static (Slider, TextBlock) AddSlider(StackPanel parent, string name, double min, double max, int decimals, bool snap)
+    private static (Slider, TextBlock) AddSlider(StackPanel parent, string name, string key, double min, double max, int decimals, bool snap)
     {
         var label = new TextBlock { FontSize = 11, Foreground = Brushes.White, Text = name + ":" };
         var slider = new Slider { Minimum = min, Maximum = max, Width = 170, VerticalAlignment = VerticalAlignment.Center };
@@ -212,7 +213,7 @@ internal static class RynthVisionPanel
             syncing = true;
             box.Text = s;
             syncing = false;
-            Push();
+            Push(key);
         };
         box.GotFocus += (_, _) =>
         {
@@ -237,14 +238,14 @@ internal static class RynthVisionPanel
                 box.Text = s;
                 label.Text = $"{name}: {s}";
                 syncing = false;
-                Push();
+                Push(key);
             }
         };
 
         return (slider, label);
     }
 
-    private static (TextBox, Border) AddColorRow(StackPanel parent, string name, Func<uint> get, Action<uint> set)
+    private static (TextBox, Border) AddColorRow(StackPanel parent, string name, string key, Func<uint> get, Action<uint> set)
     {
         var lbl = new TextBlock { Text = name, FontSize = 11, Foreground = Brushes.White, Width = 44, VerticalAlignment = VerticalAlignment.Center };
         var tb = new TextBox { FontSize = 11, Width = 92, FontFamily = new FontFamily("Consolas,monospace") };
@@ -259,35 +260,10 @@ internal static class RynthVisionPanel
         tb.LostFocus += (_, _) =>
         {
             Win32Backend.AvaloniaTextInputActive = false;
-            if (TryParseHex(tb.Text, out uint c)) { set(c); sw.Background = ToBrush(c); Push(); }
+            if (TryParseHex(tb.Text, out uint c)) { set(c); sw.Background = ToBrush(c); Push(key); }
             else tb.Text = get().ToString("X8"); // revert on bad input
         };
         return (tb, sw);
-    }
-
-    // ── Plugin binding ────────────────────────────────────────────────────────
-
-    private static void TryBind()
-    {
-        LoadedPlugin? plugin = PluginManager.Plugins.FirstOrDefault(
-            p => p.DisplayName.Contains("RynthVision", StringComparison.OrdinalIgnoreCase));
-        if (plugin == null || plugin.ModuleHandle == IntPtr.Zero) return;
-
-        _getSettings ??= Bind<GetSettingsJsonFn>(plugin, "RynthVisionGetSettingsJson");
-        _setSettings ??= Bind<SetSettingsFn>(plugin, "RynthVisionSetSettings");
-        _inspect     ??= Bind<InspectFn>(plugin, "RynthVisionInspectTerrain");
-
-        if (!_bindingLogged && _getSettings != null)
-        {
-            _bindingLogged = true;
-            RynthLog.UI("RynthVisionPanel: bound RynthVision plugin exports.");
-        }
-    }
-
-    private static T? Bind<T>(LoadedPlugin plugin, string export) where T : Delegate
-    {
-        IntPtr addr = GetProcAddress(plugin.ModuleHandle, export);
-        return addr == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<T>(addr);
     }
 
     // ── Sync ──────────────────────────────────────────────────────────────────
@@ -301,10 +277,9 @@ internal static class RynthVisionPanel
     /// </summary>
     private static bool Populate()
     {
-        if (_getSettings == null) return false;
-        IntPtr ptr = _getSettings();
-        if (ptr == IntPtr.Zero) return false;
-        string? json = Marshal.PtrToStringAnsi(ptr);
+        var snap = UiSources.Vision.Current;
+        if (snap == null || snap.Version <= _populateAfterVersion) return false;
+        string? json = snap.Value.Json;
         if (string.IsNullOrEmpty(json) || json == "{}") return false;
 
         RynthLog.UI($"RynthVisionPanel.Populate: applying JSON ({json.Length} chars): {json}");
@@ -343,45 +318,58 @@ internal static class RynthVisionPanel
         return true;
     }
 
-    private static void Push()
+    /// <summary>
+    /// Saves just the field that changed (<paramref name="key"/>, a
+    /// <see cref="VisionKeys"/> constant) from its control, so values changed
+    /// elsewhere since Populate (a /rv command, the ImGui face) aren't
+    /// written back over.
+    /// </summary>
+    private static void Push(string key)
     {
         if (_suppressPush)
         {
             RynthLog.UI("RynthVisionPanel.Push: SUPPRESSED (Populate in flight or panel not yet ready)");
             return;
         }
-        if (_setSettings == null)
-        {
-            RynthLog.UI("RynthVisionPanel.Push: SKIPPED (plugin not yet bound)");
-            return;
-        }
         var ci = CultureInfo.InvariantCulture;
-        var sb = new StringBuilder(256);
-        sb.Append('{');
-        sb.Append("\"radar\":").Append(_cbRadar?.IsChecked == true ? 1 : 0).Append(',');
-        sb.Append("\"slopes\":").Append(_cbSlopes?.IsChecked == true ? 1 : 0).Append(',');
-        sb.Append("\"water\":").Append(_cbWater?.IsChecked == true ? 1 : 0).Append(',');
-        sb.Append("\"slopeColor\":").Append(_slopeColor).Append(',');
-        sb.Append("\"waterColor\":").Append(_waterColor).Append(',');
-        sb.Append("\"radarColor\":").Append(_radarColor).Append(',');
-        sb.Append("\"radarRange\":").Append((_slRange?.Value ?? 192).ToString("R", ci)).Append(',');
-        sb.Append("\"ringThick\":").Append((_slThick?.Value ?? 2).ToString("R", ci)).Append(',');
-        sb.Append("\"ringHeight\":").Append((_slHeight?.Value ?? 3).ToString("R", ci)).Append(',');
-        sb.Append("\"slopeRadius\":").Append((int)(_slSlopeR?.Value ?? 12)).Append(',');
-        sb.Append("\"slopeFloorZ\":").Append((_slSlopeFloor?.Value ?? 0.664).ToString("R", ci)).Append(',');
-        sb.Append("\"slopeBias\":").Append((_slSlopeBias?.Value ?? 0.15).ToString("R", ci)).Append(',');
-        sb.Append("\"waterRadius\":").Append((int)(_slWaterR?.Value ?? 12)).Append(',');
-        sb.Append("\"waterAnyCorner\":").Append(_cbWaterAnyCorner?.IsChecked == true ? 1 : 0).Append(',');
-        sb.Append("\"waterImpassableOnly\":").Append(_cbWaterImpassableOnly?.IsChecked == true ? 1 : 0).Append(',');
-        sb.Append("\"waterTypes\":[").Append(CleanCsv(_tbWaterTypes?.Text)).Append(']');
-        sb.Append('}');
+        string? value = key switch
+        {
+            VisionKeys.Radar => Flag(_cbRadar),
+            VisionKeys.Slopes => Flag(_cbSlopes),
+            VisionKeys.Water => Flag(_cbWater),
+            VisionKeys.WaterAnyCorner => Flag(_cbWaterAnyCorner),
+            VisionKeys.WaterImpassableOnly => Flag(_cbWaterImpassableOnly),
+            VisionKeys.SlopeColor => _slopeColor.ToString(ci),
+            VisionKeys.WaterColor => _waterColor.ToString(ci),
+            VisionKeys.RadarColor => _radarColor.ToString(ci),
+            VisionKeys.RadarRange => _slRange?.Value.ToString("R", ci),
+            VisionKeys.RingThick => _slThick?.Value.ToString("R", ci),
+            VisionKeys.RingHeight => _slHeight?.Value.ToString("R", ci),
+            VisionKeys.SlopeRadius => _slSlopeR != null ? ((int)_slSlopeR.Value).ToString(ci) : null,
+            VisionKeys.SlopeFloorZ => _slSlopeFloor?.Value.ToString("R", ci),
+            VisionKeys.SlopeBias => _slSlopeBias?.Value.ToString("R", ci),
+            VisionKeys.WaterRadius => _slWaterR != null ? ((int)_slWaterR.Value).ToString(ci) : null,
+            // Empty resets to the defaults in the plugin; the republish after
+            // the save repopulates the box.
+            VisionKeys.WaterTypes => "[" + CleanCsv(_tbWaterTypes?.Text) + "]",
+            _ => null,
+        };
+        if (value == null) return;
 
-        string outJson = sb.ToString();
-        RynthLog.UI($"RynthVisionPanel.Push: writing JSON ({outJson.Length} chars): {outJson}");
-        IntPtr p = Marshal.StringToHGlobalAnsi(outJson);
-        try { _setSettings(p); }
-        finally { Marshal.FreeHGlobal(p); }
+        string outJson = "{\"" + key + "\":" + value + "}";
+        RynthLog.UI($"RynthVisionPanel.Push: writing JSON: {outJson}");
+        VisionCommands.Save(outJson);
+
+        if (key == VisionKeys.WaterTypes)
+        {
+            _populateAfterVersion = UiSources.Vision.Current?.Version ?? 0;
+            _populated = false;
+            _populateRetries = 0;
+            _populateTimer?.Start();
+        }
     }
+
+    private static string? Flag(CheckBox? cb) => cb == null ? null : (cb.IsChecked == true ? "1" : "0");
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 

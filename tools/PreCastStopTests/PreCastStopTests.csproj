@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the pre-cast stop (2026-10-12): src\RynthCore.Engine\Compatibility\
+    PreCastStopRules.cs, compiled in. While the player has control, a queued cast first sends
+    its stop and waits for the server's answer (or 750 ms), then casts without the stop that
+    FreeHandsAndCastSpell would otherwise send in the cast's frame. With the server in control
+    (or the state unreadable) the cast goes at once, as before. Pure code, nothing native.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>PreCastStopTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\PreCastStopRules.cs" Link="Engine\PreCastStopRules.cs" />
+  </ItemGroup>
+
+</Project>

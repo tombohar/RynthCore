@@ -19,9 +19,10 @@ namespace RynthCore.Engine.Compatibility;
 /// <see cref="PlayerPhysicsHooks.TryGetCastGestureInProgress"/>).
 ///
 /// This is a SAMPLED gate — no acclient.exe hook is installed. <see cref="Sample"/>
-/// runs on the existing 30 Hz NormalPluginPump heartbeat (PluginManager.TickAll)
-/// and reads a single CMotionInterp scalar through the already-proven
-/// PlayerPhysicsHooks accessor. No new detour, no pattern-scan-and-call (the
+/// runs on AC's main thread (MainThreadSnapshots.Tick, from the Client::UseTime
+/// drain and EndScene; it ran on the 30 Hz plugin pump until 2026-09-30, which
+/// walked the player's MovementManager chain off-thread) and reads a single
+/// CMotionInterp scalar through the already-proven PlayerPhysicsHooks accessor. No new detour, no pattern-scan-and-call (the
 /// ACE crash class), no list walk (UAF-safe). The consumer polls the gate at
 /// the same tick rate, so the busy→idle edge is observed without any new
 /// engine→plugin callback (avoids the NativeAOT reverse-P/Invoke crash class).
@@ -46,7 +47,7 @@ internal static class CastGate
     public static int GetCastBusyState() => Volatile.Read(ref _castBusy);
 
     /// <summary>
-    /// Sampled from the 30 Hz plugin pump (PluginManager.TickAll). Cheap, fully
+    /// Sampled on AC's main thread (MainThreadSnapshots.Tick). Cheap, fully
     /// guarded, never throws. If CMotionInterp isn't reachable (pre-login /
     /// between worlds) the gate reports "clear to cast" so the consumer falls
     /// back to its own throttle/park, which is the hard anti-spam guarantee.

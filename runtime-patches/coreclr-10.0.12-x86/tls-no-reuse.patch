@@ -1,0 +1,44 @@
+From f2f2e4642c7d86fd6cf4503762051b1ecb6f12f7 Mon Sep 17 00:00:00 2001
+From: Tom Bohar <tombohar@gmail.com>
+Date: Fri, 23 Oct 2026 08:07:39 -0400
+Subject: [PATCH] Never reuse a cleared collectible thread-static TLS index
+ (RynthCore hot-reload statics crash, dotnet/runtime #135441)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/coreclr/vm/threadstatics.cpp | 19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/src/coreclr/vm/threadstatics.cpp b/src/coreclr/vm/threadstatics.cpp
+index dcff2bc8c..1b174463e 100644
+--- a/src/coreclr/vm/threadstatics.cpp
++++ b/src/coreclr/vm/threadstatics.cpp
+@@ -766,12 +766,19 @@ void GetTLSIndexForThreadStatic(MethodTable* pMT, bool gcStatic, TLSIndex* pInde
+     }
+     else
+     {
+-        if (!g_pThreadStaticCollectibleTypeIndices->FindClearedIndex(&newTLSIndex))
+-        {
+-            uint32_t tlsRawIndex = g_NextTLSSlot;
+-            newTLSIndex = TLSIndex(TLSIndexType::Collectible, tlsRawIndex);
+-            g_NextTLSSlot += 1;
+-        }
++        // RynthCore patch (2026-10-23, dotnet/runtime #135441 / #134928): never reuse a cleared
++        // collectible index. A thread that outlived the old owner's unload still holds
++        // pLoaderHandles[index] (and its TLS array entry) for it. Once the index was reused,
++        // FreeLoaderAllocatorHandlesForTLSData freed that stale handle against the NEW owner's
++        // LoaderAllocator when the thread exited, unrooting whatever live object the new owner kept
++        // in that slot (random statics of live types read null or garbage, then crashed). A cleared
++        // index is skipped by CollectibleEntries(), so its stale state is simply dropped with the
++        // thread's arrays. Cost: the index space grows with every collectible type with thread
++        // statics ever loaded (a few bytes per thread per type), which is bounded for a host that
++        // unloads a context per hot reload.
++        uint32_t tlsRawIndex = g_NextTLSSlot;
++        newTLSIndex = TLSIndex(TLSIndexType::Collectible, tlsRawIndex);
++        g_NextTLSSlot += 1;
+ 
+         g_pThreadStaticCollectibleTypeIndices->Set(newTLSIndex, pMT, gcStatic);
+         pMT->GetLoaderAllocator()->GetTLSIndexList().Append(newTLSIndex);
+-- 
+2.54.0.windows.1
+

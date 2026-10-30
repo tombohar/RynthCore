@@ -14,6 +14,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -64,6 +65,22 @@ internal static class AvaloniaOverlay
     // separately. Clicks inside the popup are always interactive (even with
     // Ctrl-gated click-through enabled) so the user can toggle settings.
     private static PhysicalRect? _radarSettingsPopupRect;
+    // Same slot pattern as radar, for chat's own Ctrl-gated click-through
+    // option (live-testing finding 2026-09-02).
+    private static PhysicalRect? _chatPanelRect;
+    // Open Flyout / ContextMenu / ComboBox dropdowns, embedded in the overlay
+    // window's OverlayLayer (Win32PlatformOptions.OverlayPopups). They can hang
+    // past their panel's rect, so they're published separately and are always
+    // interactive. ToolTips are left out: they never take clicks.
+    private static PhysicalRect[] _popupRects = Array.Empty<PhysicalRect>();
+
+    /// <summary>
+    /// True while a light-dismiss popup (Flyout, ContextMenu, ComboBox
+    /// dropdown) is open. A click on the game world is never forwarded to
+    /// Avalonia, so its own light-dismiss can't see it; Win32Backend checks
+    /// this and calls <see cref="DismissLightDismissPopups"/> instead.
+    /// </summary>
+    internal static volatile bool HasOpenLightDismissPopup;
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
@@ -104,6 +121,13 @@ internal static class AvaloniaOverlay
     /// can read it without taking a dependency on the panel namespace.
     /// </summary>
     internal static volatile bool RadarCtrlGatedClickThrough;
+
+    /// <summary>
+    /// Live-testing finding 2026-09-02: same mechanism as
+    /// RadarCtrlGatedClickThrough, for the chat panel — see RynthChatPanel's
+    /// click-through checkbox and IsOverPanel below.
+    /// </summary>
+    internal static volatile bool ChatCtrlGatedClickThrough;
 
     internal static IntPtr AvaloniaHwnd { get; private set; }
     internal static volatile int AvaloniaWindowLeft;
@@ -204,6 +228,9 @@ internal static class AvaloniaOverlay
     internal static volatile int SurfacePixelWidth;
     internal static volatile int SurfacePixelHeight;
     internal static volatile float InputScale = 1f;
+
+    /// <summary>True once the overlay window exists (Start ran and built it).</summary>
+    internal static bool IsRunning => _window != null;
     internal static bool UseAnglePreferredBridge { get; private set; }
     internal static bool UseCustomSkiaBridge { get; private set; }
     internal static bool ShouldUseCustomSkiaProducer => UseCustomSkiaBridge;
@@ -215,6 +242,13 @@ internal static class AvaloniaOverlay
 
         lock (HitTestLock)
         {
+            // Open popups sit above every panel and are always interactive.
+            foreach (PhysicalRect rect in _popupRects)
+            {
+                if (rect.Contains(gameClientX, gameClientY))
+                    return true;
+            }
+
             foreach (PhysicalRect rect in _panelRects)
             {
                 if (rect.Contains(gameClientX, gameClientY))
@@ -232,6 +266,12 @@ internal static class AvaloniaOverlay
             // radar is always interactive like any other panel.
             if (_radarPanelRect.HasValue && _radarPanelRect.Value.Contains(gameClientX, gameClientY))
                 return !RadarCtrlGatedClickThrough || IsCtrlHeld();
+
+            // Chat: same Ctrl-gated click-through option as Radar (live-testing
+            // finding 2026-09-02) — off by default, so this is a no-op unless
+            // the user opts in via the chat panel's gear menu.
+            if (_chatPanelRect.HasValue && _chatPanelRect.Value.Contains(gameClientX, gameClientY))
+                return !ChatCtrlGatedClickThrough || IsCtrlHeld();
         }
 
         return false;
@@ -284,6 +324,7 @@ internal static class AvaloniaOverlay
 
     internal static void RequestCapture()
     {
+        if (_window == null) return;   // not started: nothing to capture, no dispatcher to wake
         Dispatcher.UIThread.Post(() => _window?.RequestCapture(), DispatcherPriority.Input);
     }
 
@@ -294,27 +335,107 @@ internal static class AvaloniaOverlay
     {
         var dcomp = DcompActivateBarButton;
         if (dcomp != null) { dcomp(title); return; }
+        // Not started (Avalonia off, e.g. the CoreCLR engine): no Avalonia panels, and
+        // touching Dispatcher.UIThread would bring up a dispatcher for nothing.
+        if (_window == null) return;
         Dispatcher.UIThread.Post(() => _window?.ActivateBarButton(title), DispatcherPriority.Input);
+    }
+
+    /// <summary>
+    /// The ImGui face of <paramref name="title"/> just opened: take down any
+    /// Avalonia copy of it (docked or popped out) without saving that as the
+    /// panel's state, so one panel is never on screen twice. Any thread.
+    /// </summary>
+    internal static void CloseAvaloniaCopy(string title)
+    {
+        if (_window == null) return;   // not started: there is no Avalonia copy (and no dispatcher to wake)
+        Dispatcher.UIThread.Post(() => _window?.CloseAvaloniaCopyCore(title), DispatcherPriority.Input);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> on the Avalonia UI thread at Input
+    /// priority (same queue as ActivateBarButton), so a sequence of UI steps
+    /// stays in order. Any thread.
+    /// </summary>
+    /// <summary>
+    /// Takes keyboard focus off any Avalonia TextBox (an ImGui text field just
+    /// took the keyboard; plan §3.2 d). Clearing Avalonia's focus makes the
+    /// TextBox lose focus (which clears AvaloniaTextInputActive) without
+    /// touching Win32 focus. Any thread.
+    /// </summary>
+    internal static void ClearTextFocus()
+    {
+        if (_window != null)
+            Dispatcher.UIThread.Post(() => _window?.FocusManager?.ClearFocus(), DispatcherPriority.Input);
+    }
+
+    internal static void PostToUi(Action action)
+    {
+        if (_window != null)
+            Dispatcher.UIThread.Post(action, DispatcherPriority.Input);
+    }
+
+    /// <summary>Toggles a panel synchronously. Avalonia UI thread only (inside PostToUi).</summary>
+    internal static void TogglePanelOnUiThread(string title) => _window?.ActivateBarButton(title);
+
+    /// <summary>
+    /// True while the ImGui bar stands in for the docked Avalonia bar: the
+    /// Avalonia bar is laid out but invisible (opacity 0, so pop-out can still
+    /// measure it) and publishes no hit rects, so it takes no clicks.
+    /// </summary>
+    internal static volatile bool DockedBarSuppressed;
+
+    internal static void SetDockedBarSuppressed(bool suppressed)
+    {
+        DockedBarSuppressed = suppressed;
+        // Before Start there is no window (and no UI thread to post to): BuildRoot reads the flag.
+        if (_window != null)
+            Dispatcher.UIThread.Post(() => _window?.ApplyDockedBarSuppression(), DispatcherPriority.Input);
+    }
+
+    /// <summary>
+    /// The ImGui bar's ↗: move the (hidden) docked Avalonia bar to where the
+    /// ImGui bar is, then pop it out, in one UI-thread step so PopOutBar
+    /// snapshots the right docked position.
+    /// </summary>
+    internal static void PopOutBarFrom(double left, double top)
+    {
+        if (_window == null) return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _window?.MoveDockedBar(left, top);
+            _window?.PopOutBar();
+        }, DispatcherPriority.Input);
+    }
+
+    /// <summary>Keeps the hidden docked Avalonia bar where the ImGui bar is. Any thread.</summary>
+    internal static void SyncDockedBarPosition(double left, double top)
+    {
+        if (_window != null)
+            Dispatcher.UIThread.Post(() => _window?.MoveDockedBar(left, top), DispatcherPriority.Input);
     }
 
     internal static void CommitDrag(int x, int y)
     {
+        if (_window == null) return;
         Dispatcher.UIThread.Post(() => _window?.CommitBarDrag(x, y), DispatcherPriority.Render);
     }
 
     internal static void MoveBarByPhys(int x, int y)
     {
+        if (_window == null) return;
         Dispatcher.UIThread.Post(() => _window?.MoveBarByPhys(x, y), DispatcherPriority.Input);
     }
 
     internal static void ResizePanelByPhys(int w, int h)
     {
+        if (_window == null) return;
         Dispatcher.UIThread.Post(() => _window?.ResizeShellByPhys(w, h), DispatcherPriority.Input);
     }
 
     internal static void NotifyGameSurfaceMetricsChanged()
     {
-        if (!UseCustomSkiaBridge)
+        if (!UseCustomSkiaBridge || _window == null)
             return;
 
         Dispatcher.UIThread.Post(() => _window?.OnGameSurfaceMetricsChanged(), DispatcherPriority.Render);
@@ -329,6 +450,38 @@ internal static class AvaloniaOverlay
             return;
 
         Dispatcher.UIThread.Post(() => _window?.OnCustomFrameSubmitted(width, height), DispatcherPriority.Render);
+    }
+
+    /// <summary>
+    /// Publish the physical bounds (game client pixels) of every open
+    /// interactive popup in the overlay window's OverlayLayer. Empty = none.
+    /// </summary>
+    internal static void PublishPopupRects(List<(double Left, double Top, double Width, double Height)> rects)
+    {
+        var snapshots = new PhysicalRect[rects.Count];
+        for (int i = 0; i < rects.Count; i++)
+        {
+            snapshots[i] = new PhysicalRect(
+                (int)Math.Round(rects[i].Left),
+                (int)Math.Round(rects[i].Top),
+                (int)Math.Round(rects[i].Left + rects[i].Width),
+                (int)Math.Round(rects[i].Top + rects[i].Height));
+        }
+
+        lock (HitTestLock)
+            _popupRects = snapshots;
+    }
+
+    /// <summary>
+    /// Close every open light-dismiss popup (Flyout, ContextMenu, dropdown).
+    /// Called from the game thread when the user clicks the game world while
+    /// one is open; the click itself still goes to AC.
+    /// </summary>
+    internal static void DismissLightDismissPopups()
+    {
+        HasOpenLightDismissPopup = false;
+        if (_window == null) return;
+        Dispatcher.UIThread.Post(() => _window?.CloseLightDismissPopups(), DispatcherPriority.Input);
     }
 
     internal static void PublishPanelRects(params (double Left, double Top, double Width, double Height)[] rects)
@@ -363,6 +516,30 @@ internal static class AvaloniaOverlay
             }
             var r = rect.Value;
             _radarPanelRect = new PhysicalRect(
+                (int)Math.Round(r.Left),
+                (int)Math.Round(r.Top),
+                (int)Math.Round(r.Left + r.Width),
+                (int)Math.Round(r.Top + r.Height));
+        }
+    }
+
+    /// <summary>
+    /// Publish the docked chat panel's physical bounds for Ctrl-gated
+    /// click-through (live-testing finding 2026-09-02). Pass null to clear
+    /// (chat closed or popped out — popout uses the layered window's own
+    /// WM_NCHITTEST / HTTRANSPARENT path). Mirrors PublishRadarPanelRect.
+    /// </summary>
+    internal static void PublishChatPanelRect((double Left, double Top, double Width, double Height)? rect)
+    {
+        lock (HitTestLock)
+        {
+            if (rect == null)
+            {
+                _chatPanelRect = null;
+                return;
+            }
+            var r = rect.Value;
+            _chatPanelRect = new PhysicalRect(
                 (int)Math.Round(r.Left),
                 (int)Math.Round(r.Top),
                 (int)Math.Round(r.Left + r.Width),
@@ -549,9 +726,11 @@ internal static class AvaloniaOverlay
         _window = null;
         _started = false;
         AvaloniaHwnd = IntPtr.Zero;
+        HasOpenLightDismissPopup = false;
         lock (HitTestLock)
         {
             _panelRects = Array.Empty<PhysicalRect>();
+            _popupRects = Array.Empty<PhysicalRect>();
             _barButtonRects = new Dictionary<string, PhysicalRect>(StringComparer.OrdinalIgnoreCase);
         }
     }
@@ -585,7 +764,19 @@ internal static class AvaloniaOverlay
                 [
                     Win32CompositionMode.RedirectionSurface
                 ],
-                ShouldRenderOnUIThread = true
+                ShouldRenderOnUIThread = true,
+                // Popup flash fix: without this every ToolTip, Flyout,
+                // ContextMenu and ComboBox dropdown opens as its own PopupRoot
+                // TopLevel (a native popup HWND), which the custom producer
+                // path rendered through the overlay's one render target - a
+                // popup-only frame reached the game and every docked panel
+                // vanished until the overlay window drew again. With
+                // OverlayPopups the popups live in the overlay window's
+                // OverlayLayer and are drawn in the same frame as the panels
+                // (no extra HWND, readback or focus change). The software
+                // fallback renders each TopLevel into its own framebuffer, so it
+                // keeps native popups as before.
+                OverlayPopups = UseCustomSkiaBridge,
             };
 
             if (UseCustomSkiaBridge)
@@ -963,8 +1154,8 @@ internal class RynthOverlayWindow : Window
     // working) but the canvas RTT clips it; the host renders the Border into
     // its own RTT and pushes the pixels to the layered window via
     // UpdateLayeredWindow. This sidesteps OverlaySkiaPlatformGraphics
-    // entirely — the bridge is a singleton with one shared render target,
-    // so a real visible Avalonia Window would thrash that target.
+    // entirely - only the overlay window's render target reaches the game, so
+    // a real Avalonia Window would get a detached target and draw nowhere.
     private readonly Dictionary<string, FloatingPanelHost> _floatingPanels = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Control> _panelContents = new(StringComparer.OrdinalIgnoreCase);
     // Each floating panel parks its chrome Border past the right edge of
@@ -1071,6 +1262,27 @@ internal class RynthOverlayWindow : Window
 
         Content = BuildRoot();
 
+        // UI deep-dive finding P0-7 (2026-07-02): MonstersPanel (5 TextBoxes)
+        // and MetaPanel (3 TextBoxes) never wired Win32Backend.
+        // AvaloniaTextInputActive at all — unlike SettingsPanel/other panels
+        // that hand-wire GotFocus/LostFocus on each of their own TextBoxes.
+        // Without it, keystrokes typed into those specific boxes leak
+        // through to the game underneath (per Win32Backend's key-routing
+        // gate on this flag). Rather than hand-wire the missing ones (and
+        // risk the next new TextBox anywhere repeating the same bug),
+        // GotFocusEvent/LostFocusEvent bubble by default in Avalonia, so one
+        // window-level handler here covers every TextBox in every panel,
+        // present and future — the per-panel hand-wiring elsewhere becomes
+        // redundant-but-harmless (same flag, same value) rather than wrong.
+        AddHandler(InputElement.GotFocusEvent, (_, e) =>
+        {
+            if (e.Source is TextBox) Win32Backend.AvaloniaTextInputActive = true;
+        }, RoutingStrategies.Bubble);
+        AddHandler(InputElement.LostFocusEvent, (_, e) =>
+        {
+            if (e.Source is TextBox) Win32Backend.AvaloniaTextInputActive = false;
+        }, RoutingStrategies.Bubble);
+
         Opened += (s, e) =>
         {
             try
@@ -1114,6 +1326,11 @@ internal class RynthOverlayWindow : Window
         };
 
         AvaloniaOverlay.RegisterWindow(this);
+
+        // Popups are embedded in this window's OverlayLayer (OverlayPopups).
+        // Track them for hit-testing, game-world light-dismiss and the
+        // popup-flash diagnostics (see the "Embedded popups" section).
+        InstallPopupTracking();
 
         _captureTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, (_, _) =>
         {
@@ -1201,15 +1418,17 @@ internal class RynthOverlayWindow : Window
 
         var stack = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(8, 4) };
         _barStack = stack;
-        stack.Children.Add(new TextBlock { Text = "RC", FontWeight = FontWeight.Bold, Foreground = Brushes.LightGreen, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,10,0) });
+        var rcLabel = new TextBlock { Text = "RC", FontWeight = FontWeight.Bold, Foreground = Brushes.LightGreen, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,10,0) };
+        ToolTip.SetTip(rcLabel, $"RynthCore {EntryPoint.BuildStamp}");   // plugins: Status panel
+        stack.Children.Add(rcLabel);
 
-        var barSuppressed = new HashSet<string> { "Monsters", "Settings", "Nav", "Meta", "Items" };
+        var barSuppressed = new HashSet<string> { "Monsters", "Damage", "Settings", "Nav", "Meta", "Items", "Lua" };
         foreach (var p in registeredPanels)
         {
             _registeredPanels[p.Title] = p.Factory;
             if (barSuppressed.Contains(p.Title)) continue;
             var btn = StyleBarButton(new Button { Content = p.Title });
-            btn.Click += (_, _) => ActivateBarButton(p.Title);
+            btn.Click += (_, _) => PanelRouter.Toggle(p.Title);
             stack.Children.Add(btn);
             _barButtons[p.Title] = btn;
         }
@@ -1255,6 +1474,11 @@ internal class RynthOverlayWindow : Window
             CornerRadius = new CornerRadius(4), 
             Child = stack 
         };
+        if (AvaloniaOverlay.DockedBarSuppressed)
+        {
+            _barBorder.Opacity = 0;
+            _barBorder.IsHitTestVisible = false;
+        }
 
         // Update physical bar bounds for dragging. Use the persisted position
         // if we have one so a reload (or AC restart) keeps the user's layout.
@@ -1289,6 +1513,11 @@ internal class RynthOverlayWindow : Window
     {
         try
         {
+            // Settings > Display "Remember Open Windows and Positions" (default on).
+            // Off: leave panels closed so a hand-arranged layout is not forced back.
+            if (!Plugins.EngineSettings.RememberWindowLayout)
+                return;
+
             // Bar floating mode restores once AC's HWND is available. If we
             // pop out before that, the FloatingPanelHost ctor takes its
             // legacy code path (no marshal to game thread) and the layered
@@ -1298,7 +1527,8 @@ internal class RynthOverlayWindow : Window
             // its own comments. Poll briefly; give up after a few seconds so
             // a never-ready GameHwnd (Decal coexistence?) doesn't leave the
             // bar lost.
-            if (PanelStateStore.BarFloating && _floatingBar == null)
+            // An ImGui-faced bar pops out as an ImGui window (ImGuiBar.SyncPopOut).
+            if (PanelStateStore.BarFloating && _floatingBar == null && ImGuiBar.ResolveFace() != PanelFace.ImGui)
             {
                 TryRestoreFloatingBar(attemptsRemaining: 30);
             }
@@ -1320,9 +1550,18 @@ internal class RynthOverlayWindow : Window
                 }
                 if (kv.Value.Floating)
                 {
+                    // Panels with an ImGui face pop out as ImGui windows now
+                    // (ImGuiPopOuts, Tom 2026-09-29): ImGuiPanelHost.RestoreOnce
+                    // reopens them popped out. Leave the saved entry alone.
+                    if (PanelRouter.ResolveDockedFace(kv.Key) == PanelFace.ImGui)
+                        continue;
                     deferred.Add(kv.Key);
                     continue;
                 }
+                // Docked panels whose docked face is ImGui are restored by
+                // ImGuiPanelHost.RestoreOnce instead.
+                if (PanelRouter.ResolveDockedFace(kv.Key) == PanelFace.ImGui)
+                    continue;
                 if (_registeredPanels.TryGetValue(kv.Key, out Func<Control>? factory))
                     TogglePanel(kv.Key, factory);
             }
@@ -1353,8 +1592,24 @@ internal class RynthOverlayWindow : Window
         }
     }
 
-    private void RestoreFloatingPanels(List<string> titles)
+    private void RestoreFloatingPanels(List<string> titles) => RestoreFloatingPanels(titles, 0);
+
+    private void RestoreFloatingPanels(List<string> titles, int waited)
     {
+        // A floating panel's window must be created on AC's thread (PopOut uses
+        // RunOnGameThread). Login can complete before Win32Backend knows the game
+        // window (it initialises with ImGui, a few seconds later); restoring then
+        // created the window on this thread, the later close was posted to the
+        // game thread, DestroyWindow failed with ACCESS_DENIED and the old window
+        // stayed up beside every reopened one — the double dashboard
+        // (2026-09-28). Wait for the game window, up to ~30 s.
+        if (ImGuiBackend.Win32Backend.GameHwnd == IntPtr.Zero && waited < 120)
+        {
+            DispatcherTimer.RunOnce(() => RestoreFloatingPanels(titles, waited + 1), TimeSpan.FromMilliseconds(250));
+            return;
+        }
+        if (waited > 0)
+            try { RynthLog.UI($"AvaloniaOverlay: restoring floating panel(s) after waiting {waited * 250} ms for the game window."); } catch { }
         try
         {
             foreach (var title in titles)
@@ -1379,6 +1634,35 @@ internal class RynthOverlayWindow : Window
 
         _captureDirty = true;
         QueueCapture();
+    }
+
+    internal void CloseAvaloniaCopyCore(string title)
+    {
+        try
+        {
+            if (_floatingPanels.TryGetValue(title, out FloatingPanelHost? host))
+            {
+                RynthLog.Info($"Panel({title}): ImGui face opened; closing its popped-out Avalonia window.");
+                _floatingPanels.Remove(title);
+                RebuildFloatingLayeredSnapshot();
+                _panelContents.Remove(title);
+                try { _desktopCanvas.Children.Remove(host.RootControl); } catch { }
+                host.Dispose();
+            }
+            if (_activePanels.TryGetValue(title, out Border? docked))
+            {
+                RynthLog.Info($"Panel({title}): ImGui face opened; closing its docked Avalonia copy.");
+                _desktopCanvas.Children.Remove(docked);
+                _activePanels.Remove(title);
+                _panelContents.Remove(title);
+            }
+            RefreshHitTestSnapshot();
+            RequestFrameRefresh();
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Info($"Panel({title}): CloseAvaloniaCopy threw {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     internal void ActivateBarButton(string title)
@@ -1406,20 +1690,63 @@ internal class RynthOverlayWindow : Window
         }
     }
 
+    // Every docked frame carries this tag so a frame the dictionaries lost
+    // track of can still be found (see RemoveStrayPanelFrames).
+    private const string PanelFrameTagPrefix = "rc-panel:";
+
+    private static string PanelFrameTag(string title) => PanelFrameTagPrefix + title;
+
+    /// <summary>
+    /// A panel has at most one frame. Before opening a new one, remove any
+    /// frame for this title still sitting in the canvas that neither
+    /// _activePanels nor a floating host owns: it would keep drawing under the
+    /// new one and could never be clicked (hit-testing only covers tracked
+    /// frames), i.e. the "frozen duplicate" players see.
+    /// </summary>
+    private int RemoveStrayPanelFrames(string title)
+    {
+        string tag = PanelFrameTag(title);
+        _activePanels.TryGetValue(title, out Border? tracked);
+        _floatingPanels.TryGetValue(title, out FloatingPanelHost? host);
+        var strays = _desktopCanvas.Children
+            .OfType<Control>()
+            .Where(c => c.Tag is string t && t == tag
+                        && !ReferenceEquals(c, tracked)
+                        && !ReferenceEquals(c, host?.RootControl))
+            .ToList();
+        foreach (Control stray in strays)
+        {
+            try { _desktopCanvas.Children.Remove(stray); } catch { }
+        }
+        if (strays.Count > 0)
+            RynthLog.Info($"Panel({title}): removed {strays.Count} untracked frame(s) from the overlay - a duplicate was about to show.");
+        return strays.Count;
+    }
+
+    private int CountPanelFrames(string title)
+    {
+        string tag = PanelFrameTag(title);
+        return _desktopCanvas.Children.Count(c => c.Tag is string t && t == tag);
+    }
+
     private void TogglePanel(string title, Func<Control> factory)
     {
         if (_activePanels.TryGetValue(title, out var existing))
         {
+            RynthLog.Info($"Panel({title}): toggle -> close docked (frames={CountPanelFrames(title)}, inWorld={LoginLifecycleHooks.HasObservedLoginComplete}).");
             ClosePanel(title, existing);
         }
         else if (_floatingPanels.TryGetValue(title, out var floating))
         {
             // Toggling a panel that's currently popped out closes the
             // floating window entirely (matches the docked-mode toggle).
+            RynthLog.Info($"Panel({title}): toggle -> close floating (frames={CountPanelFrames(title)}, inWorld={LoginLifecycleHooks.HasObservedLoginComplete}).");
             CloseFloatingPanel(title, floating);
         }
         else
         {
+            RemoveStrayPanelFrames(title);
+            RynthLog.Info($"Panel({title}): toggle -> open (inWorld={LoginLifecycleHooks.HasObservedLoginComplete}, canvas={_desktopCanvas.Bounds.Width:0}x{_desktopCanvas.Bounds.Height:0}).");
             bool isRynthAi  = string.Equals(title, "RynthAi",  StringComparison.OrdinalIgnoreCase);
             bool isMonsters = string.Equals(title, "Monsters", StringComparison.OrdinalIgnoreCase);
             bool isRadar    = string.Equals(title, "Radar",    StringComparison.OrdinalIgnoreCase);
@@ -1433,12 +1760,18 @@ internal class RynthOverlayWindow : Window
             // it can be shrunk to a sliver.
             double defaultW = isRynthAi ? 296 : (isMonsters ? 1100 : (isRadar ? 320 : (isTracker ? 165 : 400)));
             double defaultH = isRynthAi ? 332 : (isMonsters ? 540  : (isRadar ? 320 : (isTracker ? 190 : 500)));
+            // Live-testing finding 2026-09-02: if RynthAi was left minimized
+            // last session, saved.Height is the small preset — but MinHeight
+            // clamps the effective render size regardless of how Height was
+            // set, so a hardcoded large floor here would silently re-expand
+            // it back to 260 on every reopen despite the smaller saved value.
+            bool rynthAiMinimized = isRynthAi && RynthAiDashboardState.Minimized;
             var windowFrame = new Border
             {
                 Width = hasSaved && saved.Width > 0 ? saved.Width : defaultW,
                 Height = hasSaved && saved.Height > 0 ? saved.Height : defaultH,
                 MinWidth  = isRynthAi ? 280 : (isRadar ? 120 : (isTracker ? 60  : 320)),
-                MinHeight = isRynthAi ? 260 : (isRadar ? 120 : (isTracker ? 20  : 240)),
+                MinHeight = isRynthAi ? (rynthAiMinimized ? 46 : 260) : (isRadar ? 120 : (isTracker ? 20  : 240)),
                 // RynthAi panel matches the ImGui dashboard's WindowBg (0.04,
                 // 0.06, 0.08, 0.95) → #F20A0F14, with the ColBtnBord (0.15,
                 // 0.25, 0.35) → #264059 edge. Other panels keep the softer
@@ -1660,6 +1993,20 @@ internal class RynthOverlayWindow : Window
                     Panels.RynthAiPanel.RequestPopOut    = () => PopOutPanel(title);
                     Panels.RynthAiPanel.RequestRedock    = () => RedockPanel(title);
                     Panels.RynthAiPanel.IsFloatingNow    = () => _floatingPanels.ContainsKey(title);
+                    Panels.RynthAiPanel.MarkDirty        = () => { if (_floatingPanels.TryGetValue(title, out var fp)) fp.MarkDirty(); };
+                    // Live-testing finding 2026-09-02: see RequestDockedResize's
+                    // doc comment — moves both the wrapping panel's actual
+                    // Height and its MinHeight floor together so a shrink
+                    // request isn't immediately clamped back up.
+                    Panels.RynthAiPanel.RequestDockedResize = (targetHeight, newMinHeight) =>
+                    {
+                        windowFrame.MinHeight = newMinHeight;
+                        SetPanelSize(windowFrame, windowFrame.Width, targetHeight);
+                        SetPanelPosition(windowFrame, GetCanvasLeft(windowFrame), GetCanvasTop(windowFrame));
+                        RefreshHitTestSnapshot();
+                        RequestFrameRefresh();
+                        PersistPanelState(title, windowFrame, open: true);
+                    };
                     try { panelContent = factory(); }
                     finally { Panels.RynthAiPanel.AttachDragHandle = null; }
                 }
@@ -1676,6 +2023,7 @@ internal class RynthOverlayWindow : Window
                             ClosePanel(title, docked);
                     };
                     Panels.RadarPanel.IsFloatingNow = () => _floatingPanels.ContainsKey(title);
+                    Panels.RadarPanel.MarkDirty     = () => { if (_floatingPanels.TryGetValue(title, out var fp)) fp.MarkDirty(); };
                     Panels.RadarPanel.AttachSettingsPopup = popup =>
                     {
                         // Tear down any popup left over from the previous radar
@@ -1754,7 +2102,10 @@ internal class RynthOverlayWindow : Window
             var resizeGlyph = new TextBlock
             {
                 Text = "◢",
-                FontSize = isRadar ? 10 : 14,
+                // Live-testing finding 2026-09-02: non-radar size shrunk
+                // from 14/22 to 10/16 — was much too large relative to the
+                // other panel chrome. Matches LayeredWindow.GripPx.
+                FontSize = 10,
                 Foreground = isRadar ? new SolidColorBrush(Color.FromArgb(0xFF, 0xE6, 0xC7, 0x66)) : Brushes.Teal,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
@@ -1768,8 +2119,8 @@ internal class RynthOverlayWindow : Window
                 : new SolidColorBrush(Color.Parse("#5526C1A6"));
             var resizeGrip = new Border
             {
-                Width  = isRadar ? 14 : 22,
-                Height = isRadar ? 14 : 22,
+                Width  = isRadar ? 14 : 16,
+                Height = isRadar ? 14 : 16,
                 Background = resizeGripIdle,
                 BorderBrush = isRadar ? new SolidColorBrush(Color.FromArgb(0xFF, 0xE6, 0xC7, 0x66)) : Brushes.Teal,
                 BorderThickness = new Thickness(0, 1, 0, 0),
@@ -1850,6 +2201,7 @@ internal class RynthOverlayWindow : Window
 
             windowFrame.Child = grid;
             windowFrame.PointerPressed += (_, _) => BringPanelToFront(title, windowFrame);
+            windowFrame.Tag = PanelFrameTag(title);
             _desktopCanvas.Children.Add(windowFrame);
 
             double initialLeft = hasSaved ? saved.Left : 100 + (_activePanels.Count * 20);
@@ -1882,16 +2234,30 @@ internal class RynthOverlayWindow : Window
 
     private void ClosePanel(string title, Border panel)
     {
+        // Only forget the tracked frame if it is the one being closed. A close
+        // from an older frame's handler must not untrack the live frame: that
+        // left it drawing in the canvas, unclickable, and the next bar toggle
+        // opened a second copy on top of it.
+        bool isTracked = _activePanels.TryGetValue(title, out Border? tracked) && ReferenceEquals(tracked, panel);
+
         // Save final pos/size before tearing the panel down so reopens
         // start where the user left it.
-        PersistPanelState(title, panel, open: false);
+        if (isTracked)
+            PersistPanelState(title, panel, open: false);
 
         _desktopCanvas.Children.Remove(panel);
-        _activePanels.Remove(title);
-        // Drop the content reference — closing the panel discards in-panel
-        // state, matching the previous behavior where reopening called factory()
-        // again. Popout/redock keeps the entry, full-close removes it.
-        _panelContents.Remove(title);
+        if (isTracked)
+        {
+            _activePanels.Remove(title);
+            // Drop the content reference — closing the panel discards in-panel
+            // state, matching the previous behavior where reopening called factory()
+            // again. Popout/redock keeps the entry, full-close removes it.
+            _panelContents.Remove(title);
+        }
+        else
+        {
+            RynthLog.Info($"Panel({title}): close came from an untracked frame; the tracked frame stays open.");
+        }
         // Tear down the radar's settings popup if this is the radar — the
         // popup lives in _desktopCanvas as a sibling and would otherwise
         // leak past the panel close.
@@ -2084,6 +2450,7 @@ internal class RynthOverlayWindow : Window
 
         Canvas.SetLeft(renderWrapper, offBoundsX);
         Canvas.SetTop(renderWrapper, offBoundsY);
+        renderWrapper.Tag = PanelFrameTag(title);
         _desktopCanvas.Children.Add(renderWrapper);
 
         // The chrome's caption is 24px tall; reserve ~60px on the right for
@@ -2134,10 +2501,16 @@ internal class RynthOverlayWindow : Window
                 // intact but dormant so a future "gate the undocked radar too"
                 // option can re-enable it here without rework.
                 clickThroughWhenCtrlReleased: false,
-                // Radar + RynthAi render smoothly via custom draw / live
-                // snapshots and depend on the per-frame RTT re-render — exempt
-                // them from the dirty gate so they keep full-rate rendering.
-                alwaysRender: isRadarPopout || isRynthAiPopout);
+                // UI deep-dive finding TL;DR #7 (2026-07-02): Radar + RynthAi
+                // used to be exempted from the dirty gate entirely
+                // (alwaysRender=true), rendering the popout at the
+                // compositor's ~60Hz Tick rate for data that only actually
+                // updates at their own ~30Hz snapshot-timer cadence — 2x the
+                // needed render cost. Both panels now call the newly-wired
+                // MarkDirty() from their own timer when new data arrives, so
+                // the normal dirty gate correctly paces them to ~30Hz
+                // instead of exempting them from it.
+                alwaysRender: false);
         }
         catch (Exception ex)
         {
@@ -2340,10 +2713,12 @@ internal class RynthOverlayWindow : Window
 
         // Bottom-right grip is purely visual; HTBOTTOMRIGHT in the layered
         // window's WndProc gives the OS-level resize.
+        // Live-testing finding 2026-09-02: shrunk from 22x22/FontSize 14 to
+        // match LayeredWindow.GripPx (16) — was much too large.
         var resizeGlyph = new TextBlock
         {
             Text = "◢",
-            FontSize = 14,
+            FontSize = 10,
             Foreground = Brushes.Teal,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
@@ -2351,8 +2726,8 @@ internal class RynthOverlayWindow : Window
         };
         var resizeGrip = new Border
         {
-            Width = 22,
-            Height = 22,
+            Width = 16,
+            Height = 16,
             Background = new SolidColorBrush(Color.Parse("#2026C1A6")),
             BorderBrush = Brushes.Teal,
             BorderThickness = new Thickness(0, 1, 0, 0),
@@ -2534,6 +2909,11 @@ internal class RynthOverlayWindow : Window
         // where the user popped out from. Canvas.GetLeft can return NaN if
         // the bar hasn't been positioned yet — defensive defaults match
         // BuildRoot's initial 50,5.
+        // Popped out, the bar is always the Avalonia bar - even while the ImGui
+        // bar stands in for it docked.
+        _barBorder.Opacity = 1;
+        _barBorder.IsHitTestVisible = true;
+
         double dockedLeft = GetCanvasLeft(_barBorder);
         double dockedTop = GetCanvasTop(_barBorder);
         if (double.IsNaN(dockedLeft)) dockedLeft = 50;
@@ -2739,9 +3119,26 @@ internal class RynthOverlayWindow : Window
             ToolTip.SetTip(_barPopoutButton, "Pop the bar out into its own floating window.");
         }
 
+        ApplyDockedBarSuppression();
+        RynthLog.Info($"RedockBar: redocked to canvas at ({dockedLeft:0.#},{dockedTop:0.#}).");
+    }
+
+    internal void ApplyDockedBarSuppression()
+    {
+        if (_barBorder == null) return;
+        bool hide = AvaloniaOverlay.DockedBarSuppressed && _floatingBar == null;
+        _barBorder.Opacity = hide ? 0 : 1;
+        _barBorder.IsHitTestVisible = !hide;
         RefreshHitTestSnapshot();
         RequestFrameRefresh();
-        RynthLog.Info($"RedockBar: redocked to canvas at ({dockedLeft:0.#},{dockedTop:0.#}).");
+    }
+
+    internal void MoveDockedBar(double left, double top)
+    {
+        if (_barBorder == null || _floatingBar != null) return;
+        Canvas.SetLeft(_barBorder, left);
+        Canvas.SetTop(_barBorder, top);
+        RefreshHitTestSnapshot();
     }
 
     /// <summary>
@@ -2757,6 +3154,16 @@ internal class RynthOverlayWindow : Window
         if (!_floatingPanels.TryGetValue(title, out FloatingPanelHost? host) || host == null)
         {
             RynthLog.Info($"RedockPanel({title}): bailing — no floating host.");
+            return;
+        }
+
+        // ImGui in game, Avalonia popped out: when this panel's docked face is
+        // ImGui, redocking closes the floating window and opens the ImGui face.
+        if (PanelRouter.RedockGoesToImGui(title))
+        {
+            RynthLog.Info($"RedockPanel({title}): docked face is ImGui - handing off.");
+            CloseFloatingPanel(title, host);
+            PanelRouter.CompleteRedockToImGui(title);
             return;
         }
 
@@ -3011,6 +3418,7 @@ internal class RynthOverlayWindow : Window
         Grid.SetRow(resizeGrip, 1);
         windowFrame.Child = grid;
         windowFrame.PointerPressed += (_, _) => BringPanelToFront(title, windowFrame);
+        windowFrame.Tag = PanelFrameTag(title);
         _desktopCanvas.Children.Add(windowFrame);
 
         double initialLeft = hasSaved ? saved.Left : 100 + (_activePanels.Count * 20);
@@ -3029,10 +3437,13 @@ internal class RynthOverlayWindow : Window
     /// </summary>
     private Border BuildResizeGrip(string title, Border windowFrame)
     {
+        // Live-testing finding 2026-09-02: shrunk from 22x22/FontSize 14 —
+        // was much too large relative to the other panel chrome (close/
+        // redock buttons run ~14-20px). Matches LayeredWindow.GripPx.
         var resizeGlyph = new TextBlock
         {
             Text = "◢",
-            FontSize = 14,
+            FontSize = 10,
             Foreground = Brushes.Teal,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
@@ -3042,8 +3453,8 @@ internal class RynthOverlayWindow : Window
         var resizeGripHover = new SolidColorBrush(Color.Parse("#5526C1A6"));
         var resizeGrip = new Border
         {
-            Width = 22,
-            Height = 22,
+            Width = 16,
+            Height = 16,
             Background = resizeGripIdle,
             BorderBrush = Brushes.Teal,
             BorderThickness = new Thickness(0, 1, 0, 0),
@@ -3346,13 +3757,23 @@ internal class RynthOverlayWindow : Window
         }
     }
 
+    // UI deep-dive finding TL;DR #8 (2026-07-02): BringPanelToFront used to
+    // Remove then re-Add the panel's Border in _desktopCanvas.Children on
+    // EVERY docked-panel click — a full detach/reattach of the whole panel
+    // subtree, which drops TextBox focus and forces a full layout pass for
+    // everything in it, stacking on top of any MetaPanel rebuild the same
+    // click triggers. ZIndex controls paint/hit-test order without touching
+    // the Children collection at all — no detach, no focus loss, no layout
+    // churn. A simple ever-increasing counter keeps "most recently clicked"
+    // on top exactly like the old Remove+Add did.
+    private int _nextPanelZIndex = 1;
+
     private void BringPanelToFront(string title, Border panel)
     {
         if (!_desktopCanvas.Children.Contains(panel))
             return;
 
-        _desktopCanvas.Children.Remove(panel);
-        _desktopCanvas.Children.Add(panel);
+        panel.ZIndex = _nextPanelZIndex++;
 
         if (_activePanels.Remove(title))
             _activePanels[title] = panel;
@@ -3685,7 +4106,14 @@ internal class RynthOverlayWindow : Window
         float inputScale = (float)GetEffectiveRenderScale();
         AvaloniaOverlay.InputScale = inputScale;
 
-        if (_barBorder != null)
+        bool barSuppressed = AvaloniaOverlay.DockedBarSuppressed && _floatingBar == null;
+        if (barSuppressed)
+        {
+            // Off-screen, zero-size: IsOverPanel/bar drag never match it.
+            AvaloniaOverlay.PanelPhysLeft = AvaloniaOverlay.PanelPhysRight = -10000;
+            AvaloniaOverlay.PanelPhysTop = AvaloniaOverlay.PanelPhysBottom = -10000;
+        }
+        else if (_barBorder != null)
         {
             Point? barOrigin = _barBorder.TranslatePoint(default, _desktopCanvas);
             double barLeft = barOrigin?.X ?? Canvas.GetLeft(_barBorder);
@@ -3705,7 +4133,7 @@ internal class RynthOverlayWindow : Window
         }
 
         var buttonRects = new Dictionary<string, (double Left, double Top, double Width, double Height)>(_barButtons.Count, StringComparer.OrdinalIgnoreCase);
-        if (_barBorder != null)
+        if (_barBorder != null && !barSuppressed)
         {
             foreach ((string title, Button button) in _barButtons)
             {
@@ -3728,6 +4156,7 @@ internal class RynthOverlayWindow : Window
 
         var rects = new List<(double Left, double Top, double Width, double Height)>(_activePanels.Count);
         (double Left, double Top, double Width, double Height)? radarRect = null;
+        (double Left, double Top, double Width, double Height)? chatRect = null;
         foreach ((string title, Border panel) in _activePanels)
         {
             Point? origin = panel.TranslatePoint(default, _desktopCanvas);
@@ -3738,12 +4167,275 @@ internal class RynthOverlayWindow : Window
                 panel.Height * inputScale);
             if (string.Equals(title, "Radar", StringComparison.OrdinalIgnoreCase))
                 radarRect = rect;
+            else if (string.Equals(title, "Chat", StringComparison.OrdinalIgnoreCase))
+                chatRect = rect;
             else
                 rects.Add(rect);
         }
 
         AvaloniaOverlay.PublishPanelRects(rects.ToArray());
         AvaloniaOverlay.PublishRadarPanelRect(radarRect);
+        AvaloniaOverlay.PublishChatPanelRect(chatRect);
+    }
+
+    // ── Embedded popups ────────────────────────────────────────────────────
+    // With Win32PlatformOptions.OverlayPopups every Popup (ToolTip, Flyout,
+    // ContextMenu, ComboBox dropdown) is an OverlayPopupHost inside this
+    // window's OverlayLayer, so it is drawn in the same frame as the docked
+    // panels. Three things still need help from us:
+    //   1. hit-testing - a Flyout/menu can hang past its panel's rect, and
+    //      Win32Backend only forwards clicks that land on published rects;
+    //   2. light-dismiss - a click on the game world never reaches Avalonia;
+    //   3. diagnostics - log whether a popup ever rebuilt the overlay surface
+    //      or got its own TopLevel (the old "panel flash").
+
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+
+    private sealed class PopupTrack
+    {
+        public int Serial;
+        public string Kind = "";
+        public string Host = "";
+        public bool Suppressed;
+        public int SurfaceCreatesAtOpen;
+        public int DetachedTargetsAtOpen;
+    }
+
+    private const int PopupLogNormalLineBudget = 40;
+    private const int PopupLogAnomalyLineBudget = 200;
+    private static RynthOverlayWindow? _popupOwner;
+    private static bool _popupClassHandlerInstalled;
+    private readonly Dictionary<Avalonia.Controls.Primitives.Popup, PopupTrack> _openPopups = new();
+    private int _popupSerial;
+    private int _popupNormalLines;
+    private int _popupAnomalyLines;
+    private bool _popupRectsPublished;
+
+    private void InstallPopupTracking()
+    {
+        _popupOwner = this;
+        if (!_popupClassHandlerInstalled)
+        {
+            _popupClassHandlerInstalled = true;
+            Avalonia.Controls.Primitives.Popup.IsOpenProperty.Changed.AddClassHandler<Avalonia.Controls.Primitives.Popup, bool>(
+                (popup, e) => _popupOwner?.OnAnyPopupIsOpenChanged(popup, e.NewValue.GetValueOrDefault()));
+        }
+
+        // Fires after every layout pass: keeps popup hit rects in step with
+        // Flyout content changes and repositioning. Returns at once when no
+        // popup is open.
+        LayoutUpdated += (_, _) => RefreshPopupHitRects();
+    }
+
+    private void OnAnyPopupIsOpenChanged(Avalonia.Controls.Primitives.Popup popup, bool isOpen)
+    {
+        try
+        {
+            if (isOpen)
+            {
+                if (_openPopups.ContainsKey(popup))
+                    return;
+
+                var track = new PopupTrack
+                {
+                    Serial = ++_popupSerial,
+                    Kind = DescribePopup(popup),
+                    Host = popup.Host?.GetType().Name ?? "none",
+                    SurfaceCreatesAtOpen = OverlaySkiaRenderTarget.SurfaceCreateCount,
+                    DetachedTargetsAtOpen = OverlaySkiaGpuContext.DetachedTargetCount,
+                };
+                _openPopups[popup] = track;
+                UpdateLightDismissFlag();
+
+                // A ToolTip for a control inside a popped-out panel: that
+                // control lives in the off-bounds canvas strip, so the embedded
+                // tooltip would be clamped onto the edge of the in-game overlay,
+                // nowhere near the floating window. Don't show it.
+                if (popup.Child is ToolTip && popup.PlacementTarget is Control tipTarget && !IsInsideOverlayClientArea(tipTarget))
+                {
+                    track.Suppressed = true;
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        try { ToolTip.SetIsOpen(tipTarget, false); } catch { }
+                    }, DispatcherPriority.Send);
+                }
+
+                Dispatcher.UIThread.Post(() =>
+                {
+                    RefreshPopupHitRects();
+                    LogPopupOpened(track);
+                }, DispatcherPriority.Background);
+            }
+            else
+            {
+                if (!_openPopups.Remove(popup, out PopupTrack? track))
+                    return;
+
+                UpdateLightDismissFlag();
+                RefreshPopupHitRects();
+
+                // The old flash rebuilt the overlay surface on the window's next
+                // frame after the popup closed, so check a moment later.
+                DispatcherTimer.RunOnce(() => LogPopupClosed(track), TimeSpan.FromMilliseconds(1000), DispatcherPriority.Background);
+            }
+        }
+        catch (Exception ex)
+        {
+            RynthLog.UI($"OverlayPopup: tracking threw {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static string DescribePopup(Avalonia.Controls.Primitives.Popup popup)
+    {
+        string child = popup.Child?.GetType().Name ?? "empty";
+        string? owner = popup.TemplatedParent?.GetType().Name;
+        return owner != null ? $"{owner}/{child}" : child;
+    }
+
+    private bool IsInsideOverlayClientArea(Control control)
+    {
+        Point? origin = control.TranslatePoint(default, this);
+        if (origin == null)
+            return true;
+
+        double width = Bounds.Width > 0 ? Bounds.Width : Width;
+        double height = Bounds.Height > 0 ? Bounds.Height : Height;
+        return origin.Value.X < width && origin.Value.Y < height &&
+               origin.Value.X + control.Bounds.Width > 0 && origin.Value.Y + control.Bounds.Height > 0;
+    }
+
+    private void UpdateLightDismissFlag()
+    {
+        bool any = false;
+        foreach (Avalonia.Controls.Primitives.Popup popup in _openPopups.Keys)
+        {
+            if (popup.IsLightDismissEnabled)
+            {
+                any = true;
+                break;
+            }
+        }
+
+        AvaloniaOverlay.HasOpenLightDismissPopup = any;
+    }
+
+    /// <summary>
+    /// Close open light-dismiss popups because the user clicked the game world.
+    /// Popup.Close is the same call Avalonia's own light-dismiss makes, so
+    /// Flyout/ContextMenu/ComboBox state stays in sync.
+    /// </summary>
+    internal void CloseLightDismissPopups()
+    {
+        foreach (Avalonia.Controls.Primitives.Popup popup in _openPopups.Keys.ToArray())
+        {
+            if (!popup.IsOpen || !popup.IsLightDismissEnabled)
+                continue;
+
+            try { popup.Close(); }
+            catch (Exception ex) { RynthLog.UI($"OverlayPopup: dismiss threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        UpdateLightDismissFlag();
+    }
+
+    private void RefreshPopupHitRects()
+    {
+        if (_openPopups.Count == 0)
+        {
+            if (_popupRectsPublished)
+            {
+                AvaloniaOverlay.PublishPopupRects(new List<(double, double, double, double)>());
+                _popupRectsPublished = false;
+            }
+            return;
+        }
+
+        float scale = (float)GetEffectiveRenderScale();
+        var rects = new List<(double Left, double Top, double Width, double Height)>(_openPopups.Count);
+        List<Avalonia.Controls.Primitives.Popup>? stale = null;
+        foreach ((Avalonia.Controls.Primitives.Popup popup, PopupTrack track) in _openPopups)
+        {
+            if (!popup.IsOpen)
+            {
+                (stale ??= new()).Add(popup);
+                continue;
+            }
+
+            // ToolTips never take clicks; a click over one must reach AC.
+            if (track.Suppressed || popup.Child is ToolTip)
+                continue;
+
+            // OverlayPopupHost is a control in this window's OverlayLayer. A
+            // native PopupRoot (not expected) would be its own root: skipped.
+            if (popup.Host is not Visual host || !host.IsVisible)
+                continue;
+
+            Point? origin = host.TranslatePoint(default, _desktopCanvas);
+            if (origin == null || host.Bounds.Width <= 0 || host.Bounds.Height <= 0)
+                continue;
+
+            rects.Add((origin.Value.X * scale, origin.Value.Y * scale, host.Bounds.Width * scale, host.Bounds.Height * scale));
+        }
+
+        if (stale != null)
+        {
+            foreach (Avalonia.Controls.Primitives.Popup popup in stale)
+                _openPopups.Remove(popup);
+            UpdateLightDismissFlag();
+        }
+
+        AvaloniaOverlay.PublishPopupRects(rects);
+        _popupRectsPublished = rects.Count > 0;
+    }
+
+    private bool TakePopupLogLine(bool anomaly)
+    {
+        if (anomaly)
+            return _popupAnomalyLines++ < PopupLogAnomalyLineBudget;
+
+        if (_popupNormalLines < PopupLogNormalLineBudget)
+        {
+            _popupNormalLines++;
+            return true;
+        }
+
+        if (_popupNormalLines == PopupLogNormalLineBudget)
+        {
+            _popupNormalLines++;
+            RynthLog.UI("OverlayPopup: normal popup open/close lines muted for this session; anomalies are still logged.");
+        }
+        return false;
+    }
+
+    private void LogPopupOpened(PopupTrack track)
+    {
+        // Expected: host=OverlayPopupHost (drawn in the overlay frame). A
+        // PopupRoot here means a native popup TopLevel - the flash path.
+        bool anomaly = !track.Suppressed && track.Host != "OverlayPopupHost";
+        if (!TakePopupLogLine(anomaly))
+            return;
+
+        IntPtr game = Win32Backend.GameHwnd;
+        string fg = game == IntPtr.Zero ? "?" : GetForegroundWindow() == game ? "game" : "other";
+        RynthLog.UI(
+            $"OverlayPopup: open #{track.Serial} {track.Kind} host={track.Host}" +
+            (track.Suppressed ? " (tooltip of a popped-out panel - not shown)" : "") +
+            $" surfaceCreates={track.SurfaceCreatesAtOpen} detachedTargets={track.DetachedTargetsAtOpen} foreground={fg}.");
+    }
+
+    private void LogPopupClosed(PopupTrack track)
+    {
+        int rebuilds = OverlaySkiaRenderTarget.SurfaceCreateCount - track.SurfaceCreatesAtOpen;
+        int detached = OverlaySkiaGpuContext.DetachedTargetCount - track.DetachedTargetsAtOpen;
+        bool anomaly = rebuilds != 0 || detached != 0;
+        if (!TakePopupLogLine(anomaly))
+            return;
+
+        IntPtr game = Win32Backend.GameHwnd;
+        string fg = game == IntPtr.Zero ? "?" : GetForegroundWindow() == game ? "game" : "other";
+        RynthLog.UI(
+            $"OverlayPopup: close #{track.Serial} {track.Kind} surfaceRebuilds=+{rebuilds} detachedTargets=+{detached} foreground={fg}" +
+            (anomaly ? " - overlay surface was rebuilt or a popup TopLevel appeared (panel flash / resize)." : " - no flash."));
     }
 
     private void QueueCapture()
@@ -3769,6 +4461,16 @@ internal class RynthOverlayWindow : Window
     /// </summary>
     internal void TickFloatingPanels()
     {
+        // The UI hides between characters: popped-out panels (and a floating bar) are
+        // real windows, so they're hidden outright while not in the world rather than
+        // left sitting over character select. SetShown only acts on a change.
+        bool inWorld = Compatibility.LoginLifecycleHooks.HasObservedLoginComplete;
+        foreach (FloatingPanelHost host in _floatingPanels.Values)
+            host.SetShown(inWorld);
+        _floatingBar?.SetShown(inWorld);
+        if (!inWorld)
+            return;
+
         if (_floatingPanels.Count > 0)
         {
             foreach (FloatingPanelHost host in _floatingPanels.Values)
@@ -3803,9 +4505,11 @@ internal class RynthOverlayWindow : Window
 /// forwarded to the off-screen Avalonia HWND with translated coords so the
 /// panel's buttons/scrollbars/etc. behave the same as when docked.
 ///
-/// This deliberately does NOT use Avalonia's Window — a second Avalonia
-/// top-level routes through OverlaySkiaPlatformGraphics' singleton render
-/// target and thrashes the in-AC capture (the original "flashing" bug).
+/// This deliberately does NOT use Avalonia's Window. A second Avalonia
+/// top-level used to share OverlaySkiaPlatformGraphics' render target and
+/// blank the in-AC capture (the original "flashing" bug); it now gets a
+/// detached target (see OverlaySkiaGpuContext.TryCreateRenderTarget), so it
+/// would draw nowhere at all.
 /// </summary>
 internal sealed unsafe class FloatingPanelHost : IDisposable
 {
@@ -3847,6 +4551,8 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     private bool _disposed;
 
     private int _logCount;
+        private long _tickCount;
+        private long _lastTickHeartbeatMs;
     private bool _ownerApplied;
     private readonly bool _clickThroughGated;
     // Radar + RynthAi animate smoothly via custom Render / live snapshots and
@@ -3903,12 +4609,23 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         RootControl = rootControl;
         PanelBorder = panelBorder;
         PanelContent = panelContent;
-        // Any layout change in the panel subtree marks it dirty so the gated
-        // Tick() re-renders on the next frame (catches MetaPanel rebuilds,
-        // list/text updates, resizes). Render-only changes with no layout pass
-        // are covered by the heartbeat in Tick().
-        panelBorder.LayoutUpdated += (_, _) => _dirty = true;
-        panelContent.LayoutUpdated += (_, _) => _dirty = true;
+        // UI deep-dive finding (2026-07-02): this used to be
+        // panelBorder.LayoutUpdated / panelContent.LayoutUpdated. Avalonia's
+        // LayoutUpdated fires per-TopLevel after EVERY layout pass, not
+        // scoped to the subscribing control's own subtree — and docked
+        // panels + every popout share one Avalonia visual tree (popouts are
+        // just positioned off-canvas, not separate top-levels). So a single
+        // docked panel's rebuild (e.g. MetaPanel churn) re-dirtied EVERY
+        // popout at once, defeating the whole point of the gate during
+        // botting (near-60fps popout rendering came right back).
+        // PropertyChanged on BoundsProperty + SizeChanged genuinely scope to
+        // THIS control's own geometry changing. Content-only changes with no
+        // size/bounds delta (rare, but real — e.g. text swapped in a
+        // fixed-size row) still need the panel to call the existing
+        // MarkDirty() itself; the 200ms heartbeat below is the backstop for
+        // any that don't.
+        panelBorder.PropertyChanged += (_, e) => { if (e.Property == Visual.BoundsProperty) _dirty = true; };
+        panelContent.SizeChanged += (_, _) => _dirty = true;
         _logicalWidth = Math.Max(logicalWidth, 1);
         _logicalHeight = Math.Max(logicalHeight, 1);
         OffBoundsCanvasX = offBoundsCanvasX;
@@ -3955,6 +4672,8 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
             _ownerApplied = true;
         }
 
+        // One popped-out window per panel: retire any earlier window for this title.
+        LayeredWindow.ClaimTitle(title, _layered.Hwnd);
         _layered.CaptionHeight = captionHeight;
         _layered.CaptionRightInset = captionRightInset;
         // Each chrome button is 20×20 logical + ~4px margin = ~24
@@ -3964,10 +4683,30 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         // OnCloseClicked; the user redocks or toggles the bar button.
         _layered.CloseButtonWidthPx = closeButtonWidthPx;
         _layered.RedockButtonWidthPx = redockButtonWidthPx;
+        // UI deep-dive finding P0-1 / TL;DR #1 (2026-07-02): this was
+        // Dispatcher.UIThread.Invoke (blocking) — the WndProc that fires
+        // OnInput runs on AC's game thread, and a raw dispatcher-Invoke wait
+        // does NOT pump this thread's own Win32 message queue while
+        // blocked. If the UI thread is concurrently inside
+        // Win32Backend.RunOnGameThread (a synchronous SendMessage to this
+        // same game HWND — e.g. to create a floating panel's HWND), that
+        // SendMessage can't complete until the game thread's WndProc
+        // services it, which can't happen until this Invoke returns, which
+        // can't happen until the UI thread's dispatcher runs — which is
+        // blocked inside that same SendMessage. Classic AB-BA deadlock, and
+        // even without deadlocking it stalls the game thread on every hover
+        // mousemove over any popout. Post is fire-and-forget: it queues the
+        // job and returns immediately, never blocking the game thread.
         _layered.OnInput = (uint msg, IntPtr wp, IntPtr lp, int cx, int cy) =>
-            Dispatcher.UIThread.Invoke(() => ForwardInput(msg, wp, lp, cx, cy));
+            Dispatcher.UIThread.Post(() => ForwardInput(msg, wp, lp, cx, cy));
+        // Post, not Invoke (2026-09-30): OnMoved fires on AC's game thread (the
+        // LayeredWindow WndProc: WM_MOVE, EndDrag, capture loss) and only persists
+        // the position, so nothing needs to wait for it. The blocking Invoke held
+        // AC's frame on panel-state persistence at every drag end, and is the same
+        // AB-BA deadlock class as OnInput above if the UI thread is inside
+        // RunOnGameThread / UpdateLayeredWindow on this HWND at that moment.
         _layered.OnMoved = (x, y) =>
-            Dispatcher.UIThread.Invoke(() => OnLayeredMoved(x, y));
+            Dispatcher.UIThread.Post(() => OnLayeredMoved(x, y));
         // Invoke (synchronous), NOT Post. This is deliberate: the WndProc runs
         // on AC's game thread, and during an HTBOTTOMRIGHT drag it sits in the
         // OS modal resize loop. The synchronous Invoke blocks that loop until
@@ -3996,10 +4735,13 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         // hit-test drops forwarded clicks at canvas X past AC client
         // (the panel chrome lives at canvas X = FloatingOffBoundsX),
         // so we resolve those buttons at the WndProc level instead.
+        // Same AB-BA deadlock class as OnInput above (finding P0-1) —
+        // neither of these needs the OS-modal-loop frame-pacing that
+        // OnResized's Invoke below is deliberately kept for.
         _layered.OnRedockClicked = () =>
-            Dispatcher.UIThread.Invoke(() => _owner.RequestRedock(title));
+            Dispatcher.UIThread.Post(() => _owner.RequestRedock(title));
         _layered.OnCloseClicked = () =>
-            Dispatcher.UIThread.Invoke(() => _owner.RequestCloseFloating(title));
+            Dispatcher.UIThread.Post(() => _owner.RequestCloseFloating(title));
 
         if (ownerHwnd != IntPtr.Zero)
             ImGuiBackend.Win32Backend.RunOnGameThread(() => _layered.Show());
@@ -4013,9 +4755,53 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     /// RynthOverlayWindow's _captureTimer so render and panel state stay in
     /// sync. Skips the heavy work if the panel hasn't been arranged yet.
     /// </summary>
+    // Created shown (the constructor shows the window); SetShown tracks changes from there.
+    private volatile bool _windowShown = true;
+
+    /// <summary>
+    /// Hide or show the popped-out window (the UI hides between characters). Only acts
+    /// on a change; the window belongs to AC's thread, so the call is marshalled there.
+    /// </summary>
+    internal void SetShown(bool shown)
+    {
+        if (_disposed || _layered.Hwnd == IntPtr.Zero || _windowShown == shown) return;
+        long now = Environment.TickCount64;
+        if (now < _setShownRetryAtMs) return;
+
+        // Record the new state only once the game thread has actually run the
+        // Show/Hide. RunOnGameThread gives up after 2 s and returns false - the
+        // game thread is often that busy right at login - and recording the
+        // state first left a popped-out panel hidden for the whole session
+        // (the bar button then "closes" an invisible window). Retry after 1 s.
+        bool ran = ImGuiBackend.Win32Backend.RunOnGameThread(() =>
+        {
+            if (shown) _layered.Show(); else _layered.Hide();
+            return true;
+        });
+        if (ran)
+        {
+            _windowShown = shown;
+            _setShownRetryAtMs = 0;
+        }
+        else
+        {
+            _setShownRetryAtMs = now + 1000;
+            RynthLog.Info($"FloatingPanelHost({Title}): {(shown ? "Show" : "Hide")} didn't run on the game thread; retrying.");
+        }
+    }
+
+    private long _setShownRetryAtMs;
+
     public void Tick()
     {
         if (_disposed || _layered.Hwnd == IntPtr.Zero) return;
+
+        // UI deep-dive finding P1-B (2026-07-02): skip the whole raster+blit
+        // when the popout's native window isn't visible (minimized, or
+        // hidden behind another window's exclusive-fullscreen/etc) — there's
+        // nothing for the user to see, so every cost below this point is
+        // pure waste until it's visible again.
+        if (!_layered.IsVisible) return;
 
         // Late-binding owner: if we created the layered window before ImGui
         // had captured AC's HWND, retro-fit the owner relationship now.
@@ -4068,6 +4854,22 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
         {
             _logCount++;
             RynthLog.Info($"FloatingPanelHost({Title}): Tick #{_logCount} bounds={w:0.#}x{h:0.#}.");
+        }
+
+        // Bounded liveness heartbeat. The two lines above are one-shot, so a
+        // floating panel that STOPS ticking is invisible in the log — which is
+        // exactly the failure seen on 2026-09-03: the panel froze (its uptime
+        // stamp stuck at 3:11 while the docked panel read 4:21) about 46s before
+        // its HWND was destroyed, and its last composited frame stayed on screen
+        // afterwards, showing the user two dashboards. Nothing recorded when it
+        // stopped. One line every 5s while the panel exists is enough to pin the
+        // moment without the 30Hz spam the tick counters were capped to avoid.
+        _tickCount++;
+        long nowMs = Environment.TickCount64;
+        if (nowMs - _lastTickHeartbeatMs >= 5000)
+        {
+            _lastTickHeartbeatMs = nowMs;
+            RynthLog.Info($"FloatingPanelHost({Title}): alive tick#{_tickCount} bounds={w:0.#}x{h:0.#}.");
         }
 
         _logicalWidth = w;
@@ -4178,11 +4980,35 @@ internal sealed unsafe class FloatingPanelHost : IDisposable
     private Slider? _activeSlider;
     private ScrollViewer? _activeScroll;
 
+    // UI deep-dive finding P1-B (2026-07-02): WM_MOUSEMOVE marked this panel
+    // dirty unconditionally on every single hover message — at typical mouse
+    // poll rates that's 60-120+ Hz of forced repaints just for hovering a
+    // popout, even with no click and no real visual change most of the time
+    // (Avalonia's own :pointerover state repaints itself; this only needs to
+    // be often enough for the popout's separate RTT-capture to look
+    // responsive). Throttled to ~15Hz; every other message (clicks, wheel,
+    // focus) still marks dirty immediately, unthrottled, below.
+    private long _lastMouseMoveDirtyTick;
+    private const long MouseMoveDirtyIntervalMs = 66; // ~15Hz
+    private const uint WM_MOUSEMOVE_ForDirtyThrottle = 0x0200;
+
     private void ForwardInput(uint msg, IntPtr wParam, IntPtr lParam, int layeredClientX, int layeredClientY)
     {
         // Any forwarded input may change the panel's visuals (press/hover
         // states, scroll, focus) — repaint on the next tick.
-        _dirty = true;
+        if (msg == WM_MOUSEMOVE_ForDirtyThrottle)
+        {
+            long now = Environment.TickCount64;
+            if (now - _lastMouseMoveDirtyTick >= MouseMoveDirtyIntervalMs)
+            {
+                _lastMouseMoveDirtyTick = now;
+                _dirty = true;
+            }
+        }
+        else
+        {
+            _dirty = true;
+        }
 
         // Radar's overlay buttons sit inside the panel content. Avalonia's
         // WM_LBUTTONDOWN dispatch routes events to the AvaloniaHwnd but

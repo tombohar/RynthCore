@@ -87,6 +87,10 @@ internal static class EngineStatusMetrics
         w.WriteString("ts", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff'Z'"));
         w.WriteString("host", SafeMachineName());
         w.WriteNumber("pid", Environment.ProcessId);
+        // The engine's build ("2026.9.26.3 (8ca322f)", "dev (...)") and plugin API version, so a
+        // plugin can say which engine it runs on (RynthAi /ra version). Additive fields.
+        w.WriteString("engineVersion", EntryPoint.BuildStamp);
+        w.WriteNumber("apiVersion", Plugins.PluginContractVersion.Current);
 
         w.WriteString("account", SessionStateRegistry.LastAccountName ?? string.Empty);
         w.WriteString("character", SessionStateRegistry.LastCharacterName ?? string.Empty);
@@ -100,6 +104,15 @@ internal static class EngineStatusMetrics
         w.WriteNumber("queueDropped", queueDropped);
         w.WriteNumber("reconciles", reconciles);
         w.WriteNumber("forceClears", forceClears);
+        // AC's main thread frozen (message box or stale beat) and plugin ticks paused for it
+        // (MainThreadFreeze). pluginTicksPausedMs is a running total: a plugin's stall
+        // detector subtracts its change over the window it measured.
+        bool frozen = false; long stallMs = 0, pausedMs = 0;
+        try { frozen = MainThreadFreeze.Paused; stallMs = MainThreadFreeze.MainThreadStallMs; pausedMs = MainThreadFreeze.PausedTotalMs; }
+        catch { }
+        w.WriteBoolean("mainThreadFrozen", frozen);
+        w.WriteNumber("mainThreadStallMs", stallMs);
+        w.WriteNumber("pluginTicksPausedMs", pausedMs);
 
         // Player stats, read on the main thread by PrefetchPlayerStats and served here off-thread
         // (the plugin pump can't read these live). deaths all-time; rates/session = whole-session.

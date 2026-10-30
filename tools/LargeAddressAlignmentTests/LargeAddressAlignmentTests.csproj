@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the large-address alignment fix
+    (src\RynthCore.Engine\Compatibility\LargeAddressAlignmentScan.cs, compiled in): the site scan
+    against the .text of a real acclient.exe read from disk, idempotence once patched, refusal of
+    near-miss byte patterns, and the padding arithmetic above and below 2 GB. Nothing native: no
+    AC process, no engine state.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail); after the usual separator, an AC folder or an acclient.exe.
+    Default: C:\Turbine\Asheron's Call-ryn\acclient.exe.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>LargeAddressAlignmentTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\LargeAddressAlignmentScan.cs" Link="Engine\LargeAddressAlignmentScan.cs" />
+  </ItemGroup>
+
+</Project>

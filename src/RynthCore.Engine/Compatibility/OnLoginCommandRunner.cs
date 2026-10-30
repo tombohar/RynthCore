@@ -70,10 +70,12 @@ internal static class OnLoginCommandRunner
             RynthLog.Info($"OnLogin: {commands.Count} command(s) scheduled, first dispatch in {effectiveWait}ms.");
 
             // Fire-and-forget background task. ChatCommandDispatcher.Dispatch
-            // is thread-safe — it calls thiscall/cdecl AC functions through
-            // function-pointer delegates, which AC's chat layer tolerates from
-            // any thread because the underlying CM_Communication::Event_*
-            // handlers post to the network queue rather than touching UI.
+            // is safe to call from this ThreadPool thread — NOT because AC's
+            // chat layer tolerates off-thread calls (it doesn't; that was the
+            // deep-audit finding #4 bug this comment used to claim), but
+            // because Dispatch() now self-marshals: an off-thread call
+            // enqueues onto AcMainThreadQueue and the real native dispatch
+            // runs on AC's main thread from the EndScene drain.
             _ = Task.Run(async () => await DispatchAsync(commands, effectiveWait));
         }
         catch (Exception ex)

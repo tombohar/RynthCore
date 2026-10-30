@@ -1,14 +1,18 @@
 // ============================================================================
 //  RynthCore.Engine — UI/Panels/MonsterDamagePanel.cs
 //  Interactive table of the RynthAi plugin's learned per-monster combat data.
-//  Bridge exports (polled every 500ms):
+//  Data comes through UiDataHub (UI/Data/DamageData.cs: UiSources.Damage and
+//  UiSources.MonsterRules, DamageCommands), which calls these plugin exports
+//  on the pump thread; the ImGui face (ImGui/Panels/DamageFace.cs) shares it:
 //    RynthPluginGetMonsterDamageJson()       → JSON rows (STABLE order)
 //    RynthPluginSetMonsterHp(wcid, hp)       → manual HP override
 //    RynthPluginDeleteMonsterRow(key)        → delete one learned row
 //    RynthPluginGetCombatWeaponsJson()       → selectable weapons [{id,name}]
 //    RynthPluginSetMonsterWeapon(wcid, wid)  → per-monster weapon override (0 = Auto/best)
 //    RynthPluginSetMonsterOffhand(wcid, oid) → per-monster offhand override (0 = none; stored only)
-//  Columns: WCID | Monster | Elem | Tier | HP(edit) | Crit | NonCrit | Casts/Kill | Kills | Weapon | Offhand | ✕
+//    RynthPluginGetPetChoicesJson / RynthPluginSetMonsterPet(wcid, choice) → per-monster pet
+//      ("" = Auto by weakest element, "E:<element>", "I:<essence id>")
+//  Columns: WCID | Monster | Elem | Tier | HP(edit) | Crit | NonCrit | Casts/Kill | Kills | Weapon | Offhand | Pet | ✕
 //  Weapon is per-MONSTER (wcid): it defaults to the learned-best ("Auto") and the
 //  same value shows on every row of that monster; picking pins an override (gold).
 //  Rows update IN PLACE (cells only) — the row Grids + HP TextBoxes are never
@@ -31,65 +35,15 @@ using Avalonia.Media;
 using Avalonia.Threading;
 using RynthCore.Engine.ImGuiBackend;
 using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI.Data;
 
 namespace RynthCore.Engine.UI.Panels;
 
 internal static class MonsterDamagePanel
 {
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr GetJsonFn();
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void   SetHpFn(uint wcid, int hp);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int    DelRowFn(IntPtr keyAnsi);
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void   SetU2Fn(uint wcid, uint id); // weapon/offhand override
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void   SetU1Fn(uint id);            // default weapon (one arg)
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void   SetJsonFn(IntPtr ansiJson);  // monsters rules write-back
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate void   VoidFn();                    // parameterless action (clear stats)
-
-    private static GetJsonFn? _getJson;
-    private static SetHpFn?   _setHp;
-    private static DelRowFn?  _delRow;
-    private static GetJsonFn? _getWeapons;   // RynthPluginGetCombatWeaponsJson
-    private static SetU2Fn?   _setWeapon;     // RynthPluginSetMonsterWeapon
-    private static SetU2Fn?   _setOffhand;    // RynthPluginSetMonsterOffhand
-    private static SetU1Fn?   _setDefaultWeapon; // RynthPluginSetDefaultWeapon (sweeping default)
-    private static GetJsonFn? _getMonsters;   // RynthPluginGetMonstersJson  (per-monster debuff/shape rules)
-    private static SetJsonFn? _setMonsters;   // RynthPluginSetMonstersJson  (write-back, whole rules array)
-    private static VoidFn?    _clearStats;    // RynthPluginClearMonsterStats (master reset)
-
-    private static void TryBind()
-    {
-        if (_getJson != null) return;
-        LoadedPlugin? plugin = PluginManager.Plugins.FirstOrDefault(
-            p => p.DisplayName.Contains("RynthAi", StringComparison.OrdinalIgnoreCase));
-        if (plugin == null || plugin.ModuleHandle == IntPtr.Zero) return;
-
-        IntPtr a = GetProcAddress(plugin.ModuleHandle, "RynthPluginGetMonsterDamageJson");
-        IntPtr b = GetProcAddress(plugin.ModuleHandle, "RynthPluginSetMonsterHp");
-        IntPtr c = GetProcAddress(plugin.ModuleHandle, "RynthPluginDeleteMonsterRow");
-        IntPtr d = GetProcAddress(plugin.ModuleHandle, "RynthPluginGetCombatWeaponsJson");
-        IntPtr e = GetProcAddress(plugin.ModuleHandle, "RynthPluginSetMonsterWeapon");
-        IntPtr f = GetProcAddress(plugin.ModuleHandle, "RynthPluginSetMonsterOffhand");
-        IntPtr g = GetProcAddress(plugin.ModuleHandle, "RynthPluginGetMonstersJson");
-        IntPtr h = GetProcAddress(plugin.ModuleHandle, "RynthPluginSetMonstersJson");
-        IntPtr i = GetProcAddress(plugin.ModuleHandle, "RynthPluginClearMonsterStats");
-        IntPtr j = GetProcAddress(plugin.ModuleHandle, "RynthPluginSetDefaultWeapon");
-        if (a != IntPtr.Zero) _getJson     = Marshal.GetDelegateForFunctionPointer<GetJsonFn>(a);
-        if (b != IntPtr.Zero) _setHp       = Marshal.GetDelegateForFunctionPointer<SetHpFn>(b);
-        if (c != IntPtr.Zero) _delRow      = Marshal.GetDelegateForFunctionPointer<DelRowFn>(c);
-        if (d != IntPtr.Zero) _getWeapons  = Marshal.GetDelegateForFunctionPointer<GetJsonFn>(d);
-        if (e != IntPtr.Zero) _setWeapon   = Marshal.GetDelegateForFunctionPointer<SetU2Fn>(e);
-        if (f != IntPtr.Zero) _setOffhand  = Marshal.GetDelegateForFunctionPointer<SetU2Fn>(f);
-        if (g != IntPtr.Zero) _getMonsters = Marshal.GetDelegateForFunctionPointer<GetJsonFn>(g);
-        if (h != IntPtr.Zero) _setMonsters = Marshal.GetDelegateForFunctionPointer<SetJsonFn>(h);
-        if (i != IntPtr.Zero) _clearStats  = Marshal.GetDelegateForFunctionPointer<VoidFn>(i);
-        if (j != IntPtr.Zero) _setDefaultWeapon = Marshal.GetDelegateForFunctionPointer<SetU1Fn>(j);
-    }
-
     internal static Control Create() => new View().Root;
 
-    private const string Cols = "60,156,54,36,80,56,60,68,48,120,110,26";
+    private const string Cols = "60,156,54,36,80,56,60,68,48,120,110,120,26";
 
     private static readonly IBrush HeaderBg = new SolidColorBrush(Color.FromArgb(0xFF, 0x12, 0x1C, 0x26));
     private static readonly IBrush PanelBg  = new SolidColorBrush(Color.FromArgb(0xF0, 0x08, 0x10, 0x18));
@@ -112,47 +66,9 @@ internal static class MonsterDamagePanel
     // MonstersPanel.Rule.GetToggle/SetToggle; combat consumes them via BuildDebuffList /
     // the UseArc/Bolt/Ring/Streak shape gate — so this drawer is just an editor of the
     // existing name-keyed rule (no combat/storage changes).
-    private static readonly (string Field, string Label, string Tip)[] DebuffDefs =
-    {
-        ("Imperil",     "Imperil",  "Imperil (Gossamer Flesh / Imperil Other)"),
-        ("Vuln",        "Vuln",     "Vulnerability (element-matched)"),
-        ("Fester",      "Fester",   "Fester (Decrepitude's Grasp / Fester Other)"),
-        ("Yield",       "Yield",    "Yield (Magic Yield Other)"),
-        ("Broadside",   "Broadside","Broadside (Missile Weapons Ineptitude)"),
-        ("GravityWell", "Gravity",  "Gravity Well (Vulnerability Other)"),
-    };
-    private static readonly (string Field, string Label, string Tip)[] ShapeDefs =
-    {
-        ("UseArc",    "Arc",    "Arc spells"),
-        ("UseBolt",   "Bolt",   "Bolt spells (default)"),
-        ("UseRing",   "Ring",   "Ring spells"),
-        ("UseStreak", "Streak", "Streak spells"),
-    };
-    private static readonly string[] ExVulnTypes =
-        { "None", "Slash", "Pierce", "Bludgeon", "Fire", "Cold", "Lightning", "Acid", "Nether" };
-    private static bool IsShape(string f) => f is "UseArc" or "UseBolt" or "UseRing" or "UseStreak";
-    private static bool NoShapeOn(MonstersPanel.Rule r) => !r.UseArc && !r.UseBolt && !r.UseRing && !r.UseStreak;
-
-    private sealed class Row
-    {
-        public uint Wcid; public string Name = ""; public uint Wid; public string Weapon = "";
-        public string Elem = ""; public int Tier; public int Hp; public bool HpManual;
-        public double Crit; public int CritN; public double NonCrit; public int NonCritN;
-        public double Casts; public int Kills; public string Key = "";
-        // Per-monster (wcid) weapon picker state (same on every row of a wcid).
-        public uint AssignedWid; public string AssignedWeapon = "";   // user override (0 = none)
-        public uint BestWid;     public string BestWeapon = "";       // learned recommendation (0 = none yet)
-        public uint AssignedOff; public string AssignedOffName = "";  // offhand override (stored only)
-        public List<TierStat> Tiers = new();   // per-tier breakdown for the expand drawer
-        public bool IsDefault;                 // the synthetic top "Default" line (wcid 0)
-    }
-
-    private sealed class TierStat
-    {
-        public int Tier; public string Elem = ""; public string Weapon = "";
-        public double Crit; public int CritN; public double NonCrit; public int NonCritN;
-        public double Casts; public int Kills;
-    }
+    private static (string Field, string Label, string Tip)[] DebuffDefs => DamageCommands.DebuffDefs;
+    private static (string Field, string Label, string Tip)[] ShapeDefs => DamageCommands.ShapeDefs;
+    private static string[] ExVulnTypes => DamageCommands.ExVulnTypes;
 
     private sealed class RowWidgets
     {
@@ -162,9 +78,9 @@ internal static class MonsterDamagePanel
         public TextBox Hp = null!;
         public Button HpManualToggle = null!;  // "M": on = manual HP entry, off = auto
         public Button DefaultToggle = null!;   // "D": on = this monster follows Default (debuffs/shapes/weapon)
-        public Button Weapon = null!, Offhand = null!;
+        public Button Weapon = null!, Offhand = null!, Pet = null!;
         public Button Chevron = null!;  // toggles the per-monster debuff drawer
-        public Row Data = null!;  // latest row data (so picker click handlers read current best/override)
+        public DamageRow Data = null!;  // latest row data (so picker click handlers read current best/override)
     }
 
     private sealed class View
@@ -186,14 +102,13 @@ internal static class MonsterDamagePanel
         private uint   _filterWid;                 // 0 = all weapons
         private string _filterName = "All weapons";
         private string _filterText = "";           // monster name / wcid search (case-insensitive)
-        private string _lastJson = "";
+        private long   _seenVersion = -1, _seenRulesVersion = -1;
         private bool   _editing;                   // an HP box is focused → defer structural rebuilds
-        private List<Row> _data = new();
-        private readonly List<(uint Wid, string Name)> _weapons = new();
-        private readonly List<(uint Id, string Name)> _items = new(); // selectable weapons (from plugin ItemRules)
-        private string _lastWeaponsJson = "";
-        private MonstersPanel.Payload _monsters = new();  // name-keyed debuff/shape rules (for the drawer)
-        private string _lastMonstersJson = "";
+        private List<DamageRow> _data = new();
+        private List<(uint Id, string Name)> _weapons = new();       // learned weapons (filter)
+        private List<(uint Id, string Name)> _choices = new();       // per-row weapon picker list
+        private List<(string Key, string Name)> _pets = new();
+        private MonsterRulesSnapshot? _rules;                        // name-keyed debuff/shape rules (drawer)
         private uint _expandedWcid;                       // monster (wcid) whose drawer is open (0 = none)
         private bool _defaultExpanded;                    // the top Default line's drawer is open
 
@@ -294,80 +209,59 @@ internal static class MonsterDamagePanel
             rootGrid.Children.Add(_pickerCanvas);
             Root = rootGrid;
 
-            TryBind();
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            // Reads the hub's snapshots (fetched every 500 ms / 1 s while
+            // subscribed, and right after each command).
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
             timer.Tick += (_, _) => Poll();
-            timer.Start();
             // Stop with the visual tree (RadarPanel idiom): a running
-            // DispatcherTimer roots the closed panel view forever — every
-            // open/close otherwise adds another immortal poller hitting the
-            // plugin C exports against a detached tree.
-            rootGrid.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
-            rootGrid.DetachedFromVisualTree += (_, _) => timer.Stop();
+            // DispatcherTimer roots the closed panel view forever.
+            rootGrid.AttachedToVisualTree += (_, _) =>
+            {
+                UiSources.Damage.Subscribe();
+                UiSources.MonsterRules.Subscribe();
+                UiSources.Damage.RequestRefresh();
+                UiSources.MonsterRules.RequestRefresh();
+                if (!timer.IsEnabled) timer.Start();
+            };
+            rootGrid.DetachedFromVisualTree += (_, _) =>
+            {
+                timer.Stop();
+                UiSources.Damage.Unsubscribe();
+                UiSources.MonsterRules.Unsubscribe();
+            };
             Poll();
         }
 
         private void Poll()
         {
-            if (_getJson == null) { TryBind(); if (_getJson == null) { _status.Text = "Waiting for RynthAi plugin…"; return; } }
+            var rules = UiSources.MonsterRules.Current;
+            bool rulesChanged = rules != null && rules.Version != _seenRulesVersion;
+            if (rulesChanged)
+            {
+                _seenRulesVersion = rules!.Version;
+                _rules = rules.Value;
+            }
 
-            RefreshItems();
-            RefreshMonsters();
-
-            IntPtr ptr;
-            try { ptr = _getJson(); } catch { return; }
-            if (ptr == IntPtr.Zero) return;
-            string json = Marshal.PtrToStringAnsi(ptr) ?? "[]";
-            if (json == _lastJson) return;
-            _lastJson = json;
-
-            _data = Parse(json);
+            var snap = UiSources.Damage.Current;
+            if (snap == null) { _status.Text = "Binding to RynthAi…"; return; }
+            if (!snap.Value.Bound) { _status.Text = "Waiting for RynthAi plugin…"; return; }
+            if (snap.Version == _seenVersion)
+            {
+                if (rulesChanged) RebuildDrawer();   // drawer + chevron/D colours follow the rules
+                return;
+            }
+            _seenVersion = snap.Version;
+            _data = snap.Value.Rows;
+            _weapons = snap.Value.LearnedWeapons;
+            _choices = snap.Value.WeaponChoices;
+            _pets = snap.Value.PetChoices;
             UpdateWeapons();
-            Reconcile();
-        }
-
-        // Refresh the selectable-weapons list (configured ItemRules) shown in the row pickers.
-        private void RefreshItems()
-        {
-            if (_getWeapons == null) return;
-            IntPtr p;
-            try { p = _getWeapons(); } catch { return; }
-            if (p == IntPtr.Zero) return;
-            string json = Marshal.PtrToStringAnsi(p) ?? "[]";
-            if (json == _lastWeaponsJson) return;
-            _lastWeaponsJson = json;
-            _items.Clear();
-            try
-            {
-                using var doc = JsonDocument.Parse(json);
-                foreach (var e in doc.RootElement.EnumerateArray())
-                    _items.Add(((uint)e.GetProperty("id").GetInt64(), e.GetProperty("name").GetString() ?? ""));
-            }
-            catch { }
-        }
-
-        // Refresh the name-keyed debuff/shape rules (shared with the Monsters tab) used by
-        // the per-monster drawer. Reuses MonstersPanel's payload type + JSON context.
-        private void RefreshMonsters()
-        {
-            if (_getMonsters == null) return;
-            IntPtr p;
-            try { p = _getMonsters(); } catch { return; }
-            if (p == IntPtr.Zero) return;
-            string json = Marshal.PtrToStringAnsi(p) ?? "";
-            if (json.Length == 0 || json == _lastMonstersJson) return;
-            _lastMonstersJson = json;
-            try
-            {
-                var parsed = JsonSerializer.Deserialize(json, MonstersPanelJsonContext.Default.Payload);
-                if (parsed != null) _monsters = parsed;
-            }
-            catch { }
+            if (rulesChanged) RebuildDrawer(); else Reconcile();
         }
 
         private void Reconcile()
         {
-            List<Row> filtered = ApplyFilters();
+            List<DamageRow> filtered = ApplyFilters();
             var newKeys = filtered.Select(r => r.Key).ToList();
             bool structural = !newKeys.SequenceEqual(_displayedKeys);
 
@@ -418,9 +312,9 @@ internal static class MonsterDamagePanel
         }
 
         // Weapon filter (dropdown) AND monster search (name substring or wcid) combined.
-        private List<Row> ApplyFilters()
+        private List<DamageRow> ApplyFilters()
         {
-            IEnumerable<Row> q = _data;
+            IEnumerable<DamageRow> q = _data;
             // The Default line is always kept (pinned at top), exempt from filters.
             if (_filterWid != 0)
                 q = q.Where(r => r.IsDefault || r.Wid == _filterWid);
@@ -431,75 +325,9 @@ internal static class MonsterDamagePanel
             return q.ToList();
         }
 
-        private static List<Row> Parse(string json)
-        {
-            var list = new List<Row>();
-            try
-            {
-                using var doc = JsonDocument.Parse(json);
-                foreach (var e in doc.RootElement.EnumerateArray())
-                {
-                    var row = new Row
-                    {
-                        Wcid     = (uint)e.GetProperty("wcid").GetInt64(),
-                        Name     = e.GetProperty("name").GetString() ?? "",
-                        Wid      = (uint)e.GetProperty("wid").GetInt64(),
-                        Weapon   = e.GetProperty("weapon").GetString() ?? "",
-                        Elem     = e.GetProperty("elem").GetString() ?? "",
-                        Tier     = e.GetProperty("tier").GetInt32(),
-                        Hp       = e.GetProperty("hp").GetInt32(),
-                        HpManual = e.GetProperty("hpManual").GetBoolean(),
-                        Crit     = e.GetProperty("crit").GetDouble(),
-                        CritN    = e.GetProperty("critN").GetInt32(),
-                        NonCrit  = e.GetProperty("noncrit").GetDouble(),
-                        NonCritN = e.GetProperty("noncritN").GetInt32(),
-                        Casts    = e.GetProperty("casts").GetDouble(),
-                        Kills    = e.GetProperty("kills").GetInt32(),
-                        Key      = e.GetProperty("key").GetString() ?? "",
-                    };
-                    // New per-monster weapon fields (TryGetProperty so an older plugin
-                    // build that omits them doesn't blank the whole table).
-                    if (e.TryGetProperty("assignedWid", out var aw))     row.AssignedWid     = (uint)aw.GetInt64();
-                    if (e.TryGetProperty("assignedWeapon", out var awn)) row.AssignedWeapon  = awn.GetString() ?? "";
-                    if (e.TryGetProperty("bestWid", out var bw))         row.BestWid         = (uint)bw.GetInt64();
-                    if (e.TryGetProperty("bestWeapon", out var bwn))     row.BestWeapon      = bwn.GetString() ?? "";
-                    if (e.TryGetProperty("assignedOff", out var ao))     row.AssignedOff     = (uint)ao.GetInt64();
-                    if (e.TryGetProperty("assignedOffName", out var aon))row.AssignedOffName = aon.GetString() ?? "";
-                    if (e.TryGetProperty("isDefault", out var idf))      row.IsDefault       = idf.GetBoolean();
-                    // Per-tier breakdown (for the expand drawer). Optional so an older plugin doesn't break the table.
-                    if (e.TryGetProperty("tiers", out var tarr) && tarr.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var te in tarr.EnumerateArray())
-                        {
-                            row.Tiers.Add(new TierStat
-                            {
-                                Tier     = te.GetProperty("tier").GetInt32(),
-                                Elem     = te.GetProperty("elem").GetString() ?? "",
-                                Weapon   = te.GetProperty("weapon").GetString() ?? "",
-                                Crit     = te.GetProperty("crit").GetDouble(),
-                                CritN    = te.GetProperty("critN").GetInt32(),
-                                NonCrit  = te.GetProperty("noncrit").GetDouble(),
-                                NonCritN = te.GetProperty("noncritN").GetInt32(),
-                                Casts    = te.GetProperty("casts").GetDouble(),
-                                Kills    = te.GetProperty("kills").GetInt32(),
-                            });
-                        }
-                    }
-                    list.Add(row);
-                }
-            }
-            catch { }
-            return list;
-        }
-
         private void UpdateWeapons()
         {
-            _weapons.Clear();
-            var seen = new HashSet<uint>();
-            foreach (var r in _data)
-                if (r.Wid != 0 && seen.Add(r.Wid)) _weapons.Add((r.Wid, r.Weapon));
-
-            if (_filterWid != 0 && !seen.Contains(_filterWid)) { _filterWid = 0; _filterName = "All weapons"; }
+            if (_filterWid != 0 && !_weapons.Exists(w => w.Id == _filterWid)) { _filterWid = 0; _filterName = "All weapons"; }
             _filterBtn.Content = "Weapon: " + Trunc(_filterName, 22) + " ▾";
             _status.Text = _data.Count == 0 ? "No kills recorded yet." : $"{_data.Count} rows · {_weapons.Count} weapon(s)";
         }
@@ -570,11 +398,11 @@ internal static class MonsterDamagePanel
         private void ShowWeaponPicker()
         {
             var items = new List<(uint Id, string Name)>(_weapons.Count + 1) { (0u, "All weapons") };
-            foreach (var w in _weapons) items.Add((w.Wid, w.Name));
+            foreach (var w in _weapons) items.Add((w.Id, w.Name));
             ShowPicker(_filterBtn, items, _filterWid, id =>
             {
                 _filterWid  = id;
-                var match = _weapons.FirstOrDefault(w => w.Wid == id);
+                var match = _weapons.FirstOrDefault(w => w.Id == id);
                 _filterName = id == 0 ? "All weapons" : (match.Name ?? ("Weapon " + id));
                 _filterBtn.Content = "Weapon: " + Trunc(_filterName, 22) + " ▾";
                 _displayedKeys = new List<string> { "\0force" }; // force a structural rebuild for the new filter
@@ -582,20 +410,9 @@ internal static class MonsterDamagePanel
             });
         }
 
-        // Distinct selectable weapons for the per-row pickers: configured weapons
-        // (ItemRules, from the plugin) merged with weapons we have learned data for,
-        // sorted by name.
-        private List<(uint Id, string Name)> WeaponChoices()
-        {
-            var seen = new HashSet<uint>();
-            var list = new List<(uint Id, string Name)>();
-            foreach (var it in _items)
-                if (it.Id != 0 && seen.Add(it.Id)) list.Add(it);
-            foreach (var w in _weapons)
-                if (w.Wid != 0 && seen.Add(w.Wid)) list.Add((w.Wid, w.Name));
-            list.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
-            return list;
-        }
+        private List<(string Key, string Name)> PetChoices() => _pets;
+
+        private List<(uint Id, string Name)> WeaponChoices() => _choices;
 
         private void ClosePicker()
         {
@@ -639,10 +456,8 @@ internal static class MonsterDamagePanel
             cancel.Click  += (_, _) => ClosePicker();
             confirm.Click += (_, _) =>
             {
-                if (_clearStats != null) { try { _clearStats(); } catch { } }
+                DamageCommands.ClearStats();
                 ClosePicker();
-                _lastJson = "";                       // force the next poll to re-read the zeroed stats
-                Dispatcher.UIThread.Post(Poll);
             };
             var btnRow = new StackPanel
             {
@@ -672,92 +487,11 @@ internal static class MonsterDamagePanel
         // The drawer edits an EXACT-name rule for the monster: editing while inheriting
         // clones Default into one (so other config carries over); Reset deletes it.
 
-        private MonstersPanel.Rule? FindRule(string name) =>
-            _monsters.Rules?.FirstOrDefault(r =>
-                !r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase)
-                && r.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        private MonstersPanel.Rule? FindRule(string name) => _rules?.FindRule(name);
 
-        private bool HasCustomRule(string name) => FindRule(name) != null;
+        private bool HasCustomRule(string name) => _rules?.HasCustomRule(name) ?? false;
 
-        private MonstersPanel.Rule DefaultRule() =>
-            _monsters.Rules?.FirstOrDefault(r => r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase))
-            ?? new MonstersPanel.Rule { Name = "Default", UseBolt = true };
-
-        private static MonstersPanel.Rule CloneRule(MonstersPanel.Rule s, string name) => new MonstersPanel.Rule
-        {
-            Name = name,
-            Category = s.Category,
-            MatchExpression = "",   // exact-name rule matches by name, not a (possibly false) expression
-            Priority = s.Priority,
-            DamageType = s.DamageType,
-            WeaponId = s.WeaponId,
-            OffhandId = s.OffhandId,
-            ExVuln = s.ExVuln,
-            PetDamage = s.PetDamage,
-            Fester = s.Fester, Broadside = s.Broadside, GravityWell = s.GravityWell,
-            Imperil = s.Imperil, Yield = s.Yield, Vuln = s.Vuln,
-            UseArc = s.UseArc, UseBolt = s.UseBolt, UseRing = s.UseRing, UseStreak = s.UseStreak,
-        };
-
-        // Force a fresh re-read of the rules right before a write. Both panels run on the
-        // single UI thread, so re-reading here means the drawer builds its edit on the very
-        // latest plugin state and can't clobber a rule just added on the Monsters tab.
-        private void RefreshMonstersNow() { _lastMonstersJson = ""; RefreshMonsters(); }
-
-        // Return the editable exact-name rule, creating it (cloned from Default) if the
-        // monster is currently inheriting. Inserted right after Default so the more-specific
-        // rule wins GetRuleForTarget's first-substring-match resolution.
-        private MonstersPanel.Rule EnsureCustomRule(string name)
-        {
-            RefreshMonstersNow();
-            // The Default line edits the real Default rule in place (not a clone).
-            if (name.Equals("Default", StringComparison.OrdinalIgnoreCase))
-            {
-                var def = DefaultRule();
-                if (_monsters.Rules != null && !_monsters.Rules.Contains(def)) _monsters.Rules.Add(def);
-                return def;
-            }
-            var existing = FindRule(name);
-            if (existing != null) return existing;
-            var clone = CloneRule(DefaultRule(), name);
-            int defIdx = _monsters.Rules.FindIndex(r => r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase));
-            _monsters.Rules.Insert(defIdx >= 0 ? defIdx + 1 : 0, clone);
-            return clone;
-        }
-
-        private void ResetRule(string name)
-        {
-            RefreshMonstersNow();
-            int i = _monsters.Rules.FindIndex(r =>
-                !r.Name.Equals("Default", StringComparison.OrdinalIgnoreCase)
-                && r.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (i < 0) return;
-            _monsters.Rules.RemoveAt(i);
-            PushMonsters();
-            RebuildDrawer();
-        }
-
-        // Whole-rules-array write-back over the existing Monsters bridge (same shape the
-        // Monsters tab pushes). The plugin's ApplyMonstersJson preserves the Default rule.
-        private void PushMonsters()
-        {
-            if (_setMonsters == null) return;
-            // Never write back an empty/un-loaded array — that would wipe the user's rules
-            // (incl. Default) on the plugin side.
-            if (_monsters?.Rules == null || _monsters.Rules.Count == 0) return;
-            IntPtr ansi = IntPtr.Zero;
-            try
-            {
-                string json = JsonSerializer.Serialize(
-                    new MonstersPanel.Payload { Rules = _monsters.Rules },
-                    MonstersPanelJsonContext.Default.Payload);
-                ansi = Marshal.StringToHGlobalAnsi(json);
-                _setMonsters(ansi);
-            }
-            catch { }
-            finally { if (ansi != IntPtr.Zero) Marshal.FreeHGlobal(ansi); }
-            _lastMonstersJson = ""; // re-read the plugin's applied copy on the next poll
-        }
+        private MonstersPanel.Rule DefaultRule() => _rules?.DefaultRule() ?? new MonstersPanel.Rule { Name = "Default", UseBolt = true };
 
         private void RebuildDrawer()
         {
@@ -765,7 +499,7 @@ internal static class MonsterDamagePanel
             Reconcile();
         }
 
-        private Control BuildDebuffDrawer(Row row)
+        private Control BuildDebuffDrawer(DamageRow row)
         {
             string monsterName = row.Name;
             var border = new Border
@@ -780,7 +514,7 @@ internal static class MonsterDamagePanel
             border.Child = stack;
 
             // Guard: never write back an empty/un-loaded rules array (would clobber Default).
-            if (_setMonsters == null || _monsters.Rules == null || _monsters.Rules.Count == 0)
+            if (_rules == null || _rules.Parsed.Rules.Count == 0)
             {
                 stack.Children.Add(new TextBlock
                 {
@@ -815,7 +549,7 @@ internal static class MonsterDamagePanel
                 Background = EntryBg, Foreground = custom ? Brushes.White : Dim,
                 BorderBrush = EntryBorder, BorderThickness = new Thickness(1), IsEnabled = custom,
             };
-            reset.Click += (_, _) => ResetRule(monsterName);
+            reset.Click += (_, _) => DamageCommands.ResetRule(monsterName);
             header.Children.Add(reset);
             stack.Children.Add(header);
 
@@ -850,9 +584,8 @@ internal static class MonsterDamagePanel
                 uint sel = (uint)Math.Max(0, Array.IndexOf(ExVulnTypes, nowEx));
                 ShowPicker(exBtn, items, sel, id =>
                 {
-                    EnsureCustomRule(monsterName).ExVuln = ExVulnTypes[id];
-                    PushMonsters();
-                    RebuildDrawer();
+                    string ex = ExVulnTypes[id];
+                    DamageCommands.EditRule(monsterName, r => r.ExVuln = ex);
                 });
             };
             exRow.Children.Add(exBtn);
@@ -873,7 +606,7 @@ internal static class MonsterDamagePanel
                     string crit = t.CritN > 0 ? t.Crit.ToString("0", CultureInfo.InvariantCulture) : "—";
                     string nc   = t.NonCritN > 0 ? t.NonCrit.ToString("0", CultureInfo.InvariantCulture) : "—";
                     string ck   = t.Kills > 0 ? t.Casts.ToString("0.00", CultureInfo.InvariantCulture) : "—";
-                    string line = $"{FormatTier(t.Tier),-4} {(string.IsNullOrEmpty(t.Elem) ? "" : t.Elem),-8} kills {t.Kills,-4} crit {crit,-5} non-crit {nc,-5} casts/kill {ck}";
+                    string line = $"{DamageSource.FormatTier(t.Tier),-4} {(string.IsNullOrEmpty(t.Elem) ? "" : t.Elem),-8} kills {t.Kills,-4} crit {crit,-5} non-crit {nc,-5} casts/kill {ck}";
                     stack.Children.Add(new TextBlock
                     {
                         Text = line, FontSize = 11, Foreground = Brushes.White,
@@ -907,16 +640,7 @@ internal static class MonsterDamagePanel
                 },
             };
             ToolTip.SetTip(btn, tip);
-            btn.Click += (_, _) =>
-            {
-                var rule = EnsureCustomRule(monsterName);
-                bool nv = !rule.GetToggle(field);
-                rule.SetToggle(field, nv);
-                // Never leave a monster with no offensive shape (combat would refuse to cast).
-                if (IsShape(field) && !nv && NoShapeOn(rule)) rule.UseBolt = true;
-                PushMonsters();
-                RebuildDrawer();
-            };
+            btn.Click += (_, _) => DamageCommands.EditRule(monsterName, r => DamageCommands.FlipToggle(r, field));
             return btn;
         }
 
@@ -947,7 +671,8 @@ internal static class MonsterDamagePanel
             AddCell(g, 8, "Kills",      bold: true);
             AddCell(g, 9, "Weapon",     bold: true);
             AddCell(g, 10, "Offhand",   bold: true);
-            AddCell(g, 11, "",          bold: true);
+            AddCell(g, 11, "Pet",       bold: true);
+            AddCell(g, 12, "",          bold: true);
             return g;
         }
 
@@ -968,7 +693,7 @@ internal static class MonsterDamagePanel
             BorderThickness = new Thickness(1),
         };
 
-        private RowWidgets CreateRow(Row r)
+        private RowWidgets CreateRow(DamageRow r)
         {
             if (r.IsDefault) return CreateDefaultRow();
             var g = NewRowGrid(22);
@@ -1012,17 +737,12 @@ internal static class MonsterDamagePanel
                 var cur = rw.Data;
                 bool onDefault = !HasCustomRule(cur.Name) && cur.AssignedWid == 0;
                 if (onDefault)
-                {
-                    EnsureCustomRule(cur.Name);   // turn OFF default → give it an editable custom rule
-                    PushMonsters();
-                }
+                    DamageCommands.EditRule(cur.Name, static _ => { });   // turn OFF default → an editable custom rule
                 else
                 {
-                    ResetRule(cur.Name);          // turn ON default → drop custom rule (PushMonsters inside)
-                    if (_setWeapon != null && cur.Wcid != 0) { try { _setWeapon(cur.Wcid, 0); } catch { } } // weapon → Default
+                    DamageCommands.ResetRule(cur.Name);                    // turn ON default → drop the custom rule
+                    if (cur.Wcid != 0) DamageCommands.SetWeapon(cur.Wcid, 0); // weapon → Default
                 }
-                _lastJson = "";
-                Dispatcher.UIThread.Post(Poll);
             };
             rw.DefaultToggle = dToggle;
 
@@ -1058,14 +778,10 @@ internal static class MonsterDamagePanel
             uint wcid = r.Wcid;
             void CommitHp()
             {
-                if (_setHp == null) return;
                 string t = (hp.Text ?? "").Trim();
-                if (t.Length == 0) { try { _setHp(wcid, 0); } catch { } _lastJson = ""; return; }
+                if (t.Length == 0) { DamageCommands.SetHp(wcid, 0); return; }
                 if (int.TryParse(t, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v) && v > 0)
-                {
-                    try { _setHp(wcid, v); } catch { }
-                    _lastJson = ""; // force a refresh so the gold "manual" flag shows
-                }
+                    DamageCommands.SetHp(wcid, v);
             }
             hp.GotFocus  += (_, _) => { _editing = true;  Win32Backend.AvaloniaTextInputActive = true; };
             hp.LostFocus += (_, _) => { Win32Backend.AvaloniaTextInputActive = false; _editing = false; CommitHp(); };
@@ -1096,17 +812,13 @@ internal static class MonsterDamagePanel
             ToolTip.SetTip(mToggle, "Manual max-HP for this monster (off = auto)");
             mToggle.Click += (_, _) =>
             {
-                if (_setHp == null) return;
                 var cur = rw.Data;
                 if (cur.HpManual)
-                {
-                    try { _setHp(cur.Wcid, 0); } catch { }   // manual -> auto
-                    _lastJson = "";
-                }
+                    DamageCommands.SetHp(cur.Wcid, 0);   // manual -> auto
                 else
                 {
                     // auto -> manual: seed with the known auto HP (if any), then open the box.
-                    if (cur.Hp > 0) { try { _setHp(cur.Wcid, cur.Hp); } catch { } _lastJson = ""; }
+                    if (cur.Hp > 0) DamageCommands.SetHp(cur.Wcid, cur.Hp);
                     rw.Hp.IsReadOnly = false;
                     rw.Hp.Focus();
                 }
@@ -1135,12 +847,7 @@ internal static class MonsterDamagePanel
                     : "Auto (best: —)";
                 var choices = new List<(uint Id, string Name)> { (0u, bestLabel) };
                 choices.AddRange(WeaponChoices());
-                ShowPicker(weaponBtn, choices, cur.AssignedWid, id =>
-                {
-                    if (_setWeapon != null) { try { _setWeapon(cur.Wcid, id); } catch { } }
-                    _lastJson = "";
-                    Dispatcher.UIThread.Post(Poll);
-                });
+                ShowPicker(weaponBtn, choices, cur.AssignedWid, id => DamageCommands.SetWeapon(cur.Wcid, id));
             };
             rw.Weapon = weaponBtn;
             g.Children.Add(weaponBtn); Grid.SetColumn(weaponBtn, 9);
@@ -1153,15 +860,34 @@ internal static class MonsterDamagePanel
                 var cur = rw.Data;
                 var choices = new List<(uint Id, string Name)> { (0u, "(none)") };
                 choices.AddRange(WeaponChoices());
-                ShowPicker(offhandBtn, choices, cur.AssignedOff, id =>
-                {
-                    if (_setOffhand != null) { try { _setOffhand(cur.Wcid, id); } catch { } }
-                    _lastJson = "";
-                    Dispatcher.UIThread.Post(Poll);
-                });
+                ShowPicker(offhandBtn, choices, cur.AssignedOff, id => DamageCommands.SetOffhand(cur.Wcid, id));
             };
             rw.Offhand = offhandBtn;
             g.Children.Add(offhandBtn); Grid.SetColumn(offhandBtn, 10);
+
+            // Pet (col 11): which combat pet to summon for this monster. Auto = the
+            // essence whose element it resists least; or an element; or a specific
+            // essence from the Items panel.
+            var petBtn = MakePickerButton();
+            ToolTip.SetTip(petBtn, "Pet to summon for this monster. Auto = the essence element it resists least (learned resists); or pick an element or a specific essence from the Items panel.");
+            petBtn.Click += (_, _) =>
+            {
+                var cur = rw.Data;
+                var opts = PetChoices();
+                var items = new List<(uint Id, string Name)>();
+                uint sel = 0;
+                for (int pi = 0; pi < opts.Count; pi++)
+                {
+                    items.Add(((uint)pi, opts[pi].Name));
+                    if (opts[pi].Key == cur.Pet) sel = (uint)pi;
+                }
+                ShowPicker(petBtn, items, sel, idx =>
+                {
+                    if (idx < opts.Count) DamageCommands.SetPet(cur.Wcid, opts[(int)idx].Key);
+                });
+            };
+            rw.Pet = petBtn;
+            g.Children.Add(petBtn); Grid.SetColumn(petBtn, 11);
 
             var del = new Button
             {
@@ -1174,17 +900,8 @@ internal static class MonsterDamagePanel
             };
             ToolTip.SetTip(del, $"Delete learned history for this row (wcid {r.Wcid}).");
             string key = r.Key;
-            del.Click += (_, _) =>
-            {
-                if (_delRow != null && key.Length > 0)
-                {
-                    IntPtr k = Marshal.StringToHGlobalAnsi(key);
-                    try { _delRow(k); } catch { } finally { Marshal.FreeHGlobal(k); }
-                }
-                _lastJson = "";
-                Dispatcher.UIThread.Post(Poll);
-            };
-            g.Children.Add(del); Grid.SetColumn(del, 11);
+            del.Click += (_, _) => DamageCommands.DeleteRow(key);
+            g.Children.Add(del); Grid.SetColumn(del, 12);
 
             rw.Data = r;
             return rw;
@@ -1239,12 +956,7 @@ internal static class MonsterDamagePanel
                 var cur = rw.Data;
                 var choices = new List<(uint Id, string Name)> { (0u, "Auto (learned best)") };
                 choices.AddRange(WeaponChoices());
-                ShowPicker(weaponBtn, choices, cur.AssignedWid, id =>
-                {
-                    if (_setDefaultWeapon != null) { try { _setDefaultWeapon(id); } catch { } }
-                    _lastJson = "";
-                    Dispatcher.UIThread.Post(Poll);
-                });
+                ShowPicker(weaponBtn, choices, cur.AssignedWid, id => DamageCommands.SetDefaultWeapon(id));
             };
             rw.Weapon = weaponBtn;
             g.Children.Add(weaponBtn); Grid.SetColumn(weaponBtn, 9);
@@ -1252,7 +964,7 @@ internal static class MonsterDamagePanel
             return rw;
         }
 
-        private void UpdateRow(RowWidgets rw, Row r)
+        private void UpdateRow(RowWidgets rw, DamageRow r)
         {
             rw.Data = r; // picker click handlers read the latest best/override from here
             if (r.IsDefault)
@@ -1272,7 +984,7 @@ internal static class MonsterDamagePanel
             rw.Chevron.Content = expanded ? "▾" : "▸";
             rw.Chevron.Foreground = HasCustomRule(r.Name) ? ManualHp : Dim;
             rw.Elem.Text    = r.Elem;
-            rw.Tier.Text    = FormatTier(r.Tier);
+            rw.Tier.Text    = DamageSource.FormatTier(r.Tier);
             rw.Crit.Text    = r.CritN    > 0 ? r.Crit.ToString("0")    : "—";
             rw.Crit.Foreground    = r.CritN    > 0 ? Brushes.White : Dim;
             rw.NonCrit.Text = r.NonCritN > 0 ? r.NonCrit.ToString("0") : "—";
@@ -1302,6 +1014,12 @@ internal static class MonsterDamagePanel
                 rw.Offhand.Content = "(none)";
                 rw.Offhand.Foreground = Dim;
             }
+            // Pet: gold = chosen element/essence, dim "Auto" otherwise.
+            if (rw.Pet != null)
+            {
+                rw.Pet.Content = Trunc(r.Pet.Length > 0 ? r.PetLabel : "Auto", 16);
+                rw.Pet.Foreground = r.Pet.Length > 0 ? ManualHp : Dim;
+            }
 
             // Never overwrite the HP box while the user is editing it.
             if (!rw.Hp.IsFocused)
@@ -1320,11 +1038,6 @@ internal static class MonsterDamagePanel
             rw.DefaultToggle.Foreground  = onDefault ? ToggleOn : Dim;
             rw.DefaultToggle.BorderBrush = onDefault ? ToggleOn : EntryBorder;
         }
-
-        // Tier display: 0 = none ("—"); negative = ring spell ("R<level>"); positive = spell level.
-        private static string FormatTier(int t) =>
-            t == 0 ? "—" : (t < 0 ? "R" + (-t).ToString(CultureInfo.InvariantCulture)
-                                  : t.ToString(CultureInfo.InvariantCulture));
 
         private static TextBlock AddCell(Grid g, int col, string text, bool bold = false, bool trim = false, IBrush? brush = null)
         {

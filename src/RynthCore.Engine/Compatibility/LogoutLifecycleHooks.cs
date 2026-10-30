@@ -133,7 +133,11 @@ internal static class LogoutLifecycleHooks
     {
         RecursionGuard.Tick("LogoutLifecycleHooks.ExecuteLogOff");
         if (!HasObservedLogout)
+        {
             RynthLog.Compat("LogoutLifecycleHooks: ExecuteLogOff detour entered.");
+            LogCaller("ExecuteLogOff");
+            LogoffOriginProbe.OnLogoffCompleted("CPlayerSystem::ExecuteLogOff");
+        }
 
         try { _originalExecuteLogOff!(thisPtr); }
         catch (Exception ex) { try { RynthLog.Compat($"LogoutLifecycleHooks: ExecuteLogOff original threw {ex.GetType().Name}: {ex.Message}"); } catch { } }
@@ -145,12 +149,59 @@ internal static class LogoutLifecycleHooks
     {
         RecursionGuard.Tick("LogoutLifecycleHooks.RecvNoticeLogoff");
         if (!HasObservedLogout)
+        {
             RynthLog.Compat("LogoutLifecycleHooks: RecvNotice_Logoff detour entered.");
+            LogCaller("RecvNotice_Logoff");
+            LogoffOriginProbe.OnLogoffCompleted("gmGamePlayUI::RecvNotice_Logoff");
+        }
 
         try { _originalRecvNoticeLogoff!(thisPtr); }
         catch (Exception ex) { try { RynthLog.Compat($"LogoutLifecycleHooks: RecvNotice_Logoff original threw {ex.GetType().Name}: {ex.Message}"); } catch { } }
 
         RaiseLogoutCompleteOnce("gmGamePlayUI::RecvNotice_Logoff");
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern ushort RtlCaptureStackBackTrace(
+        uint FramesToSkip, uint FramesToCapture, IntPtr[] BackTrace, out uint BackTraceHash);
+
+    /// <summary>
+    /// Logs who in the client called the logoff, as module+RVA frames. Characters were
+    /// logging off by themselves (2026-09-27, Lucy, twice mid-route) with no meta, no
+    /// command and nothing from the server, so the next one needs to say which client
+    /// code path confirmed it (UI button, chat /logout, something else). x86 EBP walk:
+    /// deep frames can be unreliable, the first acclient frames are the useful ones.
+    /// Known logoff call sites get a {label} (LogoffOriginProbe). Returns the first
+    /// acclient.exe frame (the immediate AC caller), or Zero if none was captured.
+    /// </summary>
+    internal static IntPtr LogCaller(string hook, string prefix = "LogoutLifecycleHooks")
+    {
+        IntPtr firstAcclient = IntPtr.Zero;
+        try
+        {
+            var frames = new IntPtr[24];
+            ushort captured = RtlCaptureStackBackTrace(1, (uint)frames.Length, frames, out _);
+            var sb = new System.Text.StringBuilder($"{prefix}: {hook} caller frames:");
+            for (int i = 0; i < captured && frames[i] != IntPtr.Zero; i++)
+            {
+                string module = ProcessExitHooks.ResolveModule(frames[i], out int rva);
+                sb.Append($" [{i}] {module}+0x{rva:X}");
+                if (string.Equals(module, "acclient.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (firstAcclient == IntPtr.Zero)
+                        firstAcclient = frames[i];
+                    string label = LogoffOriginProbe.LabelForAcclientRva(rva);
+                    if (label.Length > 0)
+                        sb.Append($"{{{label}}}");
+                }
+            }
+            RynthLog.Compat(sb.ToString());
+        }
+        catch (Exception ex)
+        {
+            try { RynthLog.Compat($"{prefix}: {hook} caller capture failed: {ex.GetType().Name}"); } catch { }
+        }
+        return firstAcclient;
     }
 
     private static void RaiseLogoutCompleteOnce(string source)

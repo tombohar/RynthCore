@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace RynthCore.Engine.Compatibility;
 
@@ -168,6 +169,17 @@ internal static class ClientCombatHooks
             return false;
         }
 
+        // Deep-audit finding #15 (2026-06-18): this fires 4 AC combat-state
+        // mutators (height notify, SetRequestedAttackHeight, StartAttackRequest,
+        // EndAttackRequest) that must land in the SAME order as the paired
+        // SelectItem that precedes it. Reachable off-thread via the host API,
+        // and UseNativeAttack defaults true — so unlike this file's sibling
+        // MeleeAttack/MissileAttack, this ran un-marshalled every fight. Marshal
+        // as ONE queue entry (not split into four) so the sequence stays atomic
+        // relative to the drain loop's other actions.
+        if (AcMainThreadQueue.MustQueue(teardown: false))
+            return AcMainThreadQueue.EnqueueNativeAttack(attackHeight, power);
+
         try
         {
             IntPtr cs = _getCombatSystem();
@@ -177,6 +189,7 @@ internal static class ClientCombatHooks
                 if (globalPtr == IntPtr.Zero) return false;
                 cs = globalPtr;
             }
+            if (!ClientObjectHooks.IsReadablePointer(cs)) return false;
 
             // Notify client of height change via CM_Combat (same path as keyboard Del/End/PgDn)
             _sendAttackHeightChanged?.Invoke(attackHeight);
@@ -200,10 +213,53 @@ internal static class ClientCombatHooks
         if (_playerInReadyPosition == null || _getCombatSystem == null)
             return false;
 
+        // Off AC's main thread (host IsPlayerReadyFn: RynthNet's login probe polls it
+        // every 2 s from the plugin pump): the value sampled on the main thread
+        // (<= ~200 ms old). ClientCombatSystem::PlayerInReadyPosition walks the
+        // player's motion state and the combat singleton, both freed and rebuilt
+        // around login / logout, exactly when this is polled.
+        if (!MainThreadGuard.IsOnMainThread())
+            return Volatile.Read(ref _readySnapshot) != 0;
+
+        bool ready = ReadPlayerReadyLive();
+        Volatile.Write(ref _readySnapshot, ready ? 1 : 0);
+        return ready;
+    }
+
+    // 1 = the main thread last saw the player in a ready position.
+    private static int _readySnapshot;
+    private static long _nextReadySampleMs;
+    private const int ReadySampleIntervalMs = 200;
+
+    /// <summary>
+    /// Main thread only (MainThreadSnapshots.Tick). Samples PlayerInReadyPosition for
+    /// off-thread IsPlayerReady callers, about five times a second. With no player
+    /// object (char-select, portal teardown) it publishes "not ready" without
+    /// calling into the combat system.
+    /// </summary>
+    internal static void SampleReady()
+    {
+        if (!MainThreadGuard.IsOnMainThread() || _playerInReadyPosition == null || _getCombatSystem == null)
+            return;
+        long now = Environment.TickCount64;
+        if (now < _nextReadySampleMs)
+            return;
+        _nextReadySampleMs = now + ReadySampleIntervalMs;
+
+        bool ready = ClientHelperHooks.GetPlayerId() != 0 && ReadPlayerReadyLive();
+        Volatile.Write(ref _readySnapshot, ready ? 1 : 0);
+    }
+
+    // MAIN THREAD ONLY.
+    private static bool ReadPlayerReadyLive()
+    {
+        if (!MainThreadGuard.IsOnMainThread() || _playerInReadyPosition == null || _getCombatSystem == null)
+            return false;
         try
         {
             IntPtr cs = _getCombatSystem();
             if (cs == IntPtr.Zero) return false;
+            if (!ClientObjectHooks.IsReadablePointer(cs)) return false;
             return _playerInReadyPosition(cs, 1) != 0;
         }
         catch { return false; }
@@ -217,10 +273,18 @@ internal static class ClientCombatHooks
         if (_autoTarget == null || _getCombatSystem == null)
             return false;
 
+        // Same mutator class as NativeAttack (audit finding #15). Not currently
+        // exposed through the plugin SDK, so there's no live off-thread caller
+        // today — fail closed rather than queue, since queuing an unreachable
+        // path is dead-weight; revisit with an ActionKind if this is exposed.
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+
         try
         {
             IntPtr cs = _getCombatSystem();
             if (cs == IntPtr.Zero) return false;
+            if (!ClientObjectHooks.IsReadablePointer(cs)) return false;
             _autoTarget(cs);
             return true;
         }
@@ -237,5 +301,6 @@ internal static class ClientCombatHooks
         _autoTarget = null;
         _sendAttackHeightChanged = null;
         _initialized = false;
+        Volatile.Write(ref _readySnapshot, 0);
     }
 }

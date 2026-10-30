@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the nameplate sizing settings and the Vision overlay opacity sliders
+    (2026-10-05): src\RynthCore.Engine\ImGui\MonsterHud\MonsterHudSettings.cs and
+    src\RynthCore.Engine\UI\Data\ArgbOpacity.cs, compiled in. Defaults equal today's look,
+    the nameplate_settings.txt lines round-trip (old files without the new keys still load),
+    out-of-range values clamp, and an untouched opacity never changes a colour.
+    No file I/O: the settings file is written to and read from memory, and the background
+    writer is a stub that never runs its work (so %LocalAppData%\RynthCore is never touched).
+    Also the portal names (2026-10-28; src\RynthCore.Engine\ImGui\MonsterHud\PlateClass.cs compiled in): an
+    ITEM_TYPE portal classifies as a portal (a creature bit wins), "Portal names" defaults on and loads on
+    from an older file, it and its distance round-trip, the distance clamps, all on|off and reset include it.
+    Also the debuff icon sizes (2026-10-28; src\RynthCore.Engine\ImGui\MonsterHud\PlateMetrics.cs compiled in): the
+    monster plates' and your plate's "Debuff icon size" default 100 %, an older file loads 100 %, they clamp to
+    50-200, round-trip on their own (apart from the text sizes), reset with the sizes, the chat form parses; the
+    row's lengths at 100 % are the old expressions exactly at every scale, and its height and width grow with it.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>PlateSizingTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\MonsterHudSettings.cs" Link="Engine\MonsterHudSettings.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ArgbOpacity.cs" Link="Engine\ArgbOpacity.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\PlateClass.cs" Link="Engine\PlateClass.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\PlateMetrics.cs" Link="Engine\PlateMetrics.cs" />
+  </ItemGroup>
+
+</Project>

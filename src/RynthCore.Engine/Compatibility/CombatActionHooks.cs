@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -331,7 +332,7 @@ internal static class CombatActionHooks
 
     public static bool MeleeAttack(uint targetId, int attackHeight, float powerLevel)
     {
-        if (!MainThreadGuard.IsOnMainThread())
+        if (AcMainThreadQueue.MustQueue(teardown: false))
             return AcMainThreadQueue.EnqueueMeleeAttack(targetId, attackHeight, powerLevel);
 
         if (_meleeAttack == null)
@@ -349,7 +350,7 @@ internal static class CombatActionHooks
 
     public static bool MissileAttack(uint targetId, int attackHeight, float accuracyLevel)
     {
-        if (!MainThreadGuard.IsOnMainThread())
+        if (AcMainThreadQueue.MustQueue(teardown: false))
             return AcMainThreadQueue.EnqueueMissileAttack(targetId, attackHeight, accuracyLevel);
 
         if (_missileAttack == null)
@@ -372,8 +373,22 @@ internal static class CombatActionHooks
         // (CSequence) state on the thread that updates it — eliminating the
         // off-thread-mutation corruption class (e.g. the CSequence::update_internal
         // AV). On the main thread (incl. the drain) this executes directly.
-        if (!MainThreadGuard.IsOnMainThread())
+        if (AcMainThreadQueue.MustQueue(teardown: false))
             return AcMainThreadQueue.EnqueueChangeCombatMode(combatMode);
+
+        // Prefer the CLIENT-level entry point. _changeCombatMode is bound by
+        // scanning for the function that writes network opcode 0x53
+        // (CM_Combat::Event_ChangeCombatMode) — that is the packet sender and
+        // nothing more. It tells the server and leaves the client's own UI
+        // untouched, so the stance widgets never learn and the toolbar icon sits
+        // on Peace while the character is in Magic and casting.
+        //
+        // ClientCombatSystem::SetCombatMode is the layer above: it sets the mode
+        // field, sends the same 0x53, AND notifies the UI. Calling it is what a
+        // toolbar click does. Falls through to the raw sender when the hook isn't
+        // installed, so behaviour is unchanged if the pattern ever fails to resolve.
+        if (CombatModeHooks.RequestCombatMode(combatMode))
+            return true;
 
         if (_changeCombatMode == null)
             return false;
@@ -393,6 +408,13 @@ internal static class CombatActionHooks
         if (_cancelAttack == null)
             return false;
 
+        // 0x1B7 CM_Combat::Event_CancelAttack: same sender class as MeleeAttack, so the
+        // same gate. Queued in the action ring so it keeps FIFO order after an attack
+        // that is already queued (it used to run at once and could overtake it). The
+        // drain re-enters here on the main thread, where the gate passes.
+        if (AcMainThreadQueue.MustQueue(teardown: true))
+            return AcMainThreadQueue.EnqueueCancelAttack();
+
         try
         {
             return _cancelAttack();
@@ -407,6 +429,14 @@ internal static class CombatActionHooks
     {
         if (_queryHealth == null)
             return false;
+
+        // 0x1BF CM_Combat::Event_QueryHealth is a game-action send (AC blob alloc +
+        // send queue): main thread only. The plugin QueryHealthFn arrives on the pump,
+        // so off-thread calls go to the non-gesture QueryHealth queue and the drain
+        // re-enters here on the main thread. Callers ignore the result and read the
+        // async 0x01C0 reply, so "queued" is enough.
+        if (AcMainThreadQueue.MustQueue(teardown: false))
+            return targetId != 0 && AcMainThreadQueue.EnqueueQueryHealth(targetId);
 
         try
         {
@@ -423,20 +453,52 @@ internal static class CombatActionHooks
         if (_requestId == null || objectId == 0)
             return false;
 
+        // The 0xC8 IdentifyObject send allocates on AC's heap and bumps the
+        // ClientUISystem busy count (non-atomic, via BusyCountHooks) - main thread
+        // only. Plugin RequestIdFn calls and the PluginManager.TickAll login
+        // self-identify arrive on the plugin pump, so off-thread callers go through
+        // the same non-gesture queue AutoIdService uses. DrainRequestIds re-enters
+        // here on the main thread, where this gate passes and the packet is sent.
+        // Fire-and-forget: the appraisal reply is async anyway, so "queued" keeps
+        // the bool's meaning ("requested").
+        // The caller's EngineSendMarker (Net/IdRequester.cs) says who asked: it rides with a
+        // queued request, and a send made under it is registered with the flight recorder so
+        // the 0xC8 shows as [eng:<who>]. Without a marker the send stays [cli].
+        Net.IdRequester who = Net.EngineSendMarker.Current;
+        if (AcMainThreadQueue.MustQueue(teardown: false))
+            return AcMainThreadQueue.EnqueueRequestId(objectId, who);
+
+        // Registered BEFORE the call, so the tag is in place whether AC puts the 0xC8 on the
+        // wire inside the call or later. A call that fails or throws retires its entry, so it
+        // cannot mis-tag a later 0xC8 for the same object.
+        int tag = who != Net.IdRequester.None ? Net.FlightRecorder.EngineSend((byte)who, objectId) : -1;
         try
         {
-            return _requestId(objectId);
+            bool sent = _requestId(objectId);
+            if (sent) Net.IdSendStats.CountSent(who);
+            else Net.FlightRecorder.EngineSendFailed(tag, objectId);
+            return sent;
         }
         catch
         {
+            Net.FlightRecorder.EngineSendFailed(tag, objectId);
             return false;
         }
     }
 
-    public static bool CastSpell(uint targetId, int spellId)
+    public static bool CastSpell(uint targetId, int spellId) => CastSpell(targetId, spellId, suppressMoveStop: false);
+
+    /// <param name="suppressMoveStop">
+    /// The engine already sent this cast's stop and the server answered it (AcMainThreadQueue
+    /// DrainCasts, PreCastStopRules): FreeHandsAndCastSpell's MaybeStopCompletely is made to send
+    /// nothing for the length of the call, so no stop rides in the cast's frame.
+    /// </param>
+    internal static bool CastSpell(uint targetId, int spellId, bool suppressMoveStop)
     {
         if (spellId <= 0) return false;
         if (_castSpellClient == null) return false;
+        // Nameplate debuffs: pairs "You cast <spell> on <name>" with this target id.
+        ImGuiBackend.Hud.HudFeed.OnCast(targetId, spellId);
 
         // P2 cast marshalling — drain-BEFORE-tick variant (2026-06-03, attempt 2).
         // Off the main thread, enqueue the cast; GameTickHooks drains it on AC's
@@ -454,24 +516,23 @@ internal static class CombatActionHooks
         // which the drain-before order is intended to fix. On the main thread (the
         // UseTime drain, or any main-thread caller) this falls through to the direct
         // cast below.
-        if (!MainThreadGuard.IsOnMainThread())
+        if (AcMainThreadQueue.MustQueue(teardown: false))
             return AcMainThreadQueue.EnqueueCast(targetId, (uint)spellId);
 
-        // Call ClientMagicSystem::CastSpell directly off the plugin pump thread.
-        // This is the proven-working casting path (buffs + combat resolve in
-        // chat). The earlier EndScene-marshalled variant (AcMainThreadQueue,
-        // drained from OnEndScene) was REVERTED 2026-05-19: EndScene fires AC's
-        // IncrementBusyCount but is not the context that drives the cast state
-        // machine to completion, so combat casts never produced a projectile /
-        // damage / "You cast" chat — busy leaked, AC's single cast slot jammed
-        // "Casting <spell>" client-wide, and even manual casting died. Do NOT
-        // re-introduce queue/EndScene marshalling for casts.
-        // The documented object-teardown AV (0x0055FA24 [null+0x40] /
-        // 0x00416C86 [null+0x28]) is contained per-callsite by the SEH
-        // trampoline below (__try/__except in RynthCore.SehTrampoline.dll),
-        // which is the correct fix for that AV. AC's CastSpell reads its
-        // "currently selected target" when targetIsSelected=1; SelectItem
-        // first so AC's selection matches the caller's intent.
+        // From here on we are ON AC's main thread: the Client::UseTime cast drain
+        // (AcMainThreadQueue.DrainCasts, before AC's tick) or another main-thread caller.
+        // Nothing below runs on the plugin pump. What was REVERTED earlier is the
+        // EndScene drain for casts: EndScene is not the context that drives the cast state
+        // machine to completion (busy leaked, AC's single cast slot jammed client-wide);
+        // EngineFrameController's EndScene drain still never runs casts.
+        // Two native paths, each through the SEH trampoline (__try/__except in
+        // RynthCore.SehTrampoline.dll), which contains the object-teardown AV
+        // (0x0055FA24 [null+0x40] / 0x00416C86 [null+0x28]) per call:
+        //   targeted (targetId != 0): GetMagicSystem() -> FreeHandsAndCastSpell(mgr, spell,
+        //     target), the target passed explicitly, NO SelectItem;
+        //   self (targetId == 0): ClientMagicSystem::CastSpell(spell, targetIsSelected=0).
+        // While the player is dead, portaling or settling after a landblock jump the drain
+        // holds the cast and drops it once the transition ends (WorldTransitionState).
         if (_castSpellClient != null)
         {
             try
@@ -500,7 +561,11 @@ internal static class CombatActionHooks
                         // busy leak. BusyCountHooks reconciles the delta once the cast
                         // gesture completes.
                         int busyBefore = BusyCountHooks.CaptureRealBusyForCast();
-                        bool okCast = SehTrampoline.FreeHandsCast(_freeHandsCastPtr, mgr, (uint)spellId, targetId);
+                        int savedCtl = 0;
+                        IntPtr suppressed = suppressMoveStop ? CommandInterpreterHooks.BeginCastStopSuppression(out savedCtl) : IntPtr.Zero;
+                        bool okCast;
+                        try { okCast = SehTrampoline.FreeHandsCast(_freeHandsCastPtr, mgr, (uint)spellId, targetId); }
+                        finally { if (suppressed != IntPtr.Zero) CommandInterpreterHooks.EndCastStopSuppression(suppressed, savedCtl); }
                         BusyCountHooks.NoteDirectCastIssued(busyBefore);
                         if (!okCast && System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
                             RynthLog.Compat($"[SEH] AV in FreeHandsAndCastSpell spell={spellId} target=0x{targetId:X8} — caught");
@@ -517,7 +582,11 @@ internal static class CombatActionHooks
                     // buff self-casts were the dominant leak source (4322 plugin
                     // clears / 10h soak, nearly all on buffs).
                     int busyBefore = BusyCountHooks.CaptureRealBusyForCast();
-                    bool ok = SehTrampoline.CdeclVoidUintByte(_castSpellClientPtr, (uint)spellId, 0);
+                    int savedCtl = 0;
+                    IntPtr suppressed = suppressMoveStop ? CommandInterpreterHooks.BeginCastStopSuppression(out savedCtl) : IntPtr.Zero;
+                    bool ok;
+                    try { ok = SehTrampoline.CdeclVoidUintByte(_castSpellClientPtr, (uint)spellId, 0); }
+                    finally { if (suppressed != IntPtr.Zero) CommandInterpreterHooks.EndCastStopSuppression(suppressed, savedCtl); }
                     BusyCountHooks.NoteDirectCastIssued(busyBefore);
                     if (!ok && System.Threading.Interlocked.Increment(ref _sehAvLogCount) <= 20)
                         RynthLog.Compat($"[SEH] AV in self-CastSpell spell={spellId} — caught");
@@ -601,8 +670,13 @@ internal static class CombatActionHooks
         _castSpellClientPtr = IntPtr.Zero;
         _getMagicSystemPtr = IntPtr.Zero;
         _freeHandsCastPtr = IntPtr.Zero;
-        _queryHealthResponseDetour = null;
-        _originalQueryHealthResponse = null;
+        // _queryHealthResponseDetour / _originalQueryHealthResponse are deliberately
+        // NOT cleared (2026-09-30): the MinHook detour on Handle_Combat__QueryHealthResponse
+        // stays enabled across a re-probe, so clearing them unrooted the detour
+        // delegate while AC could still jump to it, made a detour call in that
+        // window skip AC's original handler, and let InstallQueryHealthResponseHook
+        // re-run HookCreate on a live target (the remove-and-retry path, safe only
+        // after shutdown joined every caller). Kept, the install guard is a no-op.
         _identifyObjectDetour = null;
         _originalIdentifyObject = null;
         IsInitialized = false;
@@ -743,10 +817,6 @@ internal static class CombatActionHooks
             if (success == 0 || objectId == 0)
                 return;
 
-            const uint CreatureProfile = 0x0100;
-            if ((flags & CreatureProfile) == 0)
-                return;
-
             int offset = 16; // Past the header
             int iSize = (int)size;
 
@@ -759,6 +829,13 @@ internal static class CombatActionHooks
                 return; // BoolStatsTable
             if ((flags & 0x0004) != 0 && !SkipPackedHashTable(buffer, iSize, ref offset, 12))
                 return; // FloatStatsTable
+
+            // The identify's properties (every table and profile) are cached from the live
+            // seam, SmartBoxHooks.ParseGameEvent -> PropertyWire (2026-09-30); this parser only
+            // runs from the disabled inner-dispatcher hook and reads the creature vitals.
+            const uint CreatureProfile = 0x0100;
+            if ((flags & CreatureProfile) == 0)
+                return;
             if ((flags & 0x0008) != 0 && !SkipStringHashTable(buffer, iSize, ref offset))
                 return; // StringStatsTable
             if ((flags & 0x1000) != 0 && !SkipPackedHashTable(buffer, iSize, ref offset, 8))

@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for changing a key in AC's keymap file (Tom 2026-10-22: the item bar's keys are the
+    player's retail keys and change together with the retail toolbar's). src\RynthCore.Engine\
+    Compatibility\AcKeymapText.cs is compiled in as is, with Hotkeys\HotkeyModel.cs: reading the
+    groups and bindings, the modifier bits from MetaKeys, key names (AC's spellings, aliases matched),
+    binding a key so it comes off every other action in the game's groups (never the text-editing
+    ones), unbinding, a new group when there is none, and the CRLF text round trip. And (2026-10-27)
+    the change every other client makes to its own keys: the edits recorded in "<keymap>.rynthcore" and
+    read back, made to a client with different keys of its own (they stay, the change lands, a key
+    that clashed comes off), twice = nothing, all or nothing, other MetaKeys numbers, an older
+    engine's marker, what is pending after a hot reload. Also runs on a copy of the player's own
+    Normal.keymap in memory when there is one; never writes it.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>KeymapTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Hotkeys\HotkeyModel.cs" Link="Engine\HotkeyModel.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AcKeymapText.cs" Link="Engine\AcKeymapText.cs" />
+  </ItemGroup>
+
+</Project>

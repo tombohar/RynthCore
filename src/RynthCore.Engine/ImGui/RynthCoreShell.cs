@@ -141,6 +141,12 @@ internal static class RynthCoreShell
 
         if (_showPacketSnifferWindow)
             RenderPacketSnifferWindow();
+
+        // Deep-audit finding #25: sync AFTER the render call (not before), since
+        // RenderPacketSnifferWindow's ImGui.Begin can flip _showPacketSnifferWindow
+        // false this same frame (the window's X button) — Track() should stop
+        // allocating the instant the panel closes, not one frame late.
+        RawOpcodeTracker.Active = _showPacketSnifferWindow;
     }
 
     private static void ApplyTheme()
@@ -253,7 +259,7 @@ internal static class RynthCoreShell
         UpdateBarPositionFromWindow();
         bool auxReady = frameCount >= 120;
 
-        ImGui.TextColored(Win32Backend.IsUiCaptureEnabled() ? Good : TextMute, Win32Backend.IsUiCaptureEnabled() ? "UI" : "GAME");
+        SafeImGui.TextColored(Win32Backend.IsUiCaptureEnabled() ? Good : TextMute, Win32Backend.IsUiCaptureEnabled() ? "UI" : "GAME");
         ShowTooltip("Press Insert to toggle UI capture.");
 
         ImGui.SameLine();
@@ -363,6 +369,8 @@ internal static class RynthCoreShell
             new System.Threading.Thread(() =>
             {
                 System.Threading.Thread.Sleep(120);
+                // Asked for by hand: the reload deferral (EntryPoint.Shutdown) doesn't hold it.
+                EntryPoint.NoteManualReload();
                 bool ok = EngineLifecycle.SignalReload();
                 RynthLog.Info($"ERl: SignalReload returned {ok}.");
             })
@@ -700,7 +708,7 @@ internal static class RynthCoreShell
         string pluginDir = PluginManager.PluginDirectory;
         if (!string.IsNullOrEmpty(pluginDir))
         {
-            ImGui.TextColored(TextMute, pluginDir);
+            SafeImGui.TextColored(TextMute, pluginDir);
         }
 
         if (_showPluginTips)
@@ -733,16 +741,16 @@ internal static class RynthCoreShell
                 string ver = string.IsNullOrEmpty(p.VersionString) ? "" : $"  v{p.VersionString}";
                 ImGui.BulletText("");
                 ImGui.SameLine();
-                ImGui.TextColored(Accent, p.DisplayName);
+                SafeImGui.TextColored(Accent, p.DisplayName);
                 ImGui.SameLine();
-                ImGui.TextColored(TextMute, ver);
+                SafeImGui.TextColored(TextMute, ver);
                 ImGui.SameLine(300f);
-                ImGui.TextColored(statusColor, statusText);
+                SafeImGui.TextColored(statusColor, statusText);
 
                 if (!string.IsNullOrEmpty(p.SourceFilePath))
                 {
                     ImGui.SameLine();
-                    ImGui.TextColored(TextMute, $"<{p.FileName}>");
+                    SafeImGui.TextColored(TextMute, $"<{p.FileName}>");
                 }
 
                 string caps = "";
@@ -753,7 +761,7 @@ internal static class RynthCoreShell
                 if (caps.Length > 0)
                 {
                     ImGui.SameLine();
-                    ImGui.TextColored(TextMute, $"[{caps.Trim()}]");
+                    SafeImGui.TextColored(TextMute, $"[{caps.Trim()}]");
                 }
 
                 ImGui.PopID();
@@ -788,7 +796,7 @@ internal static class RynthCoreShell
                 _selectedPlugin = i;
 
             ImGui.SameLine();
-            ImGui.TextColored(TextMute, PluginStatuses[i]);
+            SafeImGui.TextColored(TextMute, PluginStatuses[i]);
             ImGui.PopID();
         }
 
@@ -797,8 +805,8 @@ internal static class RynthCoreShell
 
         if (_selectedPlugin >= 0 && _selectedPlugin < PluginNames.Length)
         {
-            ImGui.TextColored(Gold, PluginNames[_selectedPlugin]);
-            ImGui.TextColored(TextMute, PluginStatuses[_selectedPlugin]);
+            SafeImGui.TextColored(Gold, PluginNames[_selectedPlugin]);
+            SafeImGui.TextColored(TextMute, PluginStatuses[_selectedPlugin]);
         }
 
         ImGui.EndChild();
@@ -811,7 +819,7 @@ internal static class RynthCoreShell
 
         // ── Loaded plugins ──────────────────────────────────────────────────
         var loadedPlugins = PluginManager.Plugins;
-        ImGui.TextColored(Accent, $"Loaded Plugins ({loadedPlugins.Count})");
+        SafeImGui.TextColored(Accent, $"Loaded Plugins ({loadedPlugins.Count})");
         ImGui.Separator();
 
         if (loadedPlugins.Count == 0)
@@ -830,12 +838,12 @@ internal static class RynthCoreShell
                 string ver = string.IsNullOrEmpty(p.VersionString) ? "" : $" v{p.VersionString}";
                 ImGui.BulletText("");
                 ImGui.SameLine();
-                ImGui.TextColored(Accent, p.DisplayName);
+                SafeImGui.TextColored(Accent, p.DisplayName);
                 ImGui.SameLine();
-                ImGui.TextColored(TextMute, ver);
+                SafeImGui.TextColored(TextMute, ver);
                 ImGui.SameLine(280f);
-                ImGui.TextColored(statusColor, statusText);
-                ImGui.TextColored(TextMute, $"  {p.SourceFilePath}");
+                SafeImGui.TextColored(statusColor, statusText);
+                SafeImGui.TextColored(TextMute, $"  {p.SourceFilePath}");
             }
         }
 
@@ -851,7 +859,7 @@ internal static class RynthCoreShell
         {
             ImGui.TextColored(TextMute, "Built-in directory:");
             ImGui.SameLine();
-            ImGui.TextColored(TextDim, builtInDir);
+            SafeImGui.TextColored(TextDim, builtInDir);
         }
 
         ImGui.Spacing();
@@ -869,9 +877,9 @@ internal static class RynthCoreShell
             {
                 ImGui.PushID($"pluginpath_{i}");
                 bool exists = File.Exists(extraPaths[i]);
-                ImGui.TextColored(exists ? Good : Warn, exists ? "  OK" : "  ??");
+                SafeImGui.TextColored(exists ? Good : Warn, exists ? "  OK" : "  ??");
                 ImGui.SameLine();
-                ImGui.TextColored(TextDim, extraPaths[i]);
+                SafeImGui.TextColored(TextDim, extraPaths[i]);
                 ImGui.SameLine();
                 if (ImGui.SmallButton("Remove"))
                     removeIdx = i;
@@ -938,34 +946,34 @@ internal static class RynthCoreShell
 
         ImGui.Spacing();
         ImGui.TextColored(TextMute, "Combat");
-        ImGui.TextWrapped($"Melee {OnOff(status.MeleeAvailable)}  Missile {OnOff(status.MissileAvailable)}  Mode {OnOff(status.ChangeCombatModeAvailable)}  Cancel {OnOff(status.CancelAttackAvailable)}  Health {OnOff(status.QueryHealthAvailable)}");
-        ImGui.TextColored(TextMute, status.CombatStatus);
+        SafeImGui.TextWrapped($"Melee {OnOff(status.MeleeAvailable)}  Missile {OnOff(status.MissileAvailable)}  Mode {OnOff(status.ChangeCombatModeAvailable)}  Cancel {OnOff(status.CancelAttackAvailable)}  Health {OnOff(status.QueryHealthAvailable)}");
+        SafeImGui.TextColored(TextMute, status.CombatStatus);
 
         ImGui.Spacing();
         ImGui.TextColored(TextMute, "Movement");
-        ImGui.TextWrapped($"Move {OnOff(status.DoMovementAvailable)}  Stop {OnOff(status.StopMovementAvailable)}  Jump {OnOff(status.JumpNonAutonomousAvailable)}  Autonomy {OnOff(status.AutonomyLevelAvailable)}");
-        ImGui.TextColored(TextMute, status.MovementStatus);
+        SafeImGui.TextWrapped($"Move {OnOff(status.DoMovementAvailable)}  Stop {OnOff(status.StopMovementAvailable)}  Jump {OnOff(status.JumpNonAutonomousAvailable)}  Autonomy {OnOff(status.AutonomyLevelAvailable)}");
+        SafeImGui.TextColored(TextMute, status.MovementStatus);
 
         ImGui.Spacing();
         ImGui.TextColored(TextMute, "Local");
-        ImGui.TextWrapped($"Autorun {OnOff(status.SetAutoRunAvailable)}  TapJump {OnOff(status.TapJumpAvailable)}");
-        ImGui.TextColored(TextMute, status.CommandInterpreterStatus);
+        SafeImGui.TextWrapped($"Autorun {OnOff(status.SetAutoRunAvailable)}  TapJump {OnOff(status.TapJumpAvailable)}");
+        SafeImGui.TextColored(TextMute, status.CommandInterpreterStatus);
 
         ImGui.Spacing();
         ImGui.TextColored(TextMute, "UI");
-        ImGui.TextColored(TextMute, UiLifecycleHooks.StatusMessage);
+        SafeImGui.TextColored(TextMute, UiLifecycleHooks.StatusMessage);
 
         ImGui.Spacing();
         ImGui.TextColored(TextMute, "Chat");
-        ImGui.TextColored(TextMute, ChatCallbackHooks.StatusMessage);
+        SafeImGui.TextColored(TextMute, ChatCallbackHooks.StatusMessage);
 
         ImGui.Spacing();
         ImGui.TextColored(TextMute, "Multi-client");
-        ImGui.TextColored(TextMute, MultiClientHooks.StatusMessage);
+        SafeImGui.TextColored(TextMute, MultiClientHooks.StatusMessage);
 
         ImGui.Spacing();
         ImGui.TextColored(TextMute, "Lifecycle");
-        ImGui.TextColored(TextMute, LoginLifecycleHooks.StatusMessage);
+        SafeImGui.TextColored(TextMute, LoginLifecycleHooks.StatusMessage);
         ImGui.EndChild();
     }
 
@@ -1024,8 +1032,8 @@ internal static class RynthCoreShell
     private static void DrawMetric(in ShellMetric metric)
     {
         ImGui.BeginChild($"{metric.Label}Card", new Vector2(0f, 76f), ImGuiChildFlags.Borders);
-        ImGui.TextColored(TextMute, metric.Label);
-        ImGui.TextColored(metric.Color, metric.Value);
+        SafeImGui.TextColored(TextMute, metric.Label);
+        SafeImGui.TextColored(metric.Color, metric.Value);
         ImGui.EndChild();
     }
 
@@ -1039,14 +1047,14 @@ internal static class RynthCoreShell
         drawList.AddRectFilled(pos, pos + new Vector2(size.X + 16f, size.Y + 8f), fill, 6f);
         drawList.AddRect(pos, pos + new Vector2(size.X + 16f, size.Y + 8f), stroke, 6f);
         ImGui.SetCursorScreenPos(pos + new Vector2(8f, 4f));
-        ImGui.TextColored(color, text);
+        SafeImGui.TextColored(color, text);
     }
 
     private static void DrawFeatureLine(string name, string state, Vector4 color)
     {
-        ImGui.TextColored(TextDim, name);
+        SafeImGui.TextColored(TextDim, name);
         ImGui.SameLine(190f);
-        ImGui.TextColored(color, state);
+        SafeImGui.TextColored(color, state);
     }
 
     private static string OnOff(bool value)
@@ -1065,16 +1073,16 @@ internal static class RynthCoreShell
 
     private static void DrawBulletRow(string label, string value)
     {
-        ImGui.BulletText($"{label}: {value}");
+        SafeImGui.BulletText($"{label}: {value}");
     }
 
     private static void DrawRoadmapStep(string index, string title, string body, Vector4 color)
     {
         ImGui.BeginChild($"Roadmap{index}", new Vector2(0f, 68f), ImGuiChildFlags.Borders);
-        ImGui.TextColored(color, $"Step {index}");
+        SafeImGui.TextColored(color, $"Step {index}");
         ImGui.SameLine();
-        ImGui.TextColored(TextDim, title);
-        ImGui.TextWrapped(body);
+        SafeImGui.TextColored(TextDim, title);
+        SafeImGui.TextWrapped(body);
         ImGui.EndChild();
     }
 
@@ -1150,13 +1158,13 @@ internal static class RynthCoreShell
                 ImGui.TableNextRow();
 
                 ImGui.TableSetColumnIndex(0);
-                ImGui.TextColored(isKnown ? TextMute : Accent, $"0x{opcode:X4}");
+                SafeImGui.TextColored(isKnown ? TextMute : Accent, $"0x{opcode:X4}");
 
                 ImGui.TableSetColumnIndex(1);
-                ImGui.TextColored(TextDim, entry.Count.ToString());
+                SafeImGui.TextColored(TextDim, entry.Count.ToString());
 
                 ImGui.TableSetColumnIndex(2);
-                ImGui.TextColored(TextDim, entry.LastPayloadLen.ToString());
+                SafeImGui.TextColored(TextDim, entry.LastPayloadLen.ToString());
 
                 ImGui.TableSetColumnIndex(3);
                 if (entry.LastSample is { Length: > 0 })
@@ -1168,7 +1176,7 @@ internal static class RynthCoreShell
                         sb.Append(b.ToString("X2"));
                         sb.Append(' ');
                     }
-                    ImGui.TextColored(TextMute, sb.ToString().TrimEnd());
+                    SafeImGui.TextColored(TextMute, sb.ToString().TrimEnd());
                 }
             }
 
@@ -1178,7 +1186,7 @@ internal static class RynthCoreShell
         if (visibleCount == 0)
         {
             ImGui.Spacing();
-            ImGui.TextColored(TextMute, snapshot.Length == 0
+            SafeImGui.TextColored(TextMute, snapshot.Length == 0
                 ? "No packets captured yet — join a server and traffic will appear here."
                 : "All captured opcodes filtered. Toggle 'Show Known' / 'Show Unknown' to see them.");
         }

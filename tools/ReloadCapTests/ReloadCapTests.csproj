@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the engine's side of the hot-reload cap (2026-10-11):
+    src\RynthCore.Engine\ReloadCapNotice.cs, compiled in. When the loader refuses a hot reload
+    (engine.json MaxHotReloads, default 20), the player hears about it in chat once, and again only
+    when they asked for the reload by hand (RL, /rc rl) within the last 10 s; the chat line is the
+    plain sentence agreed for it. The loader's own rule (refuse once reloads >= cap, negative = no
+    cap; nothing staged on a refusal) is checked in tools\LoaderReloadCapTests (C).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ReloadCapTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\ReloadCapNotice.cs" Link="Engine\ReloadCapNotice.cs" />
+  </ItemGroup>
+
+</Project>

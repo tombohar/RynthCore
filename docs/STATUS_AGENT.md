@@ -126,7 +126,9 @@ they're all opt-in, so use whichever fits the app you end up building:
      a private mesh like **Tailscale** (phone hits `http://<tailscale-ip>:8740/status`).
      A `+` bind needs a one-time `netsh http add urlacl url=http://+:8740/ user=Everyone`
      (or run the agent elevated).
-   - Set `ServeToken` to require `Authorization: Bearer <token>` (or `?token=`).
+   - `ServeToken` is required: with it empty the server stays off, on any bind.
+     Every route but `/healthz` then needs `Authorization: Bearer <token>` (or `?token=`).
+     Use the same token as your DrakBot remote and one DrakRemote entry shows both.
    - `GET /healthz` returns `ok` for uptime checks.
 3. **File sync.** Leave `WriteAggregateFile: true` and point iCloud/Dropbox/etc.
    at `Logs\status\aggregate.json`; the app reads the synced copy.
@@ -202,6 +204,24 @@ A simple phone view: green if every client is `healthy`, red if any is
 `wedged`/`hung`/`dead`, and show each character's `state` + `character` name.
 
 ---
+
+## Raising from the phone (`raiseXp`)
+
+With the RynthRemote plugin 0.4 on an engine with plugin API v79, DrakRemote's Skills tab can spend
+unassigned XP (and skill credits) the way the character window's "+" does:
+
+- The plugin's character sheet (`GET /character`, passed through as the plugin wrote it) carries
+  `ranks`, `xpSpent`, `cost1`, `cost10`, `affordable` (and `trainCredits` on skills) per row and a
+  `raise` block (`available`, `reason`, `busy`, `last` = the last result). Its status file says
+  `"raiseXp": true` when the client can.
+- The agent sends `capabilities.raiseXp` (remote control on, character sheets, and a client that
+  can) and `clients[].raiseXp`.
+- `POST /command` `{"pid":N,"action":"raise","value":"{\"kind\":\"attribute|vital|skill|train\",\"id\":..,\"count\":1..100,\"cost\":N,\"nonce\":..}"}`
+  needs the token like every command, and is accepted only for a pid the last cycle read whose
+  plugin reports `raiseXp` (404 unknown client, 409 not available). The value is checked and
+  rewritten in that fixed shape (`RemoteParity.CheckRaise`); `cost` is the cost the user confirmed
+  and is required. The plugin refuses commands over 30 s old and repeated nonces; the engine works
+  the cost out again from fresh numbers and refuses when it differs.
 
 ## Removing the feature entirely
 

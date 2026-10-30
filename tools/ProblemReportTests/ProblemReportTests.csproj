@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline tests for "Report a problem" (src\RynthCore.Engine\Report\ProblemReportCore.cs, compiled
+    in; pure code, no engine state):
+      - text cleaning and the UTF-8 byte limits (never cut inside a character);
+      - the request body: exact keys and types the server's schema expects, limits applied,
+        plugin names cleaned, the log gzipped + base64 and round-tripping, no log = null;
+      - the log tail: last N lines, the byte cap (keeps the end, starts at a line), a last line
+        still being written, CRLF, an empty / missing file, the rotated .old topping up a short
+        current log, and reading while another thread keeps appending (as the engine does);
+      - hiding the account (login) name, the Windows user name (profile paths) and the PC name;
+      - the cooldown arithmetic, the endpoint override rules, and reading the server's answers.
+    Optional: (double dash) server http://127.0.0.1:18097/report posts real bodies to a local copy
+    of the endpoint (C:\Aeshnidae\ops\report-endpoint\test_local.py serve) to check both ends agree.
+    Nothing native: no AC, no engine, no network unless asked.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ProblemReportTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Report\ProblemReportCore.cs" Link="Engine\ProblemReportCore.cs" />
+  </ItemGroup>
+
+</Project>

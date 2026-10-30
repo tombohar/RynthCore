@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the engine's Aelrynth detection and /mastery-data parser
+    (src\RynthCore.Engine\Compatibility\AelrynthWire.cs, compiled in): server detection
+    from launch command lines, hosts, world names and the Bank mod's properties, and
+    mastery reply lines serialized the way the SkillMastery mod writes them
+    (DataCommand.Describe + CompanionFeed.Send). Nothing native: no AC, no engine state.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>AelrynthTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AelrynthWire.cs" Link="Engine\AelrynthWire.cs" />
+  </ItemGroup>
+
+</Project>

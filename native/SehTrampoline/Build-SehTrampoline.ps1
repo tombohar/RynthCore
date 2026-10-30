@@ -1,6 +1,9 @@
 # Build-SehTrampoline.ps1
 # Compiles RynthCore.SehTrampoline.dll (x86 MSVC) and copies to the runtime.
 # Run from anywhere; finds VS automatically via vswhere.
+# -NoDeploy: build into bin\ only; leave C:\Games\RynthCore\Runtime untouched.
+
+param([switch]$NoDeploy)
 
 $ErrorActionPreference = "Stop"
 
@@ -32,6 +35,7 @@ if ($LASTEXITCODE -ne 0) { Write-Error "Compilation failed."; exit $LASTEXITCODE
 
 $size = (Get-Item "$out\RynthCore.SehTrampoline.dll").Length
 Write-Host "Built: RynthCore.SehTrampoline.dll ($size bytes)"
+if ($NoDeploy) { return }
 
 $runtimeDst = "C:\Games\RynthCore\Runtime\RynthCore.SehTrampoline.dll"
 Copy-Item "$out\RynthCore.SehTrampoline.dll" $runtimeDst -Force

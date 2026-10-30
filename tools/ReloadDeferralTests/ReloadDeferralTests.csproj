@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the engine's hot-reload deferral (2026-10-05):
+    src\RynthCore.Engine\ReloadDeferral.cs, compiled in. A reload goes at once when no plugin
+    objects, waits (asking again every 0.5 s) while one does, logs "engine reload waiting:
+    RynthAi in combat (...)" at once and then every 15 s, goes ahead when the plugins clear,
+    and goes anyway at the 2-minute cap. A plugin query that throws never holds a reload.
+    The clock and the sleep are fakes: the tests take milliseconds, nothing touches the game.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ReloadDeferralTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\ReloadDeferral.cs" Link="Engine\ReloadDeferral.cs" />
+  </ItemGroup>
+
+</Project>

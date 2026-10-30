@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the Settings rows of SilentKelpie's RynthAi combat additions (taken 2026-10-19):
+    Variable Power (monster rules), Hitting the Environment (Missile / Magic) and Pull Away (Kite), and
+    the Power / Kite fields of a monster rule (UI\Data\SettingsData.cs, DamageData.cs, MonstersPanel.cs).
+    The new RynthAi settings are mirrored as nullable fields like the Vaulted Dungeons switch: a RynthAi
+    that predates them omits them, the rows stay hidden, and a save sends null, which RynthAi leaves
+    alone; one that has them shows the rows with the documented defaults (Off / unchanged).
+    The engine has no test seam for SettingsData.cs (it pulls in the whole ImGui layer), so this
+    references the built engine assembly and reaches the internal types by reflection. x86, like
+    the engine: needs the x86 .NET runtime (C:\Program Files (x86)\dotnet).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Platforms>x86</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>CombatSettingsTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.Engine\RynthCore.Engine.csproj" />
+  </ItemGroup>
+
+</Project>

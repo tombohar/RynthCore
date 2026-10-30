@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the ambient light floor's pure part (2026-10-27, plugin API v91):
+    src\RynthCore.Engine\D3D9\AmbientLightPolicy.cs, compiled in. Per channel the brighter of
+    AC's ambient and the floor, AC's alpha byte kept, the floor's alpha ignored, floor 0 = AC's
+    colour unchanged, never darker than AC's. No AC, no files.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>AmbientLightTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\D3D9\AmbientLightPolicy.cs" Link="Engine\AmbientLightPolicy.cs" />
+  </ItemGroup>
+
+</Project>

@@ -2,11 +2,15 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="RynthCore.App.Avalonia.AccountProfileDialog"
         Width="600"
-        Height="620"
+        Height="720"
         CanResize="False"
         WindowStartupLocation="CenterOwner"
         Title="Account Profile"
         Background="#132028">
+  <Window.Resources>
+    <!-- The "show password" eye (the same one in FirstLoginDialog.axaml). -->
+    <StreamGeometry x:Key="EyeIcon">F0 M8,3 C4.4,3 1.6,5.3 0.5,8 C1.6,10.7 4.4,13 8,13 C11.6,13 14.4,10.7 15.5,8 C14.4,5.3 11.6,3 8,3 Z M8,4.3 C5.3,4.3 3,5.9 2,8 C3,10.1 5.3,11.7 8,11.7 C10.7,11.7 13,10.1 14,8 C13,5.9 10.7,4.3 8,4.3 Z M8,5.5 A2.5,2.5 0 1 1 8,10.5 A2.5,2.5 0 1 1 8,5.5 Z</StreamGeometry>
+  </Window.Resources>
   <Grid RowDefinitions="*,Auto" Margin="18">
     <StackPanel Spacing="12">
       <TextBlock Text="Server" Foreground="#EAF0F4" />
@@ -14,16 +18,31 @@
       <TextBlock Text="Account" Foreground="#EAF0F4" />
       <TextBox x:Name="AccountBox" />
       <TextBlock Text="Password" Foreground="#EAF0F4" />
-      <TextBox x:Name="PasswordBox"
-               PasswordChar="*"
-               RevealPassword="False"
-               Watermark="Leave blank to keep the saved password hidden" />
+      <!-- The eye shows the password; with the box empty, the saved one (SavedPasswordReveal). -->
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBox x:Name="PasswordBox"
+                 Grid.Column="0"
+                 Margin="0,0,6,0"
+                 PasswordChar="*"
+                 RevealPassword="False"
+                 Watermark="Leave blank to keep the saved password" />
+        <ToggleButton x:Name="ShowPasswordToggle"
+                      Grid.Column="1"
+                      VerticalAlignment="Stretch"
+                      ToolTip.Tip="Show password"
+                      AutomationProperties.Name="Show password">
+          <PathIcon Data="{StaticResource EyeIcon}" Width="16" Height="16" />
+        </ToggleButton>
+      </Grid>
       <CheckBox x:Name="ClearPasswordCheckBox"
                 Content="Clear saved password"
                 Foreground="#EAF0F4" />
       <TextBlock x:Name="PasswordHintText"
                  Foreground="#9AA8B3"
                  TextWrapping="Wrap" />
+      <TextBlock Text="Log in as" Foreground="#EAF0F4" />
+      <ComboBox x:Name="LoginAsBox" HorizontalAlignment="Stretch" />
+      <TextBlock x:Name="LoginAsHintText" Foreground="#9AA8B3" TextWrapping="Wrap" />
       <TextBlock Text="Alias" Foreground="#EAF0F4" />
       <TextBox x:Name="AliasBox" />
 

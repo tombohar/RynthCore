@@ -13,9 +13,10 @@ using System.Threading;
 
 namespace RynthCore.Engine.Hooking;
 
-internal static class MinHook
+internal static unsafe class MinHook
 {
     private const string DLL = "minhook.x86.dll";
+    private const string LoaderDll = "RynthCore.Loader.dll";
 
     // ─── Status codes (must match MinHook's MH_STATUS enum) ────────────
     public const int MH_OK                       = 0;
@@ -23,37 +24,103 @@ internal static class MinHook
     public const int MH_ERROR_NOT_INITIALIZED     = 2;
     public const int MH_ERROR_ALREADY_CREATED    = 3;
     public const int MH_ERROR_NOT_CREATED        = 4;
+    public const int MH_ERROR_ENABLED            = 5;
+    public const int MH_ERROR_DISABLED           = 6;
 
     // ─── Core API ─────────────────────────────────────────────────────
+    //
+    // The native loader (native/Loader, 2.0+) exports MinHook's API itself: every
+    // target gets a permanent stub and a reload only re-points it, so no hook ever
+    // points into an unloaded engine (docs/UNLOADABLE_ENGINE_PLAN.md). The engine uses
+    // that facade when the loader has it (RcHooks_Version), else minhook.x86.dll as
+    // before (the NativeAOT loader, or the engine loaded directly).
 
-    [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
-    public static extern int MH_Initialize();
+    private static readonly Api s_api = ResolveApi();
 
-    [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
-    public static extern int MH_Uninitialize();
+    /// <summary>True when hooks go through the native loader's facade.</summary>
+    public static bool UsesLoaderFacade => s_api.IsFacade;
 
-    [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
-    public static extern int MH_CreateHook(
-        IntPtr pTarget,
-        IntPtr pDetour,
-        out IntPtr ppOriginal);
+    public static int MH_Initialize() => s_api.Initialize();
 
-    [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
-    public static extern int MH_RemoveHook(IntPtr pTarget);
+    public static int MH_Uninitialize() => s_api.Uninitialize();
 
-    [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
-    public static extern int MH_EnableHook(IntPtr pTarget);
+    public static int MH_CreateHook(IntPtr pTarget, IntPtr pDetour, out IntPtr ppOriginal)
+    {
+        IntPtr original = IntPtr.Zero;
+        int status = s_api.Create(pTarget, pDetour, &original);
+        ppOriginal = original;
+        return status;
+    }
 
-    [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
-    public static extern int MH_DisableHook(IntPtr pTarget);
+    public static int MH_RemoveHook(IntPtr pTarget) => s_api.Remove(pTarget);
+
+    public static int MH_EnableHook(IntPtr pTarget) => s_api.Enable(pTarget);
+
+    public static int MH_DisableHook(IntPtr pTarget) => s_api.Disable(pTarget);
 
     /// <summary>Enable/disable all hooks at once.</summary>
     public static readonly IntPtr MH_ALL_HOOKS = IntPtr.Zero;
 
-    // ─── Status to string ─────────────────────────────────────────────
+    private static IntPtr MH_StatusToString(int status) => s_api.StatusToString(status);
 
-    [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
-    private static extern IntPtr MH_StatusToString(int status);
+    private sealed class Api
+    {
+        public bool IsFacade;
+        public delegate* unmanaged[Stdcall]<int> Initialize;
+        public delegate* unmanaged[Stdcall]<int> Uninitialize;
+        public delegate* unmanaged[Stdcall]<IntPtr, IntPtr, IntPtr*, int> Create;
+        public delegate* unmanaged[Stdcall]<IntPtr, int> Remove;
+        public delegate* unmanaged[Stdcall]<IntPtr, int> Enable;
+        public delegate* unmanaged[Stdcall]<IntPtr, int> Disable;
+        public delegate* unmanaged[Stdcall]<int, IntPtr> StatusToString;
+    }
+
+    private static Api ResolveApi()
+    {
+        IntPtr module = GetModuleHandleW(LoaderDll);
+        bool facade = module != IntPtr.Zero && GetProcAddress(module, "RcHooks_Version") != IntPtr.Zero;
+        if (!facade)
+            module = LoadMinHookFromEngineFolders();
+
+        IntPtr Get(string name)
+        {
+            IntPtr fn = GetProcAddress(module, name);
+            if (fn == IntPtr.Zero)
+                throw new EntryPointNotFoundException($"{(facade ? LoaderDll : DLL)} has no export {name}");
+            return fn;
+        }
+
+        return new Api
+        {
+            IsFacade = facade,
+            Initialize = (delegate* unmanaged[Stdcall]<int>)Get("MH_Initialize"),
+            Uninitialize = (delegate* unmanaged[Stdcall]<int>)Get("MH_Uninitialize"),
+            Create = (delegate* unmanaged[Stdcall]<IntPtr, IntPtr, IntPtr*, int>)Get("MH_CreateHook"),
+            Remove = (delegate* unmanaged[Stdcall]<IntPtr, int>)Get("MH_RemoveHook"),
+            Enable = (delegate* unmanaged[Stdcall]<IntPtr, int>)Get("MH_EnableHook"),
+            Disable = (delegate* unmanaged[Stdcall]<IntPtr, int>)Get("MH_DisableHook"),
+            StatusToString = (delegate* unmanaged[Stdcall]<int, IntPtr>)Get("MH_StatusToString"),
+        };
+    }
+
+    /// <summary>
+    /// minhook.x86.dll by full path from the engine's folders (where the early preload found it).
+    /// Never by bare name: Windows' search order (the AC client folder, the current directory,
+    /// PATH) would load a planted minhook.x86.dll into the client when ours is missing.
+    /// </summary>
+    private static IntPtr LoadMinHookFromEngineFolders()
+    {
+        string? path = EntryPoint.FindNativeDll(DLL);
+        if (path == null)
+            throw new DllNotFoundException($"{DLL} was not found beside the engine (other folders are not searched).");
+        return NativeLibrary.Load(path);
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr GetModuleHandleW(string lpModuleName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
 
     public static string StatusString(int status)
     {

@@ -1,106 +1,39 @@
 // ============================================================================
 //  RynthCore.Engine - Compatibility/RecursionGuard.cs
 //
-//  Diagnostic helper. Each compat-hook detour calls Tick("HookName") on entry.
-//  Every N-th call we sample Environment.StackTrace and count how many frames
-//  of OUR managed engine code are currently on the call stack. If that exceeds
-//  the recursion threshold, we have actual stack-walked-recursion (not just
-//  high call frequency). At that point we log the full stack trace once per
-//  thread so we can see the recursive pair.
+//  Deep-audit finding #27 (2026-06-18): PERMANENTLY DISABLED, not
+//  temporarily. This used to sample Environment.StackTrace on a fraction of
+//  calls to detect runaway same-thread recursion across the ~24 detour call
+//  sites that still call Tick(name) on entry. It was switched off while
+//  ruling out whether the StackTrace allocation itself was contributing to a
+//  second recursive AV (full budget + D3D9-off + ImGui-off) — that
+//  investigation never re-enabled it, and the "TEMPORARILY DISABLED /
+//  re-enable by removing this early-return" comment it carried was
+//  misleading: nobody had, and the dead sampling body below it was never
+//  going to run again without someone reading this exact comment.
 //
-//  Why this design: the previous version only counted total detour invocations
-//  per thread, so the alarm fired during normal play once 50 hooks had run.
-//  Sampling Environment.StackTrace lets us measure the *actual* call depth
-//  of our code at the moment of sampling — which is what runaway recursion
-//  is, by definition.
-//
-//  Cost: Environment.StackTrace is ~1ms on x86 NativeAOT. We sample 1 in
-//  every 8 calls, capped to one log per thread, so the steady-state overhead
-//  during normal gameplay is negligible.
+//  Deliberately NOT re-enabled here: re-adding Environment.StackTrace
+//  sampling on a hot per-detour path reintroduces the exact allocation this
+//  was disabled to rule out, and a proper allocation-free depth counter
+//  needs a paired enter/exit at all ~24 call sites (Tick() today is
+//  entry-only) — too invasive for a diagnostic that only ever logged, never
+//  prevented anything (this project already triages it as P3/cosmetic).
+//  The sibling ThreadStackSampler.SampleAll() (cross-thread, EBP-walk based,
+//  no per-call allocation) is a safer design for the same goal, but it
+//  SuspendThreads every thread in the process on each call — wiring it to
+//  run unattended on a timer is a real behavioral risk (a live gaming
+//  client hitching, or worse, one AC thread suspended mid critical-section)
+//  that deserves its own deliberate decision, not a drive-by from this
+//  finding. Tick() stays a real, honest no-op — call sites keep compiling
+//  unchanged, and no allocation or new risk is introduced anywhere.
 // ============================================================================
-
-using System;
-using System.Threading;
 
 namespace RynthCore.Engine.Compatibility;
 
 internal static class RecursionGuard
 {
-    /// <summary>Per-thread call counter — drives the sampling cadence below.</summary>
-    [ThreadStatic] private static int _callCount;
-
-    /// <summary>Per-thread one-shot. Once a stack has been logged, suppress
-    /// further sampling on this thread so we don't recursively allocate inside
-    /// the recursion we're trying to diagnose.</summary>
-    [ThreadStatic] private static bool _alreadyLogged;
-
-    /// <summary>Sample 1 in 4 calls — keeps overhead bounded but catches
-    /// any sustained recursion within milliseconds.</summary>
-    private const int SampleMask = 0x3;
-
-    /// <summary>Recursion threshold. Counts ALL managed frames in the trace
-    /// (any "   at " line) — including Avalonia/Skia/etc compiled into the
-    /// engine. 30 is comfortably above any normal nested-call chain but well
-    /// below the depth at which 1MB stack runs out.</summary>
-    private const int RecursionFrameThreshold = 30;
-
     public static void Tick(string detourName)
     {
-        // TEMPORARILY DISABLED: ruling out whether this diagnostic itself
-        // (Environment.StackTrace allocation per sample) was contributing to
-        // the second recursive AV at full budget + D3D9-off + ImGui-off.
-        // Re-enable by removing this early-return once verified.
-        return;
-
-#pragma warning disable CS0162 // unreachable code
-        if (_alreadyLogged) return;
-        if ((++_callCount & SampleMask) != 0) return;
-
-        // Sample the stack and count how many of our own frames are on it.
-        string trace;
-        try
-        {
-            trace = Environment.StackTrace ?? string.Empty;
-        }
-        catch
-        {
-            return;
-        }
-
-        // Count any "  at " markers — that's how Environment.StackTrace formats
-        // every managed frame regardless of whether it's our code, Avalonia,
-        // Skia, or anything else compiled into the engine DLL. This catches
-        // recursion in compiled-in dependencies that don't share our namespace.
-        const string FrameMarker = "   at ";
-        int totalFrames = 0;
-        int idx = 0;
-        while ((idx = trace.IndexOf(FrameMarker, idx, StringComparison.Ordinal)) >= 0)
-        {
-            totalFrames++;
-            idx += FrameMarker.Length;
-            if (totalFrames >= RecursionFrameThreshold) break;
-        }
-
-        if (totalFrames < RecursionFrameThreshold)
-            return;
-
-        _alreadyLogged = true;
-
-        try
-        {
-            RynthLog.Info("================================================================");
-            RynthLog.Info($"==== RECURSION DETECTED ====  detour={detourName}  totalFrames>={RecursionFrameThreshold}  thread={Thread.CurrentThread.ManagedThreadId}");
-            foreach (string raw in trace.Split('\n'))
-            {
-                string line = raw.TrimEnd('\r');
-                if (line.Length > 0) RynthLog.Info($"  {line}");
-            }
-            RynthLog.Info("================================================================");
-        }
-        catch
-        {
-            // Logging from inside a recursion detector must never throw.
-        }
-#pragma warning restore CS0162
+        // No-op by design — see the file-header comment above.
     }
 }

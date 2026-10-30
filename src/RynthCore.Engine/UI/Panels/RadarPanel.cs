@@ -2,9 +2,10 @@
 //  RynthCore.Engine — UI/Panels/RadarPanel.cs
 //  Avalonia replica of the ImGui RynthRadar (RynthRadarUi.cs).
 //
-//  Renders the same view, fed by the plugin's RynthPluginGetRadarSnapshot
-//  export. Geometry is cached by MapVersion (= landblock); per-frame data
-//  (player pose, visited overlay, markers) refreshes every 100 ms.
+//  Renders the same view from UiDataHub's radar view (UiSources.Radar,
+//  UI/Data/RadarData.cs), which calls RynthPluginGetRadarSnapshot on the pump
+//  thread and keeps the per-landblock geometry cache. The ImGui face
+//  (ImGui/Panels/RadarFace.cs) draws the same view.
 //
 //  Render order matches the ImGui original:
 //    1. Frame outer/inner/accent + canvas bg
@@ -38,116 +39,12 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using RynthCore.Engine.Plugins;
+using RynthCore.Engine.UI.Data;
 
 namespace RynthCore.Engine.UI.Panels;
 
-/// <summary>
-/// Disk-backed persistence for radar settings (zoom, opacity, rotate, marker
-/// visibility). Settings live under %LocalAppData%\RynthCore\radar_settings.txt
-/// so they survive engine reloads, plugin reloads, and AC restarts.
-/// </summary>
-internal static class RadarSettingsStore
-{
-    private static readonly object _sync = new();
-    private static bool _loaded;
-
-    public static float Zoom = 1.5f;
-    public static float Opacity = 1.0f;
-    public static bool RotateWithPlayer;
-    public static bool ShowGoldRim = true;
-    public static bool CtrlGatedClickThrough = false;
-    public static bool ShowMonsters = true;
-    public static bool ShowNpcs = true;
-    public static bool ShowPortals = true;
-    public static bool ShowDoors = true;
-
-    private static string FilePath
-    {
-        get
-        {
-            string root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            return Path.Combine(root, "RynthCore", "radar_settings.txt");
-        }
-    }
-
-    public static void Load()
-    {
-        lock (_sync)
-        {
-            if (_loaded) return;
-            _loaded = true;
-            try
-            {
-                string path = FilePath;
-                if (!File.Exists(path)) return;
-                foreach (string raw in File.ReadAllLines(path))
-                {
-                    string line = raw.Trim();
-                    if (line.Length == 0 || line.StartsWith('#')) continue;
-                    int eq = line.IndexOf('=');
-                    if (eq <= 0) continue;
-                    string key = line[..eq].Trim();
-                    string val = line[(eq + 1)..].Trim();
-                    switch (key)
-                    {
-                        case "zoom":
-                            if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float z))
-                                Zoom = Math.Clamp(z, 0.5f, 6.0f);
-                            break;
-                        case "opacity":
-                            if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float o))
-                                Opacity = Math.Clamp(o, 0.05f, 1.0f);
-                            break;
-                        case "rotate":           RotateWithPlayer        = val == "1"; break;
-                        case "showGoldRim":      ShowGoldRim             = val == "1"; break;
-                        case "ctrlClickThrough": CtrlGatedClickThrough   = val == "1"; break;
-                        case "showMonsters":     ShowMonsters            = val == "1"; break;
-                        case "showNpcs":     ShowNpcs         = val == "1"; break;
-                        case "showPortals":  ShowPortals      = val == "1"; break;
-                        case "showDoors":    ShowDoors        = val == "1"; break;
-                    }
-                }
-            }
-            catch { /* best-effort: defaults already in place */ }
-        }
-    }
-
-    public static void Save()
-    {
-        lock (_sync)
-        {
-            try
-            {
-                string path = FilePath;
-                string? dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                using var sw = new StreamWriter(path, append: false);
-                sw.WriteLine("# RynthCore radar settings — auto-generated, hand-edits OK.");
-                sw.WriteLine(FormattableString.Invariant($"zoom={Zoom:0.##}"));
-                sw.WriteLine(FormattableString.Invariant($"opacity={Opacity:0.##}"));
-                sw.WriteLine($"rotate={(RotateWithPlayer ? "1" : "0")}");
-                sw.WriteLine($"showGoldRim={(ShowGoldRim ? "1" : "0")}");
-                sw.WriteLine($"ctrlClickThrough={(CtrlGatedClickThrough ? "1" : "0")}");
-                sw.WriteLine($"showMonsters={(ShowMonsters ? "1" : "0")}");
-                sw.WriteLine($"showNpcs={(ShowNpcs ? "1" : "0")}");
-                sw.WriteLine($"showPortals={(ShowPortals ? "1" : "0")}");
-                sw.WriteLine($"showDoors={(ShowDoors ? "1" : "0")}");
-            }
-            catch { /* non-fatal */ }
-        }
-    }
-}
-
 internal static partial class RadarPanel
 {
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
-    private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate IntPtr GetRadarSnapshotFn(uint mapVersion);
-
-    private static GetRadarSnapshotFn? _getRadarSnapshot;
-
     // ── Chrome-less integration hooks ───────────────────────────────────────
     // The radar lives inside the panel system but visually has no window
     // chrome — just the gold-bordered square + coords below. The overlay
@@ -165,6 +62,11 @@ internal static partial class RadarPanel
     // the popup relative to the radar and tears it down when the radar
     // closes / pops out.
     public static Action<Control>? AttachSettingsPopup;
+    // UI deep-dive finding TL;DR #7 (2026-07-02): overlay → this popout's
+    // FloatingPanelHost.MarkDirty(). Wired so the 33ms poll below can signal
+    // "new data" to the popout's own separate RTT-capture dirty gate now
+    // that alwaysRender is dropped for Radar/RynthAi — see PopOutPanel.
+    public static Action? MarkDirty;
 
     // Popout-mode click forwarders. Avalonia's WM_LBUTTONDOWN dispatch fails
     // for off-canvas panels (panels parked at canvas X ≈ 2500), so the
@@ -226,77 +128,19 @@ internal static partial class RadarPanel
     private static readonly IBrush ColDoor    = new SolidColorBrush(Color.FromRgb(0xFF, 0x8C, 0x1A));
     private static readonly IBrush ColDoorEdge = new SolidColorBrush(Color.FromRgb(0x66, 0x33, 0x00));
 
-    // ── Snapshot DTO (mirrors RynthCore.Plugin.RynthAi.LegacyUi.RadarSnapshotPayload) ──
-    public sealed class Snapshot
-    {
-        [JsonPropertyName("mapVersion")]       public uint MapVersion       { get; set; }
-        [JsonPropertyName("geometryIncluded")] public bool GeometryIncluded { get; set; }
-        [JsonPropertyName("isIndoor")]         public bool IsIndoor         { get; set; }
-        [JsonPropertyName("player")]           public PlayerInfo Player    { get; set; } = new();
-        [JsonPropertyName("ns")]               public double Ns             { get; set; } = double.NaN;
-        [JsonPropertyName("ew")]               public double Ew             { get; set; } = double.NaN;
-        [JsonPropertyName("layerZs")]          public List<float> LayerZs   { get; set; } = new();
-        [JsonPropertyName("currentLayerZ")]    public float CurrentLayerZ   { get; set; }
-        [JsonPropertyName("walls")]            public List<WallLayer> Walls { get; set; } = new();
-        [JsonPropertyName("fills")]            public List<FillLayer> Fills { get; set; } = new();
-        [JsonPropertyName("visited")]          public List<VisitedLayer> Visited { get; set; } = new();
-        [JsonPropertyName("markers")]          public List<Marker> Markers { get; set; } = new();
-    }
-
-    public sealed class PlayerInfo
-    {
-        [JsonPropertyName("cellId")]    public uint  CellId    { get; set; }
-        [JsonPropertyName("landblock")] public uint  Landblock { get; set; }
-        [JsonPropertyName("x")]         public float X         { get; set; }
-        [JsonPropertyName("y")]         public float Y         { get; set; }
-        [JsonPropertyName("z")]         public float Z         { get; set; }
-        [JsonPropertyName("worldX")]    public float WorldX    { get; set; }
-        [JsonPropertyName("worldY")]    public float WorldY    { get; set; }
-        [JsonPropertyName("heading")]   public float Heading   { get; set; }
-    }
-
-    public sealed class WallLayer
-    {
-        [JsonPropertyName("z")]        public float   Z        { get; set; }
-        [JsonPropertyName("segments")] public float[] Segments { get; set; } = Array.Empty<float>();
-    }
-
-    public sealed class FillLayer
-    {
-        [JsonPropertyName("z")]      public float   Z      { get; set; }
-        [JsonPropertyName("strips")] public float[] Strips { get; set; } = Array.Empty<float>();
-    }
-
-    public sealed class VisitedLayer
-    {
-        [JsonPropertyName("z")]      public float   Z      { get; set; }
-        [JsonPropertyName("strips")] public float[] Strips { get; set; } = Array.Empty<float>();
-    }
-
-    public sealed class Marker
-    {
-        [JsonPropertyName("kind")]  public byte    Kind  { get; set; }
-        [JsonPropertyName("x")]     public float   X     { get; set; }
-        [JsonPropertyName("y")]     public float   Y     { get; set; }
-        [JsonPropertyName("z")]     public float   Z     { get; set; }
-        [JsonPropertyName("label")] public string? Label { get; set; }
-    }
-
-    [JsonSerializable(typeof(Snapshot))]
-    [JsonSourceGenerationOptions(WriteIndented = false)]
-    internal partial class RadarJsonContext : JsonSerializerContext { }
-
     // ── Per-instance state, captured by the surface control ────────────────
     private sealed class State
     {
         // Live data (refreshed every poll).
-        public Snapshot Live = new();
+        public RadarSnapshot Live = new();
 
-        // Cached geometry, indexed by MapVersion. Walls/fills don't change
-        // until the player crosses landblocks — store and reuse.
-        public uint CachedMapVersion;
-        public List<WallLayer> CachedWalls = new();
-        public List<FillLayer> CachedFills = new();
+        // Geometry cached per landblock by the hub (RadarSource).
+        public List<RadarWallLayer> CachedWalls = new();
+        public List<RadarFillLayer> CachedFills = new();
+
+        // Hub view version last drawn; gates InvalidateVisual (UI deep-dive
+        // finding P1-A: don't re-raster when nothing moved).
+        public long SeenVersion = -1;
 
         // User-controlled settings — driven by the gear popup. Loaded from
         // RadarSettingsStore on construction; Persist() writes back.
@@ -350,7 +194,6 @@ internal static partial class RadarPanel
 
     public static Control Create()
     {
-        TryBind();
         State state = _persistentState ??= new State();
 
         var surface = new RadarSurface(state);
@@ -583,50 +426,62 @@ internal static partial class RadarPanel
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
         timer.Tick += (_, _) =>
         {
-            if (TryFetch(state.CachedMapVersion, out Snapshot? fresh) && fresh != null)
+            // UI deep-dive finding P1-A (2026-07-02): this used to call
+            // RefreshButtonSnapshot + InvalidateVisual unconditionally every
+            // 33ms, even when TryFetch failed (nothing new at all) or
+            // succeeded with byte-identical JSON (player standing still —
+            // "nothing moved"). Either way the docked compositor still
+            // re-rastered at 30Hz for no visible change. Track whether
+            // anything actually changed this tick and skip the whole
+            // refresh+invalidate when it didn't.
+            var current = UiSources.Radar.Current;
+            bool contentChanged = current != null && current.Version != state.SeenVersion;
+            if (contentChanged)
             {
-                state.Live = fresh;
-                if (fresh.GeometryIncluded)
-                {
-                    state.CachedMapVersion = fresh.MapVersion;
-                    state.CachedWalls = fresh.Walls;
-                    state.CachedFills = fresh.Fills;
-                }
-                else if (fresh.MapVersion != state.CachedMapVersion && fresh.MapVersion != 0 && !fresh.IsIndoor)
-                {
-                    // Outdoor landblocks: no geometry sent, but version still
-                    // tracks landblock — clear stale walls so they don't bleed
-                    // through when transitioning indoor→outdoor.
-                    state.CachedMapVersion = fresh.MapVersion;
-                    state.CachedWalls = new List<WallLayer>();
-                    state.CachedFills = new List<FillLayer>();
-                }
-
-                // First poll after login can land before raycast is ready, so
-                // the plugin returns an indoor snapshot with empty walls. Once
-                // raycast comes online, we have to re-ask with version=0 or
-                // the plugin sees a matching version and skips the geometry
-                // payload — leaving the radar permanently blank until the
-                // user manually closes/reopens it. Force a re-fetch next tick
-                // whenever we're indoors but lack walls.
-                if (state.Live.IsIndoor && state.CachedWalls.Count == 0)
-                    state.CachedMapVersion = 0;
+                state.SeenVersion = current!.Version;
+                state.Live = current.Value.Live;
+                state.CachedWalls = current.Value.Walls;
+                state.CachedFills = current.Value.Fills;
             }
             // Sync overlay button visibility with current pop-out state.
             //   docked → [↗ popout, ⚙ gear]
             //   popped → [↙ redock, ⚙ gear]
             bool floating = IsFloatingNow?.Invoke() ?? false;
+            bool buttonsChanged = redockBtn.IsVisible != floating || popoutBtn.IsVisible != !floating;
             if (redockBtn.IsVisible != floating)  redockBtn.IsVisible  = floating;
             if (popoutBtn.IsVisible == floating)  popoutBtn.IsVisible  = !floating;
-            // Always refresh the snapshot from the timer tick — LayoutUpdated
-            // doesn't reliably fire for off-canvas panels in popout, so we
-            // can't depend on it alone.
+
+            // RefreshButtonSnapshot stays UNCONDITIONAL, same as before this
+            // fix — it's the backstop for LayoutUpdated not firing reliably
+            // for off-canvas popout panels, so a button POSITION drift with
+            // no visibility change still needs to be caught here, and the
+            // call itself is cheap (bounds math on 3 buttons, no
+            // JSON/allocation cost). Only the expensive part — the
+            // full-viewport InvalidateVisual repaint (finding P1-A) — is
+            // gated on whether anything visible actually changed this tick.
             RefreshButtonSnapshot();
-            surface.InvalidateVisual();
+            if (contentChanged || buttonsChanged)
+            {
+                surface.InvalidateVisual();
+                // TL;DR #7: tell the popout host (if floating) new data
+                // arrived — its own dirty gate has no layout pass to key off
+                // since this renders via custom Render()/InvalidateVisual.
+                MarkDirty?.Invoke();
+            }
         };
-        timer.Start();
-        surface.AttachedToVisualTree   += (_, _) => { if (!timer.IsEnabled) timer.Start(); };
-        surface.DetachedFromVisualTree += (_, _) => timer.Stop();
+        // The hub polls the plugin only while some radar face is subscribed.
+        surface.AttachedToVisualTree += (_, _) =>
+        {
+            UiSources.Radar.Subscribe();
+            UiSources.Radar.RequestRefresh();
+            state.SeenVersion = -1;
+            if (!timer.IsEnabled) timer.Start();
+        };
+        surface.DetachedFromVisualTree += (_, _) =>
+        {
+            timer.Stop();
+            UiSources.Radar.Unsubscribe();
+        };
 
         return radarGrid;
     }
@@ -1113,10 +968,11 @@ internal static partial class RadarPanel
             HorizontalContentAlignment = HorizontalAlignment.Center,
             VerticalContentAlignment = VerticalAlignment.Center,
         };
-        // Tooltip parameter intentionally unused: ToolTip.SetTip() schedules
-        // an Avalonia ToolTip Popup whose hover-enter side effects flash the
-        // entire overlay capture pipeline (a one-frame invalidation that's
-        // very visible against AC's frame). Glyphs are self-descriptive.
+        // Tooltip parameter intentionally unused. It was dropped because a
+        // ToolTip popup used to blank every docked panel (the "panel flash").
+        // Popups are now drawn inside the overlay frame (OverlayPopups, see
+        // AvaloniaOverlay.ThreadMain), so ToolTip.SetTip would be safe here;
+        // the glyphs are self-descriptive, so they stay tooltip-less.
         _ = tooltip;
         // Eat pointer events so they don't bubble through to the radar
         // surface's drag handler beneath.
@@ -1268,7 +1124,7 @@ internal static partial class RadarPanel
     }
     private static float AlphaToFloat(byte a) => a == 0 ? 1f : a / 255f;
 
-    private static string FormatCoords(Snapshot s)
+    private static string FormatCoords(RadarSnapshot s)
     {
         // Match the ImGui radar's footer behaviour exactly:
         //   indoor  → "LB AABB  Z 12.3"   (landblock id, no NS/EW)
@@ -1281,38 +1137,5 @@ internal static partial class RadarPanel
             return $"{Math.Abs(s.Ns):0.0}{(s.Ns >= 0 ? "N" : "S")}  {Math.Abs(s.Ew):0.0}{(s.Ew >= 0 ? "E" : "W")}  Z {p.Z:0.0}";
 
         return $"Z {p.Z:0.0}";
-    }
-
-    // ── Plugin export binding ───────────────────────────────────────────────
-    private static void TryBind()
-    {
-        if (_getRadarSnapshot != null) return;
-        var plugin = PluginManager.Plugins.FirstOrDefault(
-            p => p.DisplayName.Contains("RynthAi", StringComparison.OrdinalIgnoreCase));
-        if (plugin == null || plugin.ModuleHandle == IntPtr.Zero) return;
-
-        IntPtr p1 = GetProcAddress(plugin.ModuleHandle, "RynthPluginGetRadarSnapshot");
-        if (p1 != IntPtr.Zero)
-            _getRadarSnapshot = Marshal.GetDelegateForFunctionPointer<GetRadarSnapshotFn>(p1);
-    }
-
-    private static bool TryFetch(uint engineKnownVersion, out Snapshot? snapshot)
-    {
-        snapshot = null;
-        if (_getRadarSnapshot == null) TryBind();
-        if (_getRadarSnapshot == null) return false;
-        try
-        {
-            IntPtr ptr = _getRadarSnapshot(engineKnownVersion);
-            if (ptr == IntPtr.Zero) return false;
-            string? json = Marshal.PtrToStringAnsi(ptr);
-            if (string.IsNullOrEmpty(json) || json == "{}") return false;
-            snapshot = JsonSerializer.Deserialize(json, RadarJsonContext.Default.Snapshot);
-            return snapshot != null;
-        }
-        catch
-        {
-            return false;
-        }
     }
 }

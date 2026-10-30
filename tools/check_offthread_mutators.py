@@ -31,6 +31,12 @@ This tool checks it statically (read-only, stdlib-only, out-of-process):
     construction). Catches a NEW mutator added with no marshal at all (the
     SelectItem-before-74f6d8c situation).
 
+  CHECK C (raw writes): every method that stores into memory with
+    `Marshal.Write*(...)` or the `WriteFloat(...)` helper must contain the gate,
+    or sit in an allow-listed context, or be on RAW_WRITE_ALLOW. CHECK B only
+    sees native delegate calls, so a raw store into a live AC object (the
+    SetPlayerHeadingDirect quaternion write, 2026-09-29) slipped past it.
+
 Exit 0 = invariant holds, 1 = a violation (an AC mutator reachable off-thread),
 2 = could not read the source tree. Wire into CI next to the golden tests /
 pe_pattern gate.
@@ -54,10 +60,38 @@ MUTATOR_DELEGATES = {
     "_setSelectedObject", "_useObject", "_useObjectOn", "_useWithTargetEvent",
     "_useEquippedItem", "_moveItemExternal", "_moveItemInternal",
     "_eventStackableMerge", "_addTextToScroll",
+    # CM_Inventory sends (inventory game actions): give, wield, drop (Inventory panel)
+    "_eventGiveObjectRequest", "_eventGetAndWieldItem", "_eventDropItem",
+    # CM_Inventory::Event_NoLongerViewingContents (0x0195, close a corpse/chest; v76 CloseContainer)
+    "_eventNoLongerViewingContents",
     "_setAutoRun", "_turnToHeading", "_stopCompletely", "_setMotion",
     "_changeCombatMode",
+    "_sendShopEvent",   # VendorTrade: gmVendorUI::SendShopEvent (vendor buy/sell + busy count)
+    # PlayerTrade (v72): CM_Trade trade actions + ClientTradeSystem accept/decline (Trade object)
+    "_eventOpenTradeNegotiations", "_eventAddToTrade", "_eventResetTrade",
+    "_eventCloseTradeNegotiations", "_tradeSystemAcceptTrade", "_tradeSystemDeclineTrade",
+    # Salvage panel: open notice + gmSalvageUI AddNewItem/Salvage (UIElement tree)
+    "_sendNoticeOpenSalvagePanel", "_gmSalvageUIAddNewItem", "_gmSalvageUISalvage",
+    # CM_Inventory::Event_CreateTinkeringTool (0x027D salvage without the panel; v82 SalvageDirect)
+    "_eventCreateTinkeringTool",
+    # CombatActionHooks game-action sends (AC heap alloc + send queue; 0xC8 also bumps busy count)
+    "_requestId", "_queryHealth", "_cancelAttack",
+    # MovementActionHooks: CM_Movement::Event_AutonomyLevel (0xF752 game-action send)
+    "_autonomyLevel",
+    # CharacterManagementHooks: CPlayerSystem::LogOnCharacter (login state + login send);
+    # the auto-login poll threads marshal it through MainThreadTick's request slot
+    "_logOnCharacter",
+    # PlayerTraining: CM_Train raise senders (RaiseAttribute / RaiseVital / RaiseSkill game actions)
+    "_eventTrainAttribute", "_eventTrainAttribute2nd", "_eventTrainSkill",
+    "_eventTrainSkillAdvancementClass",   # 0x0047 TrainSkill (untrained -> trained with credits)
 }
 GATE = "MainThreadGuard.IsOnMainThread"
+# AcMainThreadQueue.MustQueue(teardown: ...) is the shared mutator gate (MutatorGate.cs): it
+# asks MainThreadGuard.IsOnMainThread() itself and returns true (queue) off the main thread.
+# Counted only in the gate's own shape, an if that opens with it (optionally after one
+# 'flag ||'), searched with // comments stripped, so a commented-out gate is not a gate.
+# The check is textual: a string literal that spells the shape would still count.
+GATE_SHAPE = re.compile(r"if\s*\((?:\w+\s*\|\|\s*)?AcMainThreadQueue\.MustQueue\(")
 ENQUEUE = "AcMainThreadQueue.Enqueue"
 
 # Pure off-thread PRODUCERS: Timer/pump callbacks that ONLY enqueue (never call an
@@ -66,6 +100,20 @@ ENQUEUE = "AcMainThreadQueue.Enqueue"
 # (file, method) pairs, each verified to do no off-thread AC mutation.
 ENQUEUE_PRODUCER_ALLOW = {
     ("AutoIdService.cs", "DrainTick"),   # appraisal: enqueues 0xC8, sent on main thread in DrainRequestIds
+    ("AutoIdService.cs", "QueueIdentify"),   # LiveWorld.QueueIdentify, AutoIdDrain's send on the drain timer: only EnqueueRequestId
+    ("RynthCoreChatCommands.cs", "Reply"),   # /rc and /rv plates replies: only EnqueueWriteToChat
+    ("AcMouseOver.cs", "Say"),   # /rc acmouse watch lines: only EnqueueWriteToChat (and the log)
+}
+
+# CHECK C sinks: raw stores into memory. Comments are stripped before matching.
+RAW_WRITE = re.compile(r"\bMarshal\.Write(?:Byte|Int16|Int32|Int64|IntPtr)\s*\(|(?<![\w.])WriteFloat\s*\(")
+
+# Raw writers that do NOT touch live AC object state, so they need no gate.
+# (file, method) pairs, each verified by reading the body.
+RAW_WRITE_ALLOW = {
+    ("PlayerPhysicsHooks.cs", "WriteFloat"),     # the helper itself; its callers are checked
+    ("ThreadStackSampler.cs", "SampleAll"),      # writes ContextFlags into its OWN CONTEXT buffer
+    ("DatFileShareHooks.cs", "WriteIatPointer"), # IAT slot patch under VirtualProtect (hook plumbing, no callers today)
 }
 
 # Methods that run on AC's main thread BY CONSTRUCTION and may call mutators
@@ -127,7 +175,7 @@ def main():
         return 2
 
     violations = []
-    checked_a = checked_b = 0
+    checked_a = checked_b = checked_c = 0
 
     deleg_call = re.compile(r"(" + "|".join(re.escape(d) for d in MUTATOR_DELEGATES) + r")\s*\(")
 
@@ -140,7 +188,8 @@ def main():
         # executor - exempt it from both checks.
         is_queue = fn == "AcMainThreadQueue.cs"
         for name, line, body, attrs in split_methods(src):
-            gated = GATE in body
+            gate_code = "\n".join(l.split("//", 1)[0] for l in body.splitlines())
+            gated = GATE in body or GATE_SHAPE.search(gate_code) is not None
             allowed = is_allowed(name, attrs) or is_queue
 
             # CHECK A: calls Enqueue but lacks the gate (unless it's a known pure producer).
@@ -155,6 +204,14 @@ def main():
                 checked_b += 1
                 violations.append((fn, line, name, f"invokes AC-mutator delegate {hit}() without a MainThreadGuard gate"))
 
+            # CHECK C: raw memory store without the gate.
+            if not allowed and not gated and (fn, name) not in RAW_WRITE_ALLOW:
+                code = "\n".join(l.split("//", 1)[0] for l in body.splitlines())
+                m = RAW_WRITE.search(code)
+                if m:
+                    checked_c += 1
+                    violations.append((fn, line, name, f"raw memory write {m.group(0).rstrip('( ')}() without a MainThreadGuard gate"))
+
     if violations:
         for fn, line, name, why in violations:
             print(f"  [VIOLATION] {fn}:{line} {name}() - {why}")
@@ -164,7 +221,7 @@ def main():
         return 1
 
     print(f"PASS: every marshalled helper is gated and every curated AC-mutator "
-          f"delegate is invoked behind the main-thread gate.")
+          f"delegate is invoked and every raw memory write sits behind the main-thread gate.")
     return 0
 
 

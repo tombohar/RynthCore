@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the engine's Infinite Leaftide detection
+    (src\RynthCore.Engine\Compatibility\IltDetect.cs, compiled in, with AelrynthWire.cs for the
+    launch command line parser it shares): hosts, world names, the engine.json lists and the
+    combined verdict. Nothing native: no AC, no engine state.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>IltTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\IltDetect.cs" Link="Engine\IltDetect.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AelrynthWire.cs" Link="Engine\AelrynthWire.cs" />
+  </ItemGroup>
+
+</Project>

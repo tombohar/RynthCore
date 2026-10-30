@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the Enl calculator's data (Skills > Progression; idea and first version from
+    Silentkelpie, rynth PR 6): src\RynthCore.Engine\UI\Data\ProgressionData.cs (the Progression snapshot DTOs and
+    ProgressionSource.ParseJson), EnlRowConverters.cs and UiSource.cs, compiled in. Parses a sample shaped like
+    RynthILT's IltProgression.AppendEnlCalculatorJson output: the full data, an older RynthILT without the
+    calculator fields, null / mistyped containers, partial and malformed rows, unknown extra fields, the row cap.
+    No ImGui, no game, no files. Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>EnlCalculatorTests</RootNamespace>
+    <!-- ProgressionSource polls a native export through a function pointer. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ProgressionData.cs" Link="Engine\ProgressionData.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\EnlRowConverters.cs" Link="Engine\EnlRowConverters.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\UiSource.cs" Link="Engine\UiSource.cs" />
+  </ItemGroup>
+
+</Project>

@@ -13,9 +13,11 @@
 //  invisible).
 //
 //  Pattern:
-//    pump:    BeginFrame() → AddX(...) × N → CommitFrame()
-//    render:  reads from the "ready" buffer only; never touches "pending"
-//  CommitFrame atomically swaps the index reads see.
+//    pump:    ClearFrame() → AddX(...) × N → CommitFrame()
+//    render:  Ready once per draw, then reads only that buffer; never
+//             touches "pending"
+//  CommitFrame atomically swaps the buffer reads see. A tick during which the
+//  player crossed a landblock boundary is dropped (see CommitFrame).
 // ═══════════════════════════════════════════════════════════════════════════
 
 using System.Threading;
@@ -34,7 +36,8 @@ internal static class Nav3DRenderer
 
     private const float DefaultRingHeight = 0.5f; // back-compat default for AddRing
 
-    private sealed class NavBuffer
+    /// <summary>One tick's submissions. Render side: read-only.</summary>
+    internal sealed class NavBuffer
     {
         public readonly float[] RingX = new float[MaxRings];
         public readonly float[] RingY = new float[MaxRings];
@@ -99,38 +102,14 @@ internal static class Nav3DRenderer
 
     // ── Render-side reads ────────────────────────────────────────────────────
 
-    public static int RingCount     => _ready.RingCount;
-    public static int LineCount     => _ready.LineCount;
-    public static int TriangleCount => _ready.TriCount;
-
-    public static void GetRing(int i, out float x, out float y, out float z,
-        out float radius, out float thickness, out float height, out uint color)
-    {
-        var r = _ready;
-        x = r.RingX[i]; y = r.RingY[i]; z = r.RingZ[i];
-        radius = r.RingRadius[i]; thickness = r.RingThick[i];
-        height = r.RingHeight[i]; color = r.RingColor[i];
-    }
-
-    public static void GetLine(int i, out float x1, out float y1, out float z1,
-        out float x2, out float y2, out float z2, out float thickness, out uint color)
-    {
-        var r = _ready;
-        x1 = r.LineX1[i]; y1 = r.LineY1[i]; z1 = r.LineZ1[i];
-        x2 = r.LineX2[i]; y2 = r.LineY2[i]; z2 = r.LineZ2[i];
-        thickness = r.LineThick[i]; color = r.LineColor[i];
-    }
-
-    public static void GetTriangle(int i, out float x1, out float y1, out float z1,
-        out float x2, out float y2, out float z2,
-        out float x3, out float y3, out float z3, out uint color)
-    {
-        var r = _ready;
-        x1 = r.TriX1[i]; y1 = r.TriY1[i]; z1 = r.TriZ1[i];
-        x2 = r.TriX2[i]; y2 = r.TriY2[i]; z2 = r.TriZ2[i];
-        x3 = r.TriX3[i]; y3 = r.TriY3[i]; z3 = r.TriZ3[i];
-        color = r.TriColor[i];
-    }
+    /// <summary>
+    /// The latest committed frame. Take it once per draw and read everything
+    /// from it: re-reading this (volatile) property per item would mix two
+    /// ticks if a commit landed mid-draw (a count from one, contents from the
+    /// other). The triple buffer keeps a taken frame untouched for a full
+    /// tick after it stops being ready.
+    /// </summary>
+    public static NavBuffer Ready => _ready;
 
     // The landblock the plugin tick that produced the ready buffer was using.
     // Render thread uses this for view-matrix shifting so geometry stays
@@ -197,9 +176,26 @@ internal static class Nav3DRenderer
     /// spare becomes the next pending. Render reads of the new ready buffer
     /// become visible across cores via the volatile field. Called by
     /// PluginManager.TickAll AFTER all plugins have submitted.
+    ///
+    /// The pump runs off AC's thread, so the player can cross a landblock
+    /// boundary between ClearFrame and here. Plugins sample the pose during
+    /// their tick, so some of this tick's geometry may then be in the old
+    /// landblock's frame and some in the new one, while the frame is anchored
+    /// to the old — whatever was sampled after the crossing would draw 192 m
+    /// off for a tick. Such a tick is dropped: the previous frame stays ready
+    /// (one tick stale, consistent) and the next tick is anchored correctly.
     /// </summary>
     public static void CommitFrame()
     {
+        uint anchored = _pending.SubmissionPlayerLandblock;
+        if (anchored != 0 &&
+            PlayerPhysicsHooks.TryGetPlayerPose(out uint cellId, out _, out _, out _, out _, out _, out _, out _) &&
+            (cellId >> 16) != 0 && (cellId >> 16) != anchored)
+        {
+            _pending.Reset();
+            return;
+        }
+
         NavBuffer newReady   = _pending;
         NavBuffer newSpare   = _ready;
         NavBuffer newPending = _spare;
