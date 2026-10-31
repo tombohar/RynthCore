@@ -1,0 +1,221 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="RynthCore.App.Avalonia.HeadlessWindow"
+        Width="1100"
+        Height="760"
+        MinWidth="900"
+        MinHeight="620"
+        WindowStartupLocation="CenterScreen"
+        Title="RynthCore - Headless clients"
+        Background="#0B1218"
+        Icon="avares://RynthCore.App.Avalonia/LogoCore.ico">
+  <!-- What the headless characters (rynth-headless.exe) are doing, from their status files and logs
+       (HeadlessWindow.axaml.cs; the file rules are in RynthCore.App\HeadlessMonitor.cs). -->
+  <Window.Styles>
+    <Style Selector="TextBlock">
+      <Setter Property="FontSize" Value="12.5" />
+      <Setter Property="Foreground" Value="#EAF0F4" />
+    </Style>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Foreground" Value="#9AA8B3" />
+    </Style>
+    <Style Selector="TextBlock.title">
+      <Setter Property="FontSize" Value="16" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="#26C1A6" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Padding" Value="12,8" />
+    </Style>
+    <Style Selector="TextBox">
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="ListBox">
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="#132028" />
+      <Setter Property="CornerRadius" Value="16" />
+      <Setter Property="Padding" Value="14" />
+    </Style>
+    <Style Selector="ProgressBar.vital">
+      <Setter Property="Height" Value="10" />
+      <Setter Property="MinHeight" Value="10" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="Minimum" Value="0" />
+      <Setter Property="Maximum" Value="1" />
+      <Setter Property="Background" Value="#0F161D" />
+    </Style>
+  </Window.Styles>
+
+  <Grid ColumnDefinitions="280,Auto,*" Margin="14">
+    <!-- Left: one row per headless character. -->
+    <Border Grid.Column="0" Classes="card">
+      <Grid RowDefinitions="Auto,Auto,*,Auto">
+        <TextBlock Grid.Row="0" Classes="title" Text="Headless clients" />
+        <TextBlock Grid.Row="1" Classes="label" TextWrapping="Wrap" Margin="0,4,0,8"
+                   Text="Green botting, blue idle, red dead, grey not in the world, amber not answering (no status for 10 s)." />
+        <ListBox Grid.Row="2" x:Name="CharacterList"
+                 Background="#0F161D"
+                 BorderBrush="#243742"
+                 Foreground="#EAF0F4" />
+        <TextBlock Grid.Row="3" x:Name="ListHintText" Classes="label" TextWrapping="Wrap" Margin="0,8,0,0" />
+      </Grid>
+    </Border>
+
+    <GridSplitter Grid.Column="1" Width="12" ResizeDirection="Columns" Background="Transparent" />
+
+    <!-- Right: the selected character. -->
+    <Grid Grid.Column="2">
+      <Border x:Name="EmptyPanel" Classes="card" IsVisible="True">
+        <StackPanel Spacing="8" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="460">
+          <TextBlock Classes="title" Text="No headless character selected" HorizontalAlignment="Center" />
+          <TextBlock x:Name="EmptyText" Classes="label" TextWrapping="Wrap" TextAlignment="Center"
+                     Text="Accounts set to Headless (experimental) show up here while they run." />
+        </StackPanel>
+      </Border>
+
+      <Grid x:Name="DetailPanel" RowDefinitions="Auto,Auto,Auto,*" IsVisible="False">
+        <!-- Header: who, where, and the actions. -->
+        <Border Grid.Row="0" Classes="card" Margin="0,0,0,10">
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <Ellipse Grid.Column="0" x:Name="DetailDot" Width="14" Height="14" Margin="0,0,10,0"
+                     VerticalAlignment="Center" Fill="#6F7F8A" />
+            <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+              <TextBlock x:Name="DetailNameText" FontSize="19" FontWeight="Bold" TextTrimming="CharacterEllipsis" />
+              <TextBlock x:Name="DetailStateText" Classes="label" TextWrapping="Wrap" />
+              <TextBlock x:Name="WhereText" TextWrapping="Wrap" />
+            </StackPanel>
+            <WrapPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
+              <Button x:Name="MacroButton" Content="Start macro" Margin="0,0,8,0"
+                      ToolTip.Tip="Turns RynthAi's macro on or off for this character (the same command the phone sends)." />
+              <Button x:Name="LogOutButton" Content="Log out" Margin="0,0,8,0"
+                      ToolTip.Tip="Asks this character's rynth-headless.exe to log out and exit (closed after 20 s if it doesn't). The stop request is per process: a process running several characters logs them all out. With AutoLaunch on, uncheck the account first or it is started again." />
+              <Button x:Name="OpenLogFolderButton" Content="Open log folder"
+                      ToolTip.Tip="Opens the folder with this character's headless log." />
+            </WrapPanel>
+          </Grid>
+        </Border>
+
+        <!-- Vitals, what it is doing and how the session is going. -->
+        <Grid Grid.Row="1" ColumnDefinitions="*,10,*,10,1.3*" Margin="0,0,0,10">
+          <Border Grid.Column="0" Classes="card">
+            <StackPanel Spacing="6">
+              <TextBlock Classes="title" Text="Vitals" />
+              <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
+                <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Health" />
+                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="HealthText" HorizontalAlignment="Right" />
+                <ProgressBar Grid.Row="1" Grid.ColumnSpan="2" x:Name="HealthBar" Classes="vital" Foreground="#E05A5A" Margin="0,2,0,6" />
+                <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Stamina" />
+                <TextBlock Grid.Row="2" Grid.Column="1" x:Name="StaminaText" HorizontalAlignment="Right" />
+                <ProgressBar Grid.Row="3" Grid.ColumnSpan="2" x:Name="StaminaBar" Classes="vital" Foreground="#F2C14E" Margin="0,2,0,6" />
+                <TextBlock Grid.Row="4" Grid.Column="0" Classes="label" Text="Mana" />
+                <TextBlock Grid.Row="4" Grid.Column="1" x:Name="ManaText" HorizontalAlignment="Right" />
+                <ProgressBar Grid.Row="5" Grid.ColumnSpan="2" x:Name="ManaBar" Classes="vital" Foreground="#4A90E2" Margin="0,2,0,0" />
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Grid.Column="2" Classes="card">
+            <StackPanel Spacing="6">
+              <TextBlock Classes="title" Text="Doing" />
+              <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+                <TextBlock Grid.Row="0" Grid.Column="0" Classes="label" Text="Action" Margin="0,0,10,4" />
+                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="ActionText" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Row="1" Grid.Column="0" Classes="label" Text="Macro" Margin="0,0,10,4" />
+                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="MacroText" />
+                <TextBlock Grid.Row="2" Grid.Column="0" Classes="label" Text="Meta" Margin="0,0,10,4" />
+                <TextBlock Grid.Row="2" Grid.Column="1" x:Name="MetaText" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Row="3" Grid.Column="0" Classes="label" Text="Target" Margin="0,0,10,4" />
+                <TextBlock Grid.Row="3" Grid.Column="1" x:Name="TargetText" TextTrimming="CharacterEllipsis" />
+                <ProgressBar Grid.Row="4" Grid.ColumnSpan="2" x:Name="TargetBar" Classes="vital" Foreground="#E05A5A" Margin="0,2,0,0" />
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Grid.Column="4" Classes="card">
+            <StackPanel Spacing="6">
+              <TextBlock Classes="title" Text="Session" />
+              <!-- Wraps to one pair a row when the window is narrow. -->
+              <WrapPanel Orientation="Horizontal" ItemWidth="134">
+                <Grid ColumnDefinitions="68,*" Margin="0,0,0,4">
+                  <TextBlock Grid.Column="0" Classes="label" Text="XP/hour" />
+                  <TextBlock Grid.Column="1" x:Name="XpHourText" TextTrimming="CharacterEllipsis" />
+                </Grid>
+                <Grid ColumnDefinitions="68,*" Margin="0,0,0,4">
+                  <TextBlock Grid.Column="0" Classes="label" Text="XP session" />
+                  <TextBlock Grid.Column="1" x:Name="XpSessionText" TextTrimming="CharacterEllipsis" />
+                </Grid>
+                <Grid ColumnDefinitions="68,*" Margin="0,0,0,4">
+                  <TextBlock Grid.Column="0" Classes="label" Text="Kills" />
+                  <TextBlock Grid.Column="1" x:Name="KillsText" TextTrimming="CharacterEllipsis" />
+                </Grid>
+                <Grid ColumnDefinitions="68,*" Margin="0,0,0,4">
+                  <TextBlock Grid.Column="0" Classes="label" Text="Deaths" />
+                  <TextBlock Grid.Column="1" x:Name="DeathsText" TextTrimming="CharacterEllipsis" />
+                </Grid>
+                <Grid ColumnDefinitions="68,*" Margin="0,0,0,4">
+                  <TextBlock Grid.Column="0" Classes="label" Text="Vitae" />
+                  <TextBlock Grid.Column="1" x:Name="VitaeText" TextTrimming="CharacterEllipsis" />
+                </Grid>
+                <Grid ColumnDefinitions="68,*" Margin="0,0,0,4">
+                  <TextBlock Grid.Column="0" Classes="label" Text="Burden" />
+                  <TextBlock Grid.Column="1" x:Name="BurdenText" TextTrimming="CharacterEllipsis" />
+                </Grid>
+                <Grid ColumnDefinitions="68,*" Margin="0,0,0,4">
+                  <TextBlock Grid.Column="0" Classes="label" Text="Uptime" />
+                  <TextBlock Grid.Column="1" x:Name="UptimeText" TextTrimming="CharacterEllipsis" />
+                </Grid>
+                <Grid ColumnDefinitions="68,*" Margin="0,0,0,4">
+                  <TextBlock Grid.Column="0" Classes="label" Text="Process" />
+                  <TextBlock Grid.Column="1" x:Name="ProcessText" TextTrimming="CharacterEllipsis" />
+                </Grid>
+              </WrapPanel>
+            </StackPanel>
+          </Border>
+        </Grid>
+
+        <!-- Command box: /ra, /rnav, /mt, /rn through the character's command file. -->
+        <Border Grid.Row="2" Classes="card" Margin="0,0,0,10">
+          <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+            <TextBox Grid.Row="0" Grid.Column="0" x:Name="CommandBox"
+                     Watermark="/ra pause, /ra start, /rnav ..., /mt ..., /rn ... (Enter sends)"
+                     AcceptsReturn="False" Margin="0,0,8,0" />
+            <Button Grid.Row="0" Grid.Column="1" x:Name="SendButton" Content="Send"
+                    Background="#26C1A6" Foreground="#0B1218" FontWeight="SemiBold" />
+            <TextBlock Grid.Row="1" Grid.ColumnSpan="2" x:Name="CommandStatusText" Classes="label"
+                       TextWrapping="Wrap" Margin="2,6,0,0" />
+          </Grid>
+        </Border>
+
+        <!-- Chat and log. -->
+        <Grid Grid.Row="3" ColumnDefinitions="*,Auto,*">
+          <Border Grid.Column="0" Classes="card">
+            <Grid RowDefinitions="Auto,*">
+              <TextBlock Grid.Row="0" Classes="title" Text="Chat" Margin="0,0,0,6"
+                         ToolTip.Tip="The last 30 lines the character saw; combat damage lines are hidden." />
+              <TextBox Grid.Row="1" x:Name="ChatBox" IsReadOnly="True" TextWrapping="Wrap"
+                       AcceptsReturn="True" FontFamily="Consolas,Menlo,monospace" FontSize="11.5"
+                       Background="#0F161D" BorderBrush="#243742" Foreground="#EAF0F4"
+                       ScrollViewer.VerticalScrollBarVisibility="Auto" />
+            </Grid>
+          </Border>
+          <GridSplitter Grid.Column="1" Width="10" ResizeDirection="Columns" Background="Transparent" />
+          <Border Grid.Column="2" Classes="card">
+            <Grid RowDefinitions="Auto,Auto,*">
+              <TextBlock Grid.Row="0" Classes="title" Text="Log" Margin="0,0,0,2" />
+              <TextBlock Grid.Row="1" x:Name="LogPathText" Classes="label" FontSize="11"
+                         TextTrimming="CharacterEllipsis" Margin="0,0,0,6" />
+              <TextBox Grid.Row="2" x:Name="LogBox" IsReadOnly="True" TextWrapping="NoWrap"
+                       AcceptsReturn="True" FontFamily="Consolas,Menlo,monospace" FontSize="11"
+                       Background="#0F161D" BorderBrush="#243742" Foreground="#EAF0F4"
+                       ScrollViewer.VerticalScrollBarVisibility="Auto"
+                       ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+            </Grid>
+          </Border>
+        </Grid>
+      </Grid>
+    </Grid>
+  </Grid>
+</Window>

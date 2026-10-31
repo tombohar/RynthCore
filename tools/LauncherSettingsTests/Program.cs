@@ -291,6 +291,21 @@ internal static class Program
                 Check(OldLauncherCanRead(Main_) && BridgeLauncherCanRead(Main_), "older launchers still read the file");
             });
 
+            Scenario("headless window: its size and place round trip", root, () =>
+            {
+                AppSettings fresh = new();
+                Check(fresh.HeadlessWindowX == null && fresh.HeadlessWindowY == null &&
+                      fresh.HeadlessWindowWidth == null && fresh.HeadlessWindowHeight == null, "defaults: none (centred)");
+                AppSettings s = SampleWithHeadless();
+                s.HeadlessWindowX = 120; s.HeadlessWindowY = -40; s.HeadlessWindowWidth = 1180; s.HeadlessWindowHeight = 790;
+                AppSettingsStore.Save(s);
+                AppSettings loaded = AppSettingsStore.Load();
+                Check(loaded.HeadlessWindowX == 120 && loaded.HeadlessWindowY == -40 &&
+                      loaded.HeadlessWindowWidth == 1180 && loaded.HeadlessWindowHeight == 790, "saved and loaded");
+                Check(loaded.WindowX == s.WindowX && loaded.WindowWidth == s.WindowWidth, "the launcher's own place untouched");
+                Check(OldLauncherCanRead(Main_) && BridgeLauncherCanRead(Main_), "older launchers still read the file");
+            });
+
             Scenario("headless: run config, arguments, exe path, stop event", root, () =>
             {
                 const string HeadlessPw = "Headless-Test-Pw-7 \"q\"";

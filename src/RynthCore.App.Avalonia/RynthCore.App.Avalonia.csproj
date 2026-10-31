@@ -71,6 +71,7 @@
     <Compile Include="..\RynthCore.App\DecalAccountModes.cs" Link="Shared\DecalAccountModes.cs" />
     <Compile Include="..\RynthCore.App\HeadlessAccountModes.cs" Link="Shared\HeadlessAccountModes.cs" />
     <Compile Include="..\RynthCore.App\HeadlessLaunch.cs" Link="Shared\HeadlessLaunch.cs" />
+    <Compile Include="..\RynthCore.App\HeadlessMonitor.cs" Link="Shared\HeadlessMonitor.cs" />
     <Compile Include="..\RynthCore.App\PluginDefinition.cs" Link="Shared\PluginDefinition.cs" />
     <!-- The plugin API of the engine installed with this launcher (RynthUpdater.InstalledEngineApi). -->
     <Compile Include="..\RynthCore.Engine\Plugins\PluginContractVersion.cs" Link="Shared\PluginContractVersion.cs" />

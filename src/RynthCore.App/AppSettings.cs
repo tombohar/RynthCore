@@ -108,4 +108,10 @@ internal sealed class AppSettings
     public double? WindowY { get; set; }
     public double? WindowWidth { get; set; }
     public double? WindowHeight { get; set; }
+
+    /// The Headless window's last size and place (HeadlessWindow; null = default, centred).
+    public double? HeadlessWindowX { get; set; }
+    public double? HeadlessWindowY { get; set; }
+    public double? HeadlessWindowWidth { get; set; }
+    public double? HeadlessWindowHeight { get; set; }
 }

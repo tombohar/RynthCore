@@ -48,6 +48,19 @@ on a character you can afford to lose time with, and check on it.
 ## Seeing it and stopping it
 
 - The account shows in the launcher like any running client.
+- **The Headless window** (the **Headless clients** button under Live Sessions, or **Runtime >
+  Headless client > Show headless clients**) shows what each headless character is doing:
+  - a list with a coloured dot for each character: green botting, blue idle, red dead, grey not
+    in the world, amber not answering (no news for 10 seconds; it leaves the list after 30);
+  - for the one you pick: health, stamina and mana, what RynthAi is doing and its target, where
+    the character is (map coordinates outdoors), XP per hour and this session, kills, deaths,
+    vitae, burden and how long it has run;
+  - its last 30 chat lines (combat damage lines left out) and the last 50 lines of its log,
+    updated every second;
+  - a command box for `/ra`, `/rnav`, `/mt` and `/rn` commands (for example `/ra pause`): it
+    says when the character took the command and shows the chat line it answered with;
+  - **Start macro / Stop macro**, **Log out** (that character's headless client logs out and
+    closes) and **Open log folder**.
 - To stop a headless client, use **Runtime > Headless client > Log out headless clients**. It
   asks every headless client to log its character out and close (it is closed after 20 seconds
   if it doesn't). With AutoLaunch on, uncheck the account first, or the launcher starts it again.

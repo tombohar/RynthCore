@@ -1,0 +1,902 @@
+{
+ "schema": "rynthcore.client-status/1",
+ "ts": "2026-10-31T22:00:00.000Z",
+ "host": "TEST-PC",
+ "pid": 1006434801,
+ "engineVersion": "headless 1.0.0.0",
+ "apiVersion": 92,
+ "account": "account-one",
+ "character": "Character One",
+ "server": "ServerOne",
+ "uptimeSec": 221973,
+ "fps": 34,
+ "pluginTicksPerSec": 34,
+ "workingSetMB": 67,
+ "inWorld": true,
+ "queueDropped": 0,
+ "reconciles": 0,
+ "forceClears": 0,
+ "mainThreadFrozen": false,
+ "mainThreadStallMs": 0,
+ "pluginTicksPausedMs": 0,
+ "deaths": 19,
+ "deathsSession": 0,
+ "vitaePct": 0,
+ "xpPerHour": 0,
+ "luminancePerHour": 0,
+ "xpSession": 0,
+ "burdenPct": 4.1,
+ "area": "A9B3",
+ "landblock": "0000A9B3",
+ "indoor": false,
+ "opos": {
+  "cell": "A9B3000E",
+  "indoor": false,
+  "wx": 32486.4,
+  "wy": 34500.95,
+  "z": 94,
+  "heading": 244.6
+ },
+ "lastIssue": null,
+ "lastIssueAgeSec": -1,
+ "bot": {
+  "macroRunning": true,
+  "currentState": "Default",
+  "botAction": "Default",
+  "botActionControl": "Default",
+  "selectedProfile": "Default",
+  "profiles": [
+   "None",
+   "profile 1",
+   "profile 2"
+  ],
+  "navProfiles": [
+   "None",
+   "navProfile 1",
+   "navProfile 2",
+   "navProfile 3"
+  ],
+  "lootProfiles": [
+   "None",
+   "lootProfile 1",
+   "lootProfile 2"
+  ],
+  "metaProfiles": [
+   "None",
+   "metaProfile 1",
+   "metaProfile 2",
+   "metaProfile 3"
+  ],
+  "buffProfiles": [
+   "None"
+  ],
+  "currentBuffName": "Built-in",
+  "selectedBuffIdx": 0,
+  "currentNavName": "None",
+  "currentLootName": "Loot One",
+  "currentLootPath": "C:\\Placeholder\\LootProfiles\\Loot One.utl",
+  "vendorProfilePath": "",
+  "currentMetaName": "Meta One",
+  "selectedNavIdx": 0,
+  "selectedLootIdx": 0,
+  "selectedMetaIdx": 0,
+  "selectedProfileIdx": 0,
+  "combatEnabled": true,
+  "buffingEnabled": true,
+  "navigationEnabled": true,
+  "lootingEnabled": true,
+  "metaEnabled": false,
+  "currentTargetId": 0,
+  "targetLabel": "NO TARGET",
+  "targetHealthPercent": 0,
+  "targetHealthDisplay": "0",
+  "targetHealth": 0,
+  "targetMaxHealth": 0,
+  "targetStamina": 0,
+  "targetMaxStamina": 0,
+  "targetMana": 0,
+  "targetMaxMana": 0,
+  "playerHealth": 100019,
+  "playerMaxHealth": 100019,
+  "playerStamina": 100039,
+  "playerMaxStamina": 100039,
+  "playerMana": 99888,
+  "playerMaxMana": 100039,
+  "showTargetStaminaMana": true,
+  "isLocked": false,
+  "isMinimized": false,
+  "bgOpacity": 0.1,
+  "killsPerHour": 0,
+  "sessionKills": 0,
+  "secsSinceLastKill": -1,
+  "freeSlots": 0,
+  "scanTotal": 13,
+  "scanRing": 0,
+  "scanPossible": 0,
+  "scanLosBlocked": 0,
+  "sessionAttackCasts": 5,
+  "castsSinceLastKill": 5,
+  "castsPerKill": 0,
+  "uiHidden": false,
+  "scarabs": 236,
+  "tapers": 582,
+  "scarabsByType": [
+   {
+    "name": "Lead Scarab",
+    "count": 0
+   },
+   {
+    "name": "Iron Scarab",
+    "count": 100
+   },
+   {
+    "name": "Copper Scarab",
+    "count": 0
+   },
+   {
+    "name": "Silver Scarab",
+    "count": 0
+   },
+   {
+    "name": "Gold Scarab",
+    "count": 0
+   },
+   {
+    "name": "Pyreal Scarab",
+    "count": 0
+   },
+   {
+    "name": "Platinum Scarab",
+    "count": 38
+   },
+   {
+    "name": "Diamond Scarab",
+    "count": 98
+   }
+  ],
+  "equipment": [
+   {
+    "name": "Teardrop Crown",
+    "id": 2147487072,
+    "slot": 1,
+    "armorLevel": 523,
+    "resist": [
+     2,
+     2,
+     2,
+     2,
+     1.9,
+     2,
+     2
+    ],
+    "value": 27048,
+    "burden": 82,
+    "workmanship": 7,
+    "material": 60,
+    "maxMana": 2001,
+    "curMana": 2001,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Impenetrability VI",
+     "Major Jumping Prowess",
+     "Major Salvaging Aptitude",
+     "Incantation of Focus Self",
+     "Epic Bludgeoning Ward",
+     "Epic Piercing Ward"
+    ],
+    "longDesc": "Teardrop Crown of Focus"
+   },
+   {
+    "name": "Sollerets",
+    "id": 2147491080,
+    "slot": 256,
+    "armorLevel": 523,
+    "resist": [
+     2,
+     2,
+     2,
+     2,
+     1.9,
+     2,
+     2
+    ],
+    "value": 23220,
+    "burden": 307,
+    "workmanship": 6,
+    "material": 60,
+    "maxMana": 1618,
+    "curMana": 1618,
+    "damage": 0,
+    "damageType": 4,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Olthoi's Bane",
+     "Brogard's Defiance",
+     "Major Weapon Tinkering Expertise",
+     "Incantation of Flame Bane",
+     "Epic Healing Prowess"
+    ],
+    "longDesc": "Sollerets"
+   },
+   {
+    "name": "Academy Coat",
+    "id": 2147483882,
+    "slot": 7680,
+    "armorLevel": 250,
+    "resist": [
+     2,
+     2,
+     2,
+     2,
+     1.53,
+     2,
+     2
+    ],
+    "value": 150,
+    "burden": 600,
+    "workmanship": 0,
+    "material": 0,
+    "maxMana": 0,
+    "curMana": 0,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [],
+    "longDesc": "A fur coat awarded by the Academy to those who complete their training."
+   },
+   {
+    "name": "Nariyid Leggings",
+    "id": 2147486638,
+    "slot": 24576,
+    "armorLevel": 488,
+    "resist": [
+     2,
+     2,
+     2,
+     2,
+     1.9,
+     2,
+     2
+    ],
+    "value": 26361,
+    "burden": 929,
+    "workmanship": 8,
+    "material": 63,
+    "maxMana": 747,
+    "curMana": 747,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Acid Bane VI",
+     "Hastening",
+     "Gelidite's Bane",
+     "Brogard's Defiance",
+     "Major Magic Resistance"
+    ],
+    "longDesc": "Nariyid Leggings of Quickness"
+   },
+   {
+    "name": "Heavy Necklace",
+    "id": 2147485391,
+    "slot": 32768,
+    "armorLevel": 0,
+    "value": 5592,
+    "burden": 90,
+    "workmanship": 7,
+    "material": 58,
+    "maxMana": 1984,
+    "curMana": 1984,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Armor Tinkering Expertise Self VI",
+     "Epic Arcane Prowess"
+    ],
+    "longDesc": "Heavy Necklace of Armor Tinkering"
+   },
+   {
+    "name": "Heavy Bracelet",
+    "id": 2147484698,
+    "slot": 131072,
+    "armorLevel": 0,
+    "value": 12240,
+    "burden": 150,
+    "workmanship": 9,
+    "material": 51,
+    "maxMana": 2513,
+    "curMana": 2513,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Lightning Protection Self VI",
+     "Epic Impregnability"
+    ],
+    "longDesc": "Heavy Bracelet of Lightning Protection"
+   },
+   {
+    "name": "Deadly Prismatic Arrow",
+    "id": 2147485881,
+    "slot": 8388608,
+    "armorLevel": 0,
+    "value": 100000,
+    "burden": 1000,
+    "workmanship": 0,
+    "material": 0,
+    "maxMana": 0,
+    "curMana": 0,
+    "damage": 40,
+    "damageType": 268435456,
+    "weaponDef": 1,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0.3,
+    "elementalMod": 0,
+    "spells": [],
+    "longDesc": "Deadly, crystaline arrows that draw the elemental energies from elementally attuned bows to damage their target."
+   },
+   {
+    "name": "Sceptre",
+    "id": 2147485312,
+    "slot": 16777216,
+    "armorLevel": 0,
+    "value": 5369,
+    "burden": 50,
+    "workmanship": 4,
+    "material": 58,
+    "maxMana": 2500,
+    "curMana": 0,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 1.18,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Acid Stream V",
+     "Aura of Hermetic Link Self V"
+    ],
+    "longDesc": "Sceptre of Acid Stream"
+   },
+   {
+    "name": "Puzzle Box",
+    "id": 2147486645,
+    "slot": 67108864,
+    "armorLevel": 0,
+    "value": 11784,
+    "burden": 100,
+    "workmanship": 7,
+    "material": 64,
+    "maxMana": 2667,
+    "curMana": 2667,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Battlemage's Blessing",
+     "Major Finesse Weapon Aptitude",
+     "Incantation of Piercing Protection Self"
+    ],
+    "longDesc": "Puzzle Box of Piercing Protection"
+   }
+  ],
+  "recentChat": [
+   {
+    "t": "Line 1 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 2 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 3 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 4 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 5 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 5 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 5 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 6 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 7 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 8 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 9 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 10 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 10 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 10 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 11 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 12 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 13 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 14 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 15 of system text",
+    "c": 7
+   },
+   {
+    "t": "You hit the monster for 15 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 15 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 16 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 17 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 18 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 19 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 20 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 20 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 20 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 21 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 22 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 23 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 24 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 25 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 25 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 25 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 26 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 27 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 28 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 29 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 30 of system text",
+    "c": 7
+   },
+   {
+    "t": "You hit the monster for 30 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 30 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 31 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 32 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 33 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 34 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 35 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 35 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 35 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 36 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 37 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 38 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 39 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 40 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 40 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 40 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "[RynthAi] Macro started.",
+    "c": 5
+   }
+  ]
+ },
+ "enchantments": [
+  {
+   "spellId": 2215,
+   "secondsRemaining": 1247.3
+  },
+  {
+   "spellId": 2091,
+   "secondsRemaining": 1248.8
+  },
+  {
+   "spellId": 1616,
+   "secondsRemaining": 1994
+  },
+  {
+   "spellId": 1480,
+   "secondsRemaining": 1997.2
+  },
+  {
+   "spellId": 3258,
+   "secondsRemaining": 2003.7
+  },
+  {
+   "spellId": 1627,
+   "secondsRemaining": 2006.9
+  },
+  {
+   "spellId": 1605,
+   "secondsRemaining": 2010.1
+  },
+  {
+   "spellId": 2067,
+   "secondsRemaining": 2817.5
+  },
+  {
+   "spellId": 2267,
+   "secondsRemaining": 2818.9
+  },
+  {
+   "spellId": 2087,
+   "secondsRemaining": 2820.3
+  },
+  {
+   "spellId": 2061,
+   "secondsRemaining": 2821.7
+  },
+  {
+   "spellId": 2059,
+   "secondsRemaining": 2823.1
+  },
+  {
+   "spellId": 2081,
+   "secondsRemaining": 2824.6
+  },
+  {
+   "spellId": 2281,
+   "secondsRemaining": 2826
+  },
+  {
+   "spellId": 2245,
+   "secondsRemaining": 2827.4
+  },
+  {
+   "spellId": 2243,
+   "secondsRemaining": 2828.9
+  },
+  {
+   "spellId": 2309,
+   "secondsRemaining": 2830.3
+  },
+  {
+   "spellId": 2203,
+   "secondsRemaining": 2831.7
+  },
+  {
+   "spellId": 2223,
+   "secondsRemaining": 2833.1
+  },
+  {
+   "spellId": 2207,
+   "secondsRemaining": 2834.5
+  },
+  {
+   "spellId": 5105,
+   "secondsRemaining": 2836
+  },
+  {
+   "spellId": 5857,
+   "secondsRemaining": 2837.4
+  },
+  {
+   "spellId": 5809,
+   "secondsRemaining": 2838.8
+  },
+  {
+   "spellId": 5833,
+   "secondsRemaining": 2840.2
+  },
+  {
+   "spellId": 5881,
+   "secondsRemaining": 2841.6
+  },
+  {
+   "spellId": 5785,
+   "secondsRemaining": 2843.1
+  },
+  {
+   "spellId": 2289,
+   "secondsRemaining": 2844.5
+  },
+  {
+   "spellId": 2293,
+   "secondsRemaining": 2845.9
+  },
+  {
+   "spellId": 2195,
+   "secondsRemaining": 2847.3
+  },
+  {
+   "spellId": 2197,
+   "secondsRemaining": 2848.7
+  },
+  {
+   "spellId": 2251,
+   "secondsRemaining": 2850.1
+  },
+  {
+   "spellId": 2277,
+   "secondsRemaining": 2851.6
+  },
+  {
+   "spellId": 2325,
+   "secondsRemaining": 2853
+  },
+  {
+   "spellId": 3505,
+   "secondsRemaining": 2854.4
+  },
+  {
+   "spellId": 2301,
+   "secondsRemaining": 2855.8
+  },
+  {
+   "spellId": 2257,
+   "secondsRemaining": 2857.3
+  },
+  {
+   "spellId": 2233,
+   "secondsRemaining": 2858.7
+  },
+  {
+   "spellId": 2263,
+   "secondsRemaining": 2860.1
+  },
+  {
+   "spellId": 2227,
+   "secondsRemaining": 2861.5
+  },
+  {
+   "spellId": 2241,
+   "secondsRemaining": 2862.9
+  },
+  {
+   "spellId": 2271,
+   "secondsRemaining": 2864.3
+  },
+  {
+   "spellId": 2211,
+   "secondsRemaining": 2865.8
+  },
+  {
+   "spellId": 2237,
+   "secondsRemaining": 2867.2
+  },
+  {
+   "spellId": 2191,
+   "secondsRemaining": 2868.6
+  },
+  {
+   "spellId": 2287,
+   "secondsRemaining": 2870
+  },
+  {
+   "spellId": 2249,
+   "secondsRemaining": 2871.4
+  },
+  {
+   "spellId": 2323,
+   "secondsRemaining": 2872.9
+  },
+  {
+   "spellId": 5417,
+   "secondsRemaining": 2874.3
+  },
+  {
+   "spellId": 6122,
+   "secondsRemaining": 2875.7
+  },
+  {
+   "spellId": 2185,
+   "secondsRemaining": 2877
+  },
+  {
+   "spellId": 2187,
+   "secondsRemaining": 2878.4
+  },
+  {
+   "spellId": 2183,
+   "secondsRemaining": 2879.7
+  },
+  {
+   "spellId": 2053,
+   "secondsRemaining": 2881.1
+  },
+  {
+   "spellId": 2149,
+   "secondsRemaining": 2882.5
+  },
+  {
+   "spellId": 2157,
+   "secondsRemaining": 2883.9
+  },
+  {
+   "spellId": 2155,
+   "secondsRemaining": 2885.3
+  },
+  {
+   "spellId": 2159,
+   "secondsRemaining": 2886.6
+  },
+  {
+   "spellId": 2151,
+   "secondsRemaining": 2888
+  },
+  {
+   "spellId": 2161,
+   "secondsRemaining": 2889.4
+  },
+  {
+   "spellId": 2153,
+   "secondsRemaining": 2890.8
+  },
+  {
+   "spellId": 2106,
+   "secondsRemaining": 2900.5
+  },
+  {
+   "spellId": 3811,
+   "secondsRemaining": 14042.8
+  }
+ ],
+ "raiseXp": false,
+ "moveProto": 2,
+ "headless": true,
+ "hostPid": 64348,
+ "hostProcess": "rynth-headless"
+}

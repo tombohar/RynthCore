@@ -1,0 +1,523 @@
+{
+ "schema": "rynthcore.client-status/1",
+ "ts": "2026-10-31T22:00:00.000Z",
+ "host": "TEST-PC",
+ "pid": 1006063601,
+ "engineVersion": "headless 1.0.0.0",
+ "apiVersion": 92,
+ "account": "account-two",
+ "character": "Character Two",
+ "server": "ServerTwo",
+ "uptimeSec": 239593,
+ "fps": 49,
+ "pluginTicksPerSec": 49,
+ "workingSetMB": 54,
+ "inWorld": true,
+ "queueDropped": 0,
+ "reconciles": 0,
+ "forceClears": 0,
+ "mainThreadFrozen": false,
+ "mainThreadStallMs": 0,
+ "pluginTicksPausedMs": 0,
+ "deaths": 0,
+ "deathsSession": 0,
+ "vitaePct": 0,
+ "xpPerHour": 36815639,
+ "luminancePerHour": 0,
+ "xpSession": 2450183040,
+ "burdenPct": 182.2,
+ "area": "01F5",
+ "landblock": "000001F5",
+ "indoor": true,
+ "wx": 230.18,
+ "wy": 46992.82,
+ "pz": -18,
+ "opos": {
+  "cell": "01F501BE",
+  "indoor": true,
+  "wx": 230.18,
+  "wy": 46992.82,
+  "z": -18,
+  "heading": 282.6
+ },
+ "lastIssue": null,
+ "lastIssueAgeSec": -1,
+ "bot": {
+  "macroRunning": false,
+  "currentState": "Default",
+  "botAction": "Default",
+  "botActionControl": "Default",
+  "selectedProfile": "Default",
+  "profiles": [
+   "None",
+   "profile 1",
+   "profile 2"
+  ],
+  "navProfiles": [
+   "None"
+  ],
+  "lootProfiles": [
+   "None",
+   "lootProfile 1"
+  ],
+  "metaProfiles": [
+   "None",
+   "metaProfile 1"
+  ],
+  "buffProfiles": [
+   "None"
+  ],
+  "currentBuffName": "Built-in",
+  "selectedBuffIdx": 0,
+  "currentNavName": "None",
+  "currentLootName": "None",
+  "currentLootPath": "",
+  "vendorProfilePath": "",
+  "currentMetaName": "None",
+  "selectedNavIdx": 0,
+  "selectedLootIdx": 0,
+  "selectedMetaIdx": 0,
+  "selectedProfileIdx": 0,
+  "combatEnabled": false,
+  "buffingEnabled": true,
+  "navigationEnabled": false,
+  "lootingEnabled": false,
+  "metaEnabled": false,
+  "currentTargetId": 0,
+  "targetLabel": "NO TARGET",
+  "targetHealthPercent": 0,
+  "targetHealthDisplay": "0",
+  "targetHealth": 0,
+  "targetMaxHealth": 0,
+  "targetStamina": 0,
+  "targetMaxStamina": 0,
+  "targetMana": 0,
+  "targetMaxMana": 0,
+  "playerHealth": 165,
+  "playerMaxHealth": 165,
+  "playerStamina": 230,
+  "playerMaxStamina": 230,
+  "playerMana": 330,
+  "playerMaxMana": 330,
+  "showTargetStaminaMana": false,
+  "isLocked": false,
+  "isMinimized": false,
+  "bgOpacity": 0.95,
+  "killsPerHour": 0,
+  "sessionKills": 0,
+  "secsSinceLastKill": -1,
+  "freeSlots": 0,
+  "scanTotal": -1,
+  "scanRing": -1,
+  "scanPossible": -1,
+  "scanLosBlocked": -1,
+  "sessionAttackCasts": 0,
+  "castsSinceLastKill": 0,
+  "castsPerKill": 0,
+  "uiHidden": false,
+  "scarabs": 325,
+  "tapers": 2000,
+  "scarabsByType": [
+   {
+    "name": "Lead Scarab",
+    "count": 20
+   },
+   {
+    "name": "Iron Scarab",
+    "count": 20
+   },
+   {
+    "name": "Copper Scarab",
+    "count": 20
+   },
+   {
+    "name": "Silver Scarab",
+    "count": 20
+   },
+   {
+    "name": "Gold Scarab",
+    "count": 20
+   },
+   {
+    "name": "Pyreal Scarab",
+    "count": 50
+   },
+   {
+    "name": "Mechanical Scarab",
+    "count": 1
+   },
+   {
+    "name": "Platinum Scarab",
+    "count": 150
+   },
+   {
+    "name": "Mana Scarab",
+    "count": 24
+   }
+  ],
+  "equipment": [
+   {
+    "name": "Shirt",
+    "id": 2147994752,
+    "slot": 30,
+    "armorLevel": 0,
+    "value": 15,
+    "burden": 75,
+    "workmanship": 0,
+    "material": 0,
+    "maxMana": 0,
+    "curMana": 0,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [],
+    "longDesc": ""
+   },
+   {
+    "name": "Trousers",
+    "id": 2147994753,
+    "slot": 196,
+    "armorLevel": 0,
+    "value": 30,
+    "burden": 135,
+    "workmanship": 0,
+    "material": 0,
+    "maxMana": 0,
+    "curMana": 0,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [],
+    "longDesc": ""
+   },
+   {
+    "name": "Pathwarden Robe",
+    "id": 2147987767,
+    "slot": 32513,
+    "armorLevel": 50,
+    "resist": [
+     0.8,
+     0.8,
+     1,
+     0.2,
+     0.2,
+     0.1,
+     0.2
+    ],
+    "value": 1,
+    "burden": 200,
+    "workmanship": 0,
+    "material": 0,
+    "maxMana": 1000,
+    "curMana": 0,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Strength Self II",
+     "Endurance Self II",
+     "Focus Self II",
+     "Willpower Self II",
+     "Impenetrability II"
+    ],
+    "longDesc": ""
+   },
+   {
+    "name": "Academy Wand",
+    "id": 2147749219,
+    "slot": 16777216,
+    "armorLevel": 0,
+    "value": 200,
+    "burden": 50,
+    "workmanship": 0,
+    "material": 0,
+    "maxMana": 400,
+    "curMana": 0,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 1,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Mana Conversion Mastery Other I",
+     "Focus Other I",
+     "Willpower Other I"
+    ],
+    "longDesc": ""
+   },
+   {
+    "name": "Pathwarden Trinket",
+    "id": 2147987763,
+    "slot": 67108864,
+    "armorLevel": 0,
+    "value": 50,
+    "burden": 60,
+    "workmanship": 0,
+    "material": 0,
+    "maxMana": 6000,
+    "curMana": 0,
+    "damage": 0,
+    "damageType": 0,
+    "weaponDef": 0,
+    "missileDef": 0,
+    "magicDef": 0,
+    "variance": 0,
+    "elementalMod": 0,
+    "spells": [
+     "Augmented Understanding II"
+    ],
+    "longDesc": "A gearwork compass, may it guide your way."
+   }
+  ],
+  "recentChat": [
+   {
+    "t": "Line 1 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 2 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 3 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 4 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 5 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 5 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 5 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 6 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 7 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 8 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 9 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 10 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 10 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 10 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 11 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 12 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 13 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 14 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 15 of system text",
+    "c": 7
+   },
+   {
+    "t": "You hit the monster for 15 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 15 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 16 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 17 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 18 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 19 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 20 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 20 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 20 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 21 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 22 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 23 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 24 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 25 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 25 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 25 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 26 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 27 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 28 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 29 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 30 of system text",
+    "c": 7
+   },
+   {
+    "t": "You hit the monster for 30 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 30 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 31 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 32 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 33 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 34 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 35 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 35 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 35 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "Line 36 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 37 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 38 of system text",
+    "c": 1
+   },
+   {
+    "t": "Line 39 of system text",
+    "c": 7
+   },
+   {
+    "t": "Line 40 of system text",
+    "c": 1
+   },
+   {
+    "t": "You hit the monster for 40 points of damage!",
+    "c": 21
+   },
+   {
+    "t": "The monster hits you for 40 points of damage!",
+    "c": 22
+   },
+   {
+    "t": "[RynthAi] Macro started.",
+    "c": 5
+   }
+  ]
+ },
+ "enchantments": [],
+ "raiseXp": false,
+ "moveProto": 2,
+ "headless": true,
+ "hostPid": 60636,
+ "hostProcess": "rynth-headless"
+}

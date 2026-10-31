@@ -167,6 +167,7 @@ internal partial class MainWindow : Window
         _serverStatusTimer.Tick += async (_, _) => await RefreshServerStatusesAsync();
         _serverStatusTimer.Start();
         Closing += (_, _) => SaveWindowLayout();
+        Closed += (_, _) => _headlessWindow?.Close();
         ShowVersion();
         AppendActivity("Avalonia launcher preview ready.");
         // One-line host/runtime sidecar check (full detail in Desktop RynthCore-Launcher.log).
@@ -263,6 +264,8 @@ internal partial class MainWindow : Window
         AutoLaunchHeaderCheckBox.IsCheckedChanged += (_, _) => SaveAutoLaunchPreference();
         SavePathsButton.Click += (_, _) => SaveRuntimePaths();
         StopHeadlessButton.Click += (_, _) => StopHeadlessClients();
+        ShowHeadlessWindowButton.Click += (_, _) => ShowHeadlessWindow();
+        SessionsHeadlessButton.Click += (_, _) => ShowHeadlessWindow();
         SaveBehaviorButton.Click += (_, _) => SaveLaunchBehavior();
         InjectRunningAcButton.Click += async (_, _) => await InjectRunningAcAsync();
         RefreshSessionsButton.Click += (_, _) => RefreshSessionState();
@@ -2496,6 +2499,68 @@ internal partial class MainWindow : Window
             ? "No headless client is running."
             : $"Asked {asked} headless client(s) to log out." +
               (_settings.AutoLaunch ? " AutoLaunch is on: checked accounts are started again." : ""));
+    }
+
+    // ── The Headless window (HeadlessWindow): what headless characters are doing ──
+    private HeadlessWindow? _headlessWindow;
+
+    /// <summary>Runtime > Headless client > Show headless clients, and the button under Live Sessions.</summary>
+    private void ShowHeadlessWindow()
+    {
+        if (_headlessWindow != null)
+        {
+            if (_headlessWindow.WindowState == WindowState.Minimized)
+                _headlessWindow.WindowState = WindowState.Normal;
+            _headlessWindow.Activate();
+            return;
+        }
+        var host = new HeadlessWindowHost
+        {
+            Settings = _settings,
+            SaveSettings = SaveSettings,
+            // The folders rynth-headless uses: the launcher's settings, else the CLI's defaults (HeadlessDefaults.cs).
+            StatusDir = () => string.IsNullOrWhiteSpace(_settings.HeadlessStatusDir)
+                ? Path.Combine(RynthInstallPaths.CoreLogsDir, "status")
+                : Environment.ExpandEnvironmentVariables(_settings.HeadlessStatusDir.Trim().Trim('"')),
+            ConfiguredSuiteDir = () => _settings.HeadlessSuiteDir ?? string.Empty,
+            LaunchConfigDir = Path.Combine(AppSettingsStore.SettingsDirectoryPath, HeadlessLaunch.ConfigFolderName),
+            LogOutProcess = LogOutHeadlessProcess,
+            AutoLaunch = () => _settings.AutoLaunch,
+        };
+        _headlessWindow = new HeadlessWindow(host);
+        _headlessWindow.Closed += (_, _) => _headlessWindow = null;
+        _headlessWindow.Show();
+    }
+
+    /// <summary>
+    /// The Headless window's "Log out": the stop request of one rynth-headless process
+    /// (<see cref="EndClientProcess"/>: log out, exit, killed after the grace time). The stop event is
+    /// per process; the launcher starts one process per Headless account, so that is one character.
+    /// Only a pid the enumeration just saw as rynth-headless is touched.
+    /// </summary>
+    private string LogOutHeadlessProcess(int pid)
+    {
+        Process[] clients = FindClientProcesses();
+        try
+        {
+            if (!_headlessClientPids.Contains(pid))
+                return $"PID {pid} isn't a running rynth-headless.exe any more; nothing to do.";
+            foreach (Process p in clients)
+            {
+                int id;
+                try { id = p.Id; } catch { continue; }
+                if (id != pid)
+                    continue;
+                EndClientProcess(p, pid);
+                return $"Asked PID {pid} to log out and exit (closed after {HeadlessLaunch.StopGrace.TotalSeconds:0} s if it doesn't)." +
+                       (_settings.AutoLaunch ? " AutoLaunch is on: a checked account is started again." : "");
+            }
+            return $"PID {pid} isn't running any more.";
+        }
+        finally
+        {
+            foreach (Process p in clients) p.Dispose();
+        }
     }
 
     private Process[] AcClientsOnly(Process[] targets) =>

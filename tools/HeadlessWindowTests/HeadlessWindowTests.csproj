@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the launcher's Headless window, its pure part (src\RynthCore.App\HeadlessMonitor.cs,
+    compiled in): parsing status files into what the window shows (Samples\ are two live headless status
+    files with every name replaced by a placeholder and neutral chat), the stale and gone rules and the
+    status dot, the list's keep-the-last-good rule, the chat filter (combat spam 21/22 hidden) and the
+    new-lines diff, the command file (name, JSON, atomic write), the opos to map coordinates
+    conversion, finding and tailing a character's log.
+    Works in a temp folder, never in C:\Games or %APPDATA%\RynthCore.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>HeadlessWindowTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.App\HeadlessMonitor.cs" Link="App\HeadlessMonitor.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Samples\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

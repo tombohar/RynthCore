@@ -404,6 +404,10 @@
                              AcceptsReturn="True"
                              TextWrapping="NoWrap"
                              MinHeight="56" />
+                    <Button x:Name="ShowHeadlessWindowButton"
+                            Content="Show headless clients"
+                            ToolTip.Tip="Opens the Headless window: what each headless character is doing (vitals, target, place, XP, chat and its log), with a command box, macro on/off and log out."
+                            HorizontalAlignment="Left" />
                     <Button x:Name="StopHeadlessButton"
                             Content="Log out headless clients"
                             ToolTip.Tip="A headless client has no window to close: this asks every running rynth-headless.exe to log its character out and exit (closed after 20 s if it doesn't). With AutoLaunch on, uncheck the account first or it is started again."
@@ -614,6 +618,10 @@
                      Background="#0F161D"
                      BorderBrush="#243742"
                      Foreground="#EAF0F4" />
+            <Button x:Name="SessionsHeadlessButton"
+                    Content="Headless clients"
+                    ToolTip.Tip="Headless characters have no game window: this window shows what they are doing, their chat and log, and takes commands."
+                    HorizontalAlignment="Left" />
           </StackPanel>
         </Border>
       </StackPanel>
