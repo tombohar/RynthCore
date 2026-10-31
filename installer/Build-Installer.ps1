@@ -14,6 +14,11 @@
        - the CoreCLR engine loads them - until the update feed can carry a managed plugin's
        dependency DLLs)
     5. Publishes the Loot Editor
+    5b. The headless client (docs/HEADLESS.md, experimental): rynth-headless.exe, a self-contained
+       win-x64 publish of src\RynthCore.Headless.Cli, into {app}\Headless, and the 64-bit managed
+       RynthAi it runs into {app}\Headless\plugins\RynthAi (with its dependencies beside it). The
+       launcher loads those when its HeadlessPluginPaths list is empty. Nothing here touches the
+       x86 plugins in C:\Games\RynthSuite.
     6. Stages all output under installer\staging\app\, plus the hand-built
        RynthCore.SehTrampoline.dll and the Decal bridge (DecalBridge\RynthCore.DecalBridge.dll,
        built here against Decal's reference assemblies), and checks every required file is there
@@ -94,17 +99,25 @@ $EngineProject     = "$RepoRoot\src\RynthCore.Engine\RynthCore.Engine.csproj"
 $LoaderProject     = "$RepoRoot\src\RynthCore.Loader\RynthCore.Loader.csproj"
 $PluginProject    = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\RynthCore.Plugin.RynthAi.csproj"
 $LootEditorProject = "$RynthSuiteRoot\Tools\RynthCore.LootEditor\RynthCore.LootEditor.csproj"
+$HeadlessProject   = "$RepoRoot\src\RynthCore.Headless.Cli\RynthCore.Headless.Cli.csproj"
 
 $LauncherPublish   = "$RepoRoot\src\RynthCore.App.Avalonia\bin\$Configuration\net10.0-windows7.0\win-x86\publish"
 $EnginePublish     = "$RepoRoot\src\RynthCore.Engine\bin\$Configuration\net10.0-windows\win-x86\publish"
 $LoaderPublish     = "$RepoRoot\src\RynthCore.Loader\bin\$Configuration\net10.0-windows\win-x86\publish"
 $PluginPublish    = "$RynthSuiteRoot\Plugins\RynthCore.Plugin.RynthAi\bin\$Configuration\net10.0-windows\win-x86\publish"
 $LootEditorPublish = "$RynthSuiteRoot\Tools\RynthCore.LootEditor\bin\$Configuration\net10.0\win-x86\publish"
+# The headless builds (x64) keep their intermediates in their own artifacts folders, apart from the
+# x86 builds of the same projects (RynthCore.PluginSdk, RynthAi), and publish here (artifacts\ is ignored).
+$HeadlessBuildRoot = "$RepoRoot\artifacts\headless"
+$HeadlessPublish   = "$HeadlessBuildRoot\rynth-headless"
+$HeadlessPluginsPublish = "$HeadlessBuildRoot\plugins"
+# The 64-bit plugins the headless client gets: <Name> -> project. Only RynthAi for now.
+$HeadlessPlugins = [ordered]@{ RynthAi = $PluginProject }
 
 $StagingDir  = "$ScriptDir\staging\app"
 
 # ── Validate projects ───────────────────────────────────────────────────────
-foreach ($p in @($LauncherProject, $EngineProject, $PluginProject, $LootEditorProject) + @(if ($NativeAot) { $LoaderProject })) {
+foreach ($p in @($LauncherProject, $EngineProject, $PluginProject, $LootEditorProject, $HeadlessProject) + @(if ($NativeAot) { $LoaderProject })) {
     if (-not (Test-Path $p)) {
         throw "Project not found: $p`nUpdate paths in Build-Installer.ps1 if your repo layout differs."
     }
@@ -145,6 +158,23 @@ if (-not $SkipBuild) {
     Write-Host "[5/5] Publishing Loot Editor (self-contained, x86)..." -ForegroundColor Cyan
     dotnet publish $LootEditorProject -c $Configuration -r win-x86 --self-contained true @VersionArgs
     if ($LASTEXITCODE -ne 0) { throw "Loot Editor publish failed (exit $LASTEXITCODE)" }
+
+    # ── 5b. Headless client (self-contained x64) + its 64-bit plugins ─────────
+    # rynth-headless is a 64-bit process with its own .NET runtime (Runtime\dotnet is x86). The
+    # plugins it hosts are managed x64 builds of the release plugins, made with command-line
+    # overrides only (docs/HEADLESS.md, "Running RynthAi"); each gets its dependencies beside it.
+    Write-Host ""
+    Write-Host "[5b/5] Publishing the headless client (self-contained, x64) and its x64 plugins..." -ForegroundColor Cyan
+    if (Test-Path $HeadlessBuildRoot) { Remove-Item $HeadlessBuildRoot -Recurse -Force }
+    dotnet publish $HeadlessProject -c $Configuration -r win-x64 --self-contained true `
+        --artifacts-path "$HeadlessBuildRoot\art-cli" -o $HeadlessPublish -nologo -v q @VersionArgs
+    if ($LASTEXITCODE -ne 0) { throw "Headless client publish failed (exit $LASTEXITCODE)" }
+    foreach ($name in $HeadlessPlugins.Keys) {
+        dotnet publish $HeadlessPlugins[$name] -c $Configuration "-p:PublishAot=false" "-p:NativeLib=" "-p:SelfContained=false" `
+            "-p:PlatformTarget=x64" "-p:RuntimeIdentifier=win-x64" "-p:Platforms=x64" "-p:GenerateRuntimeConfigurationFiles=false" `
+            "-p:RynthPluginSharedSdk=true" --artifacts-path "$HeadlessBuildRoot\art-$name" -o "$HeadlessPluginsPublish\$name" -nologo -v q @VersionArgs
+        if ($LASTEXITCODE -ne 0) { throw "Headless (x64) $name publish failed (exit $LASTEXITCODE)" }
+    }
 }
 
 # ── Stage ────────────────────────────────────────────────────────────────────
@@ -245,6 +275,35 @@ foreach ($dir in (Get-ChildItem "$LootEditorPublish" -Directory)) {
     Get-ChildItem "$StagingDir\Tools\LootEditor\$($dir.Name)" -Recurse -File -Filter '*.pdb' | Remove-Item -Force
 }
 
+# Headless client (experimental, docs/HEADLESS.md): {app}\Headless\rynth-headless.exe with its own
+# x64 runtime, and {app}\Headless\plugins\<Name>\ (RynthCore.Plugin.<Name>.dll and its dependencies),
+# which the launcher's HeadlessLaunch.DefaultPluginPaths finds. The publish folders are copied whole
+# (the plugins' Data\ subfolders too); pdbs stay, for line numbers in the headless logs.
+if (-not (Test-Path "$HeadlessPublish\rynth-headless.exe")) { throw "Headless client publish not found at: $HeadlessPublish" }
+New-Item -ItemType Directory -Path "$StagingDir\Headless\plugins" -Force | Out-Null
+Copy-Item "$HeadlessPublish\*" "$StagingDir\Headless\" -Recurse -Force
+foreach ($name in $HeadlessPlugins.Keys) {
+    $src = "$HeadlessPluginsPublish\$name"
+    if (-not (Test-Path "$src\RynthCore.Plugin.$name.dll")) { throw "Headless (x64) $name publish not found at: $src" }
+    Copy-Item $src "$StagingDir\Headless\plugins\" -Recurse -Force
+}
+# The plugin builds must really be 64-bit: an x86 one (wrong overrides, a stale publish) fails to load
+# in rynth-headless with BadImageFormatException, only once a player launches.
+# The PE header's machine field: an IL assembly built for x64 says AMD64 (0x8664); x86 and AnyCPU say I386 (0x14C).
+function Get-PeMachine([string]$path) {
+    $b = [System.IO.File]::ReadAllBytes($path)
+    return [BitConverter]::ToUInt16($b, [BitConverter]::ToInt32($b, 0x3C) + 4)
+}
+foreach ($name in $HeadlessPlugins.Keys) {
+    $machine = Get-PeMachine "$StagingDir\Headless\plugins\$name\RynthCore.Plugin.$name.dll"
+    if ($machine -ne 0x8664) { throw ("Headless plugin {0} is not an x64 build (PE machine 0x{1:X})" -f $name, $machine) }
+}
+if ((Get-PeMachine "$StagingDir\Headless\rynth-headless.exe") -ne 0x8664) { throw "rynth-headless.exe is not an x64 build" }
+# The players' guide to Headless mode, beside the exe.
+Copy-Item "$ScriptDir\HEADLESS-README.md" "$StagingDir\Headless\README.md" -Force
+$headlessMb = [math]::Round((Get-ChildItem "$StagingDir\Headless" -Recurse -File | Measure-Object Length -Sum).Sum / 1MB, 1)
+Write-Host "  Headless: $((Get-ChildItem "$StagingDir\Headless" -Recurse -File).Count) file(s), ${headlessMb} MB (plugins: $($HeadlessPlugins.Keys -join ', '))"
+
 # Decal bridge (docs/DECAL_BRIDGE_PLAN.md, experimental): the net48 x86 Decal network filter
 # goes to {app}\DecalBridge\, the folder the launcher registers for "Decal + RynthCore"
 # accounts (and only for those). Built against Decal's public reference assemblies, so the
@@ -289,8 +348,13 @@ $required = @(
     "$StagingDir\Runtime\RynthCore.SehTrampoline.dll",
     "$StagingDir\Runtime\minhook.x86.dll",
     "$StagingDir\Runtime\cimgui.dll",
-    "$pluginStagingDir\RynthAi\RynthCore.Plugin.RynthAi.dll"
+    "$pluginStagingDir\RynthAi\RynthCore.Plugin.RynthAi.dll",
+    "$StagingDir\Headless\rynth-headless.exe",
+    "$StagingDir\Headless\rynth-headless.dll",
+    "$StagingDir\Headless\coreclr.dll",
+    "$StagingDir\Headless\RynthCore.Headless.dll"
 )
+foreach ($name in $HeadlessPlugins.Keys) { $required += "$StagingDir\Headless\plugins\$name\RynthCore.Plugin.$name.dll" }
 if (-not $NativeAot) {
     $required += @(
         "$StagingDir\Runtime\RynthCore.Shim.dll",

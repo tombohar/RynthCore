@@ -390,6 +390,24 @@
                              ToolTip.Tip="Added to the end of every launch's command line, after the account, password and server the profiles set. It can't contain -a, -v, -h, -p or -rodat: set those in the account and server profiles. One line."
                              AcceptsReturn="False"
                              TextWrapping="Wrap" />
+                    <TextBlock Text="Headless client (experimental)" Foreground="#26C1A6" FontWeight="SemiBold" Margin="0,6,0,0" />
+                    <TextBlock Text="For accounts set to Headless (experimental): no game window, rynth-headless.exe logs in and runs the 64-bit plugins below (empty = the RynthAi that comes with RynthCore). ACE servers only."
+                               TextWrapping="Wrap"
+                               Foreground="#9AA8B3" />
+                    <TextBlock Text="rynth-headless.exe" Foreground="#EAF0F4" />
+                    <TextBox x:Name="HeadlessExePathTextBox"
+                             Watermark="Empty = Headless\rynth-headless.exe beside the launcher" />
+                    <TextBlock Text="Headless plugins (64-bit DLLs, one per line)" Foreground="#EAF0F4" />
+                    <TextBox x:Name="HeadlessPluginPathsTextBox"
+                             Watermark="Empty = Headless\plugins\RynthAi (comes with RynthCore)"
+                             ToolTip.Tip="Loaded by every Headless account. Empty = the 64-bit plugins that come with RynthCore, in Headless\plugins beside the launcher (RynthAi). rynth-headless is a 64-bit process: list only x64 builds here, never the ones in the Plugins tab."
+                             AcceptsReturn="True"
+                             TextWrapping="NoWrap"
+                             MinHeight="56" />
+                    <Button x:Name="StopHeadlessButton"
+                            Content="Log out headless clients"
+                            ToolTip.Tip="A headless client has no window to close: this asks every running rynth-headless.exe to log its character out and exit (closed after 20 s if it doesn't). With AutoLaunch on, uncheck the account first or it is started again."
+                            HorizontalAlignment="Left" />
                     <Button x:Name="SavePathsButton"
                             Content="Save Runtime Paths"
                             HorizontalAlignment="Left" />

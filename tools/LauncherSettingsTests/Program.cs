@@ -149,6 +149,229 @@ internal static class Program
                 CheckSharedFilesSafe();
             });
 
+            // ── Headless accounts (headless-accounts.json) ──────────────────────
+            // Same arrangement as "Decal + RynthCore": appsettings.json says RynthCore, the sidecar
+            // says which are Headless. "Bridge launcher" = one that knows DecalBridge but not Headless.
+
+            Scenario("headless: written as RynthCore, listed in headless-accounts.json", root, () =>
+            {
+                AppSettings s = SampleWithHeadless();
+                AppSettingsStore.Save(s);
+                AppSettingsStore.Save(s);   // second save: a .bak exists too
+                CheckSharedFilesSafe();
+                Check(SharedMode("h") == "RynthCore", "h (Headless) is written as RynthCore");
+                Check(SharedMode("b") == "RynthCore" && SharedMode("c") == "Decal", "the others as before");
+                Check(HeadlessIds().SequenceEqual(new[] { "h" }), "headless-accounts.json lists only h");
+                Check(SidecarIds().SequenceEqual(new[] { "b" }), "decal-accounts.json still lists only b");
+                Check(s.AccountProfiles.First(a => a.Id == "h").InjectionMode == InjectionMode.Headless, "save leaves the in-memory mode alone");
+                Check(BridgeLauncherCanRead(Main_) && BridgeLauncherCanRead(Bak), "a bridge launcher can read appsettings.json and its .bak");
+            });
+
+            Scenario("headless: round trip", root, () =>
+            {
+                AppSettingsStore.Save(SampleWithHeadless());
+                AppSettings loaded = AppSettingsStore.Load();
+                Check(Mode(loaded, "h") == InjectionMode.Headless, "load: h Headless");
+                Check(Mode(loaded, "a") == InjectionMode.RynthCore && Mode(loaded, "b") == InjectionMode.DecalBridge &&
+                      Mode(loaded, "c") == InjectionMode.Decal, "load: the others as saved");
+                Check(AppSettingsStore.LastLoadDiagnostic == null && AppSettingsStore.LastMigrationNote == null, "load: no diagnostics");
+
+                loaded.AccountProfiles.First(a => a.Id == "h").InjectionMode = InjectionMode.RynthCore;
+                AppSettingsStore.Save(loaded);
+                Check(!File.Exists(HeadlessSidecar), "headless-accounts.json removed when no account uses the mode");
+                Check(SidecarIds().SequenceEqual(new[] { "b" }), "decal-accounts.json untouched");
+                Check(Mode(AppSettingsStore.Load(), "h") == InjectionMode.RynthCore, "load: h RynthCore");
+            });
+
+            Scenario("headless: older launchers still read the file, and their edits win", root, () =>
+            {
+                AppSettingsStore.Save(SampleWithHeadless());
+                Check(OldLauncherCanRead(Main_), "a launcher from before the Decal bridge can read it");
+                Check(BridgeLauncherCanRead(Main_), "a launcher with the Decal bridge but no Headless can read it");
+
+                OldLauncherEdit(_ => { });   // saves without changes (drops what it doesn't know, but not the sidecar)
+                Check(Mode(AppSettingsStore.Load(), "h") == InjectionMode.Headless, "an old launcher's save keeps h Headless");
+
+                OldLauncherEdit(accounts => SetMode(accounts, "h", "Decal"));
+                AppSettings loaded = AppSettingsStore.Load();
+                Check(Mode(loaded, "h") == InjectionMode.Decal, "an old launcher switching h to Decal wins");
+                AppSettingsStore.Save(loaded);
+                Check(!File.Exists(HeadlessSidecar), "the stale entry is dropped at the next save");
+            });
+
+            Scenario("headless: migrate a file that says Headless itself", root, () =>
+            {
+                string legacy = """
+                { "EnginePath": "X", "AccountProfiles": [
+                  { "Id": "a", "AccountName": "A", "InjectionMode": "RynthCore" },
+                  { "Id": "h", "AccountName": "H", "InjectionMode": "Headless" },
+                  { "Id": "n", "AccountName": "N", "InjectionMode": 3 },
+                  { "Id": "b", "AccountName": "B", "InjectionMode": "DecalBridge" } ] }
+                """;
+                File.WriteAllText(Main_, legacy);
+                File.WriteAllText(Bak, legacy);
+                Check(!BridgeLauncherCanRead(Main_), "negative control: a bridge launcher can't read \"Headless\"");
+                AppSettings loaded = AppSettingsStore.Load();
+                Check(Mode(loaded, "h") == InjectionMode.Headless && Mode(loaded, "n") == InjectionMode.Headless, "h and n (numeric 3) kept as Headless");
+                Check(Mode(loaded, "b") == InjectionMode.DecalBridge, "b kept as Decal + RynthCore");
+                Check(AppSettingsStore.LastMigrationNote?.Contains("2 Headless account(s)") == true &&
+                      AppSettingsStore.LastMigrationNote.Contains("1 \"Decal + RynthCore\""), "migration note: " + AppSettingsStore.LastMigrationNote);
+                CheckSharedFilesSafe();
+                Check(HeadlessIds().SequenceEqual(new[] { "h", "n" }) && SidecarIds().SequenceEqual(new[] { "b" }), "both sidecars written");
+                AppSettingsStore.Load();
+                Check(AppSettingsStore.LastMigrationNote == null, "second load: nothing left to migrate");
+            });
+
+            Scenario("headless: unreadable headless-accounts.json, and an id in both sidecars", root, () =>
+            {
+                AppSettingsStore.Save(SampleWithHeadless());
+                File.WriteAllText(HeadlessSidecar, """{ "HeadlessAccountIds": [ 7 ] }""");
+                AppSettings loaded = AppSettingsStore.Load();
+                Check(Mode(loaded, "h") == InjectionMode.RynthCore, "h runs as RynthCore");
+                Check(Mode(loaded, "b") == InjectionMode.DecalBridge, "decal-accounts.json still applies");
+                Check(AppSettingsStore.LastLoadDiagnostic == null, "appsettings.json not taken for corrupt");
+                Check(AppSettingsStore.LastMigrationNote?.Contains("headless-accounts.json could not be read") == true, "note: " + AppSettingsStore.LastMigrationNote);
+
+                AppSettingsStore.Save(SampleWithHeadless());
+                File.WriteAllText(HeadlessSidecar, """{ "Version": 1, "HeadlessAccountIds": [ "h", "b" ] }""");
+                AppSettings both = AppSettingsStore.Load();
+                Check(Mode(both, "b") == InjectionMode.DecalBridge && Mode(both, "h") == InjectionMode.Headless, "an id in both: Decal + RynthCore wins");
+            });
+
+            Scenario("headless: Clone and CopyFrom keep every field", root, () =>
+            {
+                var full = new LaunchAccountProfile
+                {
+                    Id = "id1", AccountName = "Acct", PasswordProtected = "blob", LegacyPlainPassword = "legacy",
+                    PasswordNeedsReentry = true, CharacterName = "Char", Alias = "Al", ServerId = "srv",
+                    WindowX = 1, WindowY = 2, WindowWidth = 300, WindowHeight = 400, UserPrefsPath = @"C:\p.ini",
+                    InjectionMode = InjectionMode.Headless,
+                    OnLoginCommandsByCharacter = new(StringComparer.OrdinalIgnoreCase) { ["Char"] = ["/say hi"] },
+                    OnLoginWaitMs = 1234,
+                };
+                // Every public read/write property must be set to something other than its default here,
+                // so a field added later without Clone/CopyFrom support fails this check.
+                var blank = new LaunchAccountProfile();
+                foreach (var prop in typeof(LaunchAccountProfile).GetProperties().Where(p => p.CanRead && p.CanWrite))
+                    Check(!Equals(Json(prop.GetValue(full)), Json(prop.GetValue(blank))), $"test sets {prop.Name}");
+
+                LaunchAccountProfile clone = full.Clone();
+                var copied = new LaunchAccountProfile();
+                copied.CopyFrom(full);
+                foreach (var prop in typeof(LaunchAccountProfile).GetProperties().Where(p => p.CanRead && p.CanWrite))
+                {
+                    string want = Json(prop.GetValue(full));
+                    Check(Json(prop.GetValue(clone)) == want, $"Clone keeps {prop.Name}");
+                    Check(Json(prop.GetValue(copied)) == want, $"CopyFrom keeps {prop.Name}");
+                }
+                Check(clone.InjectionMode == InjectionMode.Headless && copied.InjectionMode == InjectionMode.Headless, "Headless kept");
+            });
+
+            Scenario("headless: the new settings round trip, and default for older files", root, () =>
+            {
+                AppSettings fresh = new();
+                Check(fresh.HeadlessExePath == "" && fresh.HeadlessPluginPaths.Count == 0 &&
+                      fresh.HeadlessSuiteDir == "" && fresh.HeadlessStatusDir == "", "defaults: empty");
+
+                File.WriteAllText(Main_, """{ "EnginePath": "Z", "AccountProfiles": [] }""");
+                AppSettings older = AppSettingsStore.Load();
+                Check(older.HeadlessExePath == "" && older.HeadlessPluginPaths is { Count: 0 } &&
+                      older.HeadlessSuiteDir == "" && older.HeadlessStatusDir == "", "a file without them reads the defaults");
+
+                AppSettings s = SampleWithHeadless();
+                s.HeadlessExePath = @"D:\Rynth\Headless\rynth-headless.exe";
+                s.HeadlessPluginPaths = [@"D:\x64\RynthCore.Plugin.RynthAi.dll", @"D:\x64\RynthCore.Plugin.RynthNav.dll"];
+                s.HeadlessSuiteDir = @"D:\Suite";
+                s.HeadlessStatusDir = @"D:\Status";
+                AppSettingsStore.Save(s);
+                AppSettings loaded = AppSettingsStore.Load();
+                Check(loaded.HeadlessExePath == s.HeadlessExePath, "HeadlessExePath");
+                Check(loaded.HeadlessPluginPaths.SequenceEqual(s.HeadlessPluginPaths), "HeadlessPluginPaths");
+                Check(loaded.HeadlessSuiteDir == s.HeadlessSuiteDir && loaded.HeadlessStatusDir == s.HeadlessStatusDir, "HeadlessSuiteDir, HeadlessStatusDir");
+                Check(OldLauncherCanRead(Main_) && BridgeLauncherCanRead(Main_), "older launchers still read the file");
+            });
+
+            Scenario("headless: run config, arguments, exe path, stop event", root, () =>
+            {
+                const string HeadlessPw = "Headless-Test-Pw-7 \"q\"";
+                LaunchAccountProfile account = new() { Id = "0123abcd", AccountName = "TestAccount", InjectionMode = InjectionMode.Headless };
+                account.SetPassword(HeadlessPw);
+                var spec = new HeadlessRunSpec
+                {
+                    Host = "127.0.0.1", Port = 9000, ServerName = "Local ACE",
+                    Plugins = [@"C:\x64\RynthCore.Plugin.RynthAi.dll", "  ", @"C:\x64\Other.dll"],
+                    Sessions =
+                    {
+                        new HeadlessSessionSpec { LauncherProfileId = account.Id, Account = account.AccountName, Character = "+Test Character",
+                                                  Commands = ["/ra start", ""], StaySeconds = 0, Reconnect = true },
+                    },
+                };
+                string json = HeadlessLaunch.BuildConfigJson(spec);
+                Check(!json.Contains(HeadlessPw) && !json.Contains(account.PasswordProtected), "no password (plain or encrypted) in the config");
+                Check(!json.Contains("password", StringComparison.OrdinalIgnoreCase), "no password field at all");
+
+                JsonNode cfg = JsonNode.Parse(json)!;
+                Check((string?)cfg["host"] == "127.0.0.1" && (int?)cfg["port"] == 9000 && (string?)cfg["serverName"] == "Local ACE", "host, port, serverName");
+                Check(cfg["suiteDir"] == null && cfg["statusDir"] == null, "empty suiteDir/statusDir left out (the CLI's defaults)");
+                Check(cfg["plugins"]!.AsArray().Select(n => (string)n!).SequenceEqual(new[] { @"C:\x64\RynthCore.Plugin.RynthAi.dll", @"C:\x64\Other.dll" }), "plugins (blank dropped)");
+                JsonNode session = cfg["sessions"]!.AsArray().Single()!;
+                Check((string?)session["launcherProfileId"] == "0123abcd" && (string?)session["account"] == "TestAccount" && (string?)session["character"] == "+Test Character",
+                    "session: launcherProfileId, account, character");
+                Check(session["commands"]!.AsArray().Select(n => (string)n!).SequenceEqual(new[] { "/ra start" }) &&
+                      (int?)session["staySeconds"] == 0 && (bool?)session["reconnect"] == true, "session: commands, staySeconds, reconnect");
+
+                // As rynth-headless reads it (RunConfig: case-insensitive).
+                CliRunConfig? read = JsonSerializer.Deserialize<CliRunConfig>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                Check(read?.Host == "127.0.0.1" && read.Port == 9000 && read.Sessions.Single().LauncherProfileId == "0123abcd" &&
+                      read.Sessions.Single().Character == "+Test Character", "the CLI's shape reads it");
+
+                spec.SuiteDir = @"D:\Suite"; spec.StatusDir = @"D:\Status";
+                spec.Sessions[0].Character = "";
+                JsonNode cfg2 = JsonNode.Parse(HeadlessLaunch.BuildConfigJson(spec))!;
+                Check((string?)cfg2["suiteDir"] == @"D:\Suite" && (string?)cfg2["statusDir"] == @"D:\Status", "suiteDir/statusDir when set");
+                Check(cfg2["sessions"]![0]!.AsObject().ContainsKey("character") && cfg2["sessions"]![0]!["character"] == null, "no character: null");
+
+                string path = HeadlessLaunch.ConfigPath(_dir, account.Id);
+                Check(path == Path.Combine(_dir, "headless", "launch_0123abcd.json"), "config path: " + path);
+                Check(Path.GetFileName(HeadlessLaunch.ConfigPath(_dir, "a/b:c")) == "launch_a_b_c.json", "unsafe id characters replaced");
+                HeadlessLaunch.WriteConfig(path, json);
+                Check(File.ReadAllText(path) == json && !File.Exists(path + ".tmp"), "config written (no temp file left)");
+                CheckNoPlainText(HeadlessPw);
+
+                Check(Same(HeadlessLaunch.BuildArguments(path, @"C:\Turbine\Asheron's Call"),
+                           "run", "--config", path, "--launcher", "--ac-folder", @"C:\Turbine\Asheron's Call"), "arguments with the AC folder");
+                Check(Same(HeadlessLaunch.BuildArguments(path, null), "run", "--config", path, "--launcher"), "arguments without");
+                Check(HeadlessLaunch.AcFolderFor(@"C:\Turbine\Asheron's Call\acclient.exe") == @"C:\Turbine\Asheron's Call", "AC folder from the client path");
+                Check(HeadlessLaunch.AcFolderFor("  ") == null && HeadlessLaunch.AcFolderFor(null) == null, "no client path: no AC folder");
+
+                Check(HeadlessLaunch.ResolveExePath("", @"C:\Games\RynthCore") == @"C:\Games\RynthCore\Headless\rynth-headless.exe", "default exe beside the launcher");
+                Check(HeadlessLaunch.ResolveExePath(" \"D:\\h\\rynth-headless.exe\" ", @"C:\x") == @"D:\h\rynth-headless.exe", "set exe (trimmed, unquoted)");
+
+                // HeadlessPluginPaths empty = the x64 plugins the installer ships in <launcher>\Headless\plugins\<Name>\.
+                string install = Path.Combine(_dir, "install");
+                Check(HeadlessLaunch.DefaultPluginPaths(install).Count == 0, "no Headless\\plugins folder: no default plugins");
+                string shipped = Path.Combine(install, "Headless", "plugins");
+                Directory.CreateDirectory(Path.Combine(shipped, "RynthAi"));
+                Directory.CreateDirectory(Path.Combine(shipped, "Empty"));
+                File.WriteAllText(Path.Combine(shipped, "RynthAi", "RynthCore.Plugin.RynthAi.dll"), "x");
+                File.WriteAllText(Path.Combine(shipped, "RynthAi", "RynthCore.PluginSdk.dll"), "x");
+                string shippedAi = Path.Combine(shipped, "RynthAi", "RynthCore.Plugin.RynthAi.dll");
+                Check(Same(HeadlessLaunch.DefaultPluginPaths(install), shippedAi), "default plugins: each folder's RynthCore.Plugin.<folder>.dll, not its dependencies");
+                Check(Same(HeadlessLaunch.ResolvePluginPaths([], install), shippedAi) &&
+                      Same(HeadlessLaunch.ResolvePluginPaths(null, install), shippedAi) &&
+                      Same(HeadlessLaunch.ResolvePluginPaths(["  ", "\"\""], install), shippedAi), "an empty list uses the shipped plugins");
+                Check(Same(HeadlessLaunch.ResolvePluginPaths([" \"D:\\x64\\RynthCore.Plugin.RynthAi.dll\" "], install), @"D:\x64\RynthCore.Plugin.RynthAi.dll"),
+                      "a set list is used as it is (and nothing shipped is added)");
+
+                int pid = Environment.ProcessId;
+                Check(HeadlessLaunch.StopEventName(pid) == $@"Local\RynthHeadless.Stop.{pid}", "stop event name");
+                Check(!HeadlessLaunch.TrySignalStop(pid), "no stop event: TrySignalStop is false (the launcher kills instead)");
+                using (var stop = new EventWaitHandle(false, EventResetMode.ManualReset, HeadlessLaunch.StopEventName(pid)))
+                {
+                    Check(HeadlessLaunch.TrySignalStop(pid) && stop.WaitOne(0), "TrySignalStop sets the process's stop event");
+                }
+            });
+
             // ── saved account passwords (DPAPI) ─────────────────────────────────
             // Test-only passwords; nothing here touches the real settings file.
             const string Pw = "t3st pw \"quoted\" ü";
@@ -753,6 +976,45 @@ internal static class Program
 
     private static InjectionMode Mode(AppSettings s, string id) => s.AccountProfiles.First(a => a.Id == id).InjectionMode;
 
+    /// <summary><see cref="Sample"/> plus "h", a Headless account.</summary>
+    private static AppSettings SampleWithHeadless()
+    {
+        AppSettings s = Sample();
+        s.AccountProfiles.Add(new LaunchAccountProfile { Id = "h", AccountName = "H", InjectionMode = InjectionMode.Headless });
+        return s;
+    }
+
+    private static string HeadlessSidecar => Path.Combine(_dir, HeadlessAccountModes.FileName);
+
+    private static List<string> HeadlessIds()
+    {
+        if (!File.Exists(HeadlessSidecar)) return new();
+        JsonNode node = JsonNode.Parse(File.ReadAllText(HeadlessSidecar))!;
+        return node["HeadlessAccountIds"]!.AsArray().Select(n => (string)n!).ToList();
+    }
+
+    private static string Json(object? value) => JsonSerializer.Serialize(value);
+
+    /// <summary>The run config's shape as rynth-headless declares it (src\RynthCore.Headless.Cli\RunConfig.cs).</summary>
+    private sealed class CliRunConfig
+    {
+        public string Host { get; set; } = "";
+        public int Port { get; set; }
+        public string ServerName { get; set; } = "";
+        public List<string> Plugins { get; set; } = new();
+        public List<CliSession> Sessions { get; set; } = new();
+    }
+
+    private sealed class CliSession
+    {
+        public string LauncherProfileId { get; set; } = "";
+        public string Account { get; set; } = "";
+        public string? Character { get; set; }
+        public List<string> Commands { get; set; } = new();
+        public int StaySeconds { get; set; }
+        public bool Reconnect { get; set; }
+    }
+
     /// <summary>
     /// A swap as the launcher leaves it: the failed per-server stash copied over the live file,
     /// plus the account's name-only stash (same bytes when <paramref name="legacyMatches"/>).
@@ -778,6 +1040,12 @@ internal static class Program
             string name = Path.GetFileName(path);
             Check(!File.ReadAllText(path).Contains("DecalBridge"), $"{name} has no \"DecalBridge\"");
             Check(OldLauncherCanRead(path), $"the old launcher can read {name}");
+            // Every InjectionMode written is one the oldest launcher knows (never Headless or 3).
+            foreach (JsonNode? a in JsonNode.Parse(File.ReadAllText(path))!["AccountProfiles"]?.AsArray() ?? new JsonArray())
+            {
+                string? mode = a?["InjectionMode"]?.ToString();
+                Check(mode is null or "RynthCore" or "Decal", $"{name}: account {a?["Id"]} InjectionMode is {mode}");
+            }
         }
     }
 
@@ -828,6 +1096,31 @@ internal static class Program
     private static bool OldLauncherCanRead(string path)
     {
         try { JsonSerializer.Deserialize<OldSettings>(File.ReadAllText(path), OldOptions); return true; }
+        catch (JsonException) { return false; }
+    }
+
+    // A launcher with the Decal bridge but before Headless (its InjectionMode stops at DecalBridge).
+    private enum BridgeInjectionMode { RynthCore = 0, Decal = 1, DecalBridge = 2 }
+
+    private sealed class BridgeAccount
+    {
+        public string Id { get; set; } = "";
+        public BridgeInjectionMode InjectionMode { get; set; }
+    }
+
+    private sealed class BridgeSettings
+    {
+        public List<BridgeAccount> AccountProfiles { get; set; } = new();
+    }
+
+    private static bool BridgeLauncherCanRead(string path)
+    {
+        try
+        {
+            BridgeSettings? s = JsonSerializer.Deserialize<BridgeSettings>(File.ReadAllText(path), OldOptions);
+            // Strict like the old enum converter: a value it has no name for is "unreadable" too.
+            return s != null && s.AccountProfiles.All(a => Enum.IsDefined(a.InjectionMode));
+        }
         catch (JsonException) { return false; }
     }
 

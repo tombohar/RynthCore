@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for RynthCore.Headless's ClientSession: a scripted fake server (built from
+    the protocol description, in-process, no sockets) takes it through login, character
+    select, enter world, chat and logout, with and without lost packets, and checks every
+    packet the client sends (sequences, checksums, ISAAC keys, ack/NAK rules).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>HeadlessSessionTests</RootNamespace>
+    <AssemblyName>HeadlessSessionTests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.Headless\RynthCore.Headless.csproj" />
+  </ItemGroup>
+
+</Project>

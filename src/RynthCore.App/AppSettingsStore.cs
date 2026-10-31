@@ -15,7 +15,8 @@ internal static class AppSettingsStore
         Converters =
         {
             // Before the general enum converter: InjectionMode is written so that every
-            // launcher can read it ("Decal + RynthCore" lives in decal-accounts.json).
+            // launcher can read it ("Decal + RynthCore" lives in decal-accounts.json,
+            // Headless in headless-accounts.json).
             new SharedInjectionModeConverter(),
             new JsonStringEnumConverter()
         }
@@ -30,6 +31,13 @@ internal static class AppSettingsStore
     private static string SettingsPath => Path.Combine(SettingsDirectory, "appsettings.json");
     private static string BackupPath => SettingsPath + ".bak";
     private static string DecalAccountsPath => DecalAccountModes.PathIn(SettingsDirectory);
+    private static string HeadlessAccountsPath => HeadlessAccountModes.PathIn(SettingsDirectory);
+
+    /// <summary>
+    /// The folder appsettings.json lives in (%APPDATA%\RynthCore, or <see cref="DirectoryOverride"/>).
+    /// Other launcher files that tests redirect along with it go here too (the headless run configs).
+    /// </summary>
+    internal static string SettingsDirectoryPath => SettingsDirectory;
 
     /// <summary>
     /// Set when the last Load() hit a corrupt/unreadable file (quarantined it,
@@ -42,7 +50,8 @@ internal static class AppSettingsStore
     /// <summary>
     /// Set when the last Load() moved "Decal + RynthCore" accounts out of appsettings.json
     /// into decal-accounts.json (a file written by a pre-release Decal bridge build), or found
-    /// decal-accounts.json unreadable. Null otherwise.
+    /// decal-accounts.json unreadable; the same for Headless accounts and headless-accounts.json.
+    /// Null otherwise.
     /// </summary>
     public static string? LastMigrationNote { get; private set; }
 
@@ -65,9 +74,10 @@ internal static class AppSettingsStore
         LastMigrationNote = null;
         LastPasswordMigrationNote = null;
         LastPasswordProblemNote = null;
-        // Passwords after the Decal accounts: a save before ApplyDecalAccounts would drop
-        // decal-accounts.json (every account still reads as RynthCore at that point).
-        AppSettings settings = ApplyDecalAccounts(LoadShared());
+        // Passwords after the Decal and Headless accounts: a save before ApplyAccountModeFiles
+        // would drop decal-accounts.json and headless-accounts.json (every account still reads
+        // as RynthCore at that point).
+        AppSettings settings = ApplyAccountModeFiles(LoadShared());
         MigratePasswords(settings);
         return settings;
     }
@@ -208,36 +218,47 @@ internal static class AppSettingsStore
     }
 
     /// <summary>
-    /// Puts back the "Decal + RynthCore" accounts listed in decal-accounts.json (those that
-    /// appsettings.json still lists as RynthCore). An appsettings.json that itself says
-    /// "DecalBridge" (written by a pre-release bridge build) is rewritten at once, .bak
-    /// included, so no launcher finds that value there again.
+    /// Puts back the "Decal + RynthCore" accounts listed in decal-accounts.json and the Headless
+    /// accounts listed in headless-accounts.json (those that appsettings.json still lists as
+    /// RynthCore; an id in both files is Decal + RynthCore). An appsettings.json that itself says
+    /// "DecalBridge" (written by a pre-release bridge build) or "Headless" is rewritten at once,
+    /// .bak included, so no launcher finds that value there again.
     /// </summary>
-    private static AppSettings ApplyDecalAccounts(AppSettings settings)
+    private static AppSettings ApplyAccountModeFiles(AppSettings settings)
     {
         List<LaunchAccountProfile> accounts = settings.AccountProfiles ?? new List<LaunchAccountProfile>();
-        int legacy = accounts.Count(a => a.InjectionMode == InjectionMode.DecalBridge);
+        int legacyDecal = accounts.Count(a => a.InjectionMode == InjectionMode.DecalBridge);
+        int legacyHeadless = accounts.Count(a => a.InjectionMode == InjectionMode.Headless);
 
-        HashSet<string> ids = DecalAccountModes.ReadIds(DecalAccountsPath, out string? error);
-        if (error != null)
-            LastMigrationNote = error;
+        HashSet<string> decalIds = DecalAccountModes.ReadIds(DecalAccountsPath, out string? decalError);
+        HashSet<string> headlessIds = HeadlessAccountModes.ReadIds(HeadlessAccountsPath, out string? headlessError);
+        if (decalError != null || headlessError != null)
+            LastMigrationNote = string.Join(" ", new[] { decalError, headlessError }.Where(e => e != null));
         foreach (LaunchAccountProfile account in accounts)
-            if (DecalAccountModes.IsDecalBridge(ids, account.Id, account.InjectionMode))
-                account.InjectionMode = InjectionMode.DecalBridge;
-
-        if (legacy > 0)
         {
+            if (DecalAccountModes.IsDecalBridge(decalIds, account.Id, account.InjectionMode))
+                account.InjectionMode = InjectionMode.DecalBridge;
+            else if (HeadlessAccountModes.IsHeadless(headlessIds, account.Id, account.InjectionMode))
+                account.InjectionMode = InjectionMode.Headless;
+        }
+
+        if (legacyDecal + legacyHeadless > 0)
+        {
+            var moved = new List<string>(2);
+            if (legacyDecal > 0)
+                moved.Add($"{legacyDecal} \"Decal + RynthCore\" account(s) to {DecalAccountModes.FileName}");
+            if (legacyHeadless > 0)
+                moved.Add($"{legacyHeadless} Headless account(s) to {HeadlessAccountModes.FileName}");
+            string what = string.Join(" and ", moved);
             try
             {
                 Save(settings);
                 File.Copy(SettingsPath, BackupPath, overwrite: true);
-                LastMigrationNote = $"Moved {legacy} \"Decal + RynthCore\" account(s) from appsettings.json to " +
-                                    $"{DecalAccountModes.FileName}, so older launchers can still read appsettings.json.";
+                LastMigrationNote = $"Moved {what} from appsettings.json, so older launchers can still read appsettings.json.";
             }
             catch (Exception ex)
             {
-                LastMigrationNote = $"Could not move \"Decal + RynthCore\" accounts to {DecalAccountModes.FileName} " +
-                                    $"({ex.GetType().Name}: {ex.Message}); the next save retries.";
+                LastMigrationNote = $"Could not move {what} ({ex.GetType().Name}: {ex.Message}); the next save retries.";
             }
         }
         return settings;
@@ -245,13 +266,15 @@ internal static class AppSettingsStore
 
     public static void Save(AppSettings settings)
     {
-        // "Decal + RynthCore" accounts go to decal-accounts.json first; appsettings.json
-        // lists them as RynthCore (SharedInjectionModeConverter).
+        // "Decal + RynthCore" accounts go to decal-accounts.json and Headless accounts to
+        // headless-accounts.json first; appsettings.json lists both as RynthCore
+        // (SharedInjectionModeConverter).
         Directory.CreateDirectory(SettingsDirectory);
+        List<LaunchAccountProfile> accounts = settings.AccountProfiles ?? new List<LaunchAccountProfile>();
         DecalAccountModes.WriteIds(DecalAccountsPath,
-            (settings.AccountProfiles ?? new List<LaunchAccountProfile>())
-                .Where(a => a.InjectionMode == InjectionMode.DecalBridge)
-                .Select(a => a.Id));
+            accounts.Where(a => a.InjectionMode == InjectionMode.DecalBridge).Select(a => a.Id));
+        HeadlessAccountModes.WriteIds(HeadlessAccountsPath,
+            accounts.Where(a => a.InjectionMode == InjectionMode.Headless).Select(a => a.Id));
 
         // Atomic write: serialize to a temp file, then swap it in. A crash or
         // power cut mid-write can no longer truncate the live file (which holds
@@ -266,9 +289,9 @@ internal static class AppSettingsStore
     }
 
     /// <summary>
-    /// InjectionMode in appsettings.json. Writes only names every launcher knows: DecalBridge is
-    /// written as <see cref="DecalAccountModes.SharedMode"/> (decal-accounts.json holds the real
-    /// choice). Reads names and numbers; a name or number this build doesn't know reads as RynthCore
+    /// InjectionMode in appsettings.json. Writes only names every launcher knows: DecalBridge and
+    /// Headless are written as <see cref="AccountModeSidecar.SharedMode"/> (decal-accounts.json and
+    /// headless-accounts.json hold the real choice). Reads names and numbers; a name or number this build doesn't know reads as RynthCore
     /// instead of making the whole file unreadable.
     /// </summary>
     private sealed class SharedInjectionModeConverter : JsonConverter<InjectionMode>
@@ -288,7 +311,9 @@ internal static class AppSettingsStore
 
         public override void Write(Utf8JsonWriter writer, InjectionMode value, JsonSerializerOptions options)
         {
-            InjectionMode shared = value == InjectionMode.DecalBridge ? DecalAccountModes.SharedMode : value;
+            InjectionMode shared = value is InjectionMode.DecalBridge or InjectionMode.Headless
+                ? AccountModeSidecar.SharedMode
+                : value;
             writer.WriteStringValue(shared.ToString());
         }
     }

@@ -44,6 +44,9 @@ Name: desktopicon; Description: "Create a &desktop shortcut"; GroupDescription: 
 ; overwritereadonly: a file left read-only on the player's PC is replaced without a question
 ; (a /SILENT update can't answer one); the build clears ReadOnly on everything staged, and Setup
 ; doesn't give installed files any attributes, so nothing lands read-only.
+; This includes {app}\Headless (experimental): rynth-headless.exe with its own 64-bit .NET runtime and
+; Headless\plugins\<Name>\ (the 64-bit plugin builds it runs), staged by Build-Installer.ps1. Nothing
+; there is ever loaded by a game client; the x86 plugins below are unchanged.
 Source: "staging\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs overwritereadonly
 
 ; Plugin DLL goes to its canonical home next to plugin data dirs.

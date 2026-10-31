@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RynthCore.Headless: our own Asheron's Call client, no acclient.exe (docs\HEADLESS.md).
+    P0: the protocol (checksums, ISAAC, packets, acks/NAKs), the login handshake and a
+    session that enters the world, chats and logs out.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthCore.Headless</RootNamespace>
+    <AssemblyName>RynthCore.Headless</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HeadlessNetTests" />
+    <InternalsVisibleTo Include="HeadlessSessionTests" />
+    <InternalsVisibleTo Include="rynth-headless" />
+    <InternalsVisibleTo Include="HeadlessHostTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RynthCore.PluginSdk\RynthCore.PluginSdk.csproj" />
+    <ProjectReference Include="..\RynthCore.Geometry\RynthCore.Geometry.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pure engine code (no acclient memory), shared as source like the offline tests do. -->
+    <Compile Include="..\RynthCore.Engine\Net\AcPacketWire.cs" Link="Engine\AcPacketWire.cs" />
+    <Compile Include="..\RynthCore.Engine\Net\FragmentReassembler.cs" Link="Engine\FragmentReassembler.cs" />
+    <Compile Include="..\RynthCore.Engine\Compatibility\PropertyWire.cs" Link="Engine\PropertyWire.cs" />
+    <Compile Include="..\RynthCore.Engine\Compatibility\ObjectPropertyRecord.cs" Link="Engine\ObjectPropertyRecord.cs" />
+  </ItemGroup>
+
+</Project>

@@ -20,4 +20,11 @@ internal enum InjectionMode
     /// registers for this Windows user before the launch (DecalBridgeRegistration;
     /// docs/DECAL_BRIDGE_PLAN.md).</summary>
     DecalBridge = 2,
+
+    /// <summary>No acclient.exe: the launcher starts rynth-headless.exe (our own headless client,
+    /// src\RynthCore.Headless.Cli) for the account, with the x64 plugins set in
+    /// AppSettings.HeadlessPluginPaths (HeadlessLaunch). Experimental, ACE servers only.
+    /// appsettings.json lists such an account as RynthCore; headless-accounts.json says which
+    /// are really Headless (HeadlessAccountModes).</summary>
+    Headless = 3,
 }

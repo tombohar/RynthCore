@@ -53,7 +53,7 @@ internal static partial class StatusReader
             if (model == null) continue;
 
             double ageSec = AgeSeconds(model.Ts, path);
-            bool alive = IsAcClientAlive(pid);
+            bool alive = ClientLiveness.IsAlive(pid, model.Headless, model.HostPid, ClientLiveness.ProcessName);
 
             // Dead client: report it once (so the phone shows the stop), then
             // retire the stale file so it doesn't linger forever.
@@ -188,7 +188,7 @@ internal static partial class StatusReader
             if (!m.Success) continue;
             if (!int.TryParse(m.Groups[1].Value, out int pid)) continue;
             if (seenPids.Contains(pid)) continue;       // status file already covered it
-            if (!IsAcClientAlive(pid)) continue;        // only living clients via the log path
+            if (!ClientLiveness.IsAlive(pid, false, 0, ClientLiveness.ProcessName)) continue;        // only living clients via the log path
 
             string? hb = TailFindHeartbeat(path);
             if (hb == null) continue;
@@ -266,18 +266,6 @@ internal static partial class StatusReader
             return Math.Max(0, (DateTimeOffset.UtcNow - ts).TotalSeconds);
         try { return Math.Max(0, (DateTime.UtcNow - File.GetLastWriteTimeUtc(path)).TotalSeconds); }
         catch { return double.MaxValue; }
-    }
-
-    private static bool IsAcClientAlive(int pid)
-    {
-        try
-        {
-            using Process p = Process.GetProcessById(pid);
-            // Guard against PID reuse: a recycled PID owned by some other process
-            // must not read as a live AC client.
-            return p.ProcessName.Contains("acclient", StringComparison.OrdinalIgnoreCase);
-        }
-        catch { return false; }   // ArgumentException = no such process
     }
 
     private static string? TailFindHeartbeat(string path)

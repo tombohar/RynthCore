@@ -34,6 +34,7 @@ internal static class Program
         MoveProtocol();
         LogRollover();
         ServeGuards();
+        HeadlessClients();
         if (Arg(args, "--atlas") is { } atlas) RealAtlas(atlas);
         if (portal != null) RealSpellTable(portal);
         if (cell != null) RealWorldMap(cell, outFile);
@@ -41,6 +42,36 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine(_failed == 0 ? $"PASS ({_checks} checks)" : $"FAIL ({_failed} of {_checks} checks failed)");
         return _failed == 0 ? 0 : 1;
+    }
+
+    // ── headless characters (rynth-headless) ────────────────────────────────
+
+    private static void HeadlessClients()
+    {
+        Console.WriteLine("headless clients");
+        var names = new Dictionary<int, string> { [100] = "acclient", [200] = "rynth-headless", [300] = "notepad" };
+        string? Name(int pid) => names.TryGetValue(pid, out string? n) ? n : null;
+
+        Check(ClientLiveness.IsAlive(100, false, 0, Name), "a retail file: its own pid is an acclient");
+        Check(!ClientLiveness.IsAlive(300, false, 0, Name), "a recycled pid that isn't an acclient is dead");
+        Check(!ClientLiveness.IsAlive(1_000_000_001, false, 0, Name), "no such process: dead");
+        Check(ClientLiveness.IsAlive(1_000_000_001, true, 200, Name), "headless: the host process is a rynth-headless");
+        Check(!ClientLiveness.IsAlive(1_000_000_001, true, 300, Name), "headless: a recycled host pid is dead");
+        Check(!ClientLiveness.IsAlive(1_000_000_001, true, 0, Name), "headless with no host pid: dead");
+        Check(!ClientLiveness.IsAlive(200, false, 0, Name), "a retail file never counts a rynth-headless as an acclient");
+
+        // What StatusExporter writes (trimmed): the agent's model reads the headless fields.
+        var m = JsonSerializer.Deserialize("""
+            {"schema":"rynthcore.client-status/1","ts":"2026-10-28T12:00:00.000Z","host":"PC","pid":1012345600,
+             "account":"testaccount","character":"+Test Character","server":"ACEmulator","fps":66,"pluginTicksPerSec":66,"inWorld":true,
+             "bot":null,"enchantments":[{"spellId":2,"secondsRemaining":12.5}],
+             "opos":{"cell":"01D90108","indoor":true,"wx":100.5,"wy":200.25,"z":-6,"heading":90},
+             "headless":true,"hostPid":4242,"hostProcess":"rynth-headless"}
+            """, AgentJsonContext.Default.StatusFileModel)!;
+        Check(m.Headless && m.HostPid == 4242 && m.HostProcess == "rynth-headless", "headless fields read");
+        Check(m.Pid == 1012345600 && m.InWorld && m.Fps == 66, "the usual fields still read");
+        var retail = JsonSerializer.Deserialize("""{"schema":"rynthcore.client-status/1","pid":7}""", AgentJsonContext.Default.StatusFileModel)!;
+        Check(!retail.Headless && retail.HostPid == 0, "a retail file is not headless");
     }
 
     // ── serve guards (remote access) ────────────────────────────────────────

@@ -71,7 +71,7 @@ internal static class CrashDumpWriters
         return result;
     }
 
-    private static string? TryGetCommandLine(int pid)
+    internal static string? TryGetCommandLine(int pid)
     {
         IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
         if (h == IntPtr.Zero) return null;

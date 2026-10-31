@@ -44,6 +44,11 @@ internal sealed class StatusFileModel
     // left; the agent adds names/icons from portal.dat) and where the character stands, outdoors too.
     [JsonPropertyName("enchantments")]      public List<EnchantmentIn>? Enchantments { get; set; }
     [JsonPropertyName("opos")]              public PositionIn? Opos { get; set; }
+    // rynth-headless: one process hosts several characters, so "pid" is a per-character client id and
+    // the host process (hostPid, named hostProcess) is what must be alive (see ClientLiveness).
+    [JsonPropertyName("headless")]          public bool Headless { get; set; }
+    [JsonPropertyName("hostPid")]           public int HostPid { get; set; }
+    [JsonPropertyName("hostProcess")]       public string? HostProcess { get; set; }
     // RynthRemote 0.3: the last travel the phone asked RynthNav for (destination, what the plugin did).
     [JsonPropertyName("travel")]            public TravelIn? Travel { get; set; }
     // RynthRemote 0.4: the phone may raise attributes, vitals and skills on this client (engine API v79,

@@ -7,9 +7,11 @@ into the PC.
 
 It is built in two deliberately separated halves:
 
-1. **Engine status export** — opt-in, **default OFF**. When enabled, the engine
-   writes a small **local** JSON file per client. It never opens a network
-   connection.
+1. **Status export** — opt-in, **default OFF**. The private **RynthRemote**
+   plugin (loaded only by you) writes a small **local** JSON file per client;
+   the engine itself writes none. A headless character (`rynth-headless`, see
+   [HEADLESS.md](HEADLESS.md)) writes the same files from its own process.
+   Neither opens a network connection for this.
 2. **`RynthCore.StatusAgent.exe`** — a separate, optional program that runs **on
    your own PC**, reads those local files, and forwards a rolled-up payload to
    **an endpoint you configure**. It is not injected into the game, not in the
@@ -23,11 +25,12 @@ This feature is designed so that distributing RynthCore to other people changes
 nothing for them unless they explicitly turn it on, and even then nothing leaves
 their machine:
 
-- **Default off.** With `EnableStatusExport` absent or `false`, the engine writes
-  no status file and behaves exactly as before.
-- **No telemetry from the game.** `acclient.exe` / the engine never opens a
-  socket for this feature. The most it ever does is write a local file under
-  `C:\Games\RynthCore\Logs\status\`, right next to the logs it already writes.
+- **Default off.** Without the RynthRemote plugin loaded, no game client writes a
+  status file and everything behaves exactly as before. (Headless characters
+  write theirs by default, see below.)
+- **No telemetry from the game.** `acclient.exe` / the engine / the plugin never
+  open a socket for this feature. The most they do is write a local file under
+  `C:\Games\RynthCore\Logs\status\`, right next to the logs already written.
 - **The network half runs on the operator's PC, by the operator.** Only
   `RynthCore.StatusAgent.exe` makes outbound requests, only to the URL **you**
   put in **your** config, and only while you choose to run it. With no URL set it
@@ -41,24 +44,32 @@ agent — there is no path by which your build reaches into their PC.
 
 ## Turning it on (operator setup)
 
-### 1. Enable the engine status export
+### 1. Load the RynthRemote plugin
 
-Add to **your** `%APPDATA%\RynthCore\engine.json`:
-
-```json
-{
-  "EnableStatusExport": true
-}
-```
-
-(Or set the env var `RYNTHCORE_STATUS_EXPORT=1` before launching AC for a
-one-session test without editing the file.) Picked up on next client launch.
-
-The engine then writes, once per second, per running client:
+(The engine's own `EnableStatusExport` switch is gone; the files come from the
+plugin now.) Add the RynthRemote plugin to the launcher's plugin list. It then
+writes, once per second, per running client (plus `.inventory`, `.settings` and
+`.character` files next to it), and drains the phone's commands from
+`Logs\status\commands\RynthCore.<pid>.*.cmd.json`:
 
 ```
 C:\Games\RynthCore\Logs\status\RynthCore.<pid>.status.json
 ```
+
+**Headless characters.** `rynth-headless` writes the same four files and drains
+the same command files for each character it hosts. One process hosts several
+characters, so `<pid>` is a per-character **client id** (odd, above a billion,
+never a real process id), and the status carries `"headless": true`,
+`"hostPid"` and `"hostProcess": "rynth-headless"`. The agent checks that the
+host process is up and named rynth-headless, where for a retail client it checks
+that `<pid>` is an `acclient`. Its status folder is the run config's
+`statusDir` (the launcher's `HeadlessStatusDir`); by default it is
+`C:\Games\RynthCore\Logs\status\`, the agent's default `StatusDirectory`, so
+both kinds show together. `"statusDir": ""` turns its status files off. Unlike a
+game client, a headless character writes them without RynthRemote; they stay
+local files like the others. A headless character has no window, so screen streaming, clicks,
+`closeClient`, travel and raise are not available for it. Movement, assess and
+every RynthAi command work as they do on a retail client.
 
 ### 2. Build and run the agent
 

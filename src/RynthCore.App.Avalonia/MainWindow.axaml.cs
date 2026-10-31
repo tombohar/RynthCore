@@ -49,6 +49,12 @@ internal partial class MainWindow : Window
     private readonly ObservableCollection<string> _sessionItems = [];
     private readonly ObservableCollection<string> _pluginDllPaths = [];
     private readonly HashSet<int> _launchedSessionPids = [];
+    // rynth-headless.exe processes (InjectionMode.Headless): those this launcher started (until
+    // DetectQuickExits drops them), and those the last FindClientProcesses saw. They count as
+    // clients for sessions, account keys and auto-launch; acclient-only steps skip them.
+    private readonly HashSet<int> _launchedHeadlessPids = [];
+    private readonly HashSet<int> _headlessClientPids = [];
+    private readonly Dictionary<string, DateTime> _headlessRefusalNoticeTimesUtc = new(StringComparer.OrdinalIgnoreCase);
     // Per-PID metadata for crash detection: which account this client belongs
     // to and when we launched it. Used by the auto-relaunch circuit breaker
     // to distinguish "exited normally after a long session" from "quick exit".
@@ -256,6 +262,7 @@ internal partial class MainWindow : Window
         HeaderLaunchButton.Click += async (_, _) => await LaunchCheckedTargetsAsync();
         AutoLaunchHeaderCheckBox.IsCheckedChanged += (_, _) => SaveAutoLaunchPreference();
         SavePathsButton.Click += (_, _) => SaveRuntimePaths();
+        StopHeadlessButton.Click += (_, _) => StopHeadlessClients();
         SaveBehaviorButton.Click += (_, _) => SaveLaunchBehavior();
         InjectRunningAcButton.Click += async (_, _) => await InjectRunningAcAsync();
         RefreshSessionsButton.Click += (_, _) => RefreshSessionState();
@@ -385,6 +392,8 @@ internal partial class MainWindow : Window
             ? _settings.EnginePath
             : _injector.TryResolveEnginePath(null) ?? string.Empty;
         LaunchArgumentsTextBox.Text = _settings.LaunchArguments;
+        HeadlessExePathTextBox.Text = _settings.HeadlessExePath;
+        HeadlessPluginPathsTextBox.Text = string.Join(Environment.NewLine, _settings.HeadlessPluginPaths ?? []);
         // A whole-line override saved by an older launcher (with -a/-v/-h) would now ride along
         // on every account: launches refuse it, so say so up front.
         if (AcLaunchArgumentBuilder.ExtraArgumentsProblem(_settings.LaunchArguments, out _) is string extraProblem)
@@ -1228,20 +1237,32 @@ internal partial class MainWindow : Window
             "set the account back to RynthCore or Decal: once no account uses it, the launcher takes the " +
             "bridge out of Decal's list again (uninstalling RynthCore does too).");
 
+        var headlessItem = new ComboBoxItem { Content = "Headless (experimental)", Tag = InjectionMode.Headless };
+        global::Avalonia.Controls.ToolTip.SetTip(headlessItem,
+            "EXPERIMENTAL. No game window: the launcher starts rynth-headless.exe, RynthCore's own headless " +
+            "client, for this account. ACE servers only (not GDLE). " +
+            "Plugins: the 64-bit ones listed under Runtime > Headless client; with that list empty, the RynthAi " +
+            "that comes with RynthCore. The plugins in the Plugins tab and Decal don't run in it, and nothing is drawn: " +
+            "give RynthAi its orders with the account's on-login commands (for example /ra start). " +
+            "It logs in, runs the plugins and shows in the launcher like any other client; closing it from the launcher logs the character out first.");
+
         dropdown.Items.Add(rynthItem);
         dropdown.Items.Add(decalItem);
         dropdown.Items.Add(bridgeItem);
+        dropdown.Items.Add(headlessItem);
 
         // If the account is set to a Decal mode but Decal isn't installed, fall back to
         // RynthCore in the UI so the user can't accidentally launch into a
         // disabled mode. We don't mutate the saved profile until they click.
-        InjectionMode effectiveMode = (account.InjectionMode != InjectionMode.RynthCore && !decalAvailable)
+        // Headless needs no Decal, so it stays as it is.
+        InjectionMode effectiveMode = ((account.InjectionMode is InjectionMode.Decal or InjectionMode.DecalBridge) && !decalAvailable)
             ? InjectionMode.RynthCore
             : account.InjectionMode;
         dropdown.SelectedItem = effectiveMode switch
         {
             InjectionMode.Decal => decalItem,
             InjectionMode.DecalBridge => bridgeItem,
+            InjectionMode.Headless => headlessItem,
             _ => rynthItem,
         };
 
@@ -1257,6 +1278,9 @@ internal partial class MainWindow : Window
                 AppendActivity(mode == InjectionMode.DecalBridge
                     ? $"{account.DisplayName}: injection method set to Decal + RynthCore (experimental). " +
                       "Adding the RynthCore Decal bridge to Decal's filter list for all users (once; Windows may ask for administrator permission)."
+                    : mode == InjectionMode.Headless
+                    ? $"{account.DisplayName}: injection method set to Headless (experimental): launches start rynth-headless.exe " +
+                      "with the plugins under Runtime > Headless client (none listed = the RynthAi that comes with RynthCore). ACE servers only, no game window."
                     : $"{account.DisplayName}: injection method set to {mode}.");
                 if (mode == InjectionMode.DecalBridge)
                     _ = EnableDecalBridgeAsync();
@@ -1616,6 +1640,8 @@ internal partial class MainWindow : Window
         _settings.AcClientPath = AcClientPathTextBox.Text?.Trim() ?? string.Empty;
         _settings.EnginePath = EnginePathTextBox.Text?.Trim() ?? string.Empty;
         _settings.LaunchArguments = LaunchArgumentsTextBox.Text?.Trim() ?? string.Empty;
+        _settings.HeadlessExePath = HeadlessExePathTextBox.Text?.Trim() ?? string.Empty;
+        _settings.HeadlessPluginPaths = ReadHeadlessPluginPathsBox();
         SaveSettings();
         RefreshSummary();
         if (appendActivity)
@@ -1714,75 +1740,129 @@ internal partial class MainWindow : Window
         if (_operationBusy)
             return;
 
+        // Headless accounts start rynth-headless.exe (LaunchOneHeadlessAsync), not acclient.exe:
+        // the client checks below (client and engine paths, Extra Launch Arguments, the engine
+        // plugin, Decal, the Decal bridge) are about the other accounts only. When they fail in
+        // a batch with Headless accounts, the Headless accounts still launch.
+        List<LaunchAccountProfile> headlessAccounts = accountsToLaunch.Where(a => a.InjectionMode == InjectionMode.Headless).ToList();
+        List<LaunchAccountProfile> clientAccounts = accountsToLaunch.Where(a => a.InjectionMode != InjectionMode.Headless).ToList();
+
         string acPath = AcClientPathTextBox.Text?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(acPath) || !File.Exists(acPath))
-        {
-            AppendActivity("Launch blocked: AC client path is missing or invalid.");
-            return;
-        }
-
-        string enginePath = EnginePathTextBox.Text?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(enginePath))
-            enginePath = _injector.TryResolveEnginePath(null) ?? string.Empty;
-
-        if (string.IsNullOrWhiteSpace(enginePath))
-        {
-            AppendActivity("Launch blocked: engine path is missing and no default engine DLL could be resolved.");
-            return;
-        }
-
-        // Extra Launch Arguments go after each account's own arguments, for manual and automatic
-        // launches alike. They used to replace the whole line instead (and only manually, one
-        // account at a time); ExtraArgumentsProblem refuses what an old override would carry.
-        if (AcLaunchArgumentBuilder.ExtraArgumentsProblem(LaunchArgumentsTextBox.Text, out string extraArguments) is string extraProblem)
-        {
-            DateTime nowUtc = DateTime.UtcNow;
-            if (!isAutomaticLaunch || nowUtc - _extraArgumentsNoticeUtc >= AutoLaunchNeedsPasswordLogCooldown)
-            {
-                _extraArgumentsNoticeUtc = nowUtc;
-                AppendActivity($"Launch blocked: {extraProblem}");
-            }
-            return;
-        }
-
+        string enginePath = string.Empty;
+        string extraArguments = string.Empty;
         bool shouldInject = AutoInjectAfterLaunchCheckBox.IsChecked == true;
+        string? decalInjectPath = null;
 
-        // Engine plugin must be selected when at least one chosen account is
-        // RynthCore-mode AND auto-inject is on. Decal-mode accounts don't need
-        // it because they don't load the engine.
-        bool anyRynthCoreMode = accountsToLaunch.Any(a => a.InjectionMode is InjectionMode.RynthCore or InjectionMode.DecalBridge);
-        if (shouldInject && anyRynthCoreMode && !GetSelectedPluginIds().Contains("rynthcore-engine", StringComparer.OrdinalIgnoreCase))
+        if (clientAccounts.Count > 0)
         {
-            AppendActivity("Launch blocked: RynthCore Engine must stay selected in Runtime Loadout when auto-inject is enabled for any RynthCore-mode account.");
-            return;
-        }
+            string? clientBlock = null;   // why the acclient accounts can't launch
+            bool logClientBlock = true;
 
-        // Pre-resolve Decal Inject.dll once if any account needs it.
-        bool anyDecalMode = accountsToLaunch.Any(a => a.InjectionMode is InjectionMode.Decal or InjectionMode.DecalBridge);
-        string? decalInjectPath = anyDecalMode && shouldInject
-            ? DecalLocator.TryGetInjectDllPath()
-            : null;
-        if (shouldInject && anyDecalMode && decalInjectPath == null)
-        {
-            AppendActivity("Launch blocked: one or more accounts are set to Decal mode but Decal is not installed (HKLM\\SOFTWARE\\Decal\\Agent\\AgentPath\\Inject.dll missing).");
-            return;
-        }
+            if (string.IsNullOrWhiteSpace(acPath) || !File.Exists(acPath))
+                clientBlock = "AC client path is missing or invalid.";
 
-        // "Decal + RynthCore" accounts: make sure the Decal bridge is registered for this
-        // Windows user (idempotent; opt-in - only these accounts ever trigger it).
-        // Registered where THIS PC's AC client reads Decal's filter list, then checked: a
-        // client that wouldn't load the bridge runs the old coexistence path (no overlay, then
-        // a crash), so such a launch is blocked with the reason.
-        if (shouldInject && accountsToLaunch.Any(a => a.InjectionMode == InjectionMode.DecalBridge))
-        {
-            string decalAcPath = DecalLocator.TryGetDecalAcClientPath() ?? acPath;
-            if (!await EnsureDecalBridgeAsync(decalAcPath, interactive: !isAutomaticLaunch))
+            if (clientBlock == null)
             {
-                AppendActivity("Launch blocked: a Decal + RynthCore client would not load the Decal bridge on this PC (see the lines above, or Recovery Actions > Check Decal bridge). " +
-                    "Pick RynthCore or Decal for those accounts until it passes.");
-                return;
+                enginePath = EnginePathTextBox.Text?.Trim() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(enginePath))
+                    enginePath = _injector.TryResolveEnginePath(null) ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(enginePath))
+                    clientBlock = "engine path is missing and no default engine DLL could be resolved.";
+            }
+
+            // Extra Launch Arguments go after each account's own arguments, for manual and automatic
+            // launches alike. They used to replace the whole line instead (and only manually, one
+            // account at a time); ExtraArgumentsProblem refuses what an old override would carry.
+            if (clientBlock == null &&
+                AcLaunchArgumentBuilder.ExtraArgumentsProblem(LaunchArgumentsTextBox.Text, out extraArguments) is string extraProblem)
+            {
+                clientBlock = extraProblem;
+                DateTime nowUtc = DateTime.UtcNow;
+                logClientBlock = !isAutomaticLaunch || nowUtc - _extraArgumentsNoticeUtc >= AutoLaunchNeedsPasswordLogCooldown;
+                if (logClientBlock)
+                    _extraArgumentsNoticeUtc = nowUtc;
+            }
+
+            // Engine plugin must be selected when at least one chosen account is
+            // RynthCore-mode AND auto-inject is on. Decal-mode accounts don't need
+            // it because they don't load the engine.
+            bool anyRynthCoreMode = clientAccounts.Any(a => a.InjectionMode is InjectionMode.RynthCore or InjectionMode.DecalBridge);
+            if (clientBlock == null && shouldInject && anyRynthCoreMode &&
+                !GetSelectedPluginIds().Contains("rynthcore-engine", StringComparer.OrdinalIgnoreCase))
+            {
+                clientBlock = "RynthCore Engine must stay selected in Runtime Loadout when auto-inject is enabled for any RynthCore-mode account.";
+            }
+
+            // Pre-resolve Decal Inject.dll once if any account needs it.
+            bool anyDecalMode = clientAccounts.Any(a => a.InjectionMode is InjectionMode.Decal or InjectionMode.DecalBridge);
+            if (clientBlock == null && shouldInject && anyDecalMode)
+            {
+                decalInjectPath = DecalLocator.TryGetInjectDllPath();
+                if (decalInjectPath == null)
+                    clientBlock = "one or more accounts are set to Decal mode but Decal is not installed (HKLM\\SOFTWARE\\Decal\\Agent\\AgentPath\\Inject.dll missing).";
+            }
+
+            // "Decal + RynthCore" accounts: make sure the Decal bridge is registered for this
+            // Windows user (idempotent; opt-in - only these accounts ever trigger it).
+            // Registered where THIS PC's AC client reads Decal's filter list, then checked: a
+            // client that wouldn't load the bridge runs the old coexistence path (no overlay, then
+            // a crash), so such a launch is blocked with the reason.
+            if (clientBlock == null && shouldInject && clientAccounts.Any(a => a.InjectionMode == InjectionMode.DecalBridge))
+            {
+                string decalAcPath = DecalLocator.TryGetDecalAcClientPath() ?? acPath;
+                if (!await EnsureDecalBridgeAsync(decalAcPath, interactive: !isAutomaticLaunch))
+                {
+                    clientBlock = "a Decal + RynthCore client would not load the Decal bridge on this PC (see the lines above, or Recovery Actions > Check Decal bridge). " +
+                                  "Pick RynthCore or Decal for those accounts until it passes.";
+                }
+            }
+
+            if (clientBlock != null)
+            {
+                if (logClientBlock)
+                {
+                    AppendActivity(headlessAccounts.Count > 0
+                        ? $"Launch blocked for the accounts that aren't Headless: {clientBlock} The Headless accounts launch anyway."
+                        : $"Launch blocked: {clientBlock}");
+                }
+                clientAccounts.Clear();
             }
         }
+
+        // rynth-headless.exe must be there (Runtime > Headless client; default <launcher>\Headless).
+        string headlessExePath = string.Empty;
+        List<string> headlessPlugins = [];
+        if (headlessAccounts.Count > 0)
+        {
+            headlessExePath = HeadlessLaunch.ResolveExePath(HeadlessExePathTextBox.Text, AppContext.BaseDirectory);
+            // An empty box = the 64-bit plugins the installer ships in Headless\plugins (RynthAi).
+            headlessPlugins = HeadlessLaunch.ResolvePluginPaths(ReadHeadlessPluginPathsBox(), AppContext.BaseDirectory);
+            if (!File.Exists(headlessExePath))
+            {
+                foreach (LaunchAccountProfile account in headlessAccounts)
+                {
+                    NoteHeadlessRefusal(account, isAutomaticLaunch,
+                        $"{HeadlessLaunch.ExeName} not found at {headlessExePath}. Set its path under Runtime > Headless client.");
+                }
+                headlessAccounts.Clear();
+            }
+
+            // Refused before the First Login dialog could ask for a password it then can't use.
+            headlessAccounts.RemoveAll(account =>
+            {
+                LaunchServerProfile? server = ResolveServerForAccount(account);
+                if (server?.Emulator != AcEmulatorKind.Gdle)
+                    return false;
+                NoteHeadlessRefusal(account, isAutomaticLaunch,
+                    $"Headless runs on ACE servers only, and {server.DisplayName} is a GDLE server. Pick RynthCore or Decal for this account.");
+                return true;
+            });
+        }
+
+        if (clientAccounts.Count + headlessAccounts.Count == 0)
+            return;
+        if (clientAccounts.Count + headlessAccounts.Count < accountsToLaunch.Count)
+            accountsToLaunch = accountsToLaunch.Where(a => clientAccounts.Contains(a) || headlessAccounts.Contains(a)).ToList();
 
         // No usable password: the client would refuse to start ("You can only run the game from
         // the launcher program") and exit within seconds. A manual launch asks for it (and the
@@ -1817,7 +1897,9 @@ internal partial class MainWindow : Window
         try
         {
             SetOperationState(true);
-            _launchSettings.Apply(acPath, _settings.AllowMultipleClients, _settings.SkipIntroVideos, AppendActivity);
+            // acclient's own settings (multiple clients, intro videos); nothing a Headless launch reads.
+            if (accountsToLaunch.Any(a => a.InjectionMode != InjectionMode.Headless))
+                _launchSettings.Apply(acPath, _settings.AllowMultipleClients, _settings.SkipIntroVideos, AppendActivity);
             AppendActivity($"Preparing {launchLabel}.");
             HashSet<string> activeAccountKeys = GetActiveAccountKeys();
 
@@ -1843,11 +1925,25 @@ internal partial class MainWindow : Window
             var prepared = new List<(LaunchAccountProfile Account, string Args, string Summary, LaunchContextRecord Context)>();
             foreach (LaunchAccountProfile account in accountsToLaunch)
             {
-                if (!TryGetLaunchArgumentsForAccount(
+                bool headless = account.InjectionMode == InjectionMode.Headless;
+                string launchArguments = string.Empty;
+                string launchSummary;
+                if (headless)
+                {
+                    // No acclient command line (it would carry the password): rynth-headless reads
+                    // the password itself, by profile id (HeadlessLaunch).
+                    if (HeadlessLaunchProblem(account) is string headlessProblem)
+                    {
+                        NoteHeadlessRefusal(account, isAutomaticLaunch, headlessProblem);
+                        continue;
+                    }
+                    launchSummary = _launchArgumentBuilder.Describe(ResolveServerForAccount(account)!, account) + " (headless)";
+                }
+                else if (!TryGetLaunchArgumentsForAccount(
                     account,
                     extraArguments,
-                    out string launchArguments,
-                    out string launchSummary,
+                    out launchArguments,
+                    out launchSummary,
                     out string error))
                 {
                     AppendActivity($"Launch blocked for {account.DisplayName}: {error}");
@@ -1866,7 +1962,9 @@ internal partial class MainWindow : Window
                 LaunchContextRecord launchContext = BuildLaunchContext(account, contextServer);
                 // Best-effort legacy write — last writer wins. The PID-specific
                 // writes inside the launch task are the authoritative path.
-                LaunchContextStore.WriteLegacy(launchContext);
+                // (Not for Headless: only an engine inside acclient reads it.)
+                if (!headless)
+                    LaunchContextStore.WriteLegacy(launchContext);
 
                 if (!string.IsNullOrWhiteSpace(accountKey))
                     activeAccountKeys.Add(accountKey);
@@ -1886,7 +1984,13 @@ internal partial class MainWindow : Window
 
                 var p = prepared[i];
                 Task launchTask;
-                if (!shouldInject)
+                if (p.Account.InjectionMode == InjectionMode.Headless)
+                {
+                    // rynth-headless.exe whether or not auto-inject is on (there is nothing to inject).
+                    launchTask = LaunchOneHeadlessAsync(p.Account, ResolveServerForAccount(p.Account), headlessExePath,
+                        HeadlessLaunch.AcFolderFor(acPath), headlessPlugins, p.Summary, p.Context);
+                }
+                else if (!shouldInject)
                 {
                     launchTask = LaunchOneNoInjectAsync(p.Account, acPath, p.Args, p.Summary, p.Context);
                 }
@@ -2162,6 +2266,293 @@ internal partial class MainWindow : Window
                 LauncherDiag.Info($"LaunchOneNoInject released _userPrefsSwapLock (semCount={_userPrefsSwapLock.CurrentCount})");
             }
             LauncherDiag.Info($"LaunchOneNoInject EXIT account='{launchContext.AccountName}'");
+        }
+    }
+
+    // ── Headless accounts (InjectionMode.Headless) ─────────────────────────
+    // One rynth-headless.exe per account, with a run config the launcher writes
+    // (HeadlessLaunch). No acclient, so none of its steps apply: no prefs swap,
+    // window title or placement, graphics readiness, injection or heartbeat log.
+    // The process writes its own session_<pid>.json (--launcher), so the session
+    // poll sees it like any client once FindClientProcesses lists it.
+
+    /// <summary>
+    /// Starts rynth-headless.exe for <paramref name="account"/>: writes the run config
+    /// (%APPDATA%\RynthCore\headless\launch_&lt;profile id&gt;.json, no password in it), starts
+    /// the process without a window, writes its launch context and pending session record, and
+    /// tracks the pid like the other launch paths (exit watch, quick-exit crash accounting).
+    /// </summary>
+    private async Task LaunchOneHeadlessAsync(
+        LaunchAccountProfile account,
+        LaunchServerProfile? server,
+        string exePath,
+        string? acFolder,
+        IReadOnlyList<string> plugins,
+        string launchSummary,
+        LaunchContextRecord launchContext)
+    {
+        string accountKey = BuildAccountKey(launchContext.AccountName, launchContext.ServerName);
+        LauncherDiag.Info($"LaunchOneHeadless ENTRY account='{launchContext.AccountName}' exe='{exePath}' plugins={plugins.Count} sessionPids={_launchedSessionPids.Count} pidInfo={_launchedPidInfo.Count}");
+        if (server == null)
+        {
+            AppendActivity($"Launch blocked for {account.DisplayName}: {AccountServerRules.NoServerMessage(account, _settings.ServerProfiles.Count > 0)}");
+            return;
+        }
+
+        var spec = new HeadlessRunSpec
+        {
+            Host = server.Host,
+            Port = server.Port,
+            ServerName = server.Name,
+            SuiteDir = _settings.HeadlessSuiteDir,
+            StatusDir = _settings.HeadlessStatusDir,
+            Plugins = plugins.ToList(),
+            Sessions =
+            {
+                new HeadlessSessionSpec
+                {
+                    LauncherProfileId = account.Id,
+                    Account = account.AccountName,
+                    // "" = no auto-login for acclient; rynth-headless has no character screen to stop at, so it picks.
+                    Character = string.IsNullOrWhiteSpace(launchContext.TargetCharacter) ? null : launchContext.TargetCharacter,
+                    Commands = launchContext.OnLoginCommands?.ToList() ?? [],
+                    StaySeconds = 0,
+                    Reconnect = true,
+                },
+            },
+        };
+        string configPath = HeadlessLaunch.ConfigPath(AppSettingsStore.SettingsDirectoryPath, account.Id);
+
+        int? pid = null;
+        Exception? launchEx = null;
+        await Task.Run(() =>
+        {
+            try
+            {
+                HeadlessLaunch.WriteConfig(configPath, HeadlessLaunch.BuildConfigJson(spec));
+                var psi = new ProcessStartInfo(exePath)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = Path.GetDirectoryName(exePath) ?? string.Empty
+                };
+                foreach (string arg in HeadlessLaunch.BuildArguments(configPath, acFolder))
+                    psi.ArgumentList.Add(arg);
+                using Process? proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    // As the injected paths do from their suspended-launch callback. The process
+                    // overwrites the session record with its own as soon as it is connecting.
+                    LaunchContextStore.WriteForProcess(proc.Id, launchContext);
+                    WritePendingSessionState(proc.Id, launchContext);
+                    pid = proc.Id;
+                }
+            }
+            catch (Exception ex)
+            {
+                launchEx = ex;
+            }
+        });
+
+        if (launchEx != null || pid is not int trackedPid)
+        {
+            RecordCrash(accountKey);
+            string why = launchEx?.Message ?? "the process did not start";
+            AppendActivity($"Headless launch failed for {launchSummary}: {why}");
+            LauncherDiag.Info($"LaunchOneHeadless failed account='{launchContext.AccountName}': {why}");
+            return;
+        }
+
+        _launchedSessionPids.Add(trackedPid);
+        _launchedHeadlessPids.Add(trackedPid);
+        _launchedPidInfo[trackedPid] = (accountKey, DateTime.UtcNow);
+        RegisterPidExitWatch(trackedPid);
+        AppendActivity($"Headless launch complete for {launchSummary} (PID {trackedPid}).");
+        LauncherDiag.Info($"LaunchOneHeadless EXIT account='{launchContext.AccountName}' pid={trackedPid} config='{configPath}'");
+    }
+
+    /// <summary>Why <paramref name="account"/> can't run headless now (null = it can).</summary>
+    private string? HeadlessLaunchProblem(LaunchAccountProfile account)
+    {
+        LaunchServerProfile? server = ResolveServerForAccount(account);
+        if (server == null)
+            return AccountServerRules.NoServerMessage(account, _settings.ServerProfiles.Count > 0);
+        if (server.Emulator == AcEmulatorKind.Gdle)
+            return $"Headless runs on ACE servers only, and {server.DisplayName} is a GDLE server. Pick RynthCore or Decal for this account.";
+        if (string.IsNullOrWhiteSpace(server.Host) || server.Port <= 0)
+            return $"the server profile {server.DisplayName} needs a host and a port.";
+        if (AcLaunchArgumentBuilder.AccountNameProblem(account.AccountName, AcEmulatorKind.Ace) is string nameProblem)
+            return nameProblem;
+        // rynth-headless decrypts the saved password itself; check now that this Windows user can.
+        if (account.PasswordNeedsReentry ||
+            (!string.IsNullOrEmpty(account.PasswordProtected) && !AccountPasswordProtection.CanUnprotect(account.PasswordProtected)))
+        {
+            account.PasswordNeedsReentry = true;
+            return LaunchAccountProfile.PasswordNeedsReentryMessage(account.AccountName);
+        }
+        return null;
+    }
+
+    /// <summary>Logs why a Headless launch of <paramref name="account"/> was refused; automatic launches at most every few minutes.</summary>
+    private void NoteHeadlessRefusal(LaunchAccountProfile account, bool isAutomaticLaunch, string problem)
+    {
+        DateTime nowUtc = DateTime.UtcNow;
+        if (isAutomaticLaunch &&
+            _headlessRefusalNoticeTimesUtc.TryGetValue(account.Id, out DateTime lastUtc) &&
+            nowUtc - lastUtc < AutoLaunchNeedsPasswordLogCooldown)
+        {
+            return;
+        }
+        _headlessRefusalNoticeTimesUtc[account.Id] = nowUtc;
+        AppendActivity($"{(isAutomaticLaunch ? "Auto launch skipped" : "Launch blocked")} for {account.DisplayName} (Headless): {problem}");
+    }
+
+    /// <summary>The Runtime tab's headless plugin box: one DLL path per line, blank lines and surrounding quotes dropped.</summary>
+    private List<string> ReadHeadlessPluginPathsBox() =>
+        (HeadlessPluginPathsTextBox.Text ?? string.Empty)
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim().Trim('"').Trim())
+            .Where(line => line.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>
+    /// acclient.exe and rynth-headless.exe processes: every client the launcher tracks sessions,
+    /// account keys and auto-launch against. Also refreshes <see cref="_headlessClientPids"/>.
+    /// Steps that only apply to acclient (window, injection, heartbeat log) filter with
+    /// <see cref="IsHeadlessPid"/> / <see cref="AcClientsOnly"/>. The caller disposes the array.
+    /// </summary>
+    private Process[] FindClientProcesses()
+    {
+        Process[] acClients = _injector.FindTargetProcesses();
+        Process[] headless;
+        try { headless = Process.GetProcessesByName(HeadlessLaunch.ProcessName); }
+        catch { headless = []; }
+
+        _headlessClientPids.Clear();
+        foreach (Process p in headless)
+        {
+            try { _headlessClientPids.Add(p.Id); } catch { }
+        }
+        return headless.Length == 0 ? acClients : [.. acClients, .. headless];
+    }
+
+    /// <summary>True for a rynth-headless process (seen in the last enumeration, or launched as one here).</summary>
+    private bool IsHeadlessPid(int pid) => _headlessClientPids.Contains(pid) || _launchedHeadlessPids.Contains(pid);
+
+    /// <summary>
+    /// A rynth-headless.exe (from the last FindClientProcesses) already running this account's launch
+    /// config. One a previous launcher started isn't in <see cref="_launchedHeadlessPids"/>, and its
+    /// session records carry the headless client's own per-character ids, so HasTrackedPresence misses
+    /// it: auto launch then started a second one for the same account, which died at once on the
+    /// first one's open log (2026-10-30/31), and could otherwise have logged the account in twice.
+    /// </summary>
+    private bool HeadlessAlreadyRunning(LaunchAccountProfile account)
+    {
+        if (_headlessClientPids.Count == 0) return false;
+        string config = HeadlessLaunch.ConfigPath(AppSettingsStore.SettingsDirectoryPath, account.Id);
+        foreach (int pid in _headlessClientPids)
+        {
+            string? cmd = CrashDumpWriters.TryGetCommandLine(pid);
+            if (cmd != null && cmd.Contains(config, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Runtime > Headless client > Log out headless clients: a headless client has no window to close,
+    /// so every running rynth-headless gets the stop request (<see cref="EndClientProcess"/>: log out,
+    /// exit, killed after the grace time).
+    /// </summary>
+    private void StopHeadlessClients()
+    {
+        Process[] clients = FindClientProcesses();
+        int asked = 0;
+        try
+        {
+            foreach (Process p in clients)
+            {
+                int pid;
+                try { pid = p.Id; } catch { continue; }
+                if (!_headlessClientPids.Contains(pid))
+                    continue;
+                try
+                {
+                    EndClientProcess(p, pid);
+                    asked++;
+                }
+                catch (Exception ex)
+                {
+                    AppendActivity($"PID {pid} (headless): could not stop it: {ex.Message}");
+                }
+            }
+        }
+        finally
+        {
+            foreach (Process p in clients) p.Dispose();
+        }
+        AppendActivity(asked == 0
+            ? "No headless client is running."
+            : $"Asked {asked} headless client(s) to log out." +
+              (_settings.AutoLaunch ? " AutoLaunch is on: checked accounts are started again." : ""));
+    }
+
+    private Process[] AcClientsOnly(Process[] targets) =>
+        _headlessClientPids.Count == 0 && _launchedHeadlessPids.Count == 0
+            ? targets
+            : targets.Where(p => { try { return !IsHeadlessPid(p.Id); } catch { return false; } }).ToArray();
+
+    /// <summary>
+    /// Ends a client the launcher has decided to take down. acclient: killed at once. rynth-headless:
+    /// asked to log every character out and exit (its stop event), and killed after
+    /// <see cref="HeadlessLaunch.StopGrace"/> if it is still running; killed at once when it has no
+    /// stop event. Throws as Process.Kill does.
+    /// </summary>
+    private void EndClientProcess(Process process, int pid)
+    {
+        if (!IsHeadlessPid(pid))
+        {
+            process.Kill();
+            return;
+        }
+
+        if (!HeadlessLaunch.TrySignalStop(pid))
+        {
+            AppendActivity($"PID {pid} (headless) has no stop channel; killing it.");
+            process.Kill();
+            return;
+        }
+
+        DateTime startedUtc = GetProcessStartTimeUtc(process);
+        AppendActivity($"PID {pid} (headless): asked to log out and exit; killed in {HeadlessLaunch.StopGrace.TotalSeconds:0} s if still running.");
+        _ = KillHeadlessAfterGraceAsync(pid, startedUtc);
+    }
+
+    private async Task KillHeadlessAfterGraceAsync(int pid, DateTime startedUtc)
+    {
+        await Task.Delay(HeadlessLaunch.StopGrace);
+        try
+        {
+            using Process p = Process.GetProcessById(pid);
+            // The same process (not a recycled pid): name and start time match.
+            if (p.HasExited ||
+                !string.Equals(p.ProcessName, HeadlessLaunch.ProcessName, StringComparison.OrdinalIgnoreCase) ||
+                Math.Abs((GetProcessStartTimeUtc(p) - startedUtc).TotalSeconds) > 1)
+            {
+                return;
+            }
+            AppendActivity($"PID {pid} (headless) still running {HeadlessLaunch.StopGrace.TotalSeconds:0} s after the stop request; killing it.");
+            LauncherDiag.Info($"HEADLESS: PID {pid} ignored the stop request for {HeadlessLaunch.StopGrace.TotalSeconds:0} s - killed.");
+            p.Kill();
+        }
+        catch (ArgumentException)
+        {
+            // Already gone.
+        }
+        catch (Exception ex)
+        {
+            AppendActivity($"PID {pid} (headless): kill after the stop request failed: {ex.Message}");
         }
     }
 
@@ -3103,7 +3494,7 @@ internal partial class MainWindow : Window
         int running = RynthCoreClientsRunning();
         if (running > 0)
         {
-            AppendActivity($"Close your {running} game client(s) running RynthCore or its Decal bridge first: the update replaces files they have open.");
+            AppendActivity($"Close your {running} game client(s) running RynthCore or its Decal bridge (headless ones included) first: the update replaces files they have open.");
             RefreshUpdateCard();
             return;
         }
@@ -3149,6 +3540,17 @@ internal partial class MainWindow : Window
             catch { }
             finally { p.Dispose(); }
         }
+        // Headless clients (rynth-headless.exe) run RynthCore code and plugins from the install
+        // too; no module check needed (and an x86 launcher can't list an x64 process's modules).
+        try
+        {
+            foreach (Process p in Process.GetProcessesByName(HeadlessLaunch.ProcessName))
+            {
+                n++;
+                p.Dispose();
+            }
+        }
+        catch { }
         return n;
     }
 
@@ -3360,7 +3762,9 @@ internal partial class MainWindow : Window
         Process[] targets;
         try
         {
-            targets = _injector.FindTargetProcesses();
+            // rynth-headless.exe too: its session file would otherwise be deleted as stale every
+            // tick, and auto-launch would start the account again and again.
+            targets = FindClientProcesses();
         }
         catch (Exception ex)
         {
@@ -3369,11 +3773,15 @@ internal partial class MainWindow : Window
         }
 
         HashSet<int> activePids = targets.Select(process => process.Id).ToHashSet();
+        // acclient.exe only: window, injection and heartbeat-log steps below.
+        Process[] acTargets = AcClientsOnly(targets);
         LaunchContextStore.DeleteStaleProcessFiles(activePids);
         SessionStateStore.DeleteStaleProcessFiles(activePids);
         Dictionary<int, LaunchContextRecord> activeContexts = LaunchContextStore.ReadForActiveProcesses(activePids);
         Dictionary<int, SessionStateRecord> activeSessions = SessionStateStore.ReadForActiveProcesses(activePids);
         DetectQuickExits(activePids);
+        // After DetectQuickExits (which asks whether an exited pid was headless): a recycled pid starts fresh.
+        _launchedHeadlessPids.RemoveWhere(pid => !activePids.Contains(pid));
 
         // Audit trail for vanished PIDs: log each removal so a "did the
         // launcher kill this client?" question has a concrete answer. The
@@ -3415,16 +3823,24 @@ internal partial class MainWindow : Window
             }
         }
 
-        AcStatusText.Text = targets.Length switch
+        int headlessCount = targets.Length - acTargets.Length;
+        AcStatusText.Text = (targets.Length switch
         {
             0 => "No running AC clients detected.",
             1 => "1 AC client is running.",
             _ => $"{targets.Length} AC clients are running."
-        };
+        }) + (headlessCount > 0 ? $" ({headlessCount} headless)" : string.Empty);
 
         _sessionItems.Clear();
         foreach (Process process in targets.OrderBy(p => p.Id))
         {
+            // Headless: no window, no D3D device. Listed, but none of the window steps apply.
+            if (IsHeadlessPid(process.Id))
+            {
+                _sessionItems.Add($"PID {process.Id}  |  {DescribeSessionOrigin(process, activeContexts, activeSessions)}  |  headless");
+                continue;
+            }
+
             bool graphicsReady = _injector.TryDescribeGraphicsReadiness(process, out string status);
             string readiness = graphicsReady ? "graphics ready" : SimplifyReadinessStatus(status);
             string origin = DescribeSessionOrigin(process, activeContexts, activeSessions);
@@ -3441,9 +3857,11 @@ internal partial class MainWindow : Window
 
         UpdateLaunchTargetStatuses(targets, activeContexts, activeSessions);
         MaybeQueueAutoLaunch(activeContexts, activeSessions);
-        MaybeAutoInjectExternalClients(targets, activePids, activeContexts, activeSessions);
-        MaybeKillStuckClients(targets, activeContexts, activeSessions);
-        MaybeRestartWedgedClients(targets, activeContexts, activeSessions);
+        // acclient only: injection, the not-responding window check and the engine heartbeat log
+        // mean nothing for rynth-headless (it reconnects by itself; the stop event ends it).
+        MaybeAutoInjectExternalClients(acTargets, activePids, activeContexts, activeSessions);
+        MaybeKillStuckClients(acTargets, activeContexts, activeSessions);
+        MaybeRestartWedgedClients(acTargets, activeContexts, activeSessions);
 
         // Dispose this tick's Process handles. FindTargetProcesses() allocates fresh
         // System.Diagnostics.Process objects (each holds a native OS handle); on the 2s
@@ -3469,6 +3887,8 @@ internal partial class MainWindow : Window
     ///     heuristic would falsely reap working Decal sessions)
     ///   - <see cref="SessionStateRecord.IsLoggedIn"/> is still false
     ///   - Time-since-launch exceeds the configured timeout
+    /// Headless clients (rynth-headless) are never passed in (RefreshSessionState filters
+    /// them) and their profiles say Headless, not RynthCore.
     /// </summary>
     private void MaybeKillStuckClients(
         IReadOnlyList<Process> targets,
@@ -3565,7 +3985,7 @@ internal partial class MainWindow : Window
             try
             {
                 AppendActivity($"Killing stuck PID {pid} ({accountName}) — {reason} and window is not responding.");
-                process.Kill();
+                EndClientProcess(process, pid);   // a headless client is asked to stop first (never reaches here today)
                 _launchedSessionPids.Remove(pid);
                 _launchedPidInfo.Remove(pid);
 
@@ -3904,7 +4324,7 @@ internal partial class MainWindow : Window
             AppendActivity($"Wedge restart: killing PID {pid} ({accountName ?? "?"}) — {reason}."
                 + (_settings.AutoLaunch ? " Auto-launch will relaunch it." : " AutoLaunch is OFF — enable it for automatic relaunch."));
             LauncherDiag.Info($"WEDGE: PID {pid} ({accountName ?? "?"}) killed — {reason}");
-            process.Kill();
+            EndClientProcess(process, pid);   // a headless client is asked to stop first (never reaches here today)
             _launchedSessionPids.Remove(pid);
             _launchedPidInfo.Remove(pid);
 
@@ -4068,6 +4488,18 @@ internal partial class MainWindow : Window
     {
         try
         {
+            // Headless: no acclient command line; rynth-headless gets a run config (no password in it).
+            if (account.InjectionMode == InjectionMode.Headless)
+            {
+                if (server.Emulator == AcEmulatorKind.Gdle)
+                    return $"Headless runs on ACE servers only, and {server.DisplayName} is a GDLE server.";
+                if (AcLaunchArgumentBuilder.NeedsPassword(account))
+                    return AcLaunchArgumentBuilder.MissingPasswordMessage(account.AccountName);
+                return $"{HeadlessLaunch.ExeName} " + string.Join(" ", HeadlessLaunch.BuildArguments(
+                    HeadlessLaunch.ConfigPath(AppSettingsStore.SettingsDirectoryPath, account.Id),
+                    HeadlessLaunch.AcFolderFor(AcClientPathTextBox.Text)).Select(a => a.Contains(' ') ? $"\"{a}\"" : a));
+            }
+
             // Never decrypts: a saved password shows as the mask. Extra Launch Arguments follow,
             // as they do at launch.
             string masked = _launchArgumentBuilder.BuildMaskedArguments(server, account);
@@ -4085,16 +4517,17 @@ internal partial class MainWindow : Window
 
     private HashSet<string> GetActiveAccountKeys()
     {
-        Process[] targets = _injector.FindTargetProcesses();
+        Process[] targets = FindClientProcesses();
         HashSet<int> activePids = targets.Select(process => process.Id).ToHashSet();
 
         // Processes whose window is gone but whose OS process is still alive
         // (slow native shutdown, crash dump collection, etc.) should not block
         // relaunch for their account. Only applies to PIDs that completed at
         // least one login — startup-phase clients keep blocking normally.
+        // Headless clients never have a window: they count while they run.
         foreach (Process p in targets)
         {
-            if (!_everLoggedInPids.Contains(p.Id))
+            if (!_everLoggedInPids.Contains(p.Id) || IsHeadlessPid(p.Id))
                 continue;
             try
             {
@@ -4294,6 +4727,11 @@ internal partial class MainWindow : Window
                 int hist = _crashHistoryByAccount.TryGetValue(entry.Value.AccountKey, out List<DateTime>? h) ? h.Count : 0;
                 LauncherDiag.Info($"DetectQuickExits: PID {entry.Key} ({entry.Value.AccountKey}) uptime={uptime.TotalSeconds:F1}s -> RecordCrash. crashHist now {hist}.");
                 RecoverFailedPrefsSwap(entry.Key, entry.Value.AccountKey, uptime);
+            }
+            else if (!string.IsNullOrEmpty(entry.Value.AccountKey) && _launchedHeadlessPids.Contains(entry.Key))
+            {
+                // Headless: no acclient ran, so the live UserPreferences.ini isn't this account's.
+                LauncherDiag.Info($"DetectQuickExits: PID {entry.Key} ({entry.Value.AccountKey}) uptime={uptime.TotalSeconds:F1}s -> normal close (headless, no prefs snapshot).");
             }
             else if (!string.IsNullOrEmpty(entry.Value.AccountKey))
             {
@@ -4894,7 +5332,7 @@ internal partial class MainWindow : Window
         foreach (LaunchAccountProfile account in GetCheckedLaunchAccounts())
         {
             LaunchServerProfile? server = ResolveServerForAccount(account);
-            if (HasTrackedPresence(account, server, activeContexts, activeSessions))
+            if (HasTrackedPresence(account, server, activeContexts, activeSessions) || HeadlessAlreadyRunning(account))
                 continue;
 
             // No server profile (deleted, or never picked): never launched on another server.
@@ -5031,7 +5469,7 @@ internal partial class MainWindow : Window
         // Dispose the Process[] only if WE allocated it here (standalone call). When
         // called from RefreshSessionState the array is passed in and that caller owns it.
         bool ownTargets = targets is null;
-        targets ??= _injector.FindTargetProcesses();
+        targets ??= FindClientProcesses();   // headless clients have session files too
         HashSet<int> activePids = targets.Select(process => process.Id).ToHashSet();
 
         activeContexts ??= LaunchContextStore.ReadForActiveProcesses(activePids);

@@ -19,6 +19,8 @@
     <!-- "Decal + RynthCore" accounts live in decal-accounts.json beside appsettings.json. -->
     <Compile Include="..\RynthCore.App\InjectionMode.cs" Link="Shared\InjectionMode.cs" />
     <Compile Include="..\RynthCore.App\DecalAccountModes.cs" Link="Shared\DecalAccountModes.cs" />
+    <!-- Headless accounts: headless-accounts.json (the injector launch command starts them as RynthCore, with a notice). -->
+    <Compile Include="..\RynthCore.App\HeadlessAccountModes.cs" Link="Shared\HeadlessAccountModes.cs" />
     <!-- Saved account passwords are DPAPI-encrypted (PasswordProtected in appsettings.json). -->
     <Compile Include="..\RynthCore.App\AccountPasswordProtection.cs" Link="Shared\AccountPasswordProtection.cs" />
     <Compile Include="..\RynthCore.App\AcClientCommandLine.cs" Link="Shared\AcClientCommandLine.cs" />

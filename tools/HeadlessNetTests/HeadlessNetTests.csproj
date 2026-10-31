@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for RynthCore.Headless's protocol layer: Hash32, ISAAC (AC seeding),
+    String16L/String32L/packed u32, packet build/parse and checksums (plain and encrypted),
+    byte-identical resends, fragment reassembly, sequence tracking, acks and NAKs, and the
+    login/ObjectCreate message layouts. No network, no server: a session captured from the
+    local ACE server (Captures\) is replayed through the transport and parsers.
+    ISAAC and Hash32 vectors are from OpenAC's tests (MIT, see Program.cs).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>HeadlessNetTests</RootNamespace>
+    <AssemblyName>HeadlessNetTests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Datagrams captured from a live session against the local ACE server (rynth-headless capture option). -->
+    <None Include="Captures\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.Headless\RynthCore.Headless.csproj" />
+  </ItemGroup>
+
+</Project>

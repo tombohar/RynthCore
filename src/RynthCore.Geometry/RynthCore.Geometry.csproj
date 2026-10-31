@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RynthCore.Geometry: the AC world's shape, read from the dats. Dat access, terrain
+    heights/normals, indoor cells (EnvCells, portals, floors), model physics polygons, and a
+    collision query for walking. Shared by RynthCore.Headless now; meant to replace the
+    copies in RynthSuite (Shared/RynthCore.TerrainData, RynthAi Raycasting, RynthNav tools).
+    Pure managed code, no host, no Windows APIs.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthCore.Geometry</RootNamespace>
+    <AssemblyName>RynthCore.Geometry</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="GeometryTests" />
+    <InternalsVisibleTo Include="RynthCore.Headless" />
+  </ItemGroup>
+
+</Project>

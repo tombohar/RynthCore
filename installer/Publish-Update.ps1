@@ -368,6 +368,17 @@ if (-not $?) { throw "Build-Installer.ps1 failed" }
 $bridgeStaged = Join-Path $ScriptDir "staging\app\DecalBridge\RynthCore.DecalBridge.dll"
 if (-not (Test-Path $bridgeStaged)) { throw "The installer was built without the Decal bridge ($bridgeStaged missing) - not publishing." }
 Write-Host "  Decal bridge in the installer: $((Get-Item $bridgeStaged).VersionInfo.FileVersion)"
+# The headless client ships in every release too (experimental, opt-in per account): rynth-headless with its
+# own x64 runtime, and the x64 RynthAi it loads when the launcher's HeadlessPluginPaths is empty. Its
+# plugins come with the core installer only; the feed's plugin entries stay the x86 game-client builds.
+foreach ($f in "Headless\rynth-headless.exe", "Headless\plugins\RynthAi\RynthCore.Plugin.RynthAi.dll") {
+    if (-not (Test-Path (Join-Path $ScriptDir "staging\app\$f"))) { throw "The installer was built without $f - not publishing." }
+}
+foreach ($f in "Headless\rynth-headless.dll", "Headless\plugins\RynthAi\RynthCore.Plugin.RynthAi.dll") {
+    $fv = (Get-Item (Join-Path $ScriptDir "staging\app\$f")).VersionInfo.FileVersion
+    if ($fv -ne $Version) { throw "The installer's $f is version $fv, not $Version (stale build?) - not publishing." }
+}
+Write-Host "  headless client in the installer: rynth-headless and the x64 RynthAi, both $Version"
 Copy-Item (Join-Path $ScriptDir "Output\RynthCore-Setup.exe") "$rel\RynthCore-Setup.exe"
 Copy-Item (Join-Path $ScriptDir "staging\plugins\RynthAi\RynthCore.Plugin.RynthAi.dll") "$rel\plugins\"
 foreach ($name in $suitePlugins + $serverPlugins) {

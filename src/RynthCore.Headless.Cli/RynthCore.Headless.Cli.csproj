@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- rynth-headless: console runner for RynthCore.Headless (P0: the protocol spike). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>RynthCore.Headless.Cli</RootNamespace>
+    <AssemblyName>rynth-headless</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RynthCore.Headless\RynthCore.Headless.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The launcher's saved-password decryption (DPAPI), for the launcher-account option. -->
+    <Compile Include="..\RynthCore.App\AccountPasswordProtection.cs" Link="Launcher\AccountPasswordProtection.cs" />
+    <!-- run with the launcher flag: the launcher's session record and character cache, as the engine writes them. -->
+    <Compile Include="..\RynthCore.App\SessionStateStore.cs" Link="Launcher\SessionStateStore.cs" />
+    <Compile Include="..\RynthCore.App\CharacterCacheStore.cs" Link="Launcher\CharacterCacheStore.cs" />
+    <!-- The stop event name the launcher sets (shared with it). -->
+    <Compile Include="..\RynthCore.App\HeadlessLaunch.cs" Link="Launcher\HeadlessLaunch.cs" />
+    <!-- Install-folder resolver (env, HKCU, HKLM, default C:\Games): the default status folder is the
+         engine's and the StatusAgent's, <RynthCore>\Logs\status (HeadlessDefaults.cs). Read only. -->
+    <Compile Include="..\Shared\RynthInstallPaths.cs" Link="Shared\RynthInstallPaths.cs" />
+  </ItemGroup>
+
+</Project>

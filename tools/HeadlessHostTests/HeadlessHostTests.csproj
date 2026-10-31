@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the headless plugin host's API (src/RynthCore.Headless/Host): a session
+    replayed from a captured ACE session (tools/HeadlessNetTests/Captures/ace-p1-session.txt)
+    gives a real world model; the API table is built and its functions are called through the
+    same function pointers plugins use; the game actions they send are decoded and checked.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>HeadlessHostTests</RootNamespace>
+    <AssemblyName>HeadlessHostTests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Left out of the public source snapshots (it holds a live login): the tests then skip (Program.Main). -->
+    <None Include="..\HeadlessNetTests\Captures\ace-p1-session.txt" Link="Captures\ace-p1-session.txt" CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('..\HeadlessNetTests\Captures\ace-p1-session.txt')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.Headless\RynthCore.Headless.csproj" />
+  </ItemGroup>
+
+</Project>

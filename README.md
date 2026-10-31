@@ -81,6 +81,7 @@ For full deploy details, the Inno Setup installer, and gotchas, see [`BUILD.md`]
 - `docs/ACCLIENT_HOOK_INVENTORY.md` — hook target inventory against the user's live `acclient.exe`
 - `docs/PLUGIN_HOOK_MATRIX.md` — clean-room hook surface matrix
 - `docs/LEGAL_COMPATIBILITY.md` — project policy on Decal/VTank compatibility
+- `installer/HEADLESS-README.md` — players' guide to the experimental Headless mode (installed as `Headless\README.md`)
 - `docs/archive/` — archived plans and one-off utilities
 
 ## Repository notes

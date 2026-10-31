@@ -109,6 +109,14 @@ internal static class LaunchCommand
                 a.InjectionMode = InjMode.DecalBridge;
         }
 
+        // Headless accounts (rynth-headless.exe instead of acclient) are listed in
+        // headless-accounts.json the same way. This tool only starts acclient: such an account
+        // stays RynthCore here (what appsettings.json says) and is launched as one, with a notice.
+        HashSet<string> headlessIds = RynthCore.App.HeadlessAccountModes.ReadIds(
+            RynthCore.App.HeadlessAccountModes.PathIn(Path.GetDirectoryName(settingsPath)!), out string? headlessModesError);
+        if (headlessModesError != null)
+            Log(headlessModesError);
+
         // ── Resolve account ──────────────────────────────────────────────────
         List<AccountDto> accounts = settings.AccountProfiles ?? new();
         List<ServerDto> servers = settings.ServerProfiles ?? new();
@@ -150,6 +158,9 @@ internal static class LaunchCommand
             return 2;
         }
 
+        if (RynthCore.App.HeadlessAccountModes.IsHeadless(headlessIds, account.Id, (RynthCore.App.InjectionMode)(int)account.InjectionMode))
+            Log($"Account '{account.AccountName}' is set to Headless in the launcher; --launch starts it in acclient.exe with RynthCore instead " +
+                "(the launcher starts rynth-headless.exe for it).");
         if (account.InjectionMode == InjMode.Decal && !withDecal)
             Log($"WARNING: account '{account.AccountName}' is configured for Decal mode; --launch always injects the RynthCore engine (pass --decal for both).");
         // "Decal + RynthCore" accounts launch as --decal does. Registration of the Decal
@@ -440,6 +451,7 @@ internal static class LaunchCommand
 
     private enum EmulatorKind { Ace = 0, Gdle = 1 }
 
+    // No Headless (3): appsettings.json lists Headless accounts as RynthCore (headless-accounts.json above).
     private enum InjMode { RynthCore = 0, Decal = 1, DecalBridge = 2 }
 
     private sealed class LaunchContextDto
