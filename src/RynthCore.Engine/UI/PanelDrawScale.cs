@@ -8,6 +8,12 @@
 //  font (Tom 2026-10-22: "the shortcut size needs to go a lot smaller").
 //  Stored for the whole PC in %LOCALAPPDATA%\RynthCore\panel_draw_scale.txt as
 //  "Title=percent" lines; every client looks for a change at most every 2 s.
+//
+//  Sharp when bigger (2026-11-01, Tom: enlarged windows "get blurry"): a window
+//  drawn over 100% took its text from the normal bake, stretched. Now its fonts
+//  come from the text size bake just above its size (FontStep; PluginWindowFace
+//  switches ImGuiFonts.CurrentStep while the plugin draws), shrunk a little at
+//  most, and ImGuiFonts bakes the sizes the saved ones need with the text sizes.
 // ============================================================================
 
 using System;
@@ -38,6 +44,9 @@ internal static class PanelDrawScale
     private static readonly Dictionary<string, int> Scales = new(StringComparer.OrdinalIgnoreCase);
     private static DateTime _fileTime = DateTime.MinValue;
     private static long _checkedMs = long.MinValue / 2;
+    // The font steps last handed to ImGuiFonts' bake ("3,6"; null before the first bake).
+    private static string? _bakedSteps;
+    private const int RebuildDelayMs = 250;
 
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RynthCore", "panel_draw_scale.txt");
@@ -61,6 +70,7 @@ internal static class PanelDrawScale
             Refresh();
             if ((Scales.TryGetValue(title, out int cur) ? cur : 0) == percent) return;
             if (percent == 0) Scales.Remove(title); else Scales[title] = percent;
+            NoteSteps();
             try
             {
                 string path = FilePath;
@@ -90,16 +100,65 @@ internal static class PanelDrawScale
             if (t == _fileTime) return;
             _fileTime = t;
             Scales.Clear();
-            if (t == DateTime.MinValue) return;
-            foreach (string raw in File.ReadAllLines(path))
-            {
-                string line = raw.Trim();
-                if (line.Length == 0 || line.StartsWith('#')) continue;
-                int eq = line.LastIndexOf('=');
-                if (eq <= 0 || !int.TryParse(line.AsSpan(eq + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out int p)) continue;
-                if (p >= Min && p <= Max) Scales[line[..eq].Trim()] = p;
-            }
+            if (t != DateTime.MinValue)
+                foreach (string raw in File.ReadAllLines(path))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith('#')) continue;
+                    int eq = line.LastIndexOf('=');
+                    if (eq <= 0 || !int.TryParse(line.AsSpan(eq + 1), NumberStyles.Integer, CultureInfo.InvariantCulture, out int p)) continue;
+                    if (p >= Min && p <= Max) Scales[line[..eq].Trim()] = p;
+                }
+            NoteSteps();
         }
         catch { /* the old values stay */ }
+    }
+
+    /// <summary>
+    /// The text size step a window drawn at <paramref name="percent"/> takes its fonts from: the smallest
+    /// bake at least that big (shrinking a bigger bake stays sharp, stretching a smaller one blurs);
+    /// 0 at or under normal. A percent is of 96-DPI pixels; the fonts are baked at <paramref name="fontScale"/>.
+    /// </summary>
+    public static int FontStep(int percent, float fontScale)
+    {
+        if (percent <= 0) return 0;
+        float want = percent / 100f / Math.Max(0.5f, fontScale);
+        int last = PanelTextScale.SizeNames.Length - 1;
+        for (int step = 0; step < last; step++)
+            if (PanelTextScale.Factor(step) >= want - 0.005f) return step;
+        return last;
+    }
+
+    /// <summary>The non-zero font steps the saved sizes need; ImGuiFonts bakes them with the text sizes. Any thread.</summary>
+    public static List<int> FontStepsInUse(float fontScale)
+    {
+        lock (Sync)
+        {
+            Refresh();
+            List<int> steps = Steps(fontScale);
+            _bakedSteps = string.Join(",", steps);
+            return steps;
+        }
+    }
+
+    // Caller holds Sync.
+    private static List<int> Steps(float fontScale)
+    {
+        var steps = new List<int>();
+        foreach (int p in Scales.Values)
+        {
+            int step = FontStep(p, fontScale);
+            if (step > 0 && !steps.Contains(step)) steps.Add(step);
+        }
+        steps.Sort();
+        return steps;
+    }
+
+    // Caller holds Sync. A size whose font step isn't in the bake: re-bake once the changes stop.
+    private static void NoteSteps()
+    {
+        if (_bakedSteps == null) return;
+        string now = string.Join(",", Steps(RynthCore.Engine.ImGuiBackend.EngineFrameController.FontScale));
+        if (now != _bakedSteps) RynthCore.Engine.ImGuiBackend.ImGuiFonts.RequestRebuild(RebuildDelayMs);
     }
 }

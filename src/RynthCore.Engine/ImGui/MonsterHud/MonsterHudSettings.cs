@@ -49,6 +49,14 @@ internal static class MonsterHudSettings
     public static float HeightLift = 0.0f;       // extra metres above the estimated head height
     /// <summary>A left-click on a monster plate selects that monster in game.</summary>
     public static bool ClickToSelect = true;
+    /// <summary>
+    /// "Refresh others' health" (2026-10-31): the server streams health only for the selected / queried
+    /// monster, so the HUD asks for the other plates' health itself, one monster per HealthRefreshSec
+    /// (HealthProbe). Off: only the selected / queried monster's plate is live.
+    /// </summary>
+    public static bool RefreshOthersHealth = true;
+    /// <summary>Seconds between two of those health queries (HealthProbe's range).</summary>
+    public static float HealthRefreshSec = HealthProbe.DefaultIntervalSec;
 
     // Name-only labels over NPCs (vendors in gold) and, optionally, other players.
     // Counted apart from MaxPlates so they never push a monster plate out.
@@ -220,6 +228,10 @@ internal static class MonsterHudSettings
                 case "scale": if (TryF(val, out float s)) Scale = Math.Clamp(s, MinScale, MaxScale); break;
                 case "opacity": if (TryF(val, out float o)) Opacity = Math.Clamp(o, MinOpacity, MaxOpacity); break;
                 case "clickSelect": ClickToSelect = val == "1"; break;
+                case "refreshOthersHealth": RefreshOthersHealth = val == "1"; break;
+                case "healthRefreshSec":
+                    if (TryF(val, out float hr)) HealthRefreshSec = Math.Clamp(hr, HealthProbe.MinIntervalSec, HealthProbe.MaxIntervalSec);
+                    break;
                 case "heightLift": if (TryF(val, out float h)) HeightLift = Math.Clamp(h, MinLift, MaxLift); break;
                 case "npcNames": NpcNames = val == "1"; break;
                 case "npcDistance": if (TryF(val, out float nd)) NpcMaxDistance = Math.Clamp(nd, MinNpcDistance, MaxNpcDistanceLimit); break;
@@ -339,6 +351,8 @@ internal static class MonsterHudSettings
         sw.WriteLine(FormattableString.Invariant($"opacity={Opacity:0.##}"));
         sw.WriteLine(FormattableString.Invariant($"heightLift={HeightLift:0.##}"));
         sw.WriteLine($"clickSelect={B(ClickToSelect)}");
+        sw.WriteLine($"refreshOthersHealth={B(RefreshOthersHealth)}");
+        sw.WriteLine(FormattableString.Invariant($"healthRefreshSec={HealthRefreshSec:0.##}"));
         sw.WriteLine($"npcNames={B(NpcNames)}");
         sw.WriteLine(FormattableString.Invariant($"npcDistance={NpcMaxDistance:0.#}"));
         sw.WriteLine(FormattableString.Invariant($"npcMax={MaxNpcLabels}"));
@@ -397,6 +411,7 @@ internal static class MonsterHudSettings
         Enabled = true; MaxDistance = 35f; MaxPlates = 20; Filter = PlateFilter.All;
         ShowNames = true; ShowHpNumbers = true; ShowDistance = false; ShowLevel = true; ShowWeakness = true;
         FadeWithDistance = true; Scale = 1.0f; Opacity = 0.9f; HeightLift = 0f; ClickToSelect = true;
+        RefreshOthersHealth = true; HealthRefreshSec = HealthProbe.DefaultIntervalSec;
         ShowDebuffs = true; ShowOthersDebuff = true;
         NpcNames = true; NpcMaxDistance = 30f; MaxNpcLabels = 15; PlayerNames = false; PlayerBars = false;
         PortalNames = true; PortalMaxDistance = DefaultPortalDistance;
@@ -462,7 +477,8 @@ internal static class MonsterHudSettings
         $"RynthVision nameplates: monsters {(Enabled ? "ON" : "OFF")} ({(Filter == PlateFilter.Engaged ? "engaged only" : "all monsters")}, " +
         $"{MaxDistance:0}yd, max {MaxPlates}, scale {Scale:0.##}, opacity {Opacity:0.##}, lift {HeightLift:0.#}m; " +
         $"names {OnOff(ShowNames)}, hp {OnOff(ShowHpNumbers)}, level {OnOff(ShowLevel)}, weak {OnOff(ShowWeakness)}, " +
-        $"distance {OnOff(ShowDistance)}, fade {OnOff(FadeWithDistance)}, click to select {OnOff(ClickToSelect)}), debuffs {OnOff(ShowDebuffs)} (others {OnOff(ShowOthersDebuff)}); " +
+        $"distance {OnOff(ShowDistance)}, fade {OnOff(FadeWithDistance)}, click to select {OnOff(ClickToSelect)}, " +
+        $"refresh others' health {(RefreshOthersHealth ? $"every {HealthRefreshSec:0.0#} s" : "off")}), debuffs {OnOff(ShowDebuffs)} (others {OnOff(ShowOthersDebuff)}); " +
         $"NPC names {OnOff(NpcNames)} ({NpcMaxDistance:0}yd, max {MaxNpcLabels}), player names {OnOff(PlayerNames)} (bars {OnOff(PlayerBars)}), " +
         $"portal names {OnOff(PortalNames)} ({PortalMaxDistance:0}yd); " +
         $"self {OnOff(SelfPlate)} ({(SelfPlacement == SelfPlacement.Fixed ? "fixed on screen, " + (SelfLocked ? "locked" : "unlocked") : "follows you, " + SelfPosition.ToString().ToLowerInvariant())}, " +

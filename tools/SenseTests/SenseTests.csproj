@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the Sense panel's pure part (2026-10-31): src\RynthCore.Engine\UI\Data\
+    SenseModel.cs, compiled in. The compact view's layout decisions (which columns fit at a width,
+    how many rows fit and the "+N more" slot, which row the mouse is on, when the bare panel takes
+    the mouse and when clicks go to the game), the collapsed line, /rc sense's look commands
+    (compact on|off, collapse on|off, view ...: the look they lead to and their replies, and the
+    argument check), sense.txt read and written (terms, alerts and the look, a file from before
+    the look, bad values), and the term matching. No file I/O, no AC, no ImGui.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>SenseTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\SenseModel.cs" Link="Engine\SenseModel.cs" />
+  </ItemGroup>
+
+</Project>

@@ -122,6 +122,27 @@ internal static class SehTrampoline
         ((delegate* unmanaged[Cdecl]<uint, void>)fn)(exitCode);
     }
 
+    /// <summary>
+    /// The loaded RynthCore.SehTrampoline.dll's file when it exports RC_DumpProcessW (v9+): the
+    /// hang watchdog runs it in rundll32 to write a dump of this process from outside it
+    /// (CrashDump.WriteHangDumpOutOfProcess). Null when the DLL is older or not loaded.
+    /// </summary>
+    public static string? DumpHelperPath()
+    {
+        try
+        {
+            nint module = GetModuleHandleW("RynthCore.SehTrampoline.dll");
+            if (module == 0 || GetProcAddress(module, "RC_DumpProcessW") == 0) return null;
+            var buf = new char[1024];
+            int n = GetModuleFileNameW(module, buf, buf.Length);
+            return n > 0 && n < buf.Length ? new string(buf, 0, n) : null;
+        }
+        catch { return null; }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetModuleFileNameW")]
+    private static extern int GetModuleFileNameW(nint module, [Out] char[] path, int size);
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetModuleHandleW")]
     private static extern nint GetModuleHandleW(string name);
 

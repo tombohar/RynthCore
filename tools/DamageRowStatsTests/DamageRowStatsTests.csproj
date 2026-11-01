@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the line under a monster in the Damage panel (src\RynthCore.Engine\UI\Data\
+    DamageRowStats.cs, compiled in as is): the optional "mstats" of a RynthPluginGetMonsterDamageJson
+    row (a plugin's evades and resists both ways), how it is read (missing, partial, bad and negative
+    numbers), and the words DamageFace draws under the row and in its tooltip. Nothing native.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>DamageRowStatsTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\DamageRowStats.cs" Link="Engine\DamageRowStats.cs" />
+  </ItemGroup>
+
+</Project>

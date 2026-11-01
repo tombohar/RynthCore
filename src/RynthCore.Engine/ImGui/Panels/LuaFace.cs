@@ -2,8 +2,9 @@
 //  RynthCore.Engine - ImGui/Panels/LuaFace.cs
 //  ImGui face of the Lua panel. Two layouts, picked by the payload:
 //
-//  RynthLua v2 (ScriptInfos present), tabs "Scripts" | "Editor", and on the
-//  right "N running · RynthAi: loaded / not loaded":
+//  RynthLua v2 (ScriptInfos present), tabs "Scripts" | "Editor", "Live reload:
+//  on/off" (a RynthLua with live reload; /lua livereload), and on the right
+//  "N running · RynthAi: loaded / not loaded":
 //    Scripts  one row per script: running dot, name, description, autostart
 //             (Off / global / this character), Run|Stop, Restart. Click a row
 //             to select it; below, the selected script's state, "Open in
@@ -161,13 +162,37 @@ internal sealed class LuaFace : IImGuiPanel
         if (Button("##tab_editor", EditorTab, new Vector2(p.X + sw + 2, p.Y), new Vector2(ew, h), _editorTab ? Teal : Text, _editorTab ? Selected : BtnFill))
             _editorTab = true;
 
+        // RynthLua's live reload (a RynthLua that has it says so in the payload): /lua livereload on|off.
+        float lrW = 0;
+        if (LuaLiveReload.Label(d.LiveReload) is { } lrLabel)
+        {
+            bool on = d.LiveReload == true;
+            string caption = PhosphorIcons.ArrowsClockwise + " " + lrLabel;
+            lrW = ButtonWidth(caption) + 4;
+            if (Button("##lua_live", caption, new Vector2(p.X + sw + ew + 8, p.Y), new Vector2(lrW, h), on ? Teal : Mute, on ? Selected : BtnFill))
+                LuaCommands.Chat(LuaLiveReload.ClickArgs(on));
+            SafeImGui.SetItemTooltip(LuaLiveReload.Tip(on));
+            lrW += 6;
+        }
+        // Stop every running script (/lua stop all), while two or more run.
+        if (d.RunningCount > 1 && d.ScriptInfos is { } running)
+        {
+            const string StopAll = PhosphorIcons.Stop + " Stop all";
+            float saW = ButtonWidth(StopAll) + 4;
+            if (Button("##lua_stopall", StopAll, new Vector2(p.X + sw + ew + 8 + lrW, p.Y), new Vector2(saW, h), Text, StopBg))
+                foreach (LuaScriptInfo si in running)
+                    if (si.Running) LuaCommands.Send("stopScript", si.Name);
+            SafeImGui.SetItemTooltip("Stop every running script. Also: /lua stop all");
+            lrW += saW + 6;
+        }
+
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
         bool ai = d.RynthAi == true;
         string run = d.RunningCount == 1 ? "1 running" : $"{d.RunningCount} running";
         const string sep = "  ·  ";
         string aiText = ai ? "RynthAi: loaded" : "RynthAi: not loaded";
         float runW = ImGuiNET.ImGui.CalcTextSize(run).X, sepW = ImGuiNET.ImGui.CalcTextSize(sep).X, aiW = ImGuiNET.ImGui.CalcTextSize(aiText).X;
-        float left = p.X + sw + ew + 10, right = p.X + w;
+        float left = p.X + sw + ew + 10 + lrW, right = p.X + w;
         float x = Math.Max(left, right - runW - sepW - aiW);
         float ty = p.Y + (h - ImGuiNET.ImGui.GetFontSize()) * 0.5f;
         dl.PushClipRect(new Vector2(left, p.Y), new Vector2(right, p.Y + h), true);

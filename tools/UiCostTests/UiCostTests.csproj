@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the UI frame cost breakdown (Settings > Diagnostics, /rc uicost):
+    src\RynthCore.Engine\ImGui\UiCostModel.cs is compiled in as is (no engine dependencies). The rolling
+    window (buckets roll, old seconds drop out, a long gap empties it), the parts ordered largest first
+    (the slow-frame line, the heartbeat's uitop= top 3, /rc uicost now), the counts, the untimed rest
+    and the 3D pass parts listed apart, the threshold and the once-per-5-s rate limit, exclusive timing
+    (a part around other timed parts keeps only its own time), the overflow slot, timing off, and a
+    benchmark of the per-frame cost (printed; checked against a generous bound). Also
+    src\RynthCore.Engine\ImGui\DrawSubmitPlan.cs: each draw command hands the renderer only the vertices
+    its indices reach (index range, rebasing, broken lists refused), a Loot-Editor-shaped list's copy
+    volume against the old whole-list-per-command policy, and the submit counters in the slow-frame line,
+    the heartbeat's uisub= and /rc uicost now. Reads and writes nothing.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>UiCostTests</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\UiCostModel.cs" Link="Engine\UiCostModel.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\DrawSubmitPlan.cs" Link="Engine\DrawSubmitPlan.cs" />
+  </ItemGroup>
+
+</Project>

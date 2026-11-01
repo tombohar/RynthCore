@@ -5,6 +5,7 @@
 //
 //    [#] [on] [Contains v] [pattern ...................] [up] [down] [delete]
 //         When [Any line v]  [Move to v] [Junk v]  [Colour line v] [swatch]
+//         (colour: No colour / Colour line / Colour match / Highlight line)
 //         (a regex error, a timed-out rule, a missing tab, or its hit count)
 //
 //  The order and what each action does are spelled out in the header lines
@@ -84,7 +85,15 @@ internal sealed class ChatFiltersFace : IImGuiPanel
         "Hide: the line is not shown anywhere (the chat log still has it).",
         "Colour only: no routing; the rule just colours.",
     };
-    private static readonly string[] ColorLabels = { "No colour", "Colour line", "Colour match" };
+    // Indexed by ChatColorMode.
+    private static readonly string[] ColorLabels = { "No colour", "Colour line", "Colour match", "Highlight line" };
+    private static readonly string[] ColorHelp =
+    {
+        "No colour: the rule doesn't colour the line.",
+        "Colour line: the whole line's text in this colour.",
+        "Colour match: just the text the rule matched, in this colour.",
+        "Highlight line: a band in this colour behind the whole line; the text keeps its colour.",
+    };
     private static readonly string[] ModeHelp =
     {
         "Regex: a case-insensitive regular expression (^ start, $ end, \\d+ a number...).",
@@ -116,7 +125,7 @@ internal sealed class ChatFiltersFace : IImGuiPanel
         ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Ui9));
         Label("Rules run top to bottom (" + PhosphorIcons.ArrowUp + PhosphorIcons.ArrowDown + " to reorder) on each line's text: plain text (any case) or a regex.", Mute);
         Label("Where it shows: Copy rules add a tab and go on; the first Move or Hide that matches decides.", Mute);
-        Label("Colour: the first \"Colour line\" wins; \"Colour match\" colours every match (a higher rule wins an overlap).", Mute);
+        Label("Colour: the first \"Colour line\" wins, and the first \"Highlight line\"; \"Colour match\" colours every match (a higher rule wins an overlap).", Mute);
         ImGuiNET.ImGui.PopFont();
         ImGuiNET.ImGui.Dummy(new Vector2(0, 1));
 
@@ -346,7 +355,7 @@ internal sealed class ChatFiltersFace : IImGuiPanel
 
         if (r.Action != ChatRuleAction.Hide)
         {
-            int mode = (int)r.ColorMode;
+            int mode = Math.Clamp((int)r.ColorMode, 0, ColorLabels.Length - 1);
             string colText = ColorLabels[mode] + Caret;
             Vector2 cPos = flow.Place(ButtonWidth(colText));
             if (Button("##colmode", colText, cPos, new Vector2(ButtonWidth(colText), rowH), Text, BtnFill))
@@ -354,8 +363,8 @@ internal sealed class ChatFiltersFace : IImGuiPanel
                 {
                     rule.ColorMode = (ChatColorMode)k;
                     ChatModel.FiltersChanged();
-                }, 130);
-            ImGuiNET.ImGui.SetItemTooltip("Colour line: the whole line. Colour match: just the text the rule matched.");
+                }, 140);
+            SafeImGui.SetItemTooltip(ColorHelp[mode]);
             if (r.ColorMode != ChatColorMode.None)
             {
                 Vector2 sPos = flow.Place(rowH);
@@ -629,6 +638,9 @@ internal sealed class ChatFiltersFace : IImGuiPanel
         }
         uint color = RynthTheme.Argb(ChatLineColors.Resolve(route.LineArgb, ChatLineColors.KindOf(type, channel, text), channel, type));
         _testResult.Add((where + (route.LineArgb != null ? "  (this is its colour)" : ""), route.Hidden ? Faded(Mute) : color));
+        if (!route.Hidden && route.HighlightArgb is uint band)
+            _testResult.Add(($"Highlighted: a {ChatModel.FormatColor(band | 0xFF000000)} band behind the line (this colour).",
+                RynthTheme.Argb(band | 0xFF000000)));
 
         // Not hidden: name a standard filter that would hide it (one not in the rules yet).
         if (!route.Hidden)

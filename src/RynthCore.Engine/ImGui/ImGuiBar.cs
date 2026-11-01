@@ -242,6 +242,20 @@ internal static class ImGuiBar
     public static bool Visible => ResolveFace() != PanelFace.Avalonia && !Floating;
 
     /// <summary>
+    /// The panel store now holds another layout (UI/PanelLayout: another character's, the default, or a
+    /// reset): the bar's place, rows and popped-out state are read from it again; a popped-out bar's
+    /// window closes and SyncPopOut opens it at the new layout's spot. AC thread, between frames.
+    /// </summary>
+    public static void OnLayoutSwitched()
+    {
+        Volatile.Write(ref _rowSettings, null);
+        _floating = null;
+        _placed = false;
+        _userMoved = false;
+        if (ImGuiPopOuts.IsPopped(PopOutTitle)) ImGuiPopOuts.Close(PopOutTitle);
+    }
+
+    /// <summary>
     /// Opens or closes the bar's own window to match <see cref="PoppedOut"/>. AC
     /// thread, in the world, with the main context current (after the panels).
     /// </summary>

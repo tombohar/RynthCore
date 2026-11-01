@@ -19,6 +19,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using RynthCore.Engine.Plugins;
 
 namespace RynthCore.Engine.UI.Data;
@@ -113,6 +114,9 @@ internal sealed class MetaPayload
     public string SourceText { get; set; } = string.Empty;
     /// <summary>Null from a plugin that doesn't report apply results yet (it reports to chat).</summary>
     public MetaApplyResult? ApplyResult { get; set; }
+    /// <summary>The last write of the meta file, or the edit that wasn't applied (RynthAi's MetaSaver,
+    /// 2026-11-01); null from a RynthAi without it. The "Saved" indicator follows this.</summary>
+    public MetaSaveResult? SaveResult { get; set; }
     /// <summary>The Meta Manager; null from a RynthAi without it.</summary>
     public SchedulePayload? Schedule { get; set; }
     /// <summary>Seconds in state and the Watchdog; null from a RynthAi without it.</summary>
@@ -179,27 +183,46 @@ internal sealed unsafe class MetaSource : UiSource<MetaPayload>
 internal static unsafe class MetaCommands
 {
     private static delegate* unmanaged[Cdecl]<IntPtr, void> _sendMetaCommand;
+    private static int _undelivered;
 
     static MetaCommands()
     {
         PluginManager.PluginsUnloaded += () => _sendMetaCommand = null;
     }
 
+    /// <summary>Commands that never reached RynthAi (not loaded, no export, the hub refused the post).
+    /// The Meta panel compares it before and after an edit: it went up = "Not saved: not sent".</summary>
+    public static int Undelivered => Volatile.Read(ref _undelivered);
+
     /// <summary><paramref name="cmd"/> (and its Rule) must not be changed after this call.</summary>
     public static void Send(MetaCmd cmd)
     {
-        UiDataHub.Post("Meta " + cmd.Op, () =>
+        bool posted = UiDataHub.Post("Meta " + cmd.Op, () =>
         {
             if (_sendMetaCommand == null)
                 _sendMetaCommand = (delegate* unmanaged[Cdecl]<IntPtr, void>)PluginExportBinder.Resolve("RynthAi", "RynthPluginSendMetaCommand");
-            if (_sendMetaCommand == null) return;
+            if (_sendMetaCommand == null)
+            {
+                // Used to return without a word: the panel showed "Saved" for an edit RynthAi never got.
+                int n = Interlocked.Increment(ref _undelivered);
+                if (n <= 5 || n % 50 == 0)
+                    RynthLog.UI($"Meta: '{cmd.Op}' NOT sent: RynthAi isn't loaded or has no RynthPluginSendMetaCommand ({n} not sent so far).");
+                return;
+            }
             string json = JsonSerializer.Serialize(cmd, MetaJsonContext.Default.MetaCmd);
             IntPtr ansi = Marshal.StringToHGlobalAnsi(json);
             try { _sendMetaCommand(ansi); }
             finally { Marshal.FreeHGlobal(ansi); }
+            if (IsRuleEdit(cmd.Op))
+                RynthLog.UI($"Meta: sent {cmd.Op}{(cmd.Index >= 0 ? " " + (cmd.Index + 1) : "")}{(cmd.Path.Length > 0 ? " " + cmd.Path : "")} to RynthAi.");
             UiSources.Meta.RequestRefreshAfterPluginTick();
         });
+        if (!posted) Interlocked.Increment(ref _undelivered);   // the hub logged why
     }
+
+    /// <summary>The commands that change the meta's rules or file (RynthAi writes the file after each).</summary>
+    public static bool IsRuleEdit(string op) => op is "add_rule" or "update_rule" or "delete_rule" or "move_up" or "move_down"
+        or "duplicate_rule" or "set_rule_enabled" or "set_source" or "save_file";
 
     public static void Simple(string op, int index = -1, string value = "", string path = "")
         => Send(new MetaCmd { Op = op, Index = index, Value = value, Path = path });

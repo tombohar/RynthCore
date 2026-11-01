@@ -163,10 +163,14 @@ internal static class Nav3DRenderInjector
         // Video patch: no 3D scene this frame, so no markers or plates over the black.
         if (VideoPatch.SkipWorldThisFrame) return;
         _inRender = true;
+        long cost = ImGuiBackend.UiCost.Start();   // UiCost: outside ui=, listed apart
         try { ImGuiBackend.DX9Backend.RenderNav3D(dev); }
         catch { }
+        ImGuiBackend.UiCost.Stop(ImGuiBackend.UiCost.Nav3D, cost);
+        cost = ImGuiBackend.UiCost.Start();
         try { ImGuiBackend.UnderUiLayer.PresentFallback(dev); }
         catch { }
+        ImGuiBackend.UiCost.Stop(ImGuiBackend.UiCost.WorldPresent, cost);
         _inRender = false;
         _atEndScene++;
     }
@@ -192,6 +196,7 @@ internal static class Nav3DRenderInjector
         // This frame's camera, not the one EndScene captured last frame (see RefreshView).
         try { GameMatrixCapture.RefreshView(); }
         catch { }
+        long cost = ImGuiBackend.UiCost.Start();   // UiCost: outside ui=, listed apart
         try
         {
             // At the UI pass AC has set a full-screen viewport; the markers project
@@ -201,8 +206,10 @@ internal static class Nav3DRenderInjector
         catch
         {
         }
+        ImGuiBackend.UiCost.Stop(ImGuiBackend.UiCost.Nav3D, cost);
         // The world overlays (nameplates, combat text) go here too, over the
         // markers and under AC's UI. UnderUiLayer presents a list at most once.
+        cost = ImGuiBackend.UiCost.Start();
         try
         {
             if (sceneViewport) ImGuiBackend.UnderUiLayer.PresentAtUiPass(dev);
@@ -211,6 +218,7 @@ internal static class Nav3DRenderInjector
         catch
         {
         }
+        ImGuiBackend.UiCost.Stop(ImGuiBackend.UiCost.WorldPresent, cost);
         _inRender = false;
         return true;
     }

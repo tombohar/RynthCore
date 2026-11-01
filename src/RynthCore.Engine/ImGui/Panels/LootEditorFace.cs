@@ -158,6 +158,11 @@ internal sealed class LootEditorFace : IImGuiPanel
         public readonly byte[] Bytes = new byte[512];
         public string? Shown;
         public bool Active;
+        // A text condition (TextPattern): the mode shown, the words in the box, and the pattern they were
+        // read from (re-read only when the pattern changes, so a mode the player picked stays).
+        public LootTextMode? Mode;
+        public string Words = "";
+        public string? ParsedFrom;
     }
     private readonly Dictionary<(int Cond, int Line), FieldBuffer> _fields = new();
     private readonly FieldBuffer _nameField = new(), _keepField = new();
@@ -758,9 +763,25 @@ internal sealed class LootEditorFace : IImGuiPanel
             ? "A rule for the item selected in the game (click it first): preview, then add it here"
             : s.Dirty ? "Save or discard your edits first" : "This profile is read-only here");
         addW += itemW + 6;
+        // RynthAi answers in its own "Why this loot rule?" window (an older RynthAi ignores it).
+        string whyLabel = PhosphorIcons.Info + " " + LootWhyLabel;
+        float whyW = ButtonWidth(whyLabel) + 6;
+        if (Button("##loot_why", whyLabel, new Vector2(p.X + addW + 6, p.Y), new Vector2(whyW, h), Text, BtnFill))
+            AskLootWhy();
+        SafeImGui.SetItemTooltip(LootWhyTip);
+        addW += whyW + 6;
         MessageText(new Vector2(p.X + addW + 8, p.Y), p.X + w - grip - 4, h);
         NextLine(p, h);
     }
+
+    /// <summary>The "Why this loot rule?" buttons (here and the Classic Loot tab).</summary>
+    internal const string LootWhyLabel = "Why this loot rule?";
+    internal const string LootWhyTip =
+        "Which rule of the loot profile in use takes the item selected in the game, and why the rules above it\n" +
+        "didn't (the first condition each failed, and the value it read). RynthAi shows it in a small window.\nAlso: /ra loot why";
+
+    /// <summary>RynthAi's "lootwhy" remote command: /ra loot why window, for the selected item. Any thread.</summary>
+    internal static void AskLootWhy() => RynthAiCommands.ApplyRemoteCommand("lootwhy", "show");
 
     private void MessageText(Vector2 at, float right, float h)
     {
@@ -1110,14 +1131,13 @@ internal sealed class LootEditorFace : IImGuiPanel
             }
             case "keypattern":
             {
-                float kw = w * 0.34f;
+                float kw = w * 0.30f;
                 IdPicker("##key", c, 1, KeyTable(node.KeyTable), "key", p, kw - 2, h, ro);
-                if (Field("##pat", FieldFor(i, 0), c.Lines[0], new Vector2(p.X + kw + 2, p.Y), w - kw - 2, "pattern (regex)", ro, out string v, h))
-                    c.Lines[0] = v;
+                TextPattern("##pat", c, i, new Vector2(p.X + kw + 2, p.Y), w - kw - 2, h, ro);
                 break;
             }
             case "text":
-                if (Field("##text", FieldFor(i, 0), c.Lines[0], p, w, "pattern (regex)", ro, out string t, h)) c.Lines[0] = t;
+                TextPattern("##text", c, i, p, w, h, ro);
                 break;
             default:   // "value"
                 if (Field("##value", FieldFor(i, 0), c.Lines[0], p, w, node.Labels.Count > 0 ? node.Labels[0].ToLowerInvariant() : "value", ro, out string n, h))
@@ -1186,6 +1206,62 @@ internal sealed class LootEditorFace : IImGuiPanel
         string tip = sel >= 0 ? table.Items[sel] : "Not in the list: pick \"" + OtherNumber + "\" to type any number";
         if (table.Flags) tip += "\nFlags: other combinations are typed as a number";
         SafeImGui.SetItemTooltip(tip);
+    }
+
+    /// <summary>
+    /// A text condition's pattern as a mode and plain words (2026-11-01: "people hate regex"): [contains v]
+    /// [words]. The editor writes the regex (UI.LootPatternText) into the condition, so the profile stays a
+    /// plain VTank .utl; "regex" shows the pattern itself. A mode the player picks stays while the pattern
+    /// still reads back as it.
+    /// </summary>
+    private void TextPattern(string id, LootEditConditionDto c, int cond, Vector2 p, float w, float h, bool ro)
+    {
+        FieldBuffer buf = FieldFor(cond, 0);
+        string pattern = c.Lines[0];
+        if (!ReferenceEquals(buf.ParsedFrom, pattern))
+        {
+            var (mode, words) = LootPatternText.Parse(pattern);
+            LootTextMode keep = buf.Mode ?? mode;
+            if (keep == LootTextMode.Regex) { buf.Mode = LootTextMode.Regex; buf.Words = pattern; }
+            else if (pattern.Length == 0) { buf.Mode = keep; buf.Words = ""; }
+            else { buf.Mode = mode; buf.Words = mode == LootTextMode.Regex ? pattern : words; }
+            buf.ParsedFrom = pattern;
+        }
+        LootTextMode shown = buf.Mode ?? LootTextMode.Contains;
+
+        float mw = Math.Min(120, Math.Max(80, w * 0.36f));
+        if (PickerButton(id + "_mode", LootPatternText.Label(shown), p, mw - 2, h, ro))
+        {
+            FieldBuffer target = buf;
+            LootEditConditionDto dto = c;
+            _picker.Open(new Vector2(p.X, p.Y + h), LootPatternText.Labels, (int)shown, k =>
+            {
+                LootTextMode next = LootPatternText.Modes[k];
+                LootTextMode was = target.Mode ?? LootTextMode.Contains;
+                if (next == was || dto.Lines.Count == 0) return;
+                // Into regex: the pattern as it is. Out of regex: its words when it has a plain shape.
+                string words = next == LootTextMode.Regex ? dto.Lines[0]
+                    : was == LootTextMode.Regex ? (LootPatternText.Parse(dto.Lines[0]) is var (m2, w2) && m2 != LootTextMode.Regex ? w2 : "")
+                    : target.Words;
+                dto.Lines[0] = LootPatternText.Build(next, words);
+                target.Mode = next;
+                target.Words = words;
+                target.ParsedFrom = dto.Lines[0];
+                target.Shown = null;   // the box shows the new words
+            }, Math.Max(150, mw));
+        }
+        SafeImGui.SetItemTooltip("How the text is matched (case doesn't matter). Pick \"regex\" to type a pattern yourself.");
+
+        if (Field(id, buf, buf.Words, new Vector2(p.X + mw, p.Y), w - mw, LootPatternText.Hint(shown), ro, out string typed, h))
+        {
+            buf.Words = typed;
+            c.Lines[0] = LootPatternText.Build(shown, typed);
+            buf.ParsedFrom = c.Lines[0];
+        }
+        if (shown != LootTextMode.Regex)
+            SafeImGui.SetItemTooltip(c.Lines[0].Length > 0
+                ? "Written to the profile as: " + c.Lines[0] + (shown is LootTextMode.Contains or LootTextMode.NotContains ? "\nSeveral words: separate them with commas (either of them)." : "")
+                : (shown is LootTextMode.Contains or LootTextMode.NotContains ? "Type a word. Several: separate them with commas (either of them)." : "Type the text."));
     }
 
     /// <summary>A whole number: "45", "45.0" (a buffed-long value written as a double).</summary>

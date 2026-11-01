@@ -168,7 +168,7 @@ internal static class VendorTrade
     private const int PwdItemsCapacity = 48, PwdContainersCapacity = 52, PwdType = 56, PwdValue = 60;
     private const int PwdStackSize = 96, PwdMaxStackSize = 100, PwdBitfield = 104, PwdBurden = 116;
 
-    private const uint ItemTypePromissoryNote = 0x00040000;
+    private const uint ItemTypePromissoryNote = VendorRatePolicy.ItemTypePromissoryNote;
     private const int PyrealMaxStack = 25000;          // coinstack MaxStackSize (payout slots)
     private const int MaxVendorItems = 1024;
     private const int MaxTradeEntries = 100;
@@ -232,6 +232,8 @@ internal static class VendorTrade
     // Chat echo for /rc vendor (drained on the main thread; written from the drain,
     // never from inside the outgoing-chat detour).
     private static readonly object _echoLock = new();
+    // Zero-rate (free) vendors already logged, so each vendor id is logged once per engine.
+    private static readonly HashSet<uint> _zeroRateLogged = new();
     private static readonly Queue<string> _echo = new();
     private static volatile int _echoCount;
     private const int MaxEcho = 48;
@@ -316,6 +318,13 @@ internal static class VendorTrade
                 snap.ProfileRead = RateLooksSane(snap.BuyRate) && RateLooksSane(snap.SellRate);
                 if (!snap.ProfileRead)
                     RynthLog.Warn($"VendorTrade: vendor 0x{vendorId:X8} profile rates look wrong (buy={snap.BuyRate} sell={snap.SellRate}); trading with it is off.");
+                else if (VendorRatePolicy.IsFreeVendor(snap.BuyRate, snap.SellRate))
+                {
+                    bool first;
+                    lock (_zeroRateLogged) first = _zeroRateLogged.Add(vendorId);
+                    if (first)
+                        RynthLog.Compat($"VendorTrade: vendor 0x{vendorId:X8} has buy=0 sell=0: a zero-rate (free) vendor; trades are priced at 0.");
+                }
             }
 
             if (list != IntPtr.Zero && Readable(list, ListSize))
@@ -962,20 +971,14 @@ internal static class VendorTrade
     // ════════════════════════════════════════════════════════════════════════════
 
     /// <summary>What the player pays for one created stack worth <paramref name="stackValue"/> (ACE Vendor.GetSellCost).</summary>
-    internal static long PlayerPaysForStack(float sellRate, uint itemType, long stackValue)
-    {
-        float rate = itemType == ItemTypePromissoryNote ? 1.15f : sellRate;
-        float product = rate * stackValue;
-        return Math.Max(1L, (long)Math.Ceiling(product - 0.1));
-    }
+    // A 0 rate (free vendor) costs 0; see VendorRatePolicy.
+    internal static long PlayerPaysForStack(float sellRate, uint itemType, long stackValue) =>
+        VendorRatePolicy.PlayerPaysForStack(sellRate, itemType, stackValue);
 
     /// <summary>What the vendor pays for one item worth <paramref name="value"/> (ACE Vendor.GetBuyCost).</summary>
-    internal static long VendorPaysForStack(float buyRate, uint itemType, long value)
-    {
-        float rate = itemType == ItemTypePromissoryNote ? 1.0f : buyRate;
-        float product = rate * value;
-        return Math.Max(1L, (long)Math.Floor(product + 0.1));
-    }
+    // A 0 rate (free vendor) pays 0; see VendorRatePolicy.
+    internal static long VendorPaysForStack(float buyRate, uint itemType, long value) =>
+        VendorRatePolicy.VendorPaysForStack(buyRate, itemType, value);
 
     /// <summary>
     /// Cost / slots / burden for buying <paramref name="amount"/> of <paramref name="item"/>,
@@ -1425,7 +1428,8 @@ internal static class VendorTrade
         return sb.ToString();
     }
 
-    private static bool RateLooksSane(float rate) => float.IsFinite(rate) && rate > 0f && rate < 1000f;
+    // 0 is a real rate (a free storage vendor); see VendorRatePolicy.
+    private static bool RateLooksSane(float rate) => VendorRatePolicy.LooksSane(rate);
 
     private static bool InModule(IntPtr p)
     {

@@ -1006,12 +1006,16 @@ internal static class AcMainThreadQueue
     // main-thread-only like 0xC8. Same shape as the RequestId slot: its own small
     // queue, NOT the gesture-deferred action ring (a packet send doesn't perturb the
     // motion graph and a health query must not wait out a swing). Callers ignore the
-    // result and only want the async 0x01C0 reply, so a target already waiting here is
-    // not queued twice. Pre-sized, so enqueue does not allocate.
+    // result and only want the async 0x01C0 reply, so a target that is already the LAST
+    // one waiting here is not queued twice. Only the last: the server streams health for
+    // the most recent query, so "pet, then the fight target again" must keep that order
+    // even when the fight target was already queued before the pet (deduping against any
+    // earlier entry left the stream on the pet). Pre-sized, so enqueue does not allocate.
     private const int MaxQueryHealthQueue = 64;
     private static readonly System.Collections.Generic.Queue<(uint Id, long At, int Epoch)> _queryHealthQueue = new(MaxQueryHealthQueue);
     private static readonly object _queryHealthLock = new();
     private static int _queryHealthPending; // lock-free "anything queued?" for the per-frame drain
+    private static uint _queryHealthLastId;  // the newest entry's id (under _queryHealthLock)
 
     // Pump-thread enqueue. Drops (returns false) if the queue is full.
     public static bool EnqueueQueryHealth(uint targetId)
@@ -1019,14 +1023,15 @@ internal static class AcMainThreadQueue
         if (targetId == 0) return false;
         lock (_queryHealthLock)
         {
-            foreach (var q in _queryHealthQueue)
-                if (q.Id == targetId) return true; // already pending; one reply answers both
+            if (_queryHealthQueue.Count > 0 && _queryHealthLastId == targetId)
+                return true; // already the last pending; one reply answers both, the order holds
             if (_queryHealthQueue.Count >= MaxQueryHealthQueue)
             {
                 Interlocked.Increment(ref _dropped);
                 return false;
             }
             _queryHealthQueue.Enqueue((targetId, NowMs, Volatile.Read(ref _loginEpoch)));
+            _queryHealthLastId = targetId;
             Volatile.Write(ref _queryHealthPending, _queryHealthQueue.Count);
             return true;
         }

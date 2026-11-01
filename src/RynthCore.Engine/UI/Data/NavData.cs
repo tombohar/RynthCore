@@ -139,7 +139,11 @@ internal static class NavCommands
     {
         "Replace route with the trail (walk it again)",
         "Replace route with a backtrack (walk it back)",
+        "Clear the trail (start a new one from here)",
     };
+
+    /// <summary>The <see cref="TrailChoices"/> entry that wipes the trail (/ra navtrail clear) instead of making a route.</summary>
+    public const int TrailClearChoice = 2;
 
     /// <summary>Route picker index for the plugin's RouteType (1 Circular, 2 Linear, 3 Follow, else Once).</summary>
     public static int RouteIndex(int routeType) => routeType switch { 1 => 1, 2 => 2, 3 => 3, _ => 0 };

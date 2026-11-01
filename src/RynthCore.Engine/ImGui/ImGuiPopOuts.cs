@@ -432,7 +432,10 @@ internal static unsafe class ImGuiPopOuts
                 if (pop.Window == null || pop.Window.Hwnd == IntPtr.Zero) continue;
                 long interval = pop.HotFrames > 0 || pop.Hovered || pop.WantTextInput ? 0 : pop.IdleInterval;
                 if (pop.HotFrames <= 0 && now - pop.LastFrameTicks < Math.Max(interval, FrameInterval)) continue;
+                // UiCost: the window's own frame, render and present; its panel is timed by the host.
+                long cPop = UiCost.Start(), costMark = UiCost.Mark;
                 RenderOne(device, pop, uiScale, now);
+                UiCost.StopPopOutWindow(pop.Title, cPop, costMark);
             }
         }
         finally

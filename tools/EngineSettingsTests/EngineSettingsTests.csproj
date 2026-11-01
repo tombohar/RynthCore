@@ -26,6 +26,8 @@
     <!-- HoldReloadInWorldMaxMinutes: the default and the 1-240 clamp live with the gate. -->
     <Compile Include="..\..\src\RynthCore.Engine\ReloadInWorldGate.cs" Link="Engine\ReloadInWorldGate.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AutoIdPolicy.cs" Link="Engine\AutoIdPolicy.cs" />
+    <!-- UiCostThresholdMs: the default and the 5-2000 clamp live with the UI cost model. -->
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\UiCostModel.cs" Link="Engine\UiCostModel.cs" />
     <!-- EditIltServerName starts from IltDetect's defaults (IltDetect shares a parser with AelrynthWire). -->
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\IltDetect.cs" Link="Engine\IltDetect.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AelrynthWire.cs" Link="Engine\AelrynthWire.cs" />

@@ -20,10 +20,12 @@
 //    Copy  it to a tab as well (it stays where it was),
 //    Hide  it everywhere, or
 //    Colour it only,
-//  and it can colour the whole line or just the matched text. Order: top to
-//  bottom. Copy rules add up; the first matching Move or Hide decides and
-//  stops the routing. The first matching line colour wins; matched-text
-//  colours add up, a higher rule winning where two overlap.
+//  and it can colour the whole line, just the matched text, or (2026-11-01)
+//  highlight the line with a band behind it. Order: top to bottom. Copy rules
+//  add up; the first matching Move or Hide decides and stops the routing. The
+//  first matching line colour wins, and so does the first matching highlight
+//  (on its own: a line can have both); matched-text colours add up, a higher
+//  rule winning where two overlap.
 //
 //  Threads: rules are evaluated ONLY on the pump (ChatSource) - each new line
 //  once, and every kept line again when the rules change (in 8 ms slices, newest
@@ -866,7 +868,8 @@ internal static class ChatModel
             _ => "move",
         },
         When = f.When.Length > 0 ? f.When : null,
-        ColorMode = f.ColorMode switch { ChatColorMode.Line => "line", ChatColorMode.Match => "match", _ => null },
+        // "highlight" since 2026-11-01; an older RynthCore reads it as no colour (ChatColorModes.Parse).
+        ColorMode = ChatColorModes.ToJson(f.ColorMode),
         // Kept while the rule is set to "No colour" too, so switching colour back on
         // after a relaunch finds the colour that was picked.
         Color = f.ColorMode != ChatColorMode.None || f.ColorArgb != ChatFilterRule.DefaultColor ? FormatColor(f.ColorArgb) : null,
@@ -897,12 +900,7 @@ internal static class ChatModel
                 _ => tab.Length == 0 ? ChatRuleAction.Hide : ChatRuleAction.Move,
             },
             When = f.When ?? "",
-            ColorMode = (f.ColorMode ?? "").ToLowerInvariant() switch
-            {
-                "line" => ChatColorMode.Line,
-                "match" or "text" => ChatColorMode.Match,
-                _ => ChatColorMode.None,
-            },
+            ColorMode = ChatColorModes.Parse(f.ColorMode),
             ColorArgb = ParseColor(f.Color) ?? ChatFilterRule.DefaultColor,
             // Absent (every file before 2026-10-05): Regex, as those rules always were.
             Mode = ChatRuleMatching.Parse(f.Mode),
@@ -1330,6 +1328,8 @@ internal static class ChatModel
     // rynthchat_settings.v1.bak, and the next save writes version 2.
     // "lineColors" (2026-10-08, ChatLineColors) is written only once a colour
     // is set, so it needs no version bump: a file without it loads as before.
+    // "colorMode": "highlight" (2026-11-01) needs none either: "colorMode" is a
+    // string, and a RynthCore without it reads an unknown value as no colour.
 
     public const int SettingsVersion = 2;
     private static readonly object SaveLock = new();

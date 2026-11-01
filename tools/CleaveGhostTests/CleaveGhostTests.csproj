@@ -8,7 +8,10 @@
       src\RynthCore.Engine\Compatibility\ObjectFreshness.cs - when the server last sent anything
         about an object (the safety check behind plugin API v83 RemoveClientObject: a "ghost"
         creature the server talked about recently is real and is never removed).
-    Both compiled in; no game, no engine.
+    Also (2026-10-31) src\RynthCore.Engine\ImGui\MonsterHud\HealthProbe.cs: which unselected plate the HUD asks
+    the server's health for next (the server streams only the queried target), and which 0x01C0 replies are the
+    probe's (kept from plugins) versus the selection's / a plugin's.
+    All compiled in; no game, no engine.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->
   <PropertyGroup>
@@ -22,6 +25,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\CleaveHealth.cs" Link="Engine\CleaveHealth.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\HealthProbe.cs" Link="Engine\HealthProbe.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ObjectFreshness.cs" Link="Engine\ObjectFreshness.cs" />
   </ItemGroup>
 

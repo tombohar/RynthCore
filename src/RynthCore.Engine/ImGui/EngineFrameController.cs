@@ -121,107 +121,174 @@ internal static class EngineFrameController
         return true;
     }
 
-    public static bool Init(IntPtr pDevice)
+    // ImGui init runs in two parts since 2026-11-01: the first makes the context (handed to the
+    // plugins at once, as before) and starts the font atlas bake on a worker (ImGuiFonts.
+    // StartInitialBake); frames build nothing until the bake is done, and the frame that finds it
+    // done swaps it in, sets up the Win32 backend and uploads the texture. The bake used to run
+    // here, on AC's thread, for 2.5-5 s of every hot reload (the main-thread hangs of 10-31/11-01).
+    private enum InitStep { Done, Baking, Failed }
+
+    private static long _initStartedTicks;
+
+    private static InitStep Init(IntPtr pDevice)
     {
         if (_imguiInitialized)
-            return true;
+            return InitStep.Done;
+        bool begin = _context == IntPtr.Zero;
 
-        if (!EnsureCore(pDevice))
+        if (begin)
         {
-            _initFailStep = "EnsureCore (game window not found)";
-            return false;
+            if (!EnsureCore(pDevice))
+            {
+                _initFailStep = "EnsureCore (game window not found)";
+                return InitStep.Failed;
+            }
+
+            // Before any context exists: the loaded cimgui.dll must be the exact
+            // build ImGui.NET wraps, or every struct read below is at wrong offsets.
+            MainThreadHangWatchdog.Step = "ImGui init: self-test";
+            _initStartedTicks = Stopwatch.GetTimestamp();
+            Compatibility.MemoryUse.Mark("ImGui init: before the self-test");
+            if (!ImGuiSelfTest.Run(EntryPoint.ImGuiNativeHandle))
+                return InitStep.Failed;
+            Compatibility.MemoryUse.Mark("ImGui self-test done");
         }
 
-        // Before any context exists: the loaded cimgui.dll must be the exact
-        // build ImGui.NET wraps, or every struct read below is at wrong offsets.
-        Compatibility.MemoryUse.Mark("ImGui init: before the self-test");
-        if (!ImGuiSelfTest.Run(EntryPoint.ImGuiNativeHandle))
-            return false;
-        Compatibility.MemoryUse.Mark("ImGui self-test done");
-
         IntPtr previousContext = ImGuiNET.ImGui.GetCurrentContext();
-        if (previousContext != IntPtr.Zero)
-            RynthLog.Render($"EngineFrameController: Existing ImGui context detected (0x{previousContext:X8}) - isolating RynthCore context.");
-
-        _context = ImGuiNET.ImGui.CreateContext();
-        Compatibility.MemoryUse.Mark("ImGui context created");
-        bool initSucceeded = false;
+        if (begin)
+        {
+            if (previousContext != IntPtr.Zero)
+                RynthLog.Render($"EngineFrameController: Existing ImGui context detected (0x{previousContext:X8}) - isolating RynthCore context.");
+            MainThreadHangWatchdog.Step = "ImGui init: context";
+            _context = ImGuiNET.ImGui.CreateContext();
+            Compatibility.MemoryUse.Mark("ImGui context created");
+        }
+        InitStep result = InitStep.Failed;
         try
         {
             ImGuiNET.ImGui.SetCurrentContext(_context);
             ImGuiIOPtr io = ImGuiNET.ImGui.GetIO();
 
-            // Pin imgui.ini to a stable absolute path so window positions/sizes
-            // persist across plugin reloads (RL) and AC restarts. The default
-            // ImGui behavior writes to the working directory which can differ
-            // between launches. Allocated once, kept alive for the process lifetime.
-            try
+            if (begin)
             {
-                string iniPath = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "imgui.ini");
-                System.IO.Directory.CreateDirectory(RynthCore.Install.RynthInstallPaths.RynthAiDir);
-                IntPtr iniPtr = System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(iniPath);
-                unsafe { io.NativePtr->IniFilename = (byte*)iniPtr; }
-                RynthLog.Info($"EngineFrameController: imgui.ini pinned to {iniPath}");
+                SetUpContext(io);
+                MainThreadHangWatchdog.Step = "ImGui init: starting the font bake";
+                if (ImGuiFonts.StartInitialBake(_uiScale))
+                {
+                    RynthLog.UI("EngineFrameController: the font atlas bakes on a worker; ImGui frames start once it is done.");
+                    result = InitStep.Baking;
+                    return result;
+                }
+                // No worker to be had: the old way, on this thread.
+                MainThreadHangWatchdog.Step = "ImGui init: fonts on the render thread";
+                ImGuiFonts.Build(io, _uiScale);
             }
-            catch (Exception ex)
+            else
             {
-                RynthLog.Render($"EngineFrameController: failed to pin imgui.ini path - {ex.Message}");
+                MainThreadHangWatchdog.Step = "ImGui init: swapping in the baked atlas";
+                if (!ImGuiFonts.SwapFinished(io, _uiScale, out string baked))
+                {
+                    result = InitStep.Baking;   // still baking: no ImGui frame yet
+                    return result;
+                }
+                double sinceMs = (Stopwatch.GetTimestamp() - _initStartedTicks) * 1000.0 / Stopwatch.Frequency;
+                RynthLog.UI($"ImGuiFonts: first atlas {baked} ({sinceMs:0} ms after ImGui init began).");
+                Compatibility.MemoryUse.Mark("ImGui fonts swapped in");
             }
 
-            io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
-            // Multi-viewport (ViewportsEnable) is deliberately never enabled: it
-            // runs many native->managed platform/renderer callbacks per frame on
-            // AC's thread and creates HWNDs from inside EndScene. Pop-out panels,
-            // if built, are driven explicitly by the engine instead
-            // (docs/IMGUI_PARITY_PLAN.md section 4.2).
-
-            // DPI scale for fonts and style metrics. Logged next to Avalonia's
-            // scale: docked positions are stored in Avalonia logical units, so
-            // the two must agree for a panel to land in the same place in
-            // either face (plan section 4.4).
-            _uiScale = UiScale.ForWindow(_gameHwnd);
-            RynthLog.UI($"EngineFrameController: ImGui scale {_uiScale:0.##} (Avalonia input scale {UI.AvaloniaOverlay.InputScale:0.##}).");
-            RynthTheme.Apply(ImGuiNET.ImGui.GetStyle(), _uiScale);
-            Compatibility.MemoryUse.Mark("ImGui theme applied");
-            ImGuiFonts.Build(io, _uiScale);
-
+            MainThreadHangWatchdog.Step = "ImGui init: Win32 backend";
             if (!Win32Backend.Init(_gameHwnd))
             {
                 _initFailStep = "Win32Backend.Init";
-                return false;
+                return result;
             }
 
             Compatibility.MemoryUse.Mark("Win32 backend ready");
+            MainThreadHangWatchdog.Step = "ImGui init: font texture upload";
             if (!DX9Backend.InitImGui(pDevice))
             {
                 _initFailStep = "DX9Backend.InitImGui";
-                return false;
+                return result;
             }
             Compatibility.MemoryUse.Mark("DX9 backend ready (font texture)");
 
             _lastFrameTicks = Stopwatch.GetTimestamp();
             _imguiInitialized = true;
-            initSucceeded = true;
+            result = InitStep.Done;
 
             RynthLog.UI("EngineFrameController: ImGui initialized.");
-            return true;
+            return result;
         }
         finally
         {
-            if (!initSucceeded && _context != IntPtr.Zero)
+            if (result == InitStep.Failed && _context != IntPtr.Zero)
             {
+                // A bake may still be running: no context may be destroyed while it allocates.
+                ImGuiFonts.WaitForWorkers();
                 ImGuiNET.ImGui.DestroyContext(_context);
                 _context = IntPtr.Zero;
             }
 
             ImGuiNET.ImGui.SetCurrentContext(previousContext);
+            MainThreadHangWatchdog.Step = "EndScene: ImGui frame";
         }
+    }
+
+    /// <summary>The new context's ini handling, flags, DPI scale and theme (Init's first part). Context current.</summary>
+    private static void SetUpContext(ImGuiIOPtr io)
+    {
+        // Panel layout per character (UI/PanelLayout): the engine loads and saves the
+        // imgui.ini of the layout in use itself (the character's, or the PC-wide
+        // default), so Dear ImGui gets no file name: it would load only the one it
+        // started with and write it from the render thread, not atomically. The
+        // context starts with the layout already applied, if there is one.
+        if (UI.PanelLayout.Initialized)
+        {
+            unsafe { io.NativePtr->IniFilename = null; }
+            UI.PanelLayout.OnContextCreated(LoadIniFn);
+            RynthLog.Info("EngineFrameController: imgui.ini is loaded and saved by the panel layout (UI/PanelLayout).");
+        }
+        // Without it (an engine that didn't get that far), as before: pin imgui.ini to
+        // a stable absolute path so window positions/sizes persist across plugin
+        // reloads (RL) and AC restarts. The default ImGui behavior writes to the
+        // working directory which can differ between launches. Allocated once,
+        // kept alive for the process lifetime.
+        else try
+        {
+            string iniPath = System.IO.Path.Combine(RynthCore.Install.RynthInstallPaths.RynthAiDir, "imgui.ini");
+            System.IO.Directory.CreateDirectory(RynthCore.Install.RynthInstallPaths.RynthAiDir);
+            IntPtr iniPtr = System.Runtime.InteropServices.Marshal.StringToHGlobalAnsi(iniPath);
+            unsafe { io.NativePtr->IniFilename = (byte*)iniPtr; }
+            RynthLog.Info($"EngineFrameController: imgui.ini pinned to {iniPath}");
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Render($"EngineFrameController: failed to pin imgui.ini path - {ex.Message}");
+        }
+
+        io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
+        // Multi-viewport (ViewportsEnable) is deliberately never enabled: it
+        // runs many native->managed platform/renderer callbacks per frame on
+        // AC's thread and creates HWNDs from inside EndScene. Pop-out panels,
+        // if built, are driven explicitly by the engine instead
+        // (docs/IMGUI_PARITY_PLAN.md section 4.2).
+
+        // DPI scale for fonts and style metrics. Logged next to Avalonia's
+        // scale: docked positions are stored in Avalonia logical units, so
+        // the two must agree for a panel to land in the same place in
+        // either face (plan section 4.4).
+        _uiScale = UiScale.ForWindow(_gameHwnd);
+        RynthLog.UI($"EngineFrameController: ImGui scale {_uiScale:0.##} (Avalonia input scale {UI.AvaloniaOverlay.InputScale:0.##}).");
+        RynthTheme.Apply(ImGuiNET.ImGui.GetStyle(), _uiScale);
+        Compatibility.MemoryUse.Mark("ImGui theme applied");
     }
 
     public static void Shutdown()
     {
-        if (!_imguiInitialized)
+        // A context whose first font atlas is still baking (Init's two parts) goes too.
+        if (!_imguiInitialized && _context == IntPtr.Zero)
             return;
+        bool framesRan = _imguiInitialized;
 
         IntPtr previousContext = ImGuiNET.ImGui.GetCurrentContext();
         IntPtr contextToDestroy = _context;
@@ -250,6 +317,15 @@ internal static class EngineFrameController
             // unhooks), so restoring AC's original WndProc this early sends
             // those destroys to AC's proc, which ignores them, and the orphaned
             // panel HWND outlives the engine load.
+            // The windows' places go to the layout's imgui.ini now (with no IniFilename
+            // DestroyContext doesn't save them; UI/PanelLayout).
+            try
+            {
+                // Not before the first frame (the atlas still baking): nothing moved, nothing to save.
+                if (UI.PanelLayout.Initialized && framesRan)
+                    UI.PanelLayout.SaveIniOnShutdown(ImGuiNET.ImGui.SaveIniSettingsToMemory());
+            }
+            catch (Exception ex) { RynthLog.UI($"EngineFrameController: imgui.ini save at shutdown threw {ex.GetType().Name}: {ex.Message}"); }
             ImGuiNET.ImGui.DestroyContext(contextToDestroy);
             ImGuiFonts.Free(); // the atlas referenced these buffers; the context is gone now
 
@@ -276,12 +352,19 @@ internal static class EngineFrameController
         {
             // Resolve game HWND and seed EntryPoint.GameHwnd. Required even
             // in ImGui-off mode so Avalonia owner-window binding works.
+            MainThreadHangWatchdog.Step = "EndScene: engine pipeline (layout, prefetches, queues)";
             EnsureCore(pDevice);
 
             // Settings > Display: borderless windowed + AC window placement. Throttled; reads only
             // here - the window itself is changed from the game WndProc (AcWindowChrome).
             try { UI.AcWindowChrome.Tick(_gameHwnd); }
             catch (Exception ex) { RynthLog.UI($"AcWindowChrome.Tick threw {ex.GetType().Name}: {ex.Message}"); }
+
+            // Panel layout per character: switches to the character's layout (or back to the
+            // PC-wide default) and applies a loaded one, before anything below draws a panel.
+            // A layout waits for the ImGui context while the ImGui layer is in use.
+            UI.PanelLayout.Tick(imguiInUse: Plugins.EngineSettings.EnableImGuiBackend && !_imguiInitFailed,
+                imguiReady: _imguiInitialized, SnapshotIniFn, LoadIniFn);
 
             // Cache the D3D9 device function pointers used by Nav3DRenderInjector,
             // RenderNav3D, and the always-on render path. This is a strict subset
@@ -400,8 +483,12 @@ internal static class EngineFrameController
             bool imguiEnabled = Plugins.EngineSettings.EnableImGuiBackend;
             bool imguiBuilt = false;
             long uiTicks = 0;
+            MainThreadHangWatchdog.Step = "EndScene: ImGui frame";
             if (!imguiEnabled)
+            {
                 _imguiIdle = true; // switched off in game: input state resets when it comes back
+                UiCost.DiscardFrame();   // no UI frame: what the 3D pass timed isn't kept for one
+            }
             else
             {
                 long t0 = Stopwatch.GetTimestamp();
@@ -421,7 +508,13 @@ internal static class EngineFrameController
                 long t0 = Stopwatch.GetTimestamp();
                 // Popped-out panels: their own contexts, windows and render targets.
                 if (_imguiInitialized)
+                {
+                    MainThreadHangWatchdog.Step = "EndScene: pop-out panels";
+                    // UiCost: what RenderAll spends outside the pop-out windows it times itself.
+                    long c0 = UiCost.Start(), mark = UiCost.Mark;
                     ImGuiPopOuts.RenderAll(pDevice, _uiScale, PanelsLive);
+                    UiCost.StopExclusive(UiCost.PopOuts, c0, mark);
+                }
                 long ticks = uiTicks + (Stopwatch.GetTimestamp() - t0);
                 if (imguiBuilt)
                 {
@@ -431,6 +524,7 @@ internal static class EngineFrameController
                 else
                 {
                     UiFrameStats.Record(ticks);
+                    UiCost.EndFrame(ticks);
                 }
             }
         }
@@ -599,11 +693,38 @@ internal static class EngineFrameController
     /// Panel faces show only in the world, like the Avalonia overlay (hidden
     /// between characters, not closed). Also off as soon as AC leaves the world screen
     /// (UiFlowHooks, before the logout dispatch catches up) and for good once
-    /// Client::Cleanup starts.
+    /// Client::Cleanup starts. And after a login (or a hot reload) not before that
+    /// character's panel layout is in place (UI/PanelLayout), so nothing draws at the
+    /// default places first.
     /// </summary>
     private static bool PanelsLive => Compatibility.LoginLifecycleHooks.HasObservedLoginComplete
         && Compatibility.UiFlowHooks.InWorldOrUnknown
-        && !Compatibility.UiFlowHooks.ClientCleanupStarted;
+        && !Compatibility.UiFlowHooks.ClientCleanupStarted
+        && UI.PanelLayout.ReadyToDraw;
+
+    // The ImGui windows' saved text, read from and loaded into the main context for UI/PanelLayout
+    // (render thread, between frames). Cached so the per-frame Tick allocates nothing.
+    private static readonly Func<string?> SnapshotIniFn = SnapshotIni;
+    private static readonly Action<string> LoadIniFn = LoadIni;
+
+    private static string? SnapshotIni()
+    {
+        if (!_imguiInitialized || _context == IntPtr.Zero) return null;
+        IntPtr previous = ImGuiNET.ImGui.GetCurrentContext();
+        ImGuiNET.ImGui.SetCurrentContext(_context);
+        try { return ImGuiNET.ImGui.SaveIniSettingsToMemory(); }
+        finally { ImGuiNET.ImGui.SetCurrentContext(previous); }
+    }
+
+    /// <summary>Loads ini text into the main context: Dear ImGui applies it to windows that already exist too.</summary>
+    private static void LoadIni(string text)
+    {
+        if (_context == IntPtr.Zero) return;
+        IntPtr previous = ImGuiNET.ImGui.GetCurrentContext();
+        ImGuiNET.ImGui.SetCurrentContext(_context);
+        try { ImGuiNET.ImGui.LoadIniSettingsFromMemory(text); }
+        finally { ImGuiNET.ImGui.SetCurrentContext(previous); }
+    }
 
     /// <summary>DPI scale the fonts and style were built for (see Init).</summary>
     private static float _uiScale = 1f;
@@ -663,19 +784,24 @@ internal static class EngineFrameController
         {
             // Initialised as soon as the backend is enabled (not lazily on first
             // content), so the cimgui self-test result is in the log at startup.
-            if (!Init(pDevice))
+            InitStep step = Init(pDevice);
+            if (step == InitStep.Failed)
             {
                 _imguiInitFailed = true;
                 RynthLog.Error($"EngineFrameController: ImGui init FAILED at step '{_initFailStep}' - ImGui frames disabled for this session.");
                 return false;
             }
+            if (step == InitStep.Baking)
+                return false;   // the first font atlas is still baking on its worker: no ImGui frame yet
         }
 
         Win32Backend.UpdateClientMetrics(out int clientW, out int clientH);
 
         // Monster nameplates: pick the monsters (throttled) before deciding
         // whether there is a frame to build, so plates alone can ask for one.
+        long cHud = UiCost.Start();
         Hud.MonsterHud.Update(PanelsLive);
+        UiCost.Stop(UiCost.HudUpdate, cHud);
 
         if (!HasImGuiContent())
         {
@@ -704,6 +830,8 @@ internal static class EngineFrameController
             }
 
             _frameCount++;
+            // UiCost (ImGui/UiCost.cs): each part of the frame below is timed, by name.
+            long cSetup = UiCost.Start();
             // A panel's text size changed: re-bake the fonts (only the sizes in
             // use) and replace the font texture, between frames.
             // The new atlas is baked on a worker (ImGuiFonts.PumpRebuild), once per run of
@@ -737,7 +865,10 @@ internal static class EngineFrameController
             io.DeltaTime = dt > 0f ? dt : 1f / 60f;
 
             RynthTheme.RefreshStyle(ref _themeApplied);   // a theme change re-colours the base style
+            UiCost.Stop(UiCost.FrameSetup, cSetup);
+            long cNew = UiCost.Start();
             ImGuiNET.ImGui.NewFrame();
+            UiCost.Stop(UiCost.ImGuiNewFrame, cNew);
             frameStarted = true;
             // Before any window: a drag from a popped-out Inventory or AC's inventory becomes
             // a payload the client's drop targets (Mini Remote slots) see this frame.
@@ -755,15 +886,17 @@ internal static class EngineFrameController
             if (Plugins.EngineSettings.EnableImGuiShell)
             {
                 branch = 1;
+                long cShell = UiCost.Start();
                 RynthCoreShell.Render(_frameCount);
-                PluginManager.RenderAll();
+                UiCost.Stop(UiCost.Shell, cShell);
+                PluginManager.RenderAll();   // times each plugin's Render (UiCost)
             }
             else if (PluginOverlayWindowsLive)
             {
                 branch = 2;
                 // Only the opt-in extra windows (RynthPluginRenderOverlay), never the
                 // plugins' full ImGui UIs.
-                PluginManager.RenderOverlayAll();
+                PluginManager.RenderOverlayAll();   // times each plugin's RenderOverlay (UiCost)
             }
             else
             {
@@ -779,29 +912,53 @@ internal static class EngineFrameController
                 // World overlays: built into UnderUiLayer's list, drawn next frame at
                 // AC's 3D->UI transition (under AC's UI and every panel), no input.
                 // Video patch: with no 3D scene only the screen-fixed player plate draws.
+                // Timed from here, as one part (plates, the player plate, combat text): the HUD's own
+                // code isn't instrumented.
+                long cPlates = UiCost.Start();
                 Hud.MonsterHud.Draw(_uiScale, worldVisible: !D3D9.VideoPatch.SkipWorldThisFrame);
+                UiCost.Stop(UiCost.MonsterHud, cPlates, cPlates != 0 ? Hud.MonsterHud.PlateCount : -1);
                 // Video patch "all": the "rendering paused" banner (background list, under the panels).
+                long cPart = UiCost.Start();
                 VideoPatchBanner.Draw();
+                UiCost.Stop(UiCost.VideoBanner, cPart);
                 // Server verdicts, the plugins' section manifests and the servermenu push. Every
                 // frame, bar or not: with the bar hidden (the rail instead) nothing else ticks them,
                 // so Options > Diagnostics listed no servers and no server plugin was told it is active.
+                cPart = UiCost.Start();
                 RynthCore.Engine.UI.ServerMenus.Tick();
+                UiCost.Stop(UiCost.ServerMenus, cPart);
+                cPart = UiCost.Start();
                 if (ImGuiBar.Visible)
                     ImGuiBar.Draw(_uiScale);
-                ImGuiPanelHost.DrawAll(_uiScale);
+                UiCost.Stop(UiCost.Bar, cPart);
+                ImGuiPanelHost.DrawAll(_uiScale);   // times each panel by title, and its own upkeep (UiCost)
                 // Settings drawer bodies RynthAi's window didn't draw this frame let their sources go.
+                cPart = UiCost.Start();
                 Panels.SettingsDrawerBodies.EndFrame();
+                UiCost.Stop(UiCost.DrawerBodies, cPart);
+                cPart = UiCost.Start();
                 ImGuiBar.SyncPopOut(_uiScale);
+                UiCost.Stop(UiCost.Bar, cPart);
             }
             if (ImGuiFontTest.Enabled)
                 ImGuiFontTest.Draw(_uiScale);
 
+            long cRender = UiCost.Start();
             ImGuiNET.ImGui.EndFrame();
             frameEnded = true;
             ImGuiNET.ImGui.Render();
+            UiCost.Stop(UiCost.ImGuiRender, cRender);
+            long cFinish = UiCost.Start();
             ImGuiAssertLog.Poll();
             _framesBuilt++;
             _lastDisplaySize = io.DisplaySize;
+            // Windows moved a while ago (Dear ImGui's dirty timer; no IniFilename, so it asks):
+            // saved to the panel layout's imgui.ini in the background (UI/PanelLayout).
+            if (io.WantSaveIniSettings)
+            {
+                io.WantSaveIniSettings = false;
+                UI.PanelLayout.QueueIniSave(ImGuiNET.ImGui.SaveIniSettingsToMemory(), explicitSave: false);
+            }
 
             // io.WantCaptureMouse already applies ImGui's own button-ownership
             // rule; io.WantTextInput is true only while a text field is edited.
@@ -826,6 +983,7 @@ internal static class EngineFrameController
             if (typing && !Win32Backend.UiCaptureEnabled)
                 _dropImGuiTextFocus = true;
             ArbitrateTextFocus(io.WantTextInput);
+            UiCost.Stop(UiCost.FrameFinish, cFinish);
             return true;
         }
         catch (Exception ex)
@@ -884,7 +1042,9 @@ internal static class EngineFrameController
 
         long t0 = Stopwatch.GetTimestamp();
         SubmitImGuiFrame(device);
-        UiFrameStats.Record(_deferredUiTicks + (Stopwatch.GetTimestamp() - t0));
+        long ticks = _deferredUiTicks + (Stopwatch.GetTimestamp() - t0);
+        UiFrameStats.Record(ticks);
+        UiCost.EndFrame(ticks);
     }
 
     /// <summary>Draws the frame <see cref="BuildImGuiFrame"/> produced.</summary>
@@ -895,7 +1055,16 @@ internal static class EngineFrameController
         try
         {
             ImDrawDataPtr drawData = ImGuiNET.ImGui.GetDrawData();
+            long c0 = UiCost.Start();
             DX9Backend.RenderDrawData(drawData, pDevice);
+            if (c0 != 0)
+            {
+                int vertices = 0;
+                // ImDrawData +12 TotalVtxCount (as LogHeartbeatIfDue).
+                unsafe { byte* p = (byte*)drawData.NativePtr; if (p != null) vertices = *(int*)(p + 12); }
+                UiCost.Stop(UiCost.Submit, c0, vertices);
+                UiCost.SetSubmit(DX9Backend.LastSubmit);   // draws, texture switches, vertices copied
+            }
             _drawSubmits++;
             if (!_loggedFirstSubmit)
             {

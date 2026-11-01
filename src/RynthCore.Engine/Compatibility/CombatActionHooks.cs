@@ -438,9 +438,35 @@ internal static class CombatActionHooks
         if (AcMainThreadQueue.MustQueue(teardown: false))
             return targetId != 0 && AcMainThreadQueue.EnqueueQueryHealth(targetId);
 
+        // The server streams health for the last id queried: the HUD's probes put it back here.
+        ImGuiBackend.Hud.HealthProbe.NoteQuery(targetId);
         try
         {
             return _queryHealth(targetId);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The nameplates' health probe (MonsterHud.ProbeHealth): a 0x1BF for <paramref name="probeId"/>, then
+    /// one for <paramref name="restoreId"/> (the stream's owner) so the selected / fight target keeps its
+    /// live 0x01C0 stream. Both go out back to back on AC's main thread, in order; false (nothing sent) off
+    /// it or in a death / portal window. No owner (0): no second query - the stream stays on the probed
+    /// monster and its updates stay the HUD's until someone else queries (HealthProbe.IsProbeReply).
+    /// </summary>
+    internal static bool SendHudHealthProbe(uint probeId, uint restoreId, long nowMs)
+    {
+        if (_queryHealth == null || probeId == 0 || probeId == restoreId || AcMainThreadQueue.MustQueue(teardown: false))
+            return false;
+        try
+        {
+            ImGuiBackend.Hud.HealthProbe.NoteProbe(probeId, nowMs, sticky: restoreId == 0);
+            _queryHealth(probeId);
+            if (restoreId != 0) _queryHealth(restoreId);
+            return true;
         }
         catch
         {
@@ -1016,7 +1042,7 @@ internal static class CombatActionHooks
                 if (playerId != 0 && targetId == playerId && healthRatio > 0f && healthRatio <= 1f)
                     PlayerVitalsHooks.UpdateMaxFromHealthRatio(healthRatio);
 
-                PluginManager.QueueUpdateHealth(targetId, healthRatio, currentHealth, maxHealth);
+                PluginManager.QueueUpdateHealth(targetId, healthRatio, currentHealth, maxHealth, healthReply: true);
             }
         }
         catch

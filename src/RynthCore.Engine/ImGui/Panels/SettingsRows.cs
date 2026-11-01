@@ -251,7 +251,19 @@ internal sealed class SettingsRows
         ImGuiNET.ImGui.TextUnformatted(row.Label);
         ImGuiNET.ImGui.PopStyleColor();
         ImGuiNET.ImGui.SameLine(Math.Max(ImGuiNET.ImGui.GetCursorPosX() + 8, w * 0.45f));
-        if (ImGuiNET.ImGui.Button(row.ButtonText ?? row.Label))
+        bool clicked = ImGuiNET.ImGui.Button(row.ButtonText ?? row.Label);
+        Tooltip(row);
+        if (row.Confirm != null)
+        {
+            // Asks first: the question, then the button's own caption to go ahead, or Cancel.
+            if (clicked)
+            {
+                _confirmText = row.Confirm();
+                ImGuiNET.ImGui.OpenPopup("##confirm");
+            }
+            clicked = ConfirmPopup(row.ButtonText ?? row.Label);
+        }
+        if (clicked)
         {
             // A settings edit is applied to this copy and saved like a typed value (the number
             // boxes re-sync from the copy next frame); Click, when also set, runs after.
@@ -262,7 +274,33 @@ internal sealed class SettingsRows
             }
             row.Click?.Invoke();
         }
-        Tooltip(row);
+    }
+
+    private string _confirmText = string.Empty;
+
+    /// <summary>The open confirmation (the row's ID scope): true when the player went ahead.</summary>
+    private bool ConfirmPopup(string caption)
+    {
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.PopupBg, ShellBg);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Border, Teal);
+        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(12, 10));
+        bool open = ImGuiNET.ImGui.BeginPopup("##confirm");
+        ImGuiNET.ImGui.PopStyleVar();
+        ImGuiNET.ImGui.PopStyleColor(2);
+        if (!open) return false;
+        bool go = false;
+        try
+        {
+            ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, TextDim);
+            ImGuiNET.ImGui.TextUnformatted(_confirmText);
+            ImGuiNET.ImGui.PopStyleColor();
+            ImGuiNET.ImGui.Dummy(new Vector2(0, 4));
+            if (ImGuiNET.ImGui.Button(caption.TrimEnd('.') + "##confirm_go")) { go = true; ImGuiNET.ImGui.CloseCurrentPopup(); }
+            ImGuiNET.ImGui.SameLine(0, 8);
+            if (ImGuiNET.ImGui.Button("Cancel##confirm_no")) ImGuiNET.ImGui.CloseCurrentPopup();
+        }
+        finally { ImGuiNET.ImGui.EndPopup(); }
+        return go;
     }
 
     private void Changed(SettingRow row, double value)

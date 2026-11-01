@@ -14,6 +14,9 @@
 //  legend. Your own arrow, the compass letters and the coordinates have sizes too.
 //  Outdoors the World Map's picture can be drawn behind it (RadarSettingsStore.ShowWorldMap; the
 //  tiles come from WorldMapTiles through WorldMapTileDrawer, the same code as the World Map).
+//  The object selected in game is highlighted (RadarSettingsStore.HighlightSelected, RadarSelection):
+//  a ring in its own colour round its marker and the hover label beside it, or an arrow on the
+//  edge when it is off the picture.
 //
 //  Data: UiSources.Radar (RadarView, lookups precomputed). World geometry is
 //  drawn without anti-aliasing (crisp tiling like the Avalonia face's aliased
@@ -72,6 +75,8 @@ internal sealed class RadarFace : IImGuiPanel
     // The round radar (RadarSettingsStore.RoundRadar): this frame's circle, read by the drawing helpers.
     private static bool _round;
     private static RoundMask _mask;
+    // The selected object's marker this frame (RadarSelection.Highlighted), or null; drawn over everything.
+    private static RadarMarker? _sel;
 
     /// <summary>Markers move: popped out, redraw smoothly even when idle.</summary>
     public int PopOutIdleHz => 20;
@@ -167,6 +172,11 @@ internal sealed class RadarFace : IImGuiPanel
             dl.AddLine(new Vector2(worldMin.X, centre.Y), new Vector2(worldMax.X, centre.Y), Crosshair);
         }
 
+        // The game's current selection (the global AC's SetSelectedObject writes; one read a frame).
+        uint selectedId = view != null && RadarSettingsStore.HighlightSelected && Compatibility.SelectedTargetHooks.IsInstalled
+            ? Compatibility.SelectedTargetHooks.ReadCurrentSelectedId() : 0;
+        _sel = view != null ? RadarSelection.Highlighted(RadarSettingsStore.HighlightSelected, view.Live.Markers, selectedId) : null;
+
         if (view != null)
         {
             ImDrawListFlags saved = dl.Flags;
@@ -175,6 +185,7 @@ internal sealed class RadarFace : IImGuiPanel
             DrawWorld(dl, view, centre, worldMin, worldMax);
             dl.PopClipRect();
             dl.Flags = saved;
+            DrawSelected(dl, view, centre, worldMin, worldMax, origin, panelMax);
 
             DrawOutlinedText(dl, ImGuiFonts.Get(UiFont.UiBold11), view.CoordText,
                 new Vector2((origin.X + panelMax.X) * 0.5f, panelMax.Y), CoordText, alignBottom: true,
@@ -306,7 +317,7 @@ internal sealed class RadarFace : IImGuiPanel
         {
             foreach (RadarMarker m in live.Markers)
             {
-                if (!RadarSettingsStore.ShowKind(m.Kind)) continue;
+                if (m == _sel || !RadarSettingsStore.ShowKind(m.Kind)) continue;   // the selected one: DrawSelected
                 if ((pass == 1) != (RadarKind.IsCreature(m.Kind) || m.Kind is RadarKind.Portal or RadarKind.Door)) continue;
                 Vector2 pp = proj.P(m.X, m.Y);
                 if (_round ? !_mask.Contains(pp) : (pp.X < clipMin.X || pp.X > clipMax.X || pp.Y < clipMin.Y || pp.Y > clipMax.Y)) continue;
@@ -323,6 +334,7 @@ internal sealed class RadarFace : IImGuiPanel
             foreach (RadarMarker m in live.Markers)
             {
                 if (!markers.NameShown(m.Kind) || !RadarSettingsStore.ShowKind(m.Kind)) continue;
+                if (m == _sel && RadarSettingsStore.ShowSelectedLabel) continue;   // its label has the name
                 Vector2 pp = proj.P(m.X, m.Y);
                 if (pp.X < clipMin.X - 8 || pp.X > clipMax.X || pp.Y < clipMin.Y - 8 || pp.Y > clipMax.Y + 8) continue;
                 if (_round && !_mask.Contains(pp)) continue;
@@ -336,6 +348,57 @@ internal sealed class RadarFace : IImGuiPanel
         dl.AddCircleFilled(centre, 3.5f * me, PlayerCol, 10);
         Vector2 tip = rotate ? centre + new Vector2(0, -10 * me) : centre + new Vector2(proj.Cos * 10 * me, -proj.Sin * 10 * me);
         dl.AddLine(centre, tip, PlayerCol, 2);
+    }
+
+    // ── The selected object ────────────────────────────────────────────────
+    // A ring in the selection colour round its marker (the marker drawn over everything, even when its
+    // kind's box is off), and the hover label beside it; off the picture, an arrow on the edge pointing
+    // to it with the label next to the arrow. Drawn anti-aliased, after the world.
+
+    private const float ArrowInset = 3f, ArrowLength = 9f, ArrowHalfWidth = 5f;
+    private readonly TipCache _selTip = new();
+
+    private void DrawSelected(ImDrawListPtr dl, RadarView view, Vector2 centre, Vector2 clipMin, Vector2 clipMax,
+        Vector2 panelMin, Vector2 panelMax)
+    {
+        RadarMarker? sel = _sel;
+        if (sel == null) return;
+        var proj = new Projection(centre, view.Live.Player, RadarSettingsStore.RotateWithPlayer, MathF.Max(0.5f, RadarSettingsStore.Zoom));
+        Vector2 pp = proj.P(sel.X, sel.Y);
+        uint col = RynthTheme.Argb(RadarSettingsStore.SelectedColor);
+        Vector2 anchor;
+        float gap;
+        dl.PushClipRect(clipMin, clipMax, true);
+        if (RadarSelection.EdgeArrow(centre, pp, clipMin, clipMax, _round ? _mask : null, ArrowInset, out Vector2 tip, out Vector2 dir))
+        {
+            RadarSelection.ArrowCorners(tip, dir, ArrowLength, ArrowHalfWidth, out Vector2 a, out Vector2 b, out Vector2 c);
+            dl.AddTriangleFilled(a, b, c, col);
+            dl.AddTriangle(a, b, c, Outline, 1.5f);
+            anchor = tip - dir * (ArrowLength * 0.5f);
+            gap = ArrowLength;
+        }
+        else
+        {
+            float size = RadarSettingsStore.Markers.SizeOf(sel.Kind);
+            float r = MathF.Max(6.5f, RadarMarkerStyle.Radius(sel.Kind) * size + 3f);
+            dl.AddCircle(pp, r, Outline, 20, 3.5f);
+            RadarMarkerStyle.Draw(dl, sel.Kind, pp, KindCols[sel.Kind], size);
+            dl.AddCircle(pp, r, col, 20, 2f);
+            anchor = pp;
+            gap = r + 4f;
+        }
+        dl.PopClipRect();
+        if (!RadarSettingsStore.ShowSelectedLabel) return;
+
+        // The hover label, as a tooltip-styled box kept inside the panel.
+        string text = _selTip.Get(view, sel);
+        var style = ImGuiNET.ImGui.GetStyle();
+        Vector2 pad = new Vector2(6f, 4f);
+        Vector2 box = ImGuiNET.ImGui.CalcTextSize(text) + pad * 2f;
+        Vector2 at = RadarSelection.LabelPos(anchor, gap, box, panelMin, panelMax);
+        dl.AddRectFilled(at, at + box, ImGuiNET.ImGui.GetColorU32(ImGuiCol.PopupBg), style.PopupRounding);
+        dl.AddRect(at, at + box, col, style.PopupRounding, ImDrawFlags.None, 1f);
+        dl.AddText(at + pad, ImGuiNET.ImGui.GetColorU32(ImGuiCol.Text), text);
     }
 
     // ── World map backdrop ─────────────────────────────────────────────────
@@ -475,11 +538,7 @@ internal sealed class RadarFace : IImGuiPanel
 
     private Vector2 _pressPos;
     private float _pressTravel;
-    private byte _tipKind = byte.MaxValue;
-    private string? _tipLabel;
-    private int _tipDistance = int.MinValue;
-    private int _tipPct = -1;
-    private string _tipText = "";
+    private readonly TipCache _hoverTip = new();
 
     private void MarkerInput(ImDrawListPtr dl, RadarView view, Vector2 centre, Vector2 clipMin, Vector2 clipMax, bool clicked)
     {
@@ -517,8 +576,9 @@ internal sealed class RadarFace : IImGuiPanel
         dl.PushClipRect(clipMin, clipMax, true);
         dl.AddCircle(hitPos, 6.5f, CoordText, 16, 1.5f);
         dl.PopClipRect();
+        if (hit == _sel && RadarSettingsStore.ShowSelectedLabel) return;   // its label is already showing
         ImGuiNET.ImGui.BeginTooltip();
-        ImGuiNET.ImGui.TextUnformatted(TipText(view, hit));
+        ImGuiNET.ImGui.TextUnformatted(_hoverTip.Get(view, hit));
         ImGuiNET.ImGui.EndTooltip();
     }
 
@@ -621,34 +681,44 @@ internal sealed class RadarFace : IImGuiPanel
     }
 
     /// <summary>
-    /// "Name\n12 yd" for the hovered marker, plus "  75%" when the marker has an id and
-    /// the engine has a health reading for it (MonsterHudData: one locked lookup, hover
-    /// only). Rebuilt only when the marker, whole yards or whole percent change.
+    /// "Name\n12 yd" for the hovered (or selected) marker, plus "  75%" when the marker has an id and
+    /// the engine has a health reading for it (MonsterHudData: one locked lookup, hover and the
+    /// selected marker only). Rebuilt only when the marker, whole yards or whole percent change; one
+    /// cache for the hover tooltip, one for the selected object's label, so neither rebuilds the other's.
     /// </summary>
-    private string TipText(RadarView view, RadarMarker m)
+    private sealed class TipCache
     {
-        RadarPlayer p = view.Live.Player;
-        float dx = m.X - p.WorldX, dy = m.Y - p.WorldY, dz = m.Z - p.Z;
-        int d = (int)MathF.Round(MathF.Sqrt(dx * dx + dy * dy + dz * dz));
-        int pct = -1;
-        if (m.Id != 0 && RadarKind.IsCreature(m.Kind) && Hud.MonsterHudData.TryGetHealth(m.Id, out Hud.HealthObservation h))
-            pct = (int)MathF.Round(h.Ratio * 100f);
-        // Markers are rebuilt on every radar poll: key on what the text shows, not the instance.
-        if (m.Kind == _tipKind && d == _tipDistance && pct == _tipPct
-            && string.Equals(m.Label, _tipLabel, StringComparison.Ordinal))
+        private byte _tipKind = byte.MaxValue;
+        private string? _tipLabel;
+        private int _tipDistance = int.MinValue;
+        private int _tipPct = -1;
+        private string _tipText = "";
+
+        public string Get(RadarView view, RadarMarker m)
+        {
+            RadarPlayer p = view.Live.Player;
+            float dx = m.X - p.WorldX, dy = m.Y - p.WorldY, dz = m.Z - p.Z;
+            int d = (int)MathF.Round(MathF.Sqrt(dx * dx + dy * dy + dz * dz));
+            int pct = -1;
+            if (m.Id != 0 && RadarKind.IsCreature(m.Kind) && Hud.MonsterHudData.TryGetHealth(m.Id, out Hud.HealthObservation h))
+                pct = (int)MathF.Round(h.Ratio * 100f);
+            // Markers are rebuilt on every radar poll: key on what the text shows, not the instance.
+            if (m.Kind == _tipKind && d == _tipDistance && pct == _tipPct
+                && string.Equals(m.Label, _tipLabel, StringComparison.Ordinal))
+                return _tipText;
+            _tipKind = m.Kind;
+            _tipLabel = m.Label;
+            _tipDistance = d;
+            _tipPct = pct;
+            // A label is the object's name; the kind always follows it, so a dot says which show box
+            // in the settings hides it (a fellow is not a "Player", your kill's corpse not a "Corpse").
+            string name = string.IsNullOrEmpty(m.Label) ? RadarKind.Name(m.Kind)
+                : m.Label + "  (" + RadarKind.Name(m.Kind) + ")";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            _tipText = name + "\n" + d.ToString(inv) + " yd"
+                       + (pct >= 0 ? "   " + pct.ToString(inv) + "%" : "");
             return _tipText;
-        _tipKind = m.Kind;
-        _tipLabel = m.Label;
-        _tipDistance = d;
-        _tipPct = pct;
-        // A label is the object's name; the kind always follows it, so a dot says which show box
-        // in the settings hides it (a fellow is not a "Player", your kill's corpse not a "Corpse").
-        string name = string.IsNullOrEmpty(m.Label) ? RadarKind.Name(m.Kind)
-            : m.Label + "  (" + RadarKind.Name(m.Kind) + ")";
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        _tipText = name + "\n" + d.ToString(inv) + " yd"
-                   + (pct >= 0 ? "   " + pct.ToString(inv) + "%" : "");
-        return _tipText;
+        }
     }
 
     // ── Compass and text ───────────────────────────────────────────────────
@@ -763,6 +833,26 @@ internal sealed class RadarFace : IImGuiPanel
             changed |= Check("Click a dot to select it", ref RadarSettingsStore.ClickToSelect);
             if (ImGuiNET.ImGui.IsItemHovered())
                 ImGuiNET.ImGui.SetTooltip("Left-click a dot to select that object in game. Hover a dot for its name and distance.");
+            changed |= Check("Highlight the selected object", ref RadarSettingsStore.HighlightSelected);
+            if (ImGuiNET.ImGui.IsItemHovered())
+                ImGuiNET.ImGui.SetTooltip("Whatever you have selected in game (a monster, NPC, player, portal, door, corpse or item on the ground)\ngets a ring in this colour round its dot, even when its kind's box is off.\nOff the radar's picture, an arrow on the edge points the way to it.");
+            ImGuiNET.ImGui.SameLine();
+            Vector4 selCol = RynthTheme.Vec(RadarSettingsStore.SelectedColor);
+            if (ImGuiNET.ImGui.ColorEdit4("##selcol", ref selCol, PickFlags))
+            {
+                RadarSettingsStore.SelectedColor = ToArgb(selCol);
+                _colorDirty = true;
+            }
+            if (ImGuiNET.ImGui.IsItemHovered() && !ImGuiNET.ImGui.IsItemActive())
+                ImGuiNET.ImGui.SetTooltip("The selection ring's colour (click to change it).");
+            if (RadarSettingsStore.HighlightSelected)
+            {
+                ImGuiNET.ImGui.Indent();
+                changed |= Check("Show its label", ref RadarSettingsStore.ShowSelectedLabel);
+                if (ImGuiNET.ImGui.IsItemHovered())
+                    ImGuiNET.ImGui.SetTooltip("The hover label (name, distance, health) stays beside the selected object while it is selected.");
+                ImGuiNET.ImGui.Unindent();
+            }
             changed |= Slider("Opacity", ref RadarSettingsStore.Opacity, 0.05f, 1.0f, "%.2f");
             changed |= Slider("Zoom", ref RadarSettingsStore.Zoom, 0.5f, 6.0f, "%.1f");
             changed |= Check("World map behind the radar (outdoors)", ref RadarSettingsStore.ShowWorldMap);
@@ -865,8 +955,6 @@ internal sealed class RadarFace : IImGuiPanel
         float xName = 232 * scale, xSize = 268 * scale, xText = 350 * scale;
         MarkerStyleSettings markers = RadarSettingsStore.Markers;
         MarkerStyleEditor.HeaderRow(xName, xSize, xText);
-        const ImGuiColorEditFlags pickFlags = ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel
-            | ImGuiColorEditFlags.AlphaBar | ImGuiColorEditFlags.AlphaPreviewHalf;
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(6, 3));
         foreach (var (kind, label) in KindRowsOrder)
         {
@@ -893,7 +981,7 @@ internal sealed class RadarFace : IImGuiPanel
             if (ImGuiNET.ImGui.IsItemHovered()) SafeImGui.SetTooltip(KindTips[kind]);
             ImGuiNET.ImGui.SameLine(190 * scale);
             Vector4 v = RynthTheme.Vec(RadarSettingsStore.KindColors[kind]);
-            if (ImGuiNET.ImGui.ColorEdit4("##col", ref v, pickFlags))
+            if (ImGuiNET.ImGui.ColorEdit4("##col", ref v, PickFlags))
             {
                 RadarSettingsStore.KindColors[kind] = ToArgb(v);
                 _colorDirty = true;
@@ -922,7 +1010,7 @@ internal sealed class RadarFace : IImGuiPanel
             RadarSettingsStore.ResetKindColors();
             changed = true;
         }
-        if (ImGuiNET.ImGui.IsItemHovered()) ImGuiNET.ImGui.SetTooltip("Every kind back to its default colour (show boxes stay as they are).");
+        if (ImGuiNET.ImGui.IsItemHovered()) ImGuiNET.ImGui.SetTooltip("Every kind, and the selection ring, back to its default colour (show boxes stay as they are).");
         ImGuiNET.ImGui.SameLine();
         if (ImGuiNET.ImGui.SmallButton("Reset sizes and names"))
         {
@@ -934,6 +1022,10 @@ internal sealed class RadarFace : IImGuiPanel
     }
 
     private static bool _colorDirty;
+
+    // The colour swatches: click to pick, alpha included.
+    private const ImGuiColorEditFlags PickFlags = ImGuiColorEditFlags.NoInputs | ImGuiColorEditFlags.NoLabel
+        | ImGuiColorEditFlags.AlphaBar | ImGuiColorEditFlags.AlphaPreviewHalf;
 
     private static uint ToArgb(Vector4 v)
     {

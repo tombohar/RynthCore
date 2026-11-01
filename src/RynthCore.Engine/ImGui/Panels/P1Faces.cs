@@ -210,14 +210,30 @@ internal sealed unsafe class LogFace : IImGuiPanel
     }
 }
 
-/// <summary>Tracker: the session-stat rows (TrackerSource) over an adjustable-opacity background.</summary>
+/// <summary>
+/// Tracker: the session-stat rows (TrackerSource) over an adjustable-opacity background, or text only
+/// (TrackerSettings.TextOnly: bare, the rows shadowed, clicks pass through except over them).
+/// </summary>
 internal sealed class TrackerFace : IImGuiPanel
 {
     private static readonly Vector4 TitleColor = RynthTheme.Vec(0xFFE6B450);
     private static readonly Vector4 LabelColor = RynthTheme.Vec(0xFF999999);
     private static readonly uint ResetBg = RynthTheme.Argb(0xFF1A2E40);
     private static uint ResetBorder => RynthTheme.AccentFill;
+    // Text only: no background behind it, so brighter than the framed look, each with a shadow.
+    private static readonly uint BareLabel = RynthTheme.Argb(0xFFCFCFCF);
+    private static readonly uint BareValue = RynthTheme.Argb(0xFFFFFFFF);
+    private static readonly uint BareShadow = RynthTheme.Argb(0xD0000000);
     private int _opacity;
+
+    // Text only: the mouse is over what the last frame drew, so the window takes input (to drag it, or
+    // for the frame button); elsewhere clicks reach the game. A press that began there keeps it.
+    private bool _hot, _pressHot;
+
+    /// <summary>Text only is bare: docked, no frame, title, background or grip (popped out it is framed as usual).</summary>
+    public bool Bare => TrackerSettings.TextOnly;
+
+    public bool ClickThrough => Bare && !_hot && !_pressHot;
 
     public void OnShown()
     {
@@ -230,6 +246,90 @@ internal sealed class TrackerFace : IImGuiPanel
 
     public void Draw()
     {
+        if (TrackerSettings.TextOnly && !ImGuiPanelHost.DrawingEmbedded && !ImGuiPopOuts.InPopOutFrame)
+        {
+            DrawTextOnly();
+            return;
+        }
+        _hot = _pressHot = false;
+        DrawFramed();
+    }
+
+    /// <summary>
+    /// Text only: each row's label and value with a 1 px shadow, nothing behind them. The rows are a
+    /// drag handle; the button at the end of the first row (faint until the mouse is on the rows)
+    /// brings the frame back.
+    /// </summary>
+    private void DrawTextOnly()
+    {
+        var dl = ImGuiNET.ImGui.GetWindowDrawList();
+        Vector2 origin = ImGuiNET.ImGui.GetCursorScreenPos();
+        float width = Math.Max(60, ImGuiNET.ImGui.GetContentRegionAvail().X);
+        Vector2 mouse = ImGuiNET.ImGui.GetIO().MousePos;
+        bool wasHot = _hot;
+
+        ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Ui9));
+        float rowH = ImGuiNET.ImGui.GetTextLineHeight() + 1;
+        float buttonW = rowH + 4;
+        TrackerSnapshot? snap = UiSources.Tracker.Current?.Value;
+        string[]? values = snap?.Values;
+        string[] labels = snap?.Labels ?? TrackerSnapshot.DefaultLabels;
+        ImFontPtr labelFont = ImGuiNET.ImGui.GetFont();
+        float labelSize = ImGuiNET.ImGui.GetFontSize();
+        ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Mono9));
+        ImFontPtr valueFont = ImGuiNET.ImGui.GetFont();
+        float valueSize = ImGuiNET.ImGui.GetFontSize();
+        float y = origin.Y;
+        for (int i = 0; i < labels.Length; i++)
+        {
+            // The first row stops short of the frame button.
+            float right = origin.X + width - (i == 0 ? buttonW + 2 : 0);
+            Shadowed(dl, labelFont, labelSize, new Vector2(origin.X, y), BareLabel, labels[i]);
+            string value = values != null && i < values.Length ? values[i] : "—";
+            float w = ImGuiNET.ImGui.CalcTextSize(value).X;
+            Shadowed(dl, valueFont, valueSize, new Vector2(Math.Max(origin.X, right - w), y), BareValue, value);
+            y += rowH;
+        }
+        ImGuiNET.ImGui.PopFont();
+        float height = Math.Max(rowH, y - origin.Y);
+
+        // The rows: a drag handle (the window has no title bar to hold).
+        ImGuiNET.ImGui.SetCursorScreenPos(origin);
+        ImGuiNET.ImGui.InvisibleButton("##tracker_textonly_drag", new Vector2(Math.Max(1, width - buttonW - 2), height));
+        ImGuiPanelHost.DragWindowWithLastItem();
+        if (ImGuiNET.ImGui.IsItemHovered() && !ImGuiNET.ImGui.IsItemActive())
+            ImGuiNET.ImGui.SetTooltip("Drag to move the Tracker.");
+
+        // Frame button: faint until the mouse is on the rows.
+        Vector2 bp = new(origin.X + width - buttonW, origin.Y);
+        ImGuiNET.ImGui.SetCursorScreenPos(bp);
+        float alpha = wasHot ? 1f : 0.35f;
+        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.Alpha, alpha);
+        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(1, 0));
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Button, ResetBg);
+        if (ImGuiNET.ImGui.Button(PhosphorIcons.SquaresFour + "##tracker_frame", new Vector2(buttonW, rowH)))
+            TrackerSettings.SetTextOnly(false);
+        ImGuiNET.ImGui.SetItemTooltip("Show the Tracker's frame and background again.");
+        ImGuiNET.ImGui.PopStyleColor();
+        ImGuiNET.ImGui.PopStyleVar(2);
+        ImGuiNET.ImGui.PopFont();
+
+        // Hot for the next frame: the mouse over the rows or the button.
+        bool over = mouse.X >= origin.X && mouse.X <= origin.X + width && mouse.Y >= origin.Y && mouse.Y <= origin.Y + height;
+        _hot = over;
+        bool down = ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left);
+        if (!down) _pressHot = false;
+        else if (over && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Left)) _pressHot = true;
+    }
+
+    private static void Shadowed(ImDrawListPtr dl, ImFontPtr font, float size, Vector2 p, uint color, string text)
+    {
+        dl.AddText(font, size, p + new Vector2(1, 1), BareShadow, text);
+        dl.AddText(font, size, p, color, text);
+    }
+
+    private void DrawFramed()
+    {
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
         // Background behind the content only (like the Avalonia StackPanel), so
         // content goes on channel 1 and the rect, sized afterwards, on channel 0.
@@ -240,11 +340,12 @@ internal sealed class TrackerFace : IImGuiPanel
 
         ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Ui9));
 
-        // Title row: [Tracker] [===slider===] [reset]
+        // Title row: [Tracker] [===slider===] [text only] [reset]
         ImGuiNET.ImGui.TextColored(TitleColor, "Tracker");
         ImGuiNET.ImGui.SameLine();
         float resetW = ImGuiNET.ImGui.CalcTextSize(PhosphorIcons.ArrowCounterClockwise).X + 8;
-        ImGuiNET.ImGui.SetNextItemWidth(Math.Max(10, ImGuiNET.ImGui.GetContentRegionAvail().X - resetW - 4));
+        float textOnlyW = ImGuiNET.ImGui.CalcTextSize(PhosphorIcons.TextAa).X + 8;
+        ImGuiNET.ImGui.SetNextItemWidth(Math.Max(10, ImGuiNET.ImGui.GetContentRegionAvail().X - resetW - textOnlyW - 8));
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(2, 0));
         if (ImGuiNET.ImGui.SliderInt("##opacity", ref _opacity, 0, 100, ""))
             TrackerSettings.SetBgAlpha((byte)Math.Round(_opacity * 2.55), save: false);
@@ -256,6 +357,15 @@ internal sealed class TrackerFace : IImGuiPanel
         ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Border, ResetBorder);
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f);
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(4, 1));
+        bool canBare = !ImGuiPanelHost.DrawingEmbedded && !ImGuiPopOuts.InPopOutFrame;
+        ImGuiNET.ImGui.BeginDisabled(!canBare);
+        if (ImGuiNET.ImGui.Button(PhosphorIcons.TextAa + "##textonly"))
+            TrackerSettings.SetTextOnly(true);
+        ImGuiNET.ImGui.EndDisabled();
+        ImGuiNET.ImGui.SetItemTooltip(canBare
+            ? "Text only: hide the frame and background, just the numbers (clicks pass through to the game).\nThe button at the end of its first row brings the frame back."
+            : "Text only works while the Tracker is docked (not popped out).");
+        ImGuiNET.ImGui.SameLine();
         if (ImGuiNET.ImGui.Button(PhosphorIcons.ArrowCounterClockwise + "##reset"))
             UiSources.Tracker.RequestReset();
         ImGuiNET.ImGui.SetItemTooltip("Reset the session stats");

@@ -19,6 +19,20 @@
 //
 //  This captures the exact wedge location for every client, on every freeze,
 //  with no external debugger and no per-PID coordination.
+//
+//  2026-11-01 (a client hung for good on a hot reload, 10-31 21:17):
+//    * The hang dump (after six samples, as before) is written out of process: rundll32
+//      runs RynthCore.SehTrampoline.dll's RC_DumpProcess (CrashDump.WriteHangDumpOutOfProcess). It was
+//      MiniDumpWriteDump on this process: dbghelp suspends every other thread and then
+//      allocates from the process heap, so a main thread suspended inside RtlAllocateHeap
+//      (the font atlas build) deadlocked the whole process; on the clients that
+//      recovered it froze every thread for 8-10 s on top of the reload stall.
+//    * SuspendThread / GetThreadContext / ResumeThread skip the GC transition: a GC
+//      starting while this thread held the main thread suspended would otherwise stop
+//      this thread at the P/Invoke return, and the GC would wait for ever for the main
+//      thread it can't run.
+//    * Step: what the engine is doing on AC's main thread (EndScene, ImGui init's
+//      parts), logged with the hang, so a stall inside the engine names its step.
 // ============================================================================
 
 using System;
@@ -35,14 +49,16 @@ internal static class MainThreadHangWatchdog
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr OpenThread(uint dwDesiredAccess, bool bInheritHandle, uint dwThreadId);
 
-    [DllImport("kernel32.dll")]
+    // No GC transition between suspending the main thread and resuming it (see the header):
+    // these three are short kernel calls that never call back into managed code.
+    [DllImport("kernel32.dll"), SuppressGCTransition]
     private static extern uint SuspendThread(IntPtr hThread);
 
-    [DllImport("kernel32.dll")]
+    [DllImport("kernel32.dll"), SuppressGCTransition]
     private static extern uint ResumeThread(IntPtr hThread);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetThreadContext(IntPtr hThread, IntPtr lpContext);
+    [DllImport("kernel32.dll"), SuppressGCTransition]
+    private static extern int GetThreadContext(IntPtr hThread, IntPtr lpContext);
 
     [DllImport("kernel32.dll")]
     private static extern bool CloseHandle(IntPtr hObject);
@@ -58,6 +74,13 @@ internal static class MainThreadHangWatchdog
 
     // While a wedge lasts, the "still hung" line is repeated this often.
     private const long StillHungRepeatMs = 20_000;
+
+    /// <summary>
+    /// What the engine is doing on AC's main thread, set at a few steps of the EndScene
+    /// detour and of ImGui init; null = outside the engine (AC's own code). Logged with a
+    /// hang. A constant string per step (no allocation on AC's thread).
+    /// </summary>
+    internal static volatile string? Step;
 
     /// <summary>"unhandled ACCESS_VIOLATION at acclient.exe+0x18712F" when the current hang is a crash dialog.</summary>
     internal static volatile string? CrashCause;
@@ -181,6 +204,7 @@ internal static class MainThreadHangWatchdog
                         hangStartBeat = lastBeat;
                         RynthLog.Info("================================================================");
                         RynthLog.Error($"==== MAIN THREAD HANG DETECTED tid={tid} build={EntryPoint.BuildStamp} initCount={EntryPoint.InitCount} (stalled {stale}ms) ====");
+                        RynthLog.Error($"  main thread step: {Step ?? "outside the engine (AC's own code)"}");
                         // A modal dialog (AC's error MessageBox) holds the main thread: say which.
                         string? box = Compatibility.MessageBoxHooks.Describe();
                         if (box != null) RynthLog.Error($"  hang cause: {box}");
@@ -204,9 +228,8 @@ internal static class MainThreadHangWatchdog
                         sample++;
                         RynthLog.Info($"  (still hung after {MaxSamplesPerHang} samples — suppressing further samples until recovery)");
                         lastStillHungLog = Environment.TickCount64;
-                        // Confirmed permanent wedge (~10s+): write one targeted
-                        // minidump for WinDbg post-mortem if the log stack walk
-                        // isn't enough. Once per session.
+                        // Confirmed long wedge (~10s+): one minidump for a post-mortem when
+                        // the log stack walk isn't enough, written out of process. Once per session.
                         TryWriteHangDump(tid, stale);
                     }
                     else if (Environment.TickCount64 - lastStillHungLog >= StillHungRepeatMs)
@@ -255,8 +278,9 @@ internal static class MainThreadHangWatchdog
                 RynthLog.Info($"  (hang minidump skipped: the full-memory dump {full} already covers this hang)");
                 return;
             }
-            CrashDump.WriteSelfDump(
-                $"main-thread hang tid={tid} stale={staleMs}ms build={EntryPoint.BuildStamp}", out _);
+            // Out of process (rundll32 + SehTrampoline), never MiniDumpWriteDump on this process: see the header.
+            CrashDump.WriteHangDumpOutOfProcess(
+                $"main-thread hang tid={tid} stale={staleMs}ms step={Step ?? "outside the engine"} build={EntryPoint.BuildStamp}", out _);
         }
         catch { /* a diagnostic must never destabilize the host */ }
     }
@@ -384,7 +408,7 @@ internal static class MainThreadHangWatchdog
             suspendCount = SuspendThread(h);
             if (suspendCount != 0xFFFFFFFF)
             {
-                ctxOk = GetThreadContext(h, ctx);
+                ctxOk = GetThreadContext(h, ctx) != 0;
                 ResumeThread(h);
             }
 
@@ -395,7 +419,7 @@ internal static class MainThreadHangWatchdog
             }
 
             uint eip = (uint)Marshal.ReadInt32(ctx, CTX_OFF_EIP);
-            RynthLog.Info($"  sample#{sampleNum} (stale {staleMs}ms) eip=0x{eip:X8} {CrashLogger.ResolveCodeAddr((IntPtr)eip)}");
+            RynthLog.Info($"  sample#{sampleNum} (stale {staleMs}ms) eip=0x{eip:X8} {CrashLogger.ResolveCodeAddr((IntPtr)eip)} step={Step ?? "outside the engine"}");
 
             if (fullStack)
             {

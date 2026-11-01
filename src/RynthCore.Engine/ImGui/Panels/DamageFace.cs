@@ -16,6 +16,9 @@
 //  Monster Detail panel (weaknesses, accuracy, damage, summons, damage taken,
 //  its rule). x removes the monster (confirmed). Gold = set by you, dim =
 //  automatic.
+//  Under a monster's row, when the plugin sends them (the row's "mstats",
+//  UI/Data/DamageRowStats.cs, 2026-10-30): how often it evades and resists you
+//  and you it since login, the full numbers on hover.
 //  Where the server plugin reports difficulty tiers: a tier chip after Reset stats
 //  (DamageView.Tier) - which tier the numbers are for, and a picker; "~" marks an
 //  HP estimated from tier 0's. Hidden elsewhere.
@@ -97,6 +100,8 @@ internal sealed class DamageFace : IImGuiPanel
         public string NameShown = "", NameTip = "";
         public string Weapon = "", Offhand = "", Pet = "", WeakTop = "", Sec = "", SecTip = "";
         public string Prefer = "Auto";
+        /// <summary>The line under the row (the plugin's evades and resists since login) and its tooltip; "" for none.</summary>
+        public string Stats = "", StatsTip = "";
         public bool CritSet, NonCritSet, WeaponGold, OffhandGold, PetGold, PreferGold;
         public string[] TierLines = Array.Empty<string>();
         /// <summary>Priority shown (int.MinValue = rules not loaded), whether it's the monster's own
@@ -361,6 +366,11 @@ internal sealed class DamageFace : IImGuiPanel
         t.Sec = r.SecKill > 0 ? r.SecKill.ToString("0.0", inv) : "—";
         t.SecTip = (r.SecKill > 0 ? $"{r.SecKill:0.0} s from engaging to the kill (average of timed kills)." : "No timed kills yet.")
             + (r.HitRate >= 0 ? $"\nHits: {r.HitRate * 100:0}% of attacks and casts landed." : "");
+        if (r.Stats != null)
+        {
+            t.Stats = r.Stats.Line();
+            t.StatsTip = r.Stats.Tip();
+        }
         t.TierLines = new string[r.Tiers.Count];
         for (int i = 0; i < r.Tiers.Count; i++)
         {
@@ -756,29 +766,33 @@ internal sealed class DamageFace : IImGuiPanel
         }
     }
 
+    // The line under a monster's row: the plugin's evades and resists since login (DamageRowStats).
+    private const float StatsH = 16;
+
     private void DrawRow(DamageRow r, Vector2 clipMin, Vector2 clipMax)
     {
         Vector2 p = ImGuiNET.ImGui.GetCursorScreenPos();
-        if (p.Y + RowH < clipMin.Y || p.Y > clipMax.Y)
+        RowText t = _text[r];
+        float h = RowH + (t.Stats.Length > 0 ? StatsH : 0);
+        if (p.Y + h < clipMin.Y || p.Y > clipMax.Y)
         {
-            ImGuiNET.ImGui.Dummy(new Vector2(TableW, RowH));   // off screen: keep the layout, skip the drawing
+            ImGuiNET.ImGui.Dummy(new Vector2(TableW, h));   // off screen: keep the layout, skip the drawing
             return;
         }
-        RowText t = _text[r];
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
-        dl.AddRectFilled(p, p + new Vector2(TableW, RowH), r.IsDefault ? HeaderBg : RowBg);
+        dl.AddRectFilled(p, p + new Vector2(TableW, h), r.IsDefault ? HeaderBg : RowBg);
         if (r.Targeted)
         {
             // The monster being fought (or selected): teal wash, a bar on the left, an outline.
-            dl.AddRectFilled(p, p + new Vector2(TableW, RowH), TargetBg);
-            dl.AddRectFilled(p, p + new Vector2(3, RowH), Teal);
-            dl.AddRect(p, p + new Vector2(TableW, RowH), Teal);
+            dl.AddRectFilled(p, p + new Vector2(TableW, h), TargetBg);
+            dl.AddRectFilled(p, p + new Vector2(3, h), Teal);
+            dl.AddRect(p, p + new Vector2(TableW, h), Teal);
         }
         else if (r.Nearby)
         {
             // On the player's landblock: a green wash and bar.
-            dl.AddRectFilled(p, p + new Vector2(TableW, RowH), NearbyBg);
-            dl.AddRectFilled(p, p + new Vector2(3, RowH), NearbyBar);
+            dl.AddRectFilled(p, p + new Vector2(TableW, h), NearbyBg);
+            dl.AddRectFilled(p, p + new Vector2(3, h), NearbyBar);
         }
         ImGuiNET.ImGui.PushID(r.IsDefault ? "default" : r.Key);
         float ty = p.Y + (RowH - ImGuiNET.ImGui.GetFontSize()) * 0.5f;
@@ -892,8 +906,21 @@ internal sealed class DamageFace : IImGuiPanel
         }
         SafeImGui.SetItemTooltip("Remove " + r.Name + " from this list (asks first).");
 
+        if (t.Stats.Length > 0)
+        {
+            // Under the monster: its evades and resists both ways since login, the full numbers on hover.
+            ImFontPtr small = ImGuiFonts.Get(UiFont.Ui10);
+            var at = new Vector2(p.X + ColX[ColMonster] + 22, p.Y + RowH + (StatsH - small.FontSize) * 0.5f - 2);
+            dl.PushClipRect(new Vector2(p.X, p.Y + RowH), new Vector2(p.X + TableW, p.Y + h), true);
+            dl.AddText(small, small.FontSize, at, Dim, t.Stats);
+            dl.PopClipRect();
+            ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(p.X + ColX[ColMonster] + 22, p.Y + RowH));
+            ImGuiNET.ImGui.InvisibleButton("##stats", new Vector2(Math.Max(1, TableW - ColX[ColMonster] - 26), StatsH));
+            SafeImGui.SetItemTooltip(t.StatsTip);
+        }
+
         ImGuiNET.ImGui.PopID();
-        ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(p.X, p.Y + RowH));
+        ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(p.X, p.Y + h));
         ImGuiNET.ImGui.Dummy(new Vector2(TableW, 0));
     }
 
@@ -1442,7 +1469,7 @@ internal sealed class DamageFace : IImGuiPanel
             ImGuiNET.ImGui.TextColored(RynthTheme.VecOf(RynthTheme.Text), "Reset ALL learned damage statistics?");
             ImGuiNET.ImGui.Dummy(new Vector2(0, 4));
             ImGuiNET.ImGui.TextColored(RynthTheme.VecOf(RynthTheme.Text),
-                "Monster names and your settings (manual HP, weapon/offhand picks, debuffs) are KEPT — only the learned damage, crit, casts-to-kill, kills and HP are cleared. This cannot be undone.");
+                "Monster names and your settings (manual HP, weapon/offhand picks, debuffs) are KEPT — only the learned damage, crit, casts-to-kill, kills and HP are cleared, and the evades and resists under each monster start over. This cannot be undone.");
             ImGuiNET.ImGui.PopTextWrapPos();
             ImGuiNET.ImGui.Dummy(new Vector2(0, 6));
             float w = ImGuiNET.ImGui.GetContentRegionAvail().X;

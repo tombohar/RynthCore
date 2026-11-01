@@ -811,7 +811,8 @@ internal struct RynthCoreAPI
     /// which v77 callbacks can arrive. bit0 RynthPluginOnScreenChanged from the UseNewMode hook,
     /// bit1 ... from the +0x8C mode poll instead (one tick late), bit2 RynthPluginOnClientCleanup,
     /// bit3 RynthPluginOnTooltipShow, bit4 RynthPluginOnTooltipHide, bit5 RynthPluginOnDragStart,
-    /// bit6 RynthPluginOnItemDropped, bit7 Client::Cleanup has started. Any thread.
+    /// bit6 RynthPluginOnItemDropped, bit7 Client::Cleanup has started, bit8 (2026-10-30, not a hook)
+    /// the Damage panel draws a RynthPluginGetMonsterDamageJson row's "mstats". Any thread.
     /// Requires API v77+.</summary>
     public IntPtr GetUiHookFlagsFn;
 

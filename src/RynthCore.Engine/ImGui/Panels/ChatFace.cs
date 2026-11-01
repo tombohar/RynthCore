@@ -14,7 +14,8 @@
 //  highlights is laid out by hand (LayoutSpans) so each run can take its own
 //  colour. Drag across lines to copy them (the keyboard stays with the game,
 //  so copy is mouse-driven). Right-click a line to copy it or to make a rule
-//  from it: move / copy lines like it to a tab, hide them, colour them. A line
+//  from it: move / copy lines like it to a tab, hide them, colour or highlight
+//  them (a "Highlight line" rule: a band behind the whole line). A line
 //  with map coordinates in it ("42.1N, 33.6E") also offers "Arrow to" and "Go
 //  to" them, sent to RynthNav (UI/Data/ChatCoords.cs finds them). The
 //  coordinates are also drawn as underlined links: click points RynthNav's
@@ -638,6 +639,10 @@ internal sealed class ChatFace : IImGuiPanel
             Vector2 p = basePos + new Vector2(0, _tops[i]);
             ChatLine line = _vis[i];
             ChatRoute route = line.Route;
+            // A "Highlight line" rule: a band behind all of the line's rows, under the mention
+            // tint and the selection. One rect, no allocation; _h[i] already spans every row.
+            if (route.HighlightArgb is uint band)
+                dl.AddRectFilled(p, p + new Vector2(wrapW + 6, _h[i]), RynthTheme.Argb(ChatColorModes.BandArgb(band)));
             if (route.Mention)
                 dl.AddRectFilled(p, p + new Vector2(wrapW + 6, _h[i]), MentionBg);
             if (lo >= 0 && i >= lo && i <= hi)
@@ -1065,15 +1070,17 @@ internal sealed class ChatFace : IImGuiPanel
 
     // ── Rules from a line ────────────────────────────────────────────────
 
-    private void RuleFromLine(ChatRuleAction action, string? tab)
+    private void RuleFromLine(ChatRuleAction action, string? tab, ChatColorMode colour = ChatColorMode.Line)
     {
         var rule = new ChatFilterRule { Pattern = _ctxPattern, Action = action, Tab = tab ?? "" };
         if (action == ChatRuleAction.Color)
         {
-            rule.ColorMode = ChatColorMode.Line;
+            rule.ColorMode = colour;
             ChatModel.AddRule(rule);
             if (!ImGuiPanelHost.IsOpen("ChatFilters")) PanelRouter.Toggle("ChatFilters");
-            Flash("Rule added - pick its colour in Filters");
+            Flash(colour == ChatColorMode.Highlight
+                ? "Rule added: lines like this are highlighted - pick its colour in Filters"
+                : "Rule added - pick its colour in Filters");
             return;
         }
         ChatModel.AddRule(rule);
@@ -1486,6 +1493,7 @@ internal sealed class ChatFace : IImGuiPanel
         TabMenu("Also show them in", ChatRuleAction.Copy);
         if (ImGuiNET.ImGui.MenuItem("Hide them")) RuleFromLine(ChatRuleAction.Hide, null);
         if (ImGuiNET.ImGui.MenuItem("Colour them…")) RuleFromLine(ChatRuleAction.Color, null);
+        if (ImGuiNET.ImGui.MenuItem("Highlight them…")) RuleFromLine(ChatRuleAction.Color, null, ChatColorMode.Highlight);
         ImGuiNET.ImGui.Separator();
         if (ImGuiNET.ImGui.MenuItem("Edit rules…") && !ImGuiPanelHost.IsOpen("ChatFilters"))
             PanelRouter.Toggle("ChatFilters");

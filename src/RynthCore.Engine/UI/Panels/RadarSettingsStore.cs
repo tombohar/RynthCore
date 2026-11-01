@@ -49,6 +49,16 @@ internal static class RadarSettingsStore
     /// <summary>ImGui face: a left-click on a dot selects that object in game.</summary>
     public static bool ClickToSelect = true;
 
+    /// <summary>ImGui face: the object selected in game gets a ring round its marker (and an edge arrow
+    /// when it is off the picture). On by default (2026-10-31).</summary>
+    public static bool HighlightSelected = true;
+    /// <summary>...and the hover label (name, distance, health) beside it. Off by default: the box covers
+    /// the radar, and the ring alone says which one is selected (2026-10-31).</summary>
+    public static bool ShowSelectedLabel = false;
+    /// <summary>The ring's colour (ARGB): magenta, a hue none of the kinds use by default.</summary>
+    public const uint DefaultSelectedColor = 0xFFFF2ED9;
+    public static uint SelectedColor = DefaultSelectedColor;
+
     /// <summary>ImGui face: the World Map's picture drawn behind the radar while you're outdoors (off by default).</summary>
     public static bool ShowWorldMap;
     /// <summary>How strongly that picture shows (the radar's own Opacity applies on top).</summary>
@@ -136,7 +146,12 @@ internal static class RadarSettingsStore
     /// <summary>The kind's colour (ARGB); white for a kind this engine doesn't know.</summary>
     public static uint KindColor(byte kind) => kind < KindColors.Length ? KindColors[kind] : 0xFFFFFFFF;
 
-    public static void ResetKindColors() => Array.Copy(DefaultKindColors, KindColors, KindColors.Length);
+    /// <summary>Every kind's colour, and the selection ring's, back to the defaults.</summary>
+    public static void ResetKindColors()
+    {
+        Array.Copy(DefaultKindColors, KindColors, KindColors.Length);
+        SelectedColor = DefaultSelectedColor;
+    }
 
     /// <summary>Every marker size, name box and text size back to its default (show boxes and colours stay).</summary>
     public static void ResetSizes()
@@ -204,6 +219,12 @@ internal static class RadarSettingsStore
                         case "showLifestones":  ShowLifestones  = val == "1"; break;
                         case "showGroundItems": ShowGroundItems = val == "1"; break;
                         case "clickSelect":  ClickToSelect    = val == "1"; break;
+                        case "selectHighlight": HighlightSelected = val == "1"; break;
+                        case "selectLabel":     ShowSelectedLabel = val == "1"; break;
+                        case "selectedColor":
+                            if (uint.TryParse(val, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint sc))
+                                SelectedColor = sc;
+                            break;
                         case "worldMap":     ShowWorldMap     = val == "1"; break;
                         case "worldMapOpacity":
                             if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float wo) && float.IsFinite(wo))
@@ -267,6 +288,11 @@ internal static class RadarSettingsStore
                 sw.WriteLine($"showLifestones={(ShowLifestones ? "1" : "0")}");
                 sw.WriteLine($"showGroundItems={(ShowGroundItems ? "1" : "0")}");
                 sw.WriteLine($"clickSelect={(ClickToSelect ? "1" : "0")}");
+                sw.WriteLine($"selectHighlight={(HighlightSelected ? "1" : "0")}");
+                sw.WriteLine($"selectLabel={(ShowSelectedLabel ? "1" : "0")}");
+                // Like the kind colours: only when it differs from the default.
+                if (SelectedColor != DefaultSelectedColor)
+                    sw.WriteLine(FormattableString.Invariant($"selectedColor={SelectedColor:X8}"));
                 sw.WriteLine($"worldMap={(ShowWorldMap ? "1" : "0")}");
                 sw.WriteLine(FormattableString.Invariant($"worldMapOpacity={WorldMapOpacity:0.##}"));
                 sw.WriteLine(FormattableString.Invariant($"compassSize={CompassSize:0.##}"));

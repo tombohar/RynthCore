@@ -101,7 +101,7 @@ internal static class PluginWindows
             string sig = WindowPlan.Signature(w);
             if (Live.TryGetValue(title, out Hosted? h) && h.Signature == sig) continue;
             SectionWindowDecl decl = w;
-            Func<IImGuiPanel> face = () => new PluginWindowFace(decl.Plugin, decl.Surface, decl.Title, decl.FitHeight, decl.MinWidth);
+            Func<IImGuiPanel> face = () => new PluginWindowFace(decl.Plugin, decl.Surface, decl.Title, decl.FitHeight, decl.MinWidth, decl.DrawScale);
             if (takeOvers.Contains(title))
             {
                 // An engine panel's place: its key, saved place and open state stay; nothing to reopen.

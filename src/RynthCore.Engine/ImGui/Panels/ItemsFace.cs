@@ -60,6 +60,10 @@ internal sealed class ItemsFace : IImGuiPanel
             "An entry whose item is gone but with an unlisted item of the same name in your pack\n" +
             "(a new stack of kits, a replacement weapon) is pointed at that item instead.\n" +
             "Does nothing while your inventory is still loading. Also: /ra items clean.");
+        // The other way: everything in the pack that belongs here and isn't listed yet (answers in chat).
+        AddSelected("##fill_from_pack", PhosphorIcons.Plus + " Add From Pack", "(weapons, healing kits, lockpicks, pet essences not listed yet)",
+            () => RynthAiCommands.ApplyRemoteCommand("sendchat", "/ra items fill"),
+            "Adds every weapon, healing kit, lockpick and pet essence in your pack that isn't listed yet.\nRynthAi says in chat what it added. Also: /ra items fill.");
 
         // Weapons
         Section("Weapons", bw);

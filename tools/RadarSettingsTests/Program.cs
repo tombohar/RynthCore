@@ -40,6 +40,7 @@ namespace RadarSettingsTests
                 Run("CorpsesOffHidesYourCorpses", CorpsesOffHidesYourCorpses);
                 Run("UnknownKindsHidden", UnknownKindsHidden);
                 Run("SnapshotFiltersPerBox", SnapshotFiltersPerBox);
+                Run("SelectionDefaults", SelectionDefaults);   // before FileRoundTrip: the store loads once, there
                 Run("FileRoundTrip", () => FileRoundTrip(root));
                 Run("NameAndSizeDefaults", NameAndSizeDefaults);
                 Run("NameAndSizeFileRoundTrip", () => NameAndSizeFileRoundTrip(root));
@@ -47,6 +48,10 @@ namespace RadarSettingsTests
                 Run("WorldMapBackdropSettings", () => WorldMapBackdropSettings(root));
                 Run("RoundRadarAndClipping", () => RoundRadarAndClipping(root));
                 Run("ClickThroughWheelZoom", () => ClickThroughWheelZoom(root));
+                Run("SelectionSettingsSave", () => SelectionSettingsSave(root));
+                Run("WhichMarkerIsSelected", WhichMarkerIsSelected);
+                Run("SelectionEdgeArrow", SelectionEdgeArrow);
+                Run("SelectionLabelPlacement", SelectionLabelPlacement);
             }
             finally
             {
@@ -144,11 +149,21 @@ namespace RadarSettingsTests
             var lines = new List<string> { "# test" };
             for (int k = 0; k < RadarKind.Count; k++)
                 lines.Add($"{FileKeys[k]}={(k % 2 == 0 ? 0 : 1)}");   // even kinds off
+            // The selected-object highlight's three keys (the store loads once per process: here).
+            lines.Add("selectHighlight=0");
+            lines.Add("selectLabel=0");
+            lines.Add("selectedColor=FF112233");
             File.WriteAllLines(seed, lines);
             Environment.SetEnvironmentVariable("RYNTHCORE_RADAR_SETTINGS", seed);
             RadarSettingsStore.Load();
             for (byte k = 0; k < RadarKind.Count; k++)
                 Check(RadarSettingsStore.ShowFlag(k) == (k % 2 == 1), $"loaded {FileKeys[k]}");
+            Check(!RadarSettingsStore.HighlightSelected, "loaded selectHighlight=0");
+            Check(!RadarSettingsStore.ShowSelectedLabel, "loaded selectLabel=0");
+            Check(RadarSettingsStore.SelectedColor == 0xFF112233, $"loaded selectedColor ({RadarSettingsStore.SelectedColor:X8})");
+            RadarSettingsStore.HighlightSelected = true;
+            RadarSettingsStore.ShowSelectedLabel = true;
+            RadarSettingsStore.SelectedColor = RadarSettingsStore.DefaultSelectedColor;
 
             string saved = Path.Combine(root, "saved.txt");
             Environment.SetEnvironmentVariable("RYNTHCORE_RADAR_SETTINGS", saved);
@@ -341,6 +356,156 @@ namespace RadarSettingsTests
             var half = new[] { new System.Numerics.Vector2(100, 0), new System.Numerics.Vector2(200, 0), new System.Numerics.Vector2(200, 200), new System.Numerics.Vector2(100, 200) };
             n = CircleClip.Polygon(m, half, default, outP, default);
             Check(n >= 3 && Math.Abs(Area(outP, n) - circle / 2) < circle * 0.01f, $"half the circle ({Area(outP, n)} of {circle / 2})");
+        }
+
+        // ── The selected-object highlight (2026-10-31) ──────────────────────
+
+        // The ring starts on, its label off (the box covered the radar); the ring's colour is none of the kinds' default colours.
+        private static void SelectionDefaults()
+        {
+            Check(RadarSettingsStore.HighlightSelected, "highlight the selected object: on by default");
+            Check(!RadarSettingsStore.ShowSelectedLabel, "show its label: off by default");
+            Check(RadarSettingsStore.SelectedColor == RadarSettingsStore.DefaultSelectedColor, "ring colour default");
+            Check(Array.IndexOf(RadarSettingsStore.DefaultKindColors, RadarSettingsStore.DefaultSelectedColor) < 0,
+                "the ring's default colour is no kind's default colour");
+        }
+
+        // The switches save under their keys; the colour only when it isn't the default; Reset colours resets it.
+        private static void SelectionSettingsSave(string root)
+        {
+            string saved = Path.Combine(root, "selection.txt");
+            Environment.SetEnvironmentVariable("RYNTHCORE_RADAR_SETTINGS", saved);
+            RadarSettingsStore.HighlightSelected = true;
+            RadarSettingsStore.ShowSelectedLabel = true;
+            RadarSettingsStore.SelectedColor = RadarSettingsStore.DefaultSelectedColor;
+            RadarSettingsStore.Save();
+            string text = File.ReadAllText(saved).Replace("\r\n", "\n");
+            Check(text.Contains("selectHighlight=1\n"), "saved selectHighlight=1");
+            Check(text.Contains("selectLabel=1\n"), "saved selectLabel=1");
+            Check(!text.Contains("selectedColor="), "the default colour is not written");
+
+            RadarSettingsStore.HighlightSelected = false;
+            RadarSettingsStore.ShowSelectedLabel = false;
+            RadarSettingsStore.SelectedColor = 0x80ABCDEF;
+            RadarSettingsStore.Save();
+            text = File.ReadAllText(saved).Replace("\r\n", "\n");
+            Check(text.Contains("selectHighlight=0\n"), "saved selectHighlight=0");
+            Check(text.Contains("selectLabel=0\n"), "saved selectLabel=0");
+            Check(text.Contains("selectedColor=80ABCDEF\n"), "saved selectedColor=80ABCDEF");
+
+            RadarSettingsStore.ResetKindColors();
+            Check(RadarSettingsStore.SelectedColor == RadarSettingsStore.DefaultSelectedColor, "Reset colours resets the ring's colour");
+            RadarSettingsStore.HighlightSelected = true;
+            RadarSettingsStore.ShowSelectedLabel = true;
+        }
+
+        private static RadarMarker Mk(byte kind, uint id, float x = 0, float y = 0) =>
+            new() { Kind = kind, Id = id, X = x, Y = y, Label = "m" + id };
+
+        // The selected marker is the one with the selected object's id; it clears with the selection, when
+        // the object leaves the markers, or when the setting is off; a hidden kind is still found.
+        private static void WhichMarkerIsSelected()
+        {
+            var markers = new List<RadarMarker>
+            {
+                Mk(RadarKind.Monster, 0x80000001), Mk(RadarKind.Portal, 0x70000002), Mk(RadarKind.Corpse, 0x80000003),
+                Mk(RadarKind.Door, 0x70000004), Mk(RadarKind.GroundItem, 0x80000005),
+            };
+            Check(RadarSelection.Find(markers, 0x70000002) == markers[1], "the portal's id finds the portal");
+            Check(RadarSelection.Find(markers, 0x80000003) == markers[2], "the corpse's id finds the corpse");
+            Check(RadarSelection.Find(markers, 0) == null, "nothing selected: none");
+            Check(RadarSelection.Find(markers, 0x12345678) == null, "an object with no marker (in a pack, gone): none");
+            Check(RadarSelection.Find(null, 0x80000001) == null, "no snapshot yet: none");
+
+            // Old RynthAi builds send no ids: a marker with id 0 is never the selection.
+            var noIds = new List<RadarMarker> { Mk(RadarKind.Monster, 0), Mk(RadarKind.Npc, 0) };
+            Check(RadarSelection.Find(noIds, 0) == null && RadarSelection.Find(noIds, 0x80000001) == null, "markers without ids never match");
+            // A kind this engine doesn't know (a newer RynthAi's): never highlighted (no shape or colour for it).
+            Check(RadarSelection.Find(new List<RadarMarker> { Mk(12, 0x80000009) }, 0x80000009) == null, "an unknown kind: none");
+
+            // The setting off: nothing is highlighted.
+            Check(RadarSelection.Highlighted(false, markers, 0x80000001) == null, "setting off: none");
+            Check(RadarSelection.Highlighted(true, markers, 0x80000001) == markers[0], "setting on: the monster");
+
+            // It follows the selection, and clears when the selection clears.
+            Check(RadarSelection.Highlighted(true, markers, 0x70000004) == markers[3], "selection moves to the door");
+            Check(RadarSelection.Highlighted(true, markers, 0) == null, "selection cleared: none");
+
+            // It follows the object as it moves: the next snapshot's marker (a new instance) is found by id.
+            var next = new List<RadarMarker> { Mk(RadarKind.Monster, 0x80000001, 25, -10) };
+            RadarMarker? moved = RadarSelection.Highlighted(true, next, 0x80000001);
+            Check(moved != null && moved.X == 25 && moved.Y == -10, "the moved monster's new marker");
+            // ...and the object leaving the radar's markers clears it, though it is still selected.
+            Check(RadarSelection.Highlighted(true, new List<RadarMarker>(), 0x80000001) == null, "left the markers: none");
+
+            // A kind whose box is off is still highlighted when it is the selection (items on the ground start hidden).
+            RadarSettingsStore.ShowGroundItems = false;
+            Check(RadarSelection.Highlighted(true, markers, 0x80000005) == markers[4], "a hidden kind's selected item is still found");
+            RadarSettingsStore.ShowGroundItems = true;
+        }
+
+        private static bool Near(System.Numerics.Vector2 a, System.Numerics.Vector2 b, float tol = 0.01f) =>
+            Math.Abs(a.X - b.X) <= tol && Math.Abs(a.Y - b.Y) <= tol;
+
+        // The arrow sits inset inside the picture's edge, on the line from the centre toward the marker.
+        private static void SelectionEdgeArrow()
+        {
+            var min = new System.Numerics.Vector2(0, 0);
+            var max = new System.Numerics.Vector2(200, 200);
+            var c = new System.Numerics.Vector2(100, 100);
+            System.Numerics.Vector2 tip, dir;
+
+            Check(!RadarSelection.EdgeArrow(c, new(150, 40), min, max, null, 3, out _, out _), "on the picture: no arrow");
+            Check(!RadarSelection.EdgeArrow(c, max, min, max, null, 3, out _, out _), "on the picture's corner: no arrow");
+            Check(!RadarSelection.EdgeArrow(c, c, min, max, null, 3, out _, out _), "at the centre: no arrow");
+            Check(!RadarSelection.EdgeArrow(c, new(float.NaN, 5), min, max, null, 3, out _, out _), "a NaN position: no arrow");
+
+            Check(RadarSelection.EdgeArrow(c, new(100, -50), min, max, null, 3, out tip, out dir)
+                  && Near(tip, new(100, 3)) && Near(dir, new(0, -1)), $"straight up: top edge ({tip}, {dir})");
+            Check(RadarSelection.EdgeArrow(c, new(400, 100), min, max, null, 3, out tip, out dir)
+                  && Near(tip, new(197, 100)) && Near(dir, new(1, 0)), $"right: right edge ({tip})");
+            Check(RadarSelection.EdgeArrow(c, new(-1000, -1000), min, max, null, 3, out tip, out _)
+                  && Near(tip, new(3, 3)), $"up-left far away: the corner ({tip})");
+            Check(RadarSelection.EdgeArrow(c, new(300, 150), min, max, null, 3, out tip, out _)
+                  && Near(tip, new(197, 124.25f)), $"right and a little down: the right edge, a quarter down ({tip})");
+            // Off-centre panel, wider than tall: the nearer side wins.
+            var wMin = new System.Numerics.Vector2(10, 20);
+            var wMax = new System.Numerics.Vector2(410, 120);
+            Check(RadarSelection.EdgeArrow(new(210, 70), new(410, 270), wMin, wMax, null, 0, out tip, out _)
+                  && Near(tip, new(260, 120)), $"wide panel, diagonal: the bottom edge ({tip})");
+
+            // The arrow's corners: point at the tip, base back toward the centre, inside the picture.
+            RadarSelection.EdgeArrow(c, new(100, -50), min, max, null, 3, out tip, out dir);
+            RadarSelection.ArrowCorners(tip, dir, 9, 5, out var a, out var b, out var cc);
+            Check(Near(a, tip), "the arrow points at the tip");
+            Check(Near((b + cc) * 0.5f, new(100, 12)) && Math.Abs((b - cc).Length() - 10) < 0.01f, $"its base 9 px in, 10 px wide ({b}, {cc})");
+            bool inside = true;
+            foreach (var p in new[] { a, b, cc })
+                if (p.X < min.X || p.Y < min.Y || p.X > max.X || p.Y > max.Y) inside = false;
+            Check(inside, "the whole arrow is inside the picture");
+
+            // Round: on the circle (less the inset), along the line; inside the circle no arrow.
+            var round = new RoundMask(c, 100);
+            Check(!RadarSelection.EdgeArrow(c, new(170, 170), min, max, round, 3, out _, out _), "round: inside the circle, no arrow");
+            Check(RadarSelection.EdgeArrow(c, new(180, 180), min, max, round, 3, out tip, out _)
+                  && Math.Abs((tip - c).Length() - 97) < 0.01f && Math.Abs(tip.X - tip.Y) < 0.01f,
+                $"round: in the box's corner but off the circle: on the circle, diagonal ({tip})");
+            Check(RadarSelection.EdgeArrow(c, new(100, 500), min, max, round, 3, out tip, out dir)
+                  && Near(tip, new(100, 197)) && Near(dir, new(0, 1)), $"round: straight down ({tip})");
+        }
+
+        // The label goes to the right of the marker, or the left at the right edge, and stays inside the panel.
+        private static void SelectionLabelPlacement()
+        {
+            var min = new System.Numerics.Vector2(0, 0);
+            var max = new System.Numerics.Vector2(300, 300);
+            var size = new System.Numerics.Vector2(80, 30);
+            Check(Near(RadarSelection.LabelPos(new(100, 100), 10, size, min, max), new(110, 85)), "right of the marker, centred");
+            Check(Near(RadarSelection.LabelPos(new(250, 100), 10, size, min, max), new(160, 85)), "at the right edge: on the left");
+            Check(Near(RadarSelection.LabelPos(new(100, 5), 10, size, min, max), new(110, 0)), "at the top: kept inside");
+            Check(Near(RadarSelection.LabelPos(new(100, 295), 10, size, min, max), new(110, 270)), "at the bottom: kept inside");
+            Check(Near(RadarSelection.LabelPos(new(40, 100), 50, new(200, 30), min, max), new(90, 85)), "a wide label still fits on the right");
+            Check(Near(RadarSelection.LabelPos(new(150, 150), 10, new(400, 400), min, max), min), "bigger than the panel: its top-left corner");
         }
 
         private static float Area(System.Numerics.Vector2[] p, int n)

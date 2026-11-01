@@ -16,6 +16,10 @@ internal static class Program
         Run("cleave: never a kill, never a bad share, nothing to match", Bounds);
         Run("cleave: an earlier estimate counts down further", EstimateChains);
         Run("freshness: object messages are noted, a delete forgets, others are ignored", Freshness);
+        Run("health probe: fight plates first, then never-read, then old quiet ones; never the stream's owner", ProbeFightFirst);
+        Run("health probe: the stalest fight plate first, never-read plates nearest first", ProbeStalestAndNearest);
+        Run("health probe: nothing due (fresh, dead, no id) sends nothing", ProbeNothingDue);
+        Run("health probe: a probe's replies are the HUD's; the owner's and plugins' are theirs", ProbeReplies);
         Console.WriteLine($"{_checks} check(s), {_failed} failed.");
         return _failed == 0 ? 0 : 1;
     }
@@ -108,5 +112,101 @@ internal static class Program
             "vector/update-object count, server text doesn't");
         ObjectFreshness.Note(0xF74C, 0, 1);
         Check(ObjectFreshness.AgeMs(0, 2) == -1, "id 0 ignored");
+    }
+
+    // ── HealthProbe: the unselected plates' health ──────────────────────
+
+    private static void ProbeFightFirst()
+    {
+        // 0x10 is the selection (streamed). 0x20 is in the fight, last read 3 s ago; 0x30 never read;
+        // 0x40 quiet at full health, read 20 s ago.
+        HealthProbe.Candidate[] c =
+        [
+            new(0x10, 1.0f, true, 5.0, true),
+            new(0x20, 4.0f, true, 3.0, true),
+            new(0x30, 2.0f, false, 0, false),
+            new(0x40, 1.5f, true, 20.0, false),
+        ];
+        Check(HealthProbe.Pick(c, owner: 0x10) == 0x20, "a fight plate the server isn't streaming goes first");
+        Check(HealthProbe.Pick(c, owner: 0x20) == 0x10, "the stream's owner is never probed (the selection is, once it isn't the owner)");
+        HealthProbe.Candidate[] noFight = [c[2], c[3]];
+        Check(HealthProbe.Pick(noFight, owner: 0x10) == 0x30, "then a plate never read");
+        HealthProbe.Candidate[] quiet = [c[3]];
+        Check(HealthProbe.Pick(quiet, owner: 0x10) == 0x40, "then a quiet plate whose reading is old");
+    }
+
+    private static void ProbeStalestAndNearest()
+    {
+        HealthProbe.Candidate[] fight =
+        [
+            new(0x20, 1.0f, true, 2.5, true),
+            new(0x21, 9.0f, true, 6.0, true),
+            new(0x22, 3.0f, false, 0, true),   // hitting you, never read: before any reading
+        ];
+        Check(HealthProbe.Pick(fight, 0) == 0x22, "a fight plate never read beats every read one");
+        Check(HealthProbe.Pick(fight[..2], 0) == 0x21, "the stalest fight plate first");
+        HealthProbe.Candidate[] unseen =
+        [
+            new(0x30, 7.0f, false, 0, false),
+            new(0x31, 2.0f, false, 0, false),
+            new(0x32, 5.0f, false, 0, false),
+        ];
+        Check(HealthProbe.Pick(unseen, 0) == 0x31, "never-read plates: the nearest first");
+    }
+
+    private static void ProbeNothingDue()
+    {
+        HealthProbe.Candidate[] c =
+        [
+            new(0x20, 1.0f, true, HealthProbe.ActiveRefreshSec - 0.1, true),   // fresh fight plate
+            new(0x40, 1.0f, true, HealthProbe.IdleRefreshSec - 0.1, false),    // quiet, read recently
+            new(0x50, 1.0f, true, 30.0, true, Dead: true),                      // dead
+            new(0, 1.0f, false, 0, true),                                       // no id
+        ];
+        Check(HealthProbe.Pick(c, 0) == 0, "nothing due: no query (no traffic)");
+        Check(HealthProbe.Pick(ReadOnlySpan<HealthProbe.Candidate>.Empty, 0) == 0, "no plates: nothing");
+        HealthProbe.Candidate[] nan = [new(0x20, 1.0f, true, double.NaN, true)];
+        Check(HealthProbe.Pick(nan, 0) == 0, "a NaN age is never due");
+        HealthProbe.Candidate[] due = [new(0x20, 1.0f, true, HealthProbe.ActiveRefreshSec, true)];
+        Check(HealthProbe.Pick(due, 0) == 0x20, "a fight plate exactly ActiveRefreshSec old is due");
+    }
+
+    private static void ProbeReplies()
+    {
+        HealthProbe.Reset();
+        Check(!HealthProbe.TryGetOwner(out _), "after a reset the stream's owner is unknown");
+        HealthProbe.NoteQuery(0x10);                      // the selection / a plugin asked for 0x10
+        Check(HealthProbe.TryGetOwner(out uint o) && o == 0x10, "the owner is the last queried id");
+
+        HealthProbe.NoteProbe(0x20, 1000);
+        Check(HealthProbe.IsProbeReply(0x20, 1150), "the reply to a probe is the HUD's");
+        Check(HealthProbe.IsProbeReply(0x20, 1300), "... every path that reports it (window, not consume-once)");
+        Check(!HealthProbe.IsProbeReply(0x10, 1150), "the owner's replies go to plugins");
+        Check(!HealthProbe.IsProbeReply(0x30, 1150), "an id nobody probed goes to plugins");
+        Check(!HealthProbe.IsProbeReply(0x20, 1000 + HealthProbe.ReplyWindowMs + 1), "after the window the id's replies go to plugins again");
+        Check(!HealthProbe.IsProbeReply(0x20, 1200), "... and the expired entry is gone");
+
+        HealthProbe.NoteProbe(0x21, 2000);
+        HealthProbe.NoteQuery(0x21);                      // a plugin asked for the same monster right after
+        Check(!HealthProbe.IsProbeReply(0x21, 2100), "a plugin's own query for a probed id takes its replies back");
+        Check(HealthProbe.TryGetOwner(out o) && o == 0x21, "... and owns the stream");
+
+        // No owner to hand the stream back to: the probed id keeps streaming to us, all of it the HUD's.
+        HealthProbe.NoteQuery(0);
+        HealthProbe.NoteProbe(0x22, 3000, sticky: true);
+        Check(HealthProbe.IsProbeReply(0x22, 3000 + 60_000), "sticky probe: still the HUD's a minute later");
+        HealthProbe.NoteQuery(0x10);
+        Check(!HealthProbe.IsProbeReply(0x22, 3000 + 60_001), "the next query moves the stream: sticky entry gone");
+
+        for (uint i = 1; i <= 20; i++) HealthProbe.NoteProbe(0x100 + i, 5000);   // more than the ledger holds
+        Check(HealthProbe.IsProbeReply(0x114, 5100), "the newest probes are remembered when the ledger wraps");
+        Check(!HealthProbe.IsProbeReply(0x101, 5100), "the oldest are dropped (bounded)");
+        HealthProbe.NoteProbe(0, 5000);
+        Check(!HealthProbe.IsProbeReply(0, 5000), "id 0 never");
+        long before = HealthProbe.ProbeCount;
+        HealthProbe.NoteProbe(0x200, 6000);
+        Check(HealthProbe.ProbeCount == before + 1, "probes are counted");
+        HealthProbe.Reset();
+        Check(!HealthProbe.IsProbeReply(0x114, 5100) && !HealthProbe.TryGetOwner(out _), "reset (logout) forgets everything");
     }
 }

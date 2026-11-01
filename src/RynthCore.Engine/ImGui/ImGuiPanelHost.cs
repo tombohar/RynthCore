@@ -119,6 +119,15 @@ internal interface IImGuiPanel
     bool ClickThroughWantsWheel => false;
 
     /// <summary>
+    /// True while the face shows a bare look (the Sense panel's compact view, 2026-10-31): docked,
+    /// the host draws no header, frame, border, background or resize grip, so only what the face
+    /// paints shows; with <see cref="ClickThrough"/> the rest passes clicks to the game. The window
+    /// keeps its place and size for when the face is framed again. Popped out (an OS window of its
+    /// own) and embedded copies are framed as usual. Answered by the face's last Draw; keep it cheap.
+    /// </summary>
+    bool Bare => false;
+
+    /// <summary>
     /// Popped out and not hovered or in use: how often the face is redrawn (Hz).
     /// Its pictures are only pushed when they change; this bounds the cost of
     /// building the frame. Hovered or just used, a pop-out runs at 30 Hz.
@@ -594,10 +603,14 @@ internal static class ImGuiPanelHost
     /// </summary>
     public static void DrawAll(float uiScale)
     {
+        // UiCost: each panel by its title; the rest of DrawAll as the host's upkeep.
+        long cHost = UiCost.Start(), costMark = UiCost.Mark;
+        int drawn = 0;
         _frameScale = uiScale;
         WheelWanted = false;
         float placeScale = PlacementScale();
         ApplyFaceChanges(placeScale);   // plugin windows taking over (or giving back) engine panels
+        ApplyLayoutSwitch(placeScale);  // another character's panel layout (UI/PanelLayout)
         while (Requests.TryDequeue(out var req))
             Apply(req.Title, req.Kind, placeScale);
         RemoveUnregistered();
@@ -614,9 +627,13 @@ internal static class ImGuiPanelHost
                 if (_resizeTitle == entry.Title) _resizeTitle = null;   // hid mid-resize: free the grip
                 continue;
             }
+            long cPanel = UiCost.Start();
             DrawPanel(entry, uiScale, placeScale, null);
+            UiCost.StopPanel(entry.Title, cPanel);
+            drawn++;
         }
         DrawSizeNote();
+        UiCost.StopExclusive(UiCost.PanelHost, cHost, costMark, cHost != 0 ? drawn : -1);
     }
 
     // ── One way to resize every panel (Tom 2026-10-23) ───────────────────
@@ -680,7 +697,9 @@ internal static class ImGuiPanelHost
         lock (Sync) Entries.TryGetValue(title, out entry);
         if (entry == null || !entry.Shown || !entry.Popped) return;
         _frameScale = uiScale;
+        long cPanel = UiCost.Start();
         DrawPanel(entry, uiScale, PlacementScale(), display);
+        UiCost.StopPopped(entry.Title, cPanel);
     }
 
     /// <summary>A pop-out window was moved or resized by the user: save it. Game thread.</summary>
@@ -703,6 +722,12 @@ internal static class ImGuiPanelHost
         _restored = true;
         // Settings > Display "Remember Open Windows and Positions" (default on).
         if (!Plugins.EngineSettings.RememberWindowLayout) return;
+        OpenSavedOpen();
+    }
+
+    /// <summary>Opens the engine panels the panel store has saved open (ImGui or Both docked face). AC thread.</summary>
+    private static void OpenSavedOpen()
+    {
         List<string> titles = new();
         // Script windows (dynamic) open when their owner says so, not from the saved state.
         lock (Sync)
@@ -717,6 +742,77 @@ internal static class ImGuiPanelHost
             // Saved popped out: it reopens popped out (Apply reads the saved entry).
             Open(title);
         }
+    }
+
+    // ── Panel layout per character (UI/PanelLayout) ───────────────────────
+
+    private static volatile bool _layoutSwitched;
+
+    /// <summary>
+    /// The panel store now holds another layout (another character's, the default, or a reset): the
+    /// open panels take their places from it at the next DrawAll. Any thread.
+    /// </summary>
+    public static void OnLayoutSwitched() => _layoutSwitched = true;
+
+    /// <summary>
+    /// After a layout switch: each shown panel is placed from the new layout (docked spot and size, popped
+    /// out or not, and where); an engine panel the layout has saved closed closes, without saving over
+    /// it; engine panels it has saved open open. Plugin and script windows stay open (their owners
+    /// decide that) and move. Nothing shown (a hot reload, the first login): only the opening. AC thread.
+    /// </summary>
+    private static void ApplyLayoutSwitch(float placeScale)
+    {
+        if (!_layoutSwitched) return;
+        _layoutSwitched = false;
+        bool remember = Plugins.EngineSettings.RememberWindowLayout;
+        List<Entry> order;
+        lock (Sync) order = DrawOrder;
+        foreach (Entry e in order)
+        {
+            if (!e.Shown) continue;
+            bool has = PanelStateStore.TryGetPanel(e.Title, out PanelStateStore.PanelEntry saved);
+            if (!e.Dynamic && remember && has && !saved.Open)
+            {
+                CloseQuietly(e);
+                continue;
+            }
+            if (e.Popped)
+            {
+                ImGuiPopOuts.Close(e.Title);
+                e.Popped = false;
+            }
+            PlaceFromSavedState(e, placeScale);
+            if (PanelRouter.CanPopOut && !e.Spec.NoPopOut && has && saved.Floating)
+                StartPopOut(e, placeScale, fromSaved: true);
+            else if (!has)
+                Persist(e, open: true, placeScale);   // new to this layout: saved here, so it reopens here
+        }
+        if (remember) OpenSavedOpen();   // queued; applied by this DrawAll (an open one is skipped)
+        RynthLog.UI("ImGuiPanelHost: the open panels took their places from the panel layout now in use.");
+    }
+
+    /// <summary>Closes a shown face without saving its placement (the layout it came from isn't in use any more). AC thread.</summary>
+    private static void CloseQuietly(Entry entry)
+    {
+        lock (Sync)
+        {
+            if (_open.Contains(entry.Title))
+            {
+                var next = new HashSet<string>(_open, StringComparer.OrdinalIgnoreCase);
+                next.Remove(entry.Title);
+                System.Threading.Volatile.Write(ref _open, next);
+            }
+        }
+        if (entry.Popped)
+        {
+            ImGuiPopOuts.Close(entry.Title);
+            entry.Popped = false;
+        }
+        try { entry.Instance?.OnHidden(); }
+        catch (Exception ex) { RynthLog.UI($"ImGuiPanelHost: {entry.Title}.OnHidden threw {ex.GetType().Name}: {ex.Message}"); }
+        entry.Instance = null;
+        entry.Shown = false;
+        System.Threading.Interlocked.Decrement(ref _shownCount);
     }
 
     /// <summary>Client pixels per logical unit (the unit PanelSpec sizes, MinSize and RequestSize use).</summary>
@@ -1006,7 +1102,10 @@ internal static class ImGuiPanelHost
     {
         PanelSpec spec = entry.Spec;
         bool popped = popDisplay.HasValue;
-        bool standard = spec.Chrome == PanelChrome.Standard;
+        // A bare face (IImGuiPanel.Bare): docked, no frame of any kind, only what it paints.
+        bool bare = false;
+        if (!popped) try { bare = entry.Instance?.Bare ?? false; } catch { }
+        bool standard = spec.Chrome == PanelChrome.Standard && !bare;
         bool both = PanelRouter.ResolveDockedFace(entry.Title) == PanelFace.Both;
 
         Vector2 minSize = (entry.Instance?.MinSize ?? spec.MinSize) * placeScale;
@@ -1071,10 +1170,10 @@ internal static class ImGuiPanelHost
             ImGuiNET.ImGui.SetNextWindowSizeConstraints(minSize, new Vector2(float.MaxValue, float.MaxValue));
         }
 
-        uint background = spec.Background ?? RynthTheme.PanelGlass;
+        uint background = bare ? 0u : spec.Background ?? RynthTheme.PanelGlass;
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
         ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, spec.Rounding);
-        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, spec.Chrome == PanelChrome.None ? 0f : 1f);
+        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, spec.Chrome == PanelChrome.None || bare ? 0f : 1f);
         ImGuiNET.ImGui.PushStyleColor(ImGuiCol.WindowBg, background);
         ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Border, spec.BorderColor ?? RynthTheme.PanelBorder);
 
@@ -1113,7 +1212,7 @@ internal static class ImGuiPanelHost
             // the same way, over the corner the face leaves free.
             bool inlineGrip = standard && spec.GripInBody;
             bool manualGrip = (!standard || inlineGrip) && !clickThrough && !popped   // popped: the window resizes itself
-                && !spec.NoResize;
+                && !spec.NoResize && !bare;                                          // bare: sized while framed
             Vector2 outerPos = ImGuiNET.ImGui.GetWindowPos(), outerSize = ImGuiNET.ImGui.GetWindowSize();
             float gSize = GripSize(entry, uiScale);
             Vector2 gMin = GripMin(entry, uiScale, outerPos + outerSize);
@@ -1270,6 +1369,9 @@ internal static class ImGuiPanelHost
 
     /// <summary>True while an embedded copy draws: its window moves and size requests are ignored.</summary>
     [ThreadStatic] private static bool _inEmbed;
+
+    /// <summary>True while an embedded copy of a face draws (inside another panel's section). AC thread.</summary>
+    internal static bool DrawingEmbedded => _inEmbed;
 
     /// <summary>True when <paramref name="title"/> is registered and may be drawn inside another panel. Any thread.</summary>
     public static bool CanEmbed(string title) => !NotEmbeddable.Contains(title) && HasFace(title);

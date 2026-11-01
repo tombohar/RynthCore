@@ -56,6 +56,9 @@ namespace PlateSizingTests
             DebuffRowScalesWithTheSetting();
             DebuffRowWidthAndCover();
 
+            HealthRefreshDefaultsOn();
+            HealthRefreshRoundTripAndClamp();
+
             Console.WriteLine();
             Console.WriteLine($"{_checks - _failed}/{_checks} checks passed.");
             Console.WriteLine(_failed == 0 ? "ALL PLATE SIZING TESTS PASSED." : $"{_failed} FAILED.");
@@ -582,6 +585,48 @@ namespace PlateSizingTests
         }
 
         // ── harness ─────────────────────────────────────────────────────────
+
+        // ── refresh others' health (HealthProbe) ────────────────────────────
+
+        private static void HealthRefreshDefaultsOn()
+        {
+            Case("refresh others' health: on at 1 s by default, and after loading a file from before it");
+            S.ResetToDefaults();
+            Check(S.RefreshOthersHealth, "on by default");
+            Check(S.HealthRefreshSec == HealthProbe.DefaultIntervalSec && HealthProbe.DefaultIntervalSec == 1f, "1 s by default");
+            Check(HealthProbe.MinIntervalSec <= 1f && 1f <= HealthProbe.MaxIntervalSec, "the range holds the default");
+            string[] old = Written().Where(l => !l.StartsWith("refreshOthersHealth=", StringComparison.Ordinal) &&
+                                                !l.StartsWith("healthRefreshSec=", StringComparison.Ordinal)).ToArray();
+            Check(old.Length == Written().Length - 2, "the old file lacks exactly the two keys");
+            S.RefreshOthersHealth = false; S.HealthRefreshSec = 4f;
+            S.ResetToDefaults();
+            S.ApplyLines(old);
+            Check(S.RefreshOthersHealth && S.HealthRefreshSec == 1f, "on at 1 s after loading the old file");
+            Check(S.Describe().Contains("refresh others' health every 1.0 s"), "status line: " + S.Describe());
+        }
+
+        private static void HealthRefreshRoundTripAndClamp()
+        {
+            Case("refresh others' health: off and an interval round-trip, the interval clamps, reset restores");
+            S.ResetToDefaults();
+            S.RefreshOthersHealth = false; S.HealthRefreshSec = 2.5f;
+            string[] lines = Written();
+            Check(lines.Contains("refreshOthersHealth=0") && lines.Contains("healthRefreshSec=2.5"), "refreshOthersHealth=0, healthRefreshSec=2.5 written");
+            S.ResetToDefaults();
+            S.ApplyLines(lines);
+            Check(!S.RefreshOthersHealth && S.HealthRefreshSec == 2.5f, "off, 2.5 s after reload");
+            Check(lines.SequenceEqual(Written()), "identical text after a reload");
+            Check(S.Describe().Contains("refresh others' health off"), "status line says off");
+            S.ApplyLines(new[] { "healthRefreshSec=0.01" });
+            Check(S.HealthRefreshSec == HealthProbe.MinIntervalSec, $"0.01 floored at {HealthProbe.MinIntervalSec}");
+            S.ApplyLines(new[] { "healthRefreshSec=60" });
+            Check(S.HealthRefreshSec == HealthProbe.MaxIntervalSec, $"60 capped at {HealthProbe.MaxIntervalSec}");
+            S.ApplyLines(new[] { "healthRefreshSec=abc", "healthRefreshSec=" });
+            Check(S.HealthRefreshSec == HealthProbe.MaxIntervalSec, "junk leaves it alone");
+            S.ResetToDefaults();
+            Check(S.RefreshOthersHealth && S.HealthRefreshSec == 1f, "reset: on at 1 s");
+            S.ResetToDefaults();
+        }
 
         private static void Case(string name)
         {

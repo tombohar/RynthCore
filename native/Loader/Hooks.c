@@ -29,6 +29,9 @@
 //  init export returns (HooksFlush; on a first launch AC's main thread is still suspended
 //  then), on every reload, and ~20 ms after the last change otherwise (a background
 //  flusher). A hook's slot is set at once; its patch follows within that window.
+//  Each freeze runs with the process in HIGH priority class (BoostForFreeze): on a busy
+//  machine the freeze otherwise waited seconds on low-priority threads, with AC's main
+//  thread suspended all that time (2026-11-01).
 // ============================================================================
 
 #include "Loader.h"
@@ -84,6 +87,8 @@ static HANDLE g_dirtyEvent;
 static volatile DWORD g_lastChange;
 
 static void FlushLocked(const char* why);
+static DWORD BoostForFreeze(void);
+static void RestoreAfterFreeze(DWORD cls);
 
 static DWORD WINAPI Flusher(LPVOID unused)
 {
@@ -143,7 +148,9 @@ static void SetPatched(int i, int patched)
 {
     HookEntry* e = &g_hooks[i];
     if (e->patched == patched) return;
+    DWORD cls = BoostForFreeze();                         // each call is a freeze of its own
     int st = patched ? p_enable(e->target) : p_disable(e->target);
+    RestoreAfterFreeze(cls);
     if (st == MH_OK) e->patched = patched;
     else LoaderLog("ERR", "Hooks: MinHook %s %p failed: %d", patched ? "enable" : "disable", e->target, st);
 }
@@ -162,6 +169,30 @@ static void Want(int i, int patched)
     SetEvent(g_dirtyEvent);
 }
 
+// Raises the process to HIGH_PRIORITY_CLASS for one MinHook freeze; returns the class to put
+// back (0 = left as it was). MinHook's freeze suspends the process's threads one by one and reads
+// each one's context (GetThreadContext), and that read waits until the suspended thread itself
+// gets a CPU to run the kernel's get-context APC. A LOWEST or BELOW_NORMAL thread (AC's d3d9
+// workers, the engine's heartbeat) on a machine saturated by normal-priority work (every client
+// hot reloading at once) waits seconds for that, while the threads already suspended, AC's main
+// thread first among them, stay frozen: the 4-7 s "applied in one freeze" lines and main-thread
+// hangs of the 2026-10-31/11-01 reloads. In HIGH class a LOWEST thread is at 11, above every
+// normal process, so the reads come back at once (tools\LoaderFreezeBench measures both). Every
+// other thread is suspended for most of the window, so the boost doesn't let this process take
+// CPU from the other clients beyond the freeze itself.
+static DWORD BoostForFreeze(void)
+{
+    HANDLE self = GetCurrentProcess();
+    DWORD cls = GetPriorityClass(self);
+    if (cls == 0 || cls == HIGH_PRIORITY_CLASS || cls == REALTIME_PRIORITY_CLASS) return 0;
+    return SetPriorityClass(self, HIGH_PRIORITY_CLASS) ? cls : 0;
+}
+
+static void RestoreAfterFreeze(DWORD cls)
+{
+    if (cls != 0) SetPriorityClass(GetCurrentProcess(), cls);
+}
+
 // Applies every pending patch/unpatch in one MinHook freeze. (Caller holds g_lock.)
 static void FlushLocked(const char* why)
 {
@@ -176,7 +207,9 @@ static void FlushLocked(const char* why)
     }
     if (n == 0) return;
     DWORD t0 = GetTickCount();
+    DWORD cls = BoostForFreeze();
     int st = p_applyQueued();
+    RestoreAfterFreeze(cls);
     if (st == MH_OK) {
         for (int k = 0; k < n; k++) g_hooks[queued[k]].patched = g_hooks[queued[k]].want;
         LoaderLog("INF", "Hooks: %d patch(es) applied in one freeze (%lu ms, %s).", n, GetTickCount() - t0, why);

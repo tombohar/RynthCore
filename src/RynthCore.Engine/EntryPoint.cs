@@ -983,6 +983,9 @@ public static class EntryPoint
                 RynthLog.Info("InitWorker: stand-down complete - this client runs as a Decal client; RynthCore stays idle.");
                 return;
             }
+            // Panel layout per character (UI/PanelLayout): before the EndScene hook, so the first
+            // frame already asks for the right layout (after a hot reload, the character's).
+            UI.PanelLayout.Initialize();
             if (Plugins.EngineSettings.EnablePlugins)
             {
                 RynthLog.Info("InitWorker DIAG — calling PluginManager.LoadPlugins.");

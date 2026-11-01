@@ -23,6 +23,10 @@
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ChatCommandReplies.cs" Link="Engine\ChatCommandReplies.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ChatRateLimiter.cs" Link="Engine\ChatRateLimiter.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Hotkeys\HotkeyModel.cs" Link="Engine\HotkeyModel.cs" />
+    <!-- /rc sense's usage and argument check (the Sense panel's look commands). -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\SenseModel.cs" Link="Engine\SenseModel.cs" />
+    <!-- The Lua panel's live reload toggle: the /lua line a click sends. -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\LuaLiveReload.cs" Link="Engine\LuaLiveReload.cs" />
   </ItemGroup>
 
 </Project>

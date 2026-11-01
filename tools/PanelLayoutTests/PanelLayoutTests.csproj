@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the panel layout per character (2026-10-30): src\RynthCore.Engine\UI\
+    PanelLayoutPolicy.cs (who owns a layout, its file names, which layout a client uses, the session
+    that decides when to switch and when panels may draw, /rc layout's parsing and replies),
+    PanelLayoutFiles.cs (seeding, reset, make default, the latest-text writes), PanelStateStore.cs
+    (switching its file, atomic saves), BarLayout.cs and EngineSettingsFile.cs (the atomic write) and
+    Compatibility\ChatCommandReplies.cs (the /rc layout verb), compiled in with a stub RynthLog and
+    EngineSettings. Two clients are two child processes of this test writing their own characters'
+    layouts at the same time in a temp folder. Never touches %LOCALAPPDATA% or C:\Games (the temp
+    folder is deleted at the end). Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>PanelLayoutTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\PanelLayoutPolicy.cs" Link="Engine\PanelLayoutPolicy.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\PanelLayoutFiles.cs" Link="Engine\PanelLayoutFiles.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\PanelStateStore.cs" Link="Engine\PanelStateStore.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\BarLayout.cs" Link="Engine\BarLayout.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\EngineSettingsFile.cs" Link="Engine\EngineSettingsFile.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ChatCommandReplies.cs" Link="Engine\ChatCommandReplies.cs" />
+    <!-- ChatCommandReplies' /rc sense row names SenseLayout (the Sense views, feature/sense-compact). -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\SenseModel.cs" Link="Engine\SenseModel.cs" />
+  </ItemGroup>
+
+</Project>

@@ -745,6 +745,8 @@ internal static partial class PluginManager
     public static void QueueSelectedTargetChange(uint currentTargetId, uint previousTargetId)
     {
         ImGuiBackend.Hud.HudFeed.OnSelection(currentTargetId);   // debuff target matching
+        // A selection makes the client query its health: the server's health stream follows it (HealthProbe).
+        ImGuiBackend.Hud.HealthProbe.NoteQuery(currentTargetId);
 
         if (!_initialized || _plugins.Count == 0)
             return;
@@ -924,12 +926,20 @@ internal static partial class PluginManager
         }
     }
 
-    public static void QueueUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth)
+    /// <summary>
+    /// One health observation. <paramref name="healthReply"/>: it is a 0x01C0 UpdateHealth (a QueryHealth
+    /// reply or the server's stream); one that answers the nameplates' own probe (HealthProbe) is the
+    /// HUD's alone - plugins never asked for it, and a bot must not read someone else's hit on a monster
+    /// it isn't fighting as its own.
+    /// </summary>
+    public static void QueueUpdateHealth(uint targetId, float healthRatio, uint currentHealth, uint maxHealth, bool healthReply = false)
     {
         // Monster nameplates keep the last ratio per object (engine-side, plugins or not).
         ImGuiBackend.Hud.MonsterHudData.RecordHealth(targetId, healthRatio, currentHealth, maxHealth);
 
         if (_plugins.Count == 0)
+            return;
+        if (healthReply && ImGuiBackend.Hud.HealthProbe.IsProbeReply(targetId, Environment.TickCount64))
             return;
 
         lock (PendingUpdateHealthLock)
@@ -1212,6 +1222,7 @@ internal static partial class PluginManager
             if (!plugin.Initialized || plugin.Failed || plugin.Render == null)
                 continue;
 
+            long cost = ImGuiBackend.UiCost.Start();   // UiCost: each plugin's Render, by name
             try
             {
                 plugin.Render();
@@ -1221,6 +1232,7 @@ internal static partial class PluginManager
                 plugin.Failed = true;
                 RynthLog.Error($"PluginManager: {plugin.DisplayName} Render threw {ex.GetType().Name}: {ex.Message}{PluginTrace(ex)} - disabled.");
             }
+            ImGuiBackend.UiCost.StopPluginRender(plugin.DisplayName, cost);
         }
     }
 
@@ -1286,6 +1298,7 @@ internal static partial class PluginManager
                 RynthLog.Plugin($"PluginManager: first RenderOverlay call for {plugin.DisplayName}.");
             }
 
+            long cost = ImGuiBackend.UiCost.Start();   // UiCost: each plugin's RenderOverlay, by name
             try
             {
                 overlay();
@@ -1295,6 +1308,7 @@ internal static partial class PluginManager
                 plugin.RenderOverlay = null;
                 RynthLog.Error($"PluginManager: {plugin.DisplayName} RenderOverlay threw {ex.GetType().Name}: {ex.Message} - overlay windows off for this session (plugin keeps running).");
             }
+            ImGuiBackend.UiCost.StopPluginOverlay(plugin.DisplayName, cost);
         }
     }
 

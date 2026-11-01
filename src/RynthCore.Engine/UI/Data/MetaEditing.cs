@@ -110,6 +110,77 @@ internal sealed class MetaBackupPlan
     public static string BackupOf(string file) => file + ".bak";
 }
 
+/// <summary>RynthAi's last write of the meta file, or the edit it didn't apply (the snapshot's "saveResult").</summary>
+internal sealed class MetaSaveResult
+{
+    /// <summary>Counts results this plugin session (0 = none yet).</summary>
+    public long Seq { get; set; }
+    public bool Ok { get; set; } = true;
+    /// <summary>What happened, in a few words ("Saved farm.af (12 rules)", "NOT saved to farm.af: ...").</summary>
+    public string Text { get; set; } = string.Empty;
+    public string Path { get; set; } = string.Empty;
+}
+
+/// <summary>What the Meta panel's save indicator shows.</summary>
+internal enum MetaSaveState
+{
+    /// <summary>Every change so far was written (or nothing was changed).</summary>
+    Saved,
+    /// <summary>A change was sent; RynthAi hasn't answered yet.</summary>
+    Saving,
+    /// <summary>RynthAi answered: the write failed, or the edit wasn't applied (the result says why).</summary>
+    Failed,
+    /// <summary>The change never reached RynthAi (not loaded, no export).</summary>
+    NotSent,
+    /// <summary>Sent, but no answer after <see cref="MetaSaveWatch.ConfirmMs"/>.</summary>
+    Unconfirmed,
+}
+
+/// <summary>
+/// The Meta panel's "Saved" indicator (2026-11-01). It used to show "Saving..." for 2.5 s after a
+/// change and then "Saved", whatever happened: an edit RynthAi refused, one it couldn't write, one
+/// that never reached it all looked saved, and the change was simply gone the next time the meta
+/// loaded. Now it waits for RynthAi's answer: the snapshot's <see cref="MetaSaveResult"/> with a
+/// newer <see cref="MetaSaveResult.Seq"/> than the one seen when the change was sent. A RynthAi
+/// without results (null) keeps the old timer.
+/// </summary>
+internal sealed class MetaSaveWatch
+{
+    /// <summary>How long a change waits for RynthAi's answer before the indicator says it's not confirmed.</summary>
+    public const long ConfirmMs = 4000;
+    /// <summary>The old timer, for a RynthAi that reports no results.</summary>
+    public const long LegacySavingMs = 2500;
+
+    private long _sentAt = -1;
+    private long _seqAtSend;
+    private int _undeliveredAtSend;
+
+    /// <summary>A change was sent now; <paramref name="seenSeq"/> is the result seq the panel shows,
+    /// <paramref name="undelivered"/> MetaCommands.Undelivered.</summary>
+    public void Sent(long nowMs, long seenSeq, int undelivered)
+    {
+        // A burst of changes waits for the answer to the newest one; a send while still waiting keeps
+        // the older count, so a command dropped earlier in the burst still shows.
+        if (_sentAt < 0) _undeliveredAtSend = undelivered;
+        _sentAt = nowMs;
+        _seqAtSend = seenSeq;
+    }
+
+    /// <summary>The panel opened or another meta loaded: nothing is pending.</summary>
+    public void Reset() => _sentAt = -1;
+
+    public MetaSaveState State(long nowMs, MetaSaveResult? result, int undelivered)
+    {
+        if (_sentAt >= 0 && undelivered > _undeliveredAtSend) return MetaSaveState.NotSent;
+        if (result == null)
+            return _sentAt >= 0 && nowMs - _sentAt < LegacySavingMs ? MetaSaveState.Saving : MetaSaveState.Saved;
+        if (_sentAt >= 0 && result.Seq <= _seqAtSend)
+            return nowMs - _sentAt < ConfirmMs ? MetaSaveState.Saving : MetaSaveState.Unconfirmed;
+        if (_sentAt >= 0) _sentAt = -1;   // answered
+        return result.Seq > 0 && !result.Ok ? MetaSaveState.Failed : MetaSaveState.Saved;
+    }
+}
+
 /// <summary>Rule edits the editor makes.</summary>
 internal static class MetaRuleEdit
 {

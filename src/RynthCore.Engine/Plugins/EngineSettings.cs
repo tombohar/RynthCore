@@ -45,6 +45,8 @@ internal static class EngineSettings
     private static bool _borderlessWindowed;
     // Settings > Display: reopen Rynth panels where they were (default on: panels have always been remembered).
     private static bool _rememberWindowLayout = true;
+    // Settings > Display: each character keeps its own panel layout (default on; off = the one shared layout).
+    private static bool _panelLayoutPerCharacter = true;
     // Settings > Display: save and restore the AC window's own position and size (default off, opt-in).
     private static bool _rememberAcWindowPosition;
     // "LoadAllServerPlugins": hand-set only, written back only when true (PluginManifestGate).
@@ -55,6 +57,9 @@ internal static class EngineSettings
     // leaves the world, for at most _holdReloadInWorldMaxMinutes (ReloadInWorldGate).
     private static bool _holdReloadInWorld;
     private static int _holdReloadInWorldMaxMinutes = ReloadInWorldGate.DefaultMaxMinutes;
+    // Settings > Diagnostics: the UI frame cost breakdown (ImGui/UiCost.cs; default on, 50 ms).
+    private static bool _uiCostLog = true;
+    private static int _uiCostThresholdMs = ImGuiBackend.UiCostModel.DefaultThresholdMs;
     // "IltServerNames" / "IltHosts": what counts as Infinite Leaftide (Compatibility/IltInfo.cs).
     // null = not in the file: IltDetect's defaults.
     private static List<string>? _iltServerNames;
@@ -468,6 +473,27 @@ internal static class EngineSettings
         }
     }
 
+    /// <summary>"PanelLayoutPerCharacter" in engine.json (default true): in the world each character
+    /// uses its own panel layout (%LOCALAPPDATA%\RynthCore\layouts\&lt;server&gt;\&lt;character&gt;\
+    /// panel_state.txt and imgui.ini, UI/PanelLayout), so clients on one PC don't move each other's
+    /// panels. Off: every client uses the one PC-wide layout, as before. Set in game in Settings >
+    /// Display: the client it is set in switches at once, the others as they start.</summary>
+    public static bool PanelLayoutPerCharacter
+    {
+        get
+        {
+            EnsureLoaded();
+            return _panelLayoutPerCharacter;
+        }
+        set
+        {
+            EnsureLoaded();
+            if (_panelLayoutPerCharacter == value) return;
+            _panelLayoutPerCharacter = value;
+            Save("PanelLayoutPerCharacter");
+        }
+    }
+
     /// <summary>"RememberAcWindowPosition" in engine.json (default false, opt-in): save the Asheron's
     /// Call window's position and size per character and put it back at the next login.
     /// Set in game in Settings > Display.</summary>
@@ -542,6 +568,47 @@ internal static class EngineSettings
             if (_holdReloadInWorldMaxMinutes == v) return;
             _holdReloadInWorldMaxMinutes = v;
             Save("HoldReloadInWorldMaxMinutes");
+        }
+    }
+
+    /// <summary>"UiCostLog" in engine.json (default true): time the parts of each UI frame (panels by
+    /// title, plugin callbacks, the monster HUD, pop-outs, the ImGui submit; ImGui/UiCost.cs) and log one
+    /// "[UiCost]" line for a frame at or over <see cref="UiCostThresholdMs"/>, at most every 5 s. Off: no
+    /// timing at all. Only a false is written to the file. Settings > Diagnostics, /rc uicost on|off.</summary>
+    public static bool UiCostLog
+    {
+        get
+        {
+            EnsureLoaded();
+            return _uiCostLog;
+        }
+        set
+        {
+            EnsureLoaded();
+            if (_uiCostLog == value) return;
+            _uiCostLog = value;
+            Save("UiCostLog");
+        }
+    }
+
+    /// <summary>"UiCostThresholdMs" in engine.json (default 50, valid 5-2000): a UI frame this slow is
+    /// logged with its breakdown (<see cref="UiCostLog"/>), and the heartbeat names the top parts while
+    /// its ui p95 is over it. Clamped; only a non-default value is written. Settings > Diagnostics,
+    /// /rc uicost &lt;ms&gt;.</summary>
+    public static int UiCostThresholdMs
+    {
+        get
+        {
+            EnsureLoaded();
+            return _uiCostThresholdMs;
+        }
+        set
+        {
+            EnsureLoaded();
+            int v = ImGuiBackend.UiCostModel.ClampThresholdMs(value);
+            if (_uiCostThresholdMs == v) return;
+            _uiCostThresholdMs = v;
+            Save("UiCostThresholdMs");
         }
     }
 
@@ -807,6 +874,10 @@ internal static class EngineSettings
                 (rwlEl.ValueKind == JsonValueKind.True || rwlEl.ValueKind == JsonValueKind.False))
                 _rememberWindowLayout = rwlEl.GetBoolean();
 
+            if (doc.RootElement.TryGetProperty("PanelLayoutPerCharacter", out var plpcEl) &&
+                (plpcEl.ValueKind == JsonValueKind.True || plpcEl.ValueKind == JsonValueKind.False))
+                _panelLayoutPerCharacter = plpcEl.GetBoolean();
+
             if (doc.RootElement.TryGetProperty("RememberAcWindowPosition", out var rapEl) &&
                 (rapEl.ValueKind == JsonValueKind.True || rapEl.ValueKind == JsonValueKind.False))
                 _rememberAcWindowPosition = rapEl.GetBoolean();
@@ -824,6 +895,15 @@ internal static class EngineSettings
                 hrimEl.ValueKind == JsonValueKind.Number &&
                 hrimEl.TryGetInt32(out int hrim))
                 _holdReloadInWorldMaxMinutes = ReloadInWorldGate.ClampMaxMinutes(hrim);
+
+            if (doc.RootElement.TryGetProperty("UiCostLog", out var uclEl) &&
+                (uclEl.ValueKind == JsonValueKind.True || uclEl.ValueKind == JsonValueKind.False))
+                _uiCostLog = uclEl.GetBoolean();
+
+            if (doc.RootElement.TryGetProperty("UiCostThresholdMs", out var uctEl) &&
+                uctEl.ValueKind == JsonValueKind.Number &&
+                uctEl.TryGetInt32(out int uct))
+                _uiCostThresholdMs = ImGuiBackend.UiCostModel.ClampThresholdMs(uct);
 
             if (doc.RootElement.TryGetProperty("ReportEndpoint", out var repEl) &&
                 repEl.ValueKind == JsonValueKind.String &&
@@ -911,6 +991,8 @@ internal static class EngineSettings
         "MaxHotReloads", "ReportEndpoint", "CloseOnServerDisconnect", "AutoIdMode", "EnablePluginOverlayWindows", "LoggingLevel",
         "LoadAllServerPlugins", "TransitionGate",
         "HoldReloadInWorld", "HoldReloadInWorldMaxMinutes",
+        "PanelLayoutPerCharacter",
+        "UiCostLog", "UiCostThresholdMs",
     };
 
     // The engine.json keys this client changed this session. Every client keeps the whole settings
@@ -980,6 +1062,8 @@ internal static class EngineSettings
                     w.WriteBoolean("BorderlessWindowed", true);
                 if (!_rememberWindowLayout) // default true: leave the file as it was
                     w.WriteBoolean("RememberWindowLayout", false);
+                if (!_panelLayoutPerCharacter) // default true: leave the file as it was
+                    w.WriteBoolean("PanelLayoutPerCharacter", false);
                 if (_rememberAcWindowPosition) // default false: leave the file as it was
                     w.WriteBoolean("RememberAcWindowPosition", true);
                 if (!_closeOnServerDisconnect)   // default true: leave the file as it was
@@ -994,6 +1078,10 @@ internal static class EngineSettings
                     w.WriteBoolean("HoldReloadInWorld", true);
                 if (_holdReloadInWorldMaxMinutes != ReloadInWorldGate.DefaultMaxMinutes)   // only a non-default value is written
                     w.WriteNumber("HoldReloadInWorldMaxMinutes", _holdReloadInWorldMaxMinutes);
+                if (!_uiCostLog)   // default true: only a false is written
+                    w.WriteBoolean("UiCostLog", false);
+                if (_uiCostThresholdMs != ImGuiBackend.UiCostModel.DefaultThresholdMs)   // only a non-default value is written
+                    w.WriteNumber("UiCostThresholdMs", _uiCostThresholdMs);
                 if (_reportEndpoint != null)   // only a hand-set value is written
                     w.WriteString("ReportEndpoint", _reportEndpoint);
                 WriteStringList(w, "IltServerNames", _iltServerNames);   // null (not in the file): left out

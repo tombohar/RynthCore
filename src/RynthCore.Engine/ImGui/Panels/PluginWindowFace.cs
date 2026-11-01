@@ -15,6 +15,10 @@
 //  (wantHeight) as its minimum and is fitted to it whenever it changes and the
 //  mouse is up (a frameless window's empty rows would still catch clicks meant
 //  for the game); a text size change scales its width along with its fonts.
+//  A "scale": "draw" window set bigger than normal (PanelDrawScale) gets the
+//  fonts baked nearest above its size while the plugin draws (2026-11-01: from
+//  the normal bake, stretched, its text blurred); the font pushed for its menus
+//  and tooltips stays at the panel's text size.
 //  docs/PLUGIN_WINDOWS.md. AC's render thread.
 // ============================================================================
 
@@ -39,11 +43,12 @@ internal sealed class PluginWindowFace : IImGuiPanel
 
     // "fitHeight" (v90): the content height the plugin asked for (logical units; 0 = not known
     // yet), and the text size factor and width (logical) the window was last fitted at.
-    private readonly bool _fitHeight;
+    private readonly bool _fitHeight, _drawScale;
     private readonly float _minWidth;
     private float _contentHeight, _fitK, _fitWidth;
 
-    public PluginWindowFace(string plugin, string surface, string title, bool fitHeight = false, float minWidth = 0f)
+    public PluginWindowFace(string plugin, string surface, string title, bool fitHeight = false, float minWidth = 0f,
+        bool drawScale = false)
     {
         _plugin = plugin;
         _title = title;
@@ -51,6 +56,15 @@ internal sealed class PluginWindowFace : IImGuiPanel
         _idScope = "##pw_" + surface;
         _fitHeight = fitHeight;
         _minWidth = minWidth;
+        _drawScale = drawScale;
+    }
+
+    /// <summary>The font step the plugin draws with: a draw-scale window's own size's (baked), else the text size's.</summary>
+    private int DrawFontStep(int textStep)
+    {
+        if (!_drawScale) return textStep;
+        int pct = PanelDrawScale.Get(_title);
+        return pct > 0 ? ImGuiFonts.BakedStepNear(PanelDrawScale.FontStep(pct, EngineFrameController.FontScale)) : textStep;
     }
 
     /// <summary>A fitHeight window's minimum: its minimum width at its text size, and the content's height.</summary>
@@ -78,10 +92,13 @@ internal sealed class PluginWindowFace : IImGuiPanel
             guarded = guarded && ImGuiStackGuard.AtWindowBase(bodyBase);   // drawn anywhere else: as before
             ImGuiNET.ImGui.PushID(_idScope);
             ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Ui11));
+            int textStep = ImGuiFonts.CurrentStep;
+            ImGuiFonts.CurrentStep = DrawFontStep(textStep);
             ImGuiStackGuard.Mark given = guarded ? ImGuiStackGuard.Take() : default;
             try { result = PluginManager.RenderEmbed(_plugin, _surface, avail, out want); }
             finally
             {
+                ImGuiFonts.CurrentStep = textStep;
                 ImGuiStackGuard.Mark after = default;
                 StackCheck check = guarded ? ImGuiStackGuard.Check(given, out after) : StackCheck.Balanced;
                 if (check == StackCheck.Balanced)

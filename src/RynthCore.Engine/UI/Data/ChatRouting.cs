@@ -75,7 +75,7 @@ internal sealed class ChatRoute
 {
     public static readonly ChatRoute Default = new(false, true, null, null, null, false);
 
-    public ChatRoute(bool hidden, bool inHome, string[]? tabs, uint? lineArgb, ChatSpan[]? spans, bool mention)
+    public ChatRoute(bool hidden, bool inHome, string[]? tabs, uint? lineArgb, ChatSpan[]? spans, bool mention, uint? highlightArgb = null)
     {
         Hidden = hidden;
         InHome = inHome;
@@ -83,6 +83,7 @@ internal sealed class ChatRoute
         LineArgb = lineArgb;
         Spans = spans;
         Mention = mention;
+        HighlightArgb = highlightArgb;
     }
 
     /// <summary>A Hide rule matched: shown nowhere.</summary>
@@ -97,6 +98,10 @@ internal sealed class ChatRoute
     public ChatSpan[]? Spans { get; }
     /// <summary>Someone said your name (or a mention word).</summary>
     public bool Mention { get; }
+    /// <summary>A "Highlight line" rule's colour (its swatch, 0xAARRGGBB): a band behind the
+    /// whole line, drawn at <see cref="ChatColorModes.BandArgb"/>; null = no band. The text
+    /// keeps its own colour (LineArgb or the channel's).</summary>
+    public uint? HighlightArgb { get; }
 
     public bool ShowsIn(string tab, string channel)
     {
@@ -121,7 +126,52 @@ internal enum ChatRuleAction
     Color,
 }
 
-internal enum ChatColorMode { None, Line, Match }
+/// <summary>
+/// What a rule's colour does. Line: the line's text colour. Match: only the matched text.
+/// Highlight (2026-11-01): a band in the colour behind the whole line, text in its own colour.
+/// New values go at the end: the editor's dropdown is indexed by the value.
+/// </summary>
+internal enum ChatColorMode { None, Line, Match, Highlight }
+
+/// <summary>
+/// "colorMode" in rynthchat_settings.json and Export / Import, and the highlight band's colour.
+/// Kept apart from ChatModel so tools/ChatFilterTests can check them.
+/// </summary>
+internal static class ChatColorModes
+{
+    /// <summary>The value written to JSON; null (no key) for None, as every file before.</summary>
+    public static string? ToJson(ChatColorMode mode) => mode switch
+    {
+        ChatColorMode.Line => "line",
+        ChatColorMode.Match => "match",
+        ChatColorMode.Highlight => "highlight",
+        _ => null,
+    };
+
+    /// <summary>
+    /// Any case; "text" is an old spelling of "match". Unknown or absent: None. (A RynthCore
+    /// from before 2026-11-01 reads "highlight" the same way, as None: the rule loads, routes
+    /// as before and keeps its colour, it just doesn't colour.)
+    /// </summary>
+    public static ChatColorMode Parse(string? json) => (json ?? "").Trim().ToLowerInvariant() switch
+    {
+        "line" => ChatColorMode.Line,
+        "match" or "text" => ChatColorMode.Match,
+        "highlight" or "band" => ChatColorMode.Highlight,
+        _ => ChatColorMode.None,
+    };
+
+    /// <summary>How opaque the band is for an opaque swatch (0x66 = 40%).</summary>
+    public const uint BandAlpha = 0x66;
+
+    /// <summary>
+    /// The band drawn for a highlight colour: its RGB at 40% of its own alpha. The editor's
+    /// swatch is RGB only (always opaque), and at full strength a band in a light colour would
+    /// drown the text, which keeps its normal (often light) colour; 40% reads on the dark chat
+    /// with any text colour. An imported translucent colour ("#80RRGGBB") comes out fainter still.
+    /// </summary>
+    public static uint BandArgb(uint argb) => ((argb >> 24) * BandAlpha / 0xFF) << 24 | (argb & 0x00FFFFFF);
+}
 
 /// <summary>
 /// One rule. Its fields are edited in place by a rule editor (then
@@ -305,7 +355,7 @@ internal sealed class ChatRouter
     {
         bool hidden = false, inHome = true, routed = false;
         List<string>? tabs = null;
-        uint? lineArgb = null;
+        uint? lineArgb = null, highlightArgb = null;
         List<(int Start, int Length, uint Argb)>? spans = null;
 
         for (int i = 0; i < _rules.Length; i++)
@@ -322,8 +372,11 @@ internal sealed class ChatRouter
             bool wantsRoute = routes && !routed;
             bool wantsLine = mode == ChatColorMode.Line && lineArgb == null;
             bool wantsMatch = mode == ChatColorMode.Match;
+            // The band works like the line colour, on its own: the first Highlight rule that
+            // matches picks it, whatever Line / Match rules did (they colour the text on top).
+            bool wantsHighlight = mode == ChatColorMode.Highlight && highlightArgb == null;
             // Nothing left for it to decide (the test box still shows that it matches).
-            if (!wantsRoute && !wantsLine && !wantsMatch && trace == null) continue;
+            if (!wantsRoute && !wantsLine && !wantsMatch && !wantsHighlight && trace == null) continue;
             if (!rule.WhenMatches(channel, chatType)) continue;
 
             Match m;
@@ -369,6 +422,13 @@ internal sealed class ChatRouter
             }
             else if (mode == ChatColorMode.Line && trace != null)
                 what!.Append(what.Length > 0 ? ", " : "").Append("(line colour already set above)");
+            if (wantsHighlight)
+            {
+                highlightArgb = rule.ColorArgb;
+                what?.Append(what.Length > 0 ? ", " : "").Append("highlights the line");
+            }
+            else if (mode == ChatColorMode.Highlight && trace != null)
+                what!.Append(what.Length > 0 ? ", " : "").Append("(highlight already set above)");
             if (wantsMatch)
             {
                 int n = 0;
@@ -427,9 +487,9 @@ internal sealed class ChatRouter
             if (mention) trace?.Add(new Step(-1, "mentions you (highlighted)"));
         }
 
-        if (!hidden && inHome && tabs == null && lineArgb == null && spans == null && !mention)
+        if (!hidden && inHome && tabs == null && lineArgb == null && highlightArgb == null && spans == null && !mention)
             return ChatRoute.Default;
-        return new ChatRoute(hidden, inHome, tabs?.ToArray(), lineArgb, Resolve(spans, text.Length), mention);
+        return new ChatRoute(hidden, inHome, tabs?.ToArray(), lineArgb, Resolve(spans, text.Length), mention, highlightArgb);
     }
 
     private static void AddTab(ref List<string>? tabs, string tab)

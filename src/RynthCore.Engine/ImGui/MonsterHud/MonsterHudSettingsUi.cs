@@ -67,6 +67,14 @@ internal static class MonsterHudSettingsUi
             MonsterHudSettings.MinDistance, MonsterHudSettings.MaxDistanceLimit, "%.0f", w);
         changed |= SliderI("Max plates", ref MonsterHudSettings.MaxPlates,
             MonsterHudSettings.MinPlates, MonsterHudSettings.MaxPlatesLimit, w);
+        changed |= Toggle("Refresh others' health", ref MonsterHudSettings.RefreshOthersHealth,
+            "The server only keeps the selected (or fought) monster's health up to date. On: the HUD also asks for " +
+            "the other plates' health, one monster at a time - first the ones in the fight, then any it hasn't seen - " +
+            "and hands the live feed straight back to your target. Two small queries per refresh. " +
+            "Off: only your target's plate is live. Chat: /rv plates refresh [on|off], /rv plates refresh <seconds>.");
+        if (MonsterHudSettings.RefreshOthersHealth)
+            changed |= SliderF("Refresh every (s)", ref MonsterHudSettings.HealthRefreshSec,
+                HealthProbe.MinIntervalSec, HealthProbe.MaxIntervalSec, "%.1f s", w);
 
         Section("On the plate", w);
         changed |= Toggle("Name", ref MonsterHudSettings.ShowNames, null);

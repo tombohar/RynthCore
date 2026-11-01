@@ -32,6 +32,13 @@
 //  Font files are read by Preload() on the engine's init worker, so AC's
 //  render thread only copies bytes into the atlas. The native TTF buffers and
 //  glyph ranges stay alive until Free() (after the context is destroyed).
+//
+//  The first atlas is baked off AC's thread too (2026-11-01, StartInitialBake): on a
+//  hot reload with every client reloading at once, queueing the fonts, rasterizing
+//  the atlas, the RGBA->BGRA copy and freeing the ~150 MB of TTF copies took 2.5-5 s
+//  of AC's main thread in the first ImGui frame (the "[UiCost] frame 3611 ms" lines,
+//  the main-thread hangs of every reload). The worker now does all of it; AC's thread
+//  swaps the finished atlas in and copies ready BGRA rows into the texture.
 // ============================================================================
 
 using System;
@@ -105,6 +112,8 @@ internal static unsafe class ImGuiFonts
     // set per size in use. Get() returns the set for CurrentStep, which the panel
     // host sets while it draws a panel, so every face's text grows without any
     // face code changing. Baked (not stretched), so the big text stays sharp.
+    // The sizes self-drawn windows are drawn at (UI.PanelDrawScale) are baked too:
+    // a window at 160% draws its text from the 160% set (StepsToBake).
     private static readonly Dictionary<int, ImFontPtr[]> ScaledFonts = new();
 
     /// <summary>Text size step of the panel being drawn (0 = normal). Render thread.</summary>
@@ -167,6 +176,15 @@ internal static unsafe class ImGuiFonts
         _preloaded = true;
     }
 
+    /// <summary>The text size steps any panel uses, and those the self-drawn windows' sizes need.</summary>
+    private static List<int> StepsToBake(float scale)
+    {
+        List<int> steps = RynthCore.Engine.UI.PanelTextScale.StepsInUse();
+        foreach (int step in RynthCore.Engine.UI.PanelDrawScale.FontStepsInUse(scale))
+            if (!steps.Contains(step)) steps.Add(step);
+        return steps;
+    }
+
     /// <summary>A baked font. Before Build (or if it failed) this is ImGui's default font.</summary>
     public static ImFontPtr Get(UiFont font)
     {
@@ -219,7 +237,7 @@ internal static unsafe class ImGuiFonts
         Compatibility.MemoryUse.Mark("font files read");
 
         ScaledFonts.Clear();
-        AddAll(io.Fonts, scale, RynthCore.Engine.UI.PanelTextScale.StepsInUse(), Fonts, ScaledFonts);
+        AddAll(io.Fonts, scale, StepsToBake(scale), Fonts, ScaledFonts);
 
         if (Fonts[(int)UiFont.Ui11].NativePtr != null)
             io.NativePtr->FontDefault = Fonts[(int)UiFont.Ui11].NativePtr;
@@ -403,7 +421,15 @@ internal static unsafe class ImGuiFonts
         public int Steps;
         public double Ms;
         public string? Error;
+        // The atlas pixels as D3D9 A8R8G8B8 rows (BGRA in memory), made by the worker
+        // (NativeMemory); handed on by SwapIn. 0 when the bake failed.
+        public IntPtr Bgra;
+        public int Width, Height;
     }
+
+    // The swapped-in atlas's BGRA copy, until DX9Backend uploads it (TakeBgraPixels). Render thread.
+    private static IntPtr _bgra;
+    private static int _bgraWidth, _bgraHeight;
 
     private static System.Threading.Thread? _bakeThread;
     private static Bake? _bakeDone;                       // set by the worker as it ends
@@ -418,32 +444,15 @@ internal static unsafe class ImGuiFonts
     {
         what = "";
         if (_bakeThread != null)
-        {
-            Bake? done = System.Threading.Volatile.Read(ref _bakeDone);
-            if (done == null) return false;          // still baking: frames go on with the old atlas
-            _bakeThread.Join();
-            _bakeThread = null;
-            _bakeDone = null;
-            if (done.Atlas == IntPtr.Zero)
-            {
-                // Failed off-thread: the old way, here.
-                io.Fonts.Clear();
-                Build(io, scale);
-                what = $"off-thread bake failed ({done.Error}); re-baked on the render thread";
-                return true;
-            }
-            SwapIn(io, done);
-            what = $"baked off-thread in {done.Ms:0.0} ms ({done.Steps} enlarged size(s) in use)";
-            return true;
-        }
+            return SwapFinished(io, scale, out what);   // false while baking: frames go on with the old atlas
 
         if (!TakeRebuildRequest()) return false;
         PrepareNativeData();
-        List<int> steps = RynthCore.Engine.UI.PanelTextScale.StepsInUse();
+        List<int> steps = StepsToBake(scale);
         try
         {
             _bakeDone = null;
-            _bakeThread = EngineThreads.Start("ImGuiFonts.Bake", () => BakeWorker(scale, steps));
+            _bakeThread = EngineThreads.Start("ImGuiFonts.Bake", () => BakeWorker(scale, steps, prepare: false));
             return false;
         }
         catch (Exception ex)
@@ -456,27 +465,125 @@ internal static unsafe class ImGuiFonts
         }
     }
 
-    private static void BakeWorker(float scale, List<int> steps)
+    /// <summary>
+    /// The first atlas of a context, baked on a worker (see the header): reading the font files if
+    /// the init worker hasn't, making their native copies, queueing every font, rasterizing, the
+    /// BGRA copy and freeing the TTF copies all happen there. AC thread, once the scale is known.
+    /// False when no worker could be started (the caller then calls <see cref="Build"/>).
+    /// </summary>
+    public static bool StartInitialBake(float scale)
+    {
+        if (_bakeThread != null) return true;
+        List<int> steps = RynthCore.Engine.UI.PanelTextScale.StepsInUse();
+        try
+        {
+            _bakeDone = null;
+            _bakeThread = EngineThreads.Start("ImGuiFonts.Bake", () => BakeWorker(scale, steps, prepare: true));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _bakeThread = null;
+            RynthLog.UI($"ImGuiFonts: no bake thread for the first atlas ({ex.GetType().Name}: {ex.Message}); baking it on the render thread.");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Render thread, with <paramref name="io"/>'s context current: swaps a finished bake (the
+    /// first atlas, or a re-bake) into it. True when the atlas changed (the caller makes its
+    /// texture); false while none is running or it is still baking.
+    /// </summary>
+    public static bool SwapFinished(ImGuiIOPtr io, float scale, out string what)
+    {
+        what = "";
+        if (_bakeThread == null) return false;
+        Bake? done = System.Threading.Volatile.Read(ref _bakeDone);
+        if (done == null) return false;
+        _bakeThread.Join();
+        _bakeThread = null;
+        _bakeDone = null;
+        if (done.Atlas == IntPtr.Zero)
+        {
+            // Failed off-thread: the old way, here.
+            io.Fonts.Clear();
+            Build(io, scale);
+            what = $"off-thread bake failed ({done.Error}); baked on the render thread";
+            return true;
+        }
+        SwapIn(io, done);
+        what = $"baked off-thread in {done.Ms:0.0} ms: {CountBaked()} fonts at scale {scale:0.##}, {done.Steps} enlarged size(s) in use, "
+            + $"icons {(_phosphor != null ? $"{IconCount()} merged" : "missing")}"
+            + (_symbolMerges > 0 ? $", Segoe UI Symbol merged into {_symbolMerges}" : "");
+        return true;
+    }
+
+    /// <summary>
+    /// The swapped-in atlas's pixels as A8R8G8B8 rows, made by the bake worker, when they match
+    /// <paramref name="width"/> x <paramref name="height"/>: the caller copies them into the texture
+    /// and frees them with <see cref="FreeBgraPixels"/>. False (nothing to free) otherwise: the
+    /// caller converts ImGui's RGBA itself. Either way the copy is no longer held here. Render thread.
+    /// </summary>
+    public static bool TakeBgraPixels(int width, int height, out IntPtr bgra)
+    {
+        bgra = _bgra;
+        bool match = bgra != IntPtr.Zero && _bgraWidth == width && _bgraHeight == height;
+        if (bgra != IntPtr.Zero && !match) FreeBgraPixels(bgra);
+        _bgra = IntPtr.Zero;
+        _bgraWidth = _bgraHeight = 0;
+        if (!match) bgra = IntPtr.Zero;
+        return match;
+    }
+
+    public static void FreeBgraPixels(IntPtr bgra)
+    {
+        if (bgra != IntPtr.Zero) NativeMemory.Free((void*)bgra);
+    }
+
+    private static void BakeWorker(float scale, List<int> steps, bool prepare)
     {
         var bake = new Bake { Steps = steps.Count };
         long t0 = Stopwatch.GetTimestamp();
         ImFontAtlas* atlas = null;
         try
         {
+            // The first bake makes the native copies of the font files here; a re-bake finds
+            // them made (PumpRebuild prepares them first). One bake runs at a time, and nothing
+            // else touches them until it is joined (SwapFinished, WaitForWorkers).
+            if (prepare)
+            {
+                PrepareNativeData();
+                Compatibility.MemoryUse.Mark("font files read (bake worker)");
+            }
             atlas = ImGuiNative.ImFontAtlas_ImFontAtlas();
             var ptr = new ImFontAtlasPtr(atlas);
             AddAll(ptr, scale, steps, bake.Base, bake.Scaled);
             if (bake.Base[(int)UiFont.Ui11].NativePtr == null)
                 ptr.AddFontDefault(); // no Segoe UI: ImGui's built-in font keeps text readable
             ptr.Build();
-            // The RGBA copy the texture is made from, here too: the swap then only uploads it.
-            ptr.GetTexDataAsRGBA32(out IntPtr _, out int _, out int _);
+            // The RGBA copy the texture is made from, and its BGRA rows for D3D9, here too:
+            // the swap then only copies rows into the texture.
+            ptr.GetTexDataAsRGBA32(out IntPtr rgba, out int w, out int h);
+            if (rgba != IntPtr.Zero && w > 0 && h > 0)
+            {
+                bake.Bgra = (IntPtr)NativeMemory.Alloc((nuint)w * (nuint)h, 4);
+                FontPixels.RgbaToBgra(new ReadOnlySpan<uint>((void*)rgba, w * h), new Span<uint>((void*)bake.Bgra, w * h));
+                bake.Width = w;
+                bake.Height = h;
+            }
+            // The glyphs are rasterized: the atlas's copies of the font files (~150 MB with
+            // every size) are never read again (DX9Backend's note), so they go here, not on
+            // AC's thread. The pixels and TexReady stay.
+            ptr.ClearInputData();
+            if (prepare) Compatibility.MemoryUse.Mark("font atlas baked (bake worker)");
             bake.Atlas = (IntPtr)atlas;
             atlas = null;
         }
         catch (Exception ex)
         {
             bake.Error = $"{ex.GetType().Name}: {ex.Message}";
+            FreeBgraPixels(bake.Bgra);
+            bake.Bgra = IntPtr.Zero;
         }
         finally
         {
@@ -496,6 +603,10 @@ internal static unsafe class ImGuiFonts
         Array.Copy(bake.Base, Fonts, Fonts.Length);
         ScaledFonts.Clear();
         foreach (KeyValuePair<int, ImFontPtr[]> kv in bake.Scaled) ScaledFonts[kv.Key] = kv.Value;
+        FreeBgraPixels(_bgra);   // a copy never uploaded (each swap is uploaded straight after)
+        _bgra = bake.Bgra;
+        _bgraWidth = bake.Width;
+        _bgraHeight = bake.Height;
         ImGuiPopOuts.ReplaceFontAtlas((IntPtr)old, (IntPtr)fresh);
         if (old == null || old == fresh) return;
         IntPtr oldPtr = (IntPtr)old;
@@ -538,7 +649,11 @@ internal static unsafe class ImGuiFonts
             _bakeDone = null;
             if (pending != null && pending.Atlas != IntPtr.Zero)
                 ImGuiNative.ImFontAtlas_destroy((ImFontAtlas*)pending.Atlas);   // baked, never swapped in
+            if (pending != null) FreeBgraPixels(pending.Bgra);
         }
+        FreeBgraPixels(_bgra);
+        _bgra = IntPtr.Zero;
+        _bgraWidth = _bgraHeight = 0;
         foreach (IntPtr p in NativeBuffers)
             NativeMemory.Free((void*)p);
         NativeBuffers.Clear();

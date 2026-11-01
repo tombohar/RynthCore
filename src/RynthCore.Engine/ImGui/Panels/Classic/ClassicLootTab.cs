@@ -7,7 +7,9 @@
 //                   UiSources.LootEdit, shared with the Loot Editor): each rule
 //                   with its on/off gem, its action (Keep, Keep #, Salvage,
 //                   Sell, Read) and summary; move up / down, duplicate, delete,
-//                   add; Save and Reload; RynthAi's last message.
+//                   add; Why? (RynthAi's "Why this loot rule?" window for the
+//                   item selected in the game); Save and Reload; RynthAi's last
+//                   message.
 //  A rule's conditions are written in the Loot Editor (the Editor plate opens it
 //  on this file). Opening another file waits for unsaved changes to be saved or
 //  reloaded (the Loot Editor asks about discarding them; this tab doesn't).
@@ -170,6 +172,11 @@ internal sealed class ClassicLootTab : IClassicTab
             if (Plate("##cl_add", "Add", new Vector2(x, y)) && editable)
                 LootEditCommands.Simple("add", -1);
             SafeImGui.SetItemTooltip("Add a new rule at the end (write it in the Loot Editor)");
+            x += Px(50);
+            // The selected item, not the selected rule: RynthAi's "Why this loot rule?" window.
+            if (x + Px(46) <= o.X + w && Plate("##cl_why", "Why?", new Vector2(x, y)))
+                LootEditorFace.AskLootWhy();
+            SafeImGui.SetItemTooltip(LootEditorFace.LootWhyLabel + "\n" + LootEditorFace.LootWhyTip);
             y += Px(21);
         }
 

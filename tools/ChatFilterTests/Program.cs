@@ -60,6 +60,11 @@ internal static class Program
         LineColorRetail();
         LineColorPrecedence();
         LineColorJson();
+        HighlightRouting();
+        HighlightPrecedence();
+        HighlightBand();
+        HighlightJson();
+        HighlightOldReader();
 
         Console.WriteLine();
         Console.WriteLine($"{_checks - _failed}/{_checks} checks passed.");
@@ -466,6 +471,216 @@ internal static class Program
         Check(ChatLineColors.Resolve(null, "chan:General", "Channels") == 0xFF00FF00, "a colour survives the round trip");
         ChatLineColors.Load(null);
         Check(!ChatLineColors.AnySet, "loading a file without it clears them");
+    }
+
+    // ── Highlight line (2026-11-01): a band behind the whole line ──────────
+    // ChatColorMode.Highlight -> ChatRoute.HighlightArgb (the rule's colour); the face draws
+    // ChatColorModes.BandArgb of it behind all the line's rows. The first matching Highlight
+    // rule wins the band, on its own: Line and Match rules still colour the text.
+
+    private const uint HlA = 0xFF3366FF, HlB = 0xFFFF6633, LineC = 0xFF00FF00, MatchC = 0xFFFF00FF;
+
+    private static ChatFilterRule ColourRule(string pattern, ChatColorMode mode, uint argb,
+        ChatRuleAction action = ChatRuleAction.Color, string when = "", string tab = "")
+    {
+        ChatFilterRule r = Rule(pattern, action, when, tab);
+        r.ColorMode = mode;
+        r.ColorArgb = argb;
+        return r;
+    }
+
+    private static ChatRoute Route(string text, string channel, int type, out List<ChatRouter.Step> trace, params ChatFilterRule[] rules)
+    {
+        trace = new List<ChatRouter.Step>();
+        var router = RetailRouter(rules);
+        ChatRoute traced = router.Evaluate(text, channel, type, trace);
+        ChatRoute quiet = router.Evaluate(text, channel, type, null);
+        // The pump routes without a trace, the test box with one: they must agree.
+        Check(traced.HighlightArgb == quiet.HighlightArgb && traced.LineArgb == quiet.LineArgb
+            && traced.Hidden == quiet.Hidden && traced.InHome == quiet.InHome
+            && (traced.Spans?.Length ?? 0) == (quiet.Spans?.Length ?? 0), $"'{text}': traced and untraced routes agree");
+        return traced;
+    }
+
+    private static bool Says(List<ChatRouter.Step> trace, int rule, string what) =>
+        trace.Any(s => s.Rule == rule && s.What.Contains(what, StringComparison.Ordinal));
+
+    private static void HighlightRouting()
+    {
+        Case("highlight: the route carries the rule's colour");
+        try
+        {
+            ResetPresets();
+            ChatRoute r = Route("Bob tells you, \"hi\"", "Chat", 3, out var trace, ColourRule("tells you", ChatColorMode.Highlight, HlA));
+            Check(r.HighlightArgb == HlA, "a matching Highlight rule sets HighlightArgb to its colour");
+            Check(r.LineArgb == null && r.Spans == null, "...and leaves the text colour alone");
+            Check(!r.Hidden && r.InHome && r.Tabs == null, "...and the routing alone");
+            Check(Says(trace, 0, "highlights the line"), "the test box says it highlights the line");
+
+            ChatRoute none = Route("Bob says, \"hi\"", "Chat", 2, out var t2, ColourRule("tells you", ChatColorMode.Highlight, HlA));
+            Check(ReferenceEquals(none, ChatRoute.Default), "no match: the shared default route (no allocation)");
+            Check(t2.Count == 0, "...and nothing in the test box");
+
+            var off = ColourRule("tells you", ChatColorMode.Highlight, HlA);
+            off.Enabled = false;
+            Check(Route("Bob tells you, \"hi\"", "Chat", 3, out _, off).HighlightArgb == null, "a rule that is off doesn't highlight");
+
+            var combatOnly = ColourRule("evaded", ChatColorMode.Highlight, HlA, when: "chan:Combat");
+            Check(Route("You evaded Tusker Guard!", "Combat", 6, out _, combatOnly).HighlightArgb == HlA, "When chan:Combat: a Combat line is highlighted");
+            Check(Route("Bob says, \"evaded\"", "Chat", 2, out _, combatOnly).HighlightArgb == null, "...a Chat line isn't");
+
+            ChatRoute moved = Route("Bob tells you, \"hi\"", "Chat", 3, out var t3,
+                ColourRule("tells you", ChatColorMode.Highlight, HlA, ChatRuleAction.Move, tab: "Tells"));
+            Check(moved.HighlightArgb == HlA && !moved.InHome && moved.Tabs is ["Tells"], "a Move rule can highlight: moved and highlighted");
+            Check(Says(t3, 0, "moves it to Tells") && Says(t3, 0, "highlights the line"), "...the test box says both");
+
+            ChatRoute hidden = Route("spam spam", "Chat", 2, out _,
+                Rule("spam", ChatRuleAction.Hide), ColourRule("spam", ChatColorMode.Highlight, HlA));
+            Check(hidden.Hidden && hidden.HighlightArgb == null, "a Hide rule above: hidden, nothing to highlight");
+
+            Check(!ChatRetailVerdict.IsHidden(RetailRouter(ColourRule("spam", ChatColorMode.Highlight, HlA)), "buy spam now", 3),
+                "a Highlight rule never hides a line from the retail chat");
+
+            var mentionRouter = new ChatRouter(new[] { ColourRule("Tester", ChatColorMode.Highlight, HlA) },
+                new Regex(@"\bTester\b", RegexOptions.IgnoreCase), self: "", countHits: false);
+            ChatRoute both = mentionRouter.Evaluate("Bob says, \"Tester come here\"", "Chat", 2, null);
+            Check(both.Mention && both.HighlightArgb == HlA && both.Spans is { Length: 1 } && both.Spans[0].Argb == ChatRouter.MentionArgb,
+                "a mention keeps its tint and name colour on a highlighted line");
+        }
+        finally { ResetPresets(); }
+    }
+
+    private static void HighlightPrecedence()
+    {
+        Case("highlight: the first matching Highlight rule wins; Line and Match still colour the text");
+        try
+        {
+            ResetPresets();
+            const string line = "Critical hit! Olthoi Swarm Nymph nicks your head";
+            ChatRoute r = Route(line, "Combat", 6, out var trace,
+                ColourRule("Critical", ChatColorMode.Highlight, HlA), ColourRule("Olthoi", ChatColorMode.Highlight, HlB));
+            Check(r.HighlightArgb == HlA, "two Highlight rules: the higher one's colour");
+            Check(Says(trace, 1, "(highlight already set above)"), "the test box says the lower one was beaten");
+
+            ChatRoute nomatch = Route(line, "Combat", 6, out _,
+                ColourRule("nothing here", ChatColorMode.Highlight, HlA), ColourRule("Olthoi", ChatColorMode.Highlight, HlB));
+            Check(nomatch.HighlightArgb == HlB, "the higher one doesn't match: the lower one's colour");
+
+            ChatRoute lineFirst = Route(line, "Combat", 6, out _,
+                ColourRule("Critical", ChatColorMode.Line, LineC), ColourRule("Olthoi", ChatColorMode.Highlight, HlA));
+            Check(lineFirst.LineArgb == LineC && lineFirst.HighlightArgb == HlA, "Colour line above Highlight: both apply");
+            ChatRoute hlFirst = Route(line, "Combat", 6, out _,
+                ColourRule("Critical", ChatColorMode.Highlight, HlA), ColourRule("Olthoi", ChatColorMode.Line, LineC));
+            Check(hlFirst.LineArgb == LineC && hlFirst.HighlightArgb == HlA, "Highlight above Colour line: both apply");
+
+            ChatRoute lines = Route(line, "Combat", 6, out _,
+                ColourRule("Critical", ChatColorMode.Line, LineC), ColourRule("Olthoi", ChatColorMode.Line, HlB),
+                ColourRule("nicks", ChatColorMode.Highlight, HlA));
+            Check(lines.LineArgb == LineC && lines.HighlightArgb == HlA, "Colour line unchanged: still the first one wins");
+
+            ChatRoute match = Route(line, "Combat", 6, out _,
+                ColourRule("Olthoi", ChatColorMode.Match, MatchC), ColourRule("Critical", ChatColorMode.Highlight, HlA));
+            Check(match.HighlightArgb == HlA && match.Spans is { Length: 1 } && match.Spans[0].Argb == MatchC
+                && line.Substring(match.Spans[0].Start, match.Spans[0].Length) == "Olthoi", "Colour match and Highlight: the match coloured on the band");
+            Check(match.LineArgb == null, "...the rest of the text keeps its normal colour");
+
+            // A Highlight rule takes no part in routing order: a Move below it still decides.
+            ChatRoute route = Route(line, "Combat", 6, out _,
+                ColourRule("Critical", ChatColorMode.Highlight, HlA), Rule("Olthoi", ChatRuleAction.Move, tab: "Crits"));
+            Check(route.HighlightArgb == HlA && route.Tabs is ["Crits"] && !route.InHome, "a Move below a Highlight still moves it");
+        }
+        finally { ResetPresets(); }
+    }
+
+    private static void HighlightBand()
+    {
+        Case("highlight: the band is the swatch colour at 40%");
+        Check(ChatColorModes.BandAlpha == 0x66, "40% (0x66) for an opaque colour");
+        Check(ChatColorModes.BandArgb(0xFF3366FF) == 0x663366FF, "an opaque swatch: same RGB, alpha 0x66");
+        Check(ChatColorModes.BandArgb(0xFFFFFFFF) == 0x66FFFFFF, "white: alpha 0x66");
+        Check(ChatColorModes.BandArgb(0x80112233) == 0x33112233, "an imported translucent colour: fainter still (0x80 -> 0x33)");
+        Check(ChatColorModes.BandArgb(0x01112233) >> 24 == 0, "a nearly clear colour: nearly no band");
+        Check((ChatColorModes.BandArgb(ChatFilterRule.DefaultColor) & 0xFFFFFF) == (ChatFilterRule.DefaultColor & 0xFFFFFF), "the default amber keeps its RGB");
+    }
+
+    private static void HighlightJson()
+    {
+        Case("highlight: colorMode \"highlight\" in the settings file and Export / Import");
+        Check((int)ChatColorMode.None == 0 && (int)ChatColorMode.Line == 1 && (int)ChatColorMode.Match == 2 && (int)ChatColorMode.Highlight == 3,
+            "the old values keep their numbers (the dropdown is indexed by them)");
+        foreach (ChatColorMode m in Enum.GetValues<ChatColorMode>())
+            Check(ChatColorModes.Parse(ChatColorModes.ToJson(m)) == m, $"{m} round-trips");
+        Check(ChatColorModes.ToJson(ChatColorMode.None) == null, "None writes no colorMode (as before)");
+        Check(ChatColorModes.ToJson(ChatColorMode.Line) == "line" && ChatColorModes.ToJson(ChatColorMode.Match) == "match", "line / match written as before");
+        Check(ChatColorModes.ToJson(ChatColorMode.Highlight) == "highlight", "Highlight writes \"highlight\"");
+        Check(ChatColorModes.Parse("HIGHLIGHT") == ChatColorMode.Highlight && ChatColorModes.Parse(" highlight ") == ChatColorMode.Highlight, "any case, spaces");
+        Check(ChatColorModes.Parse("text") == ChatColorMode.Match, "\"text\" still reads as match");
+        Check(ChatColorModes.Parse(null) == ChatColorMode.None && ChatColorModes.Parse("") == ChatColorMode.None
+            && ChatColorModes.Parse("sparkle") == ChatColorMode.None, "absent / unknown: None");
+
+        var opts = RynthChatJsonContext.Default.RynthChatSettingsDto;
+        RynthChatSettingsDto old = JsonSerializer.Deserialize(OldFile, opts)!;
+        foreach (RynthChatFilterDto f in old.Filters!)
+            Check(ChatColorModes.ToJson(ChatColorModes.Parse(f.ColorMode)) == f.ColorMode, $"an old rule's colorMode ({f.ColorMode ?? "none"}) is written back unchanged");
+
+        old.Filters[2].ColorMode = ChatColorModes.ToJson(ChatColorMode.Highlight);
+        old.Filters[2].Color = ChatLineColors.FormatColor(HlA);
+        string saved = JsonSerializer.Serialize(old, opts);
+        Check(saved.Contains("\"colorMode\":\"highlight\"", StringComparison.Ordinal), "saved as colorMode:highlight");
+        RynthChatSettingsDto back = JsonSerializer.Deserialize(saved, opts)!;
+        Check(ChatColorModes.Parse(back.Filters![2].ColorMode) == ChatColorMode.Highlight, "loads back as Highlight");
+        Check(ChatLineColors.ParseColor(back.Filters[2].Color) == HlA, "...with its colour");
+        Check(JsonSerializer.Serialize(back, opts) == saved, "load + save is stable");
+
+        var set = new RynthChatRuleSetDto { Format = RynthChatRuleSetDto.FormatName, Rules = back.Filters, Tabs = back.CustomTabs };
+        string exported = JsonSerializer.Serialize(set, RynthChatJsonContext.Default.RynthChatRuleSetDto);
+        RynthChatRuleSetDto imported = JsonSerializer.Deserialize(exported, RynthChatJsonContext.Default.RynthChatRuleSetDto)!;
+        Check(ChatColorModes.Parse(imported.Rules![2].ColorMode) == ChatColorMode.Highlight
+            && ChatLineColors.ParseColor(imported.Rules[2].Color) == HlA, "Export / Import keeps the highlight and its colour");
+        RynthChatFilterDto[]? bare = JsonSerializer.Deserialize("[{\"pattern\":\"x\",\"colorMode\":\"highlight\",\"color\":\"#3366FF\"}]",
+            RynthChatJsonContext.Default.RynthChatFilterDtoArray);
+        Check(bare != null && ChatColorModes.Parse(bare[0].ColorMode) == ChatColorMode.Highlight, "a bare rule array imports the highlight");
+    }
+
+    /// <summary>
+    /// The colorMode reading of RynthCore release/2026.10.31.4 (ChatModel.FromDto), copied as it was:
+    /// what an older client does with a file that has "highlight" in it.
+    /// </summary>
+    private static ChatColorMode OldReader(string? colorMode) => (colorMode ?? "").ToLowerInvariant() switch
+    {
+        "line" => ChatColorMode.Line,
+        "match" or "text" => ChatColorMode.Match,
+        _ => ChatColorMode.None,
+    };
+
+    /// <summary>The colorMode writing of release/2026.10.31.4 (ChatModel.ToDto), copied as it was.</summary>
+    private static string? OldWriter(ChatColorMode m) => m switch { ChatColorMode.Line => "line", ChatColorMode.Match => "match", _ => null };
+
+    private static void HighlightOldReader()
+    {
+        Case("highlight: an older RynthCore reads a file with \"highlight\" without breaking");
+        const string newFile = """
+            {"version":2,"customTabs":["Junk"],
+             "filters":[{"pattern":"tells you","tab":"","enabled":true,"action":"color","colorMode":"highlight","color":"#3366FF"},
+                        {"pattern":"In portal Space","tab":"Junk","enabled":true,"action":"move","colorMode":"highlight","color":"#FF6633"},
+                        {"pattern":"fizzled","tab":"","enabled":true,"action":"color","colorMode":"match","color":"#FFD27A"}]}
+            """;
+        RynthChatSettingsDto? dto = null;
+        try { dto = JsonSerializer.Deserialize(newFile, RynthChatJsonContext.Default.RynthChatSettingsDto); }
+        catch (JsonException) { }
+        Check(dto?.Filters is { Length: 3 }, "the file reads (colorMode is a string: no JSON error)");
+        if (dto?.Filters is not { Length: 3 } f) return;
+        Check(OldReader(f[0].ColorMode) == ChatColorMode.None, "an old reader takes \"highlight\" as no colour");
+        Check(ChatLineColors.ParseColor(f[0].Color) == HlA, "...the rule's colour is still read");
+        Check(f[1].Action == "move" && f[1].Tab == "Junk" && OldReader(f[1].ColorMode) == ChatColorMode.None, "...a highlighting Move rule still moves");
+        Check(OldReader(f[2].ColorMode) == ChatColorMode.Match, "...the other rules are unaffected");
+        // An old client that saves again: the mode is dropped, the colour kept (ToDto writes a
+        // non-default colour even with no colour mode), so turning it back on finds the colour.
+        Check(OldWriter(OldReader(f[0].ColorMode)) == null, "an old client's save drops the highlight (no colorMode)");
+        Check(ChatColorModes.Parse(OldWriter(OldReader(f[2].ColorMode))) == ChatColorMode.Match, "...and keeps the other modes");
+        // And the new reader reads what an old client writes exactly as the old reader did.
+        foreach (string? s in new[] { null, "", "line", "match", "text", "LINE", "bogus" })
+            Check(ChatColorModes.Parse(s) == OldReader(s), $"the new reader agrees with the old on '{s ?? "null"}'");
     }
 
     private static void WhenParsing()

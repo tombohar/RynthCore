@@ -155,7 +155,13 @@ internal static class HeartbeatLogger
                     try
                     {
                         if (Plugins.EngineSettings.EnableImGuiBackend)
-                            uiField = $" ui={ImGuiBackend.UiFrameStats.P95Ms:0.0}/{ImGuiBackend.UiFrameStats.MaxMs:0.0}ms";
+                        {
+                            float uiP95 = ImGuiBackend.UiFrameStats.P95Ms;
+                            uiField = $" ui={uiP95:0.0}/{ImGuiBackend.UiFrameStats.MaxMs:0.0}ms";
+                            // uitop=part:avg/max,... = the UI frame's top 3 parts over the last seconds
+                            // (ImGui/UiCost), only while the p95 is over the slow-frame threshold.
+                            uiField += ImGuiBackend.UiCost.HeartbeatField(uiP95);
+                        }
                     }
                     catch { }
                     // vafree = free address space (MB): reloads leak engine/plugin copies,

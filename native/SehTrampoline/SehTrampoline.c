@@ -27,7 +27,9 @@
 #include <windows.h>
 
 /* File version of this native module (bump with every behavioural change). */
-#define RC_SEH_TRAMPOLINE_VERSION 8   /* v8: noise repeats only at powers of two, capped relogs per address,
+#define RC_SEH_TRAMPOLINE_VERSION 9   /* v9: RC_DumpProcess, the hang dump written from rundll32 (out of
+                                         the client's process);
+                                         v8: noise repeats only at powers of two, capped relogs per address,
                                          a total byte budget for native-crash.log (CrashLogFilter.h);
                                          v7: stack sweeps bounded by this thread's stack (TEB), never
                                          reading at or past StackBase;
@@ -1008,3 +1010,47 @@ SEH_GameTickThiscall(void* fn, void* this_ptr, int* out_result,
     RC_SEH_LEAVE();
     return 1;
 }
+
+/* ── Out-of-process minidump (rundll32 entry) ─────────────────────────────
+ * The engine's hang watchdog runs
+ *     %windir%\SysWOW64\rundll32.exe "<this dll>",RC_DumpProcess <pid> <dump path>
+ * so the dump of a hung client is written from another process: MiniDumpWriteDump on the
+ * client itself suspends every other thread and then needs the process heap, which a
+ * suspended thread may hold (2026-10-31: a client deadlocked for good that way). dbghelp comes
+ * from the system folder, not AC's own 2003 copy. The process exit code says how it went:
+ * 0 written, 1 bad arguments, 2 OpenProcess, 3 CreateFile, 4 dbghelp, 5 MiniDumpWriteDump
+ * (the file is deleted). Nothing runs in the client's process. */
+#include "DumpArgs.h"
+
+typedef BOOL (WINAPI *Fn_MiniDumpWriteDump)(HANDLE, DWORD, HANDLE, DWORD, void*, void*, void*);
+
+static UINT DumpProcessCore(const wchar_t* cmd)
+{
+    unsigned long pid = 0;
+    wchar_t path[MAX_PATH];
+    if (!ParseDumpArgs(cmd, &pid, path, MAX_PATH)) return 1;
+
+    HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE, FALSE, pid);
+    if (!proc) return 2;
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) { CloseHandle(proc); return 3; }
+    HMODULE dbghelp = LoadLibraryExW(L"dbghelp.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    Fn_MiniDumpWriteDump write = dbghelp ? (Fn_MiniDumpWriteDump)GetProcAddress(dbghelp, "MiniDumpWriteDump") : NULL;
+    UINT rc = 4;
+    if (write) {
+        /* MiniDumpNormal (every thread's stack) | WithHandleData | WithUnloadedModules | WithThreadInfo */
+        rc = write(proc, pid, file, 0x00000000 | 0x00000004 | 0x00000020 | 0x00001000, NULL, NULL, NULL) ? 0 : 5;
+    }
+    CloseHandle(file);
+    CloseHandle(proc);
+    if (rc != 0) DeleteFileW(path);
+    return rc;
+}
+
+__declspec(dllexport) void CALLBACK RC_DumpProcessW(HWND hwnd, HINSTANCE inst, LPWSTR cmdLine, int show)
+{
+    (void)hwnd; (void)inst; (void)show;
+    ExitProcess(DumpProcessCore(cmdLine));
+}
+/* rundll32 looks the entry up by its plain name (it tries RC_DumpProcessW first). */
+#pragma comment(linker, "/EXPORT:RC_DumpProcessW=_RC_DumpProcessW@16")

@@ -61,6 +61,7 @@ namespace EngineSettingsTests
                 Run(nameof(HoldReloadInWorldOptInAndSaved), HoldReloadInWorldOptInAndSaved);
                 Run(nameof(IltServerNamesEdit), IltServerNamesEdit);
                 Run(nameof(DisplaySettingsDefaultsAndSaved), DisplaySettingsDefaultsAndSaved);
+                Run(nameof(PanelLayoutPerCharacterDefaultOnAndSaved), PanelLayoutPerCharacterDefaultOnAndSaved);
                 Run(nameof(BorderlessDecisions), BorderlessDecisions);
                 Run(nameof(PlacementDecisions), PlacementDecisions);
                 Run(nameof(PlacementFilesArePerClient), PlacementFilesArePerClient);
@@ -121,11 +122,16 @@ namespace EngineSettingsTests
                     case "borderless-off": EngineSettings.BorderlessWindowed = false; break;
                     case "layout-on": EngineSettings.RememberWindowLayout = true; break;
                     case "layout-off": EngineSettings.RememberWindowLayout = false; break;
+                    case "charlayout-on": EngineSettings.PanelLayoutPerCharacter = true; break;
+                    case "charlayout-off": EngineSettings.PanelLayoutPerCharacter = false; break;
                     case "acpos-on": EngineSettings.RememberAcWindowPosition = true; break;
                     case "acpos-off": EngineSettings.RememberAcWindowPosition = false; break;
                     case "hold-on": EngineSettings.HoldReloadInWorld = true; break;
                     case "hold-off": EngineSettings.HoldReloadInWorld = false; break;
                     case "hold-minutes": EngineSettings.HoldReloadInWorldMaxMinutes = int.Parse(args[1]); break;
+                    case "uicost-on": EngineSettings.UiCostLog = true; break;
+                    case "uicost-off": EngineSettings.UiCostLog = false; break;
+                    case "uicost-ms": EngineSettings.UiCostThresholdMs = int.Parse(args[1]); break;
                     case "autoid":
                         if (!RynthCore.Engine.Compatibility.AutoIdPolicy.TryParseMode(args[1], out var aim)) throw new ArgumentException(args[1]);
                         EngineSettings.AutoIdMode = aim;
@@ -144,6 +150,7 @@ namespace EngineSettingsTests
                         Console.WriteLine("TransitionGate=" + EngineSettings.TransitionGate);
                         Console.WriteLine("BorderlessWindowed=" + EngineSettings.BorderlessWindowed);
                         Console.WriteLine("RememberWindowLayout=" + EngineSettings.RememberWindowLayout);
+                        Console.WriteLine("PanelLayoutPerCharacter=" + EngineSettings.PanelLayoutPerCharacter);
                         Console.WriteLine("RememberAcWindowPosition=" + EngineSettings.RememberAcWindowPosition);
                         Console.WriteLine("HoldReloadInWorld=" + EngineSettings.HoldReloadInWorld);
                         Console.WriteLine("HoldReloadInWorldMaxMinutes=" + EngineSettings.HoldReloadInWorldMaxMinutes);
@@ -399,9 +406,12 @@ namespace EngineSettingsTests
                 (new[] { "insertrel-on" },               "InsertReleasesUi",            "true"),
                 (new[] { "borderless-on" },              "BorderlessWindowed",          "true"),
                 (new[] { "layout-off" },                 "RememberWindowLayout",        "false"),
+                (new[] { "charlayout-off" },             "PanelLayoutPerCharacter",     "false"),
                 (new[] { "acpos-on" },                   "RememberAcWindowPosition",    "true"),
                 (new[] { "hold-on" },                    "HoldReloadInWorld",           "true"),
                 (new[] { "hold-minutes", "90" },         "HoldReloadInWorldMaxMinutes", "90"),
+                (new[] { "uicost-off" },                 "UiCostLog",                   "false"),
+                (new[] { "uicost-ms", "120" },           "UiCostThresholdMs",           "120"),
                 (new[] { "ilt-add", "Frosthaven" },      "IltServerNames",              null),
                 (new[] { "autoid", "all" },              "AutoIdMode",                  "\"All\""),
                 (new[] { "tgate-off" },                  "TransitionGate",              "false"),
@@ -663,6 +673,34 @@ namespace EngineSettingsTests
                     Eq(DumpValue(d, "RememberWindowLayout"), "True", $"{key}={bad}: layout stays on");
                     Eq(DumpValue(d, "RememberAcWindowPosition"), "False", $"{key}={bad}: position stays off");
                 }
+        }
+
+        // Settings > Display "Panel Layout Per Character" (UI/PanelLayout, 2026-10-30): on by default and
+        // not written while on; off is saved and read back (every client then shares the default layout,
+        // as before); a value that is not a boolean reads as on.
+        private static void PanelLayoutPerCharacterDefaultOnAndSaved()
+        {
+            string dir = NewDir("charlayout");
+            string path = Path.Combine(dir, "engine.json");
+            File.WriteAllText(path, LauncherFile);
+            Eq(DumpValue(RunChild(path, "dump").Out, "PanelLayoutPerCharacter"), "True", "on by default");
+            Eq(RunChild(path, "hook-off", "StartTooltip").Exit, 0, "a save with the default");
+            Check(!ReadJson(path).TryGetProperty("PanelLayoutPerCharacter", out _), "the default isn't written to the file");
+
+            Eq(RunChild(path, "charlayout-off").Exit, 0, "switched off");
+            Eq(ReadJson(path).GetProperty("PanelLayoutPerCharacter").GetRawText(), "false", "off is saved");
+            Check(ReadJson(path).TryGetProperty("LauncherWindow", out _), "launcher keys kept");
+            Eq(DumpValue(RunChild(path, "dump").Out, "PanelLayoutPerCharacter"), "False", "off read back at the next start");
+            Eq(RunChild(path, "hook-off", "CheckTooltip").Exit, 0, "another save");
+            Eq(ReadJson(path).GetProperty("PanelLayoutPerCharacter").GetRawText(), "false", "off survives other saves");
+            Eq(RunChild(path, "charlayout-on").Exit, 0, "back on");
+            Check(!ReadJson(path).TryGetProperty("PanelLayoutPerCharacter", out _), "back at the default: dropped from the file");
+
+            foreach (string bad in new[] { "\"no\"", "0", "null" })
+            {
+                File.WriteAllText(path, LauncherFile.Replace("\"LoggingLevel\"", $"\"PanelLayoutPerCharacter\": {bad}, \"LoggingLevel\""));
+                Eq(DumpValue(RunChild(path, "dump").Out, "PanelLayoutPerCharacter"), "True", $"PanelLayoutPerCharacter={bad}: stays on");
+            }
         }
 
         // ── AcWindowChromePolicy: borderless windowed ───────────────────────

@@ -691,6 +691,20 @@ internal sealed partial class MetaFace
     {
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
         bool canRevert = _editOriginal != null && !MetaRuleEdit.SameContent(_editRule, _editOriginal);
+        string problem = SaveProblem();
+        float problemX = p.X;
+        if (canRevert) problemX += BtnW(PhosphorIcons.ArrowCounterClockwise + " Revert", 60) + 6;
+        if (problem.Length > 0 && !_editConfirmDelete)
+        {
+            // The editor's status line: why the last change isn't saved (the full text on hover).
+            string del = PhosphorIcons.Trash + (_editIndex < 0 ? " Discard" : " Delete rule");
+            float room = p.X + w - BtnW(del, 70) - 6 - problemX;
+            ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Ui9));
+            dl.AddText(new Vector2(problemX, p.Y + (h - ImGuiNET.ImGui.GetFontSize()) * 0.5f), Red, Fit(problem, Math.Max(20, room)));
+            ImGuiNET.ImGui.PopFont();
+            if (ImGuiNET.ImGui.IsWindowHovered() && ImGuiNET.ImGui.IsMouseHoveringRect(new Vector2(problemX, p.Y), new Vector2(problemX + Math.Max(20, room), p.Y + h)))
+                ImGuiNET.ImGui.SetTooltip(problem);
+        }
         if (canRevert)
         {
             string label = PhosphorIcons.ArrowCounterClockwise + " Revert";
@@ -702,7 +716,7 @@ internal sealed partial class MetaFace
             }
             ImGuiNET.ImGui.SetItemTooltip("Undo every change since you opened this rule (and save that)");
         }
-        else
+        else if (problem.Length == 0)
         {
             ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Ui9));
             dl.AddText(new Vector2(p.X, p.Y + (h - ImGuiNET.ImGui.GetFontSize()) * 0.5f), Faded(Mute),

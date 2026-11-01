@@ -562,6 +562,15 @@ internal sealed class RynthNavFace : IImGuiPanel
                 SectionLabel("WHERE YOUR RECALLS LAND");
                 foreach (string line in st.MineLines) Wrapped(line, Text, iw);
             }
+            // Lifestone Recall's landing, learned from the lifestone selected or stood at (/rnav tie lifestone).
+            {
+                Vector2 p = ImGuiNET.ImGui.GetCursorScreenPos();
+                const string LsLabel = PhosphorIcons.MapPin + " My lifestone is the one selected";
+                if (Button("##rc_tiels", LsLabel, p, new Vector2(Math.Min(iw, ButtonWidth(LsLabel) + 8), 22), Text, BtnFill))
+                    RynthNavCommands.Command("tie lifestone");
+                ImGuiNET.ImGui.SetItemTooltip("Select the lifestone you are tied to (or stand at it), then click: routes can use\nLifestone Recall from then on, without casting it once first. Also: /rnav tie lifestone");
+                NextLine(p, 26);
+            }
         }
         else Wrapped("Update RynthNav (0.6.1) to see your portal ties here and answer \"which tie was it?\" with a button.", Mute, iw);
 
@@ -858,6 +867,19 @@ internal sealed class RynthNavFace : IImGuiPanel
         ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Ui9));
         Label(view.Summary.Length > 0 ? view.Summary : RynthNavAtlas.Status.Length > 0 ? RynthNavAtlas.Status : "Loading…", Mute);
         ImGuiNET.ImGui.PopFont();
+        // Recent: forget them (/rnav recent clear).
+        if (_mode == AtlasMode.Recent && view.Rows.Length > 0)
+        {
+            Vector2 cp = ImGuiNET.ImGui.GetCursorScreenPos();
+            const string ClearLabel = PhosphorIcons.Eraser + " Forget recent places";
+            if (Button("##atl_recent_clear", ClearLabel, cp, new Vector2(ButtonWidth(ClearLabel) + 8, 22), Text, BtnFill))
+            {
+                RynthNavCommands.Command("recent clear");
+                PushQuery();
+            }
+            ImGuiNET.ImGui.SetItemTooltip("Empty the Recent list (favorites stay). Also: /rnav recent clear");
+            NextLine(cp, 26);
+        }
 
         // List
         float listH = Math.Max(60, origin.Y + size.Y - 6 - ImGuiNET.ImGui.GetCursorScreenPos().Y - DetailH - 4);

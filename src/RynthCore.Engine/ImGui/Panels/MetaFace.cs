@@ -102,8 +102,7 @@ internal sealed partial class MetaFace : IImGuiPanel
     // ── Saving ───────────────────────────────────────────────────────────
     private readonly MetaAutosave _autosave = new();
     private readonly MetaBackupPlan _backup = new();
-    private long _saveSentAt = -1;        // ms (TickCount64) of the last rule command, for "Saving..."
-    private long _saveSentVersion;        // the snapshot version then
+    private readonly MetaSaveWatch _saveWatch = new();   // waits for RynthAi's answer to each change
     private static long NowMs => Environment.TickCount64;
 
     // ── Rule editor ──────────────────────────────────────────────────────
@@ -145,6 +144,7 @@ internal sealed partial class MetaFace : IImGuiPanel
         UiSources.Meta.RequestRefresh();
         CodeEditor.SetMetaVocabulary(MetaVocabulary.StructKeywords, MetaVocabulary.ConditionKeywords, MetaVocabulary.ActionKeywords);
         _backup.NewSession();   // a new editing session: the first save backs the file up again
+        _saveWatch.Reset();
     }
 
     public void OnHidden()
@@ -271,8 +271,7 @@ internal sealed partial class MetaFace : IImGuiPanel
                     // Saving over another meta keeps that one's old copy as <file>.bak.
                     MetaCommands.Backup(target, MetaBackupPlan.BackupOf(target));
                     MetaCommands.Simple("save_file", path: target);
-                    _saveSentAt = NowMs;
-                    _saveSentVersion = _seenVersion;
+                    _saveWatch.Sent(NowMs, SeenSaveSeq, MetaCommands.Undelivered);
                 }
                 _saveAs = false;
             }
@@ -324,6 +323,7 @@ internal sealed partial class MetaFace : IImGuiPanel
     {
         float m = Math.Max(ImGuiNET.ImGui.CalcTextSize(SavedText).X, ImGuiNET.ImGui.CalcTextSize(SavingText).X);
         m = Math.Max(m, Math.Max(ImGuiNET.ImGui.CalcTextSize(EditingText).X, ImGuiNET.ImGui.CalcTextSize(NoFileText).X));
+        m = Math.Max(m, ImGuiNET.ImGui.CalcTextSize(UnconfirmedText).X);
         if (editor) m = Math.Max(m, ImGuiNET.ImGui.CalcTextSize(DraftText).X);
         return m + 6;
     }
@@ -339,10 +339,37 @@ internal sealed partial class MetaFace : IImGuiPanel
             return _editTyping
                 ? (EditingText, Amber, "Saves when you leave the box (Enter, Tab or click elsewhere).")
                 : (SavingText, Amber, "Saving in a moment...");
-        if (_saveSentAt >= 0 && _seenVersion == _saveSentVersion && NowMs - _saveSentAt < 2500)
-            return (SavingText, Amber, "Saving " + file + "...");
+        switch (_saveWatch.State(NowMs, _data.SaveResult, MetaCommands.Undelivered))
+        {
+            case MetaSaveState.Saving:
+                return (SavingText, Amber, "Saving " + file + "...");
+            case MetaSaveState.Failed:
+            case MetaSaveState.NotSent:
+                return (NoFileText, Red, SaveProblem());
+            case MetaSaveState.Unconfirmed:
+                return (UnconfirmedText, Amber, SaveProblem());
+        }
         string bak = System.IO.Path.GetFileName(MetaBackupPlan.BackupOf(MetaBackupPlan.WrittenFile(_data.CurrentMetaPath!)));
-        return (SavedText, Green, $"Every change saves to {file} on its own. The first change after opening this panel keeps the file as it was in {bak}.");
+        string last = _data.SaveResult is { Seq: > 0, Text.Length: > 0 } r ? $"\nLast: {r.Text}" : "";
+        return (SavedText, Green, $"Every change saves to {file} on its own. The first change after opening this panel keeps the file as it was in {bak}.{last}");
+    }
+
+    private const string UnconfirmedText = PhosphorIcons.Warning + " Not confirmed";
+
+    /// <summary>The result seq the panel has seen (0: none, or a RynthAi without results).</summary>
+    private long SeenSaveSeq => _data.SaveResult?.Seq ?? 0;
+
+    /// <summary>Why the last change isn't saved, for the status line and the indicator's tooltip; empty when it is.</summary>
+    private string SaveProblem()
+    {
+        if (string.IsNullOrEmpty(_data.CurrentMetaPath)) return string.Empty;   // "Not saved" + its own hint
+        return _saveWatch.State(NowMs, _data.SaveResult, MetaCommands.Undelivered) switch
+        {
+            MetaSaveState.Failed => _data.SaveResult!.Text,
+            MetaSaveState.NotSent => "Not saved: the change never reached RynthAi (it isn't loaded, or is too old for this panel). Reload RynthAi and make the change again.",
+            MetaSaveState.Unconfirmed => "RynthAi hasn't confirmed the last change. If this stays, it may not have been saved: check the rule after reopening the meta.",
+            _ => string.Empty,
+        };
     }
 
     /// <summary>The save status, right-aligned in (pos, width); hover for details.</summary>
@@ -360,15 +387,14 @@ internal sealed partial class MetaFace : IImGuiPanel
 
     /// <summary>
     /// Every command that changes the meta's rules goes through here: before the first one of this
-    /// session the file is backed up, and the indicator shows "Saving..." until the next snapshot.
-    /// (RynthAi writes the file after each such command.)
+    /// session the file is backed up, and the indicator shows "Saving..." until RynthAi answers
+    /// (MetaSaveWatch; RynthAi writes the file after each such command and reports the result).
     /// </summary>
     private void SendEdit(MetaCmd cmd)
     {
         if (_backup.Before(_data.CurrentMetaPath) is { } b) MetaCommands.Backup(b.File, b.Backup);
         MetaCommands.Send(cmd);
-        _saveSentAt = NowMs;
-        _saveSentVersion = _seenVersion;
+        _saveWatch.Sent(NowMs, SeenSaveSeq, MetaCommands.Undelivered);
     }
 
     private void BeginSaveAs()

@@ -335,7 +335,7 @@ internal static class SmartBoxHooks
                         _hpReadLogCount++;
                         RynthLog.Compat($"Creature HP id=0x{targetId:X8}: sehRead={(gotReal ? realMax.ToString() : "none")} used={maxHealth} ratio={ratio:0.00}");
                     }
-                    PluginManager.QueueUpdateHealth(targetId, ratio, currentHealth, maxHealth);
+                    PluginManager.QueueUpdateHealth(targetId, ratio, currentHealth, maxHealth, healthReply: true);
                 }
                 break;
 
@@ -765,7 +765,7 @@ internal static class SmartBoxHooks
                 currentHealth = (uint)Math.Round(maxHealth * Math.Clamp(ratio, 0f, 1f));
             }
 
-            PluginManager.QueueUpdateHealth(targetId, ratio, currentHealth, maxHealth);
+            PluginManager.QueueUpdateHealth(targetId, ratio, currentHealth, maxHealth, healthReply: true);
         }
         catch
         {

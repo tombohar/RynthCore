@@ -26,6 +26,7 @@ internal static class Program
         ReplyTexts();
         SourceMatchesCatalog();
         ChatBurst();
+        ControlsRunTheirCommands();
 
         Console.WriteLine();
         Console.WriteLine($"{_checks - _failed}/{_checks} checks passed.");
@@ -98,12 +99,19 @@ internal static class Program
         ("inventory", "inv", "inv now"),
         ("inventory", "inventory", "inventory now"),
         ("sense", "sense", "sense now"),
+        ("sense", "sense compact on", "sense compact maybe"),
+        ("sense", "sense collapse off", "sense collapse on off"),
+        ("sense", "sense view collapsed", "sense view huge"),
+        ("sense", "sense compact", "sense frob on"),
         ("characters", "chars", "characters now"),
         ("itemcount", "itemhud", "itemcount now"),
         ("resetbar", "barreset", "resetbar now"),
         ("actionstate", "actions", "actionstate now"),
         ("unlockactions", "unlock", "unlockactions now"),
         ("vitals", "hud", "vitals now"),
+        ("layout", "layout", "layout frob"),
+        ("layout", "layout reset confirm", "layout reset now"),
+        ("layout", "layout default", "layout default now"),
     };
 
     private static void EveryVerbValidAndInvalid()
@@ -155,6 +163,7 @@ internal static class Program
         ("report", "report the map froze", "report", "ProblemReport (alone: opens the panel)"),
         ("flight", "flight mark here", "flight frob", "FlightRecorder.HandleCommand: its usage"),
         ("autoid", "autoid limited", "autoid frob", "AutoIdService.HandleCommand: its usage"),
+        ("uicost", "uicost 80", "uicost frob", "UiCost.HandleCommand: its usage"),
         ("netmsg", "netmsg log on", "netmsg frob", "ServerMessageStream.HandleCommand: its usage"),
         ("hotkeys", "hotkeys", "hotkeys frob", "HotkeyCommandParser: unknown verb + usage"),
         ("settings", "settings Hotkeys", "settings frob", "SettingsCommand: no tab called 'frob' (tabs: ...)"),
@@ -370,6 +379,32 @@ internal static class Program
         var loop = new ChatRateLimiter();
         for (long t = 0; t < 1000; t += 5) if (loop.TryTake(10_000 + t)) spam++;
         Check(spam <= 22, $"a retry loop sending every 5 ms for 1 s: at most 12 + 10 (got {spam})");
+    }
+
+    // ── controls that run a command (2026-10-31: buttons for what commands do) ──
+
+    private static void ControlsRunTheirCommands()
+    {
+        Case("the Sense panel's view switch: each button names a /rc sense command that runs");
+        foreach (RynthCore.Engine.UI.Data.SenseLayoutMode to in new[] { RynthCore.Engine.UI.Data.SenseLayoutMode.Full,
+                     RynthCore.Engine.UI.Data.SenseLayoutMode.Compact, RynthCore.Engine.UI.Data.SenseLayoutMode.Collapsed })
+        {
+            string tip = RynthCore.Engine.UI.Data.SenseLayout.SwitchTip(to);
+            Match m = Regex.Match(tip, @"/rc (sense [a-z ]+)\)");
+            Check(m.Success, $"the {to} button's tip names its command: {tip}");
+            if (!m.Success) continue;
+            ChatVerbCheck c = ChatCommandReplies.Check(m.Groups[1].Value);
+            Check(c.Problem == null && c.Verb?.Name == "sense", $"'/rc {m.Groups[1].Value}' runs");
+        }
+
+        Case("the Lua panel's live reload toggle");
+        Check(RynthCore.Engine.UI.Data.LuaLiveReload.Label(null) == null, "a RynthLua without live reload: no toggle");
+        Check(RynthCore.Engine.UI.Data.LuaLiveReload.Label(true) == "Live reload: on"
+              && RynthCore.Engine.UI.Data.LuaLiveReload.Label(false) == "Live reload: off", "it says the value now");
+        Check(RynthCore.Engine.UI.Data.LuaLiveReload.ClickArgs(true) == "livereload off"
+              && RynthCore.Engine.UI.Data.LuaLiveReload.ClickArgs(false) == "livereload on", "a click sends the other value (/lua livereload on|off)");
+        Check(RynthCore.Engine.UI.Data.LuaLiveReload.Tip(true).Contains("/lua livereload on|off", StringComparison.Ordinal)
+              && RynthCore.Engine.UI.Data.LuaLiveReload.Tip(false).Contains("/lua livereload on|off", StringComparison.Ordinal), "the tip names the command");
     }
 
     private static void Case(string name)

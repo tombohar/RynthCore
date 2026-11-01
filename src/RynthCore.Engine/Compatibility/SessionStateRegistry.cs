@@ -19,6 +19,10 @@ internal static class SessionStateRegistry
     internal static string LastCharacterName { get; private set; } = string.Empty;
     internal static string LastServerName { get; private set; } = string.Empty;
 
+    /// <summary>True once a login's identity is recorded (the names above are final for it; empty when
+    /// the launch context had none). UI/PanelLayout waits for it before it picks the character's layout.</summary>
+    internal static bool LoginRecorded => System.Threading.Volatile.Read(ref _loginRecorded);
+
     public static void Initialize()
     {
         if (_initialized)

@@ -61,6 +61,9 @@ internal sealed class DamageRow
     public List<DamageTierStat> Tiers = new();
     /// <summary>The synthetic top "Default" line (wcid 0).</summary>
     public bool IsDefault;
+    /// <summary>Evades, resists, attacks and spells both ways since login (the row's optional "mstats",
+    /// DamageRowStats.cs); null when the plugin sends none.</summary>
+    public DamageRowStats? Stats;
 }
 
 internal sealed class DamageTierStat
@@ -303,6 +306,7 @@ internal sealed unsafe class DamageSource : UiSource<DamageView>
                 if (e.TryGetProperty("hitRate", out var hr)) row.HitRate = hr.GetDouble();
                 if (e.TryGetProperty("targeted", out var tg)) row.Targeted = tg.GetBoolean();
                 if (e.TryGetProperty("nearby", out var nb)) row.Nearby = nb.GetBoolean();
+                row.Stats = DamageRowStats.Parse(e);
                 if (e.TryGetProperty("tiers", out var tarr) && tarr.ValueKind == JsonValueKind.Array)
                     foreach (JsonElement te in tarr.EnumerateArray())
                         row.Tiers.Add(new DamageTierStat

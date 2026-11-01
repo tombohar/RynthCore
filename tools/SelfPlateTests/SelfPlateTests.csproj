@@ -28,6 +28,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\MonsterHudSettings.cs" Link="Engine\MonsterHudSettings.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\HealthProbe.cs" Link="Engine\HealthProbe.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\DebuffIcon.cs" Link="Engine\DebuffIcon.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\SelfDebuffs.cs" Link="Engine\SelfDebuffs.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\PlateMetrics.cs" Link="Engine\PlateMetrics.cs" />

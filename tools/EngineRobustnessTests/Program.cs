@@ -51,6 +51,7 @@ internal static partial class Program
 
         RunPumpGuardTests();
         RunShutdownOrderTests();
+        RunReloadStallTests();
 
         Console.WriteLine($"{_checks} check(s), {_failed} failed.");
         return _failed == 0 ? 0 : 1;

@@ -52,6 +52,8 @@
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AutoIdPolicy.cs" Link="Engine\AutoIdPolicy.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AutoIdDrain.cs" Link="Engine\AutoIdDrain.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\DumpBudget.cs" Link="Engine\DumpBudget.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\HangDumpCommand.cs" Link="Engine\HangDumpCommand.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\FontPixels.cs" Link="Engine\FontPixels.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Net\IdRequester.cs" Link="Engine\IdRequester.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Plugins\PumpGuards.cs" Link="Engine\PumpGuards.cs" />
   </ItemGroup>

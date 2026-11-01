@@ -23,8 +23,10 @@ using System.Diagnostics;
 namespace RynthCore.Engine.ImGuiBackend.Hud;
 
 /// <summary>Last health observation for one object. <paramref name="Prev"/>: the ratio before it
-/// (-1 = first). <paramref name="Estimated"/>: worked out from a hit (CleaveHealth), not sent by the server.</summary>
-internal readonly record struct HealthObservation(float Ratio, uint Current, uint Max, long Ticks, float Prev = -1f, bool Estimated = false);
+/// (-1 = first). <paramref name="Estimated"/>: worked out from a hit (CleaveHealth), not sent by the server.
+/// <paramref name="ServerTicks"/>: when the server last sent this object's health (0 = never; estimates keep it).</summary>
+internal readonly record struct HealthObservation(float Ratio, uint Current, uint Max, long Ticks, float Prev = -1f, bool Estimated = false,
+    long ServerTicks = 0);
 
 internal static class MonsterHudData
 {
@@ -58,7 +60,8 @@ internal static class MonsterHudData
             }
             if (Health.Count >= MaxHealthEntries && !Health.ContainsKey(id))
                 Health.Clear();
-            Health[id] = new HealthObservation(ratio, current, max, now, before, estimated);
+            long serverTicks = estimated ? (had ? prev.ServerTicks : 0) : now;
+            Health[id] = new HealthObservation(ratio, current, max, now, before, estimated, serverTicks);
         }
         // An estimate never kills (CleaveHealth keeps it above 0) and the server correcting one
         // isn't a heal: the combat text sees an estimate's successor as a first observation.

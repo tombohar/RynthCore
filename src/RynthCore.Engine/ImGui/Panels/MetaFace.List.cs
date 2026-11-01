@@ -207,15 +207,18 @@ internal sealed partial class MetaFace
         FilterRow(w);
 
         // A note over the list: the editor closed under a meta switch, or the meta can't do anything.
-        string note = string.Empty;
-        if (_listNote.Length > 0 && NowMs - _listNoteAt < 8000) note = _listNote;
+        // A change that wasn't saved comes first, in red, and stays until the next result (2026-11-01).
+        string note = SaveProblem();
+        bool unsaved = note.Length > 0;
+        if (unsaved) { }
+        else if (_listNote.Length > 0 && NowMs - _listNoteAt < 8000) note = _listNote;
         else if (_data.Rules.Count > 0 && !HasRulesIn(_data.CurrentState))
             note = $"The current state, {_data.CurrentState}, has no rules: the meta does nothing until something changes the state.";
         if (note.Length > 0)
         {
             ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Ui9));
             ImGuiNET.ImGui.PushTextWrapPos(ImGuiNET.ImGui.GetCursorPosX() + w);
-            ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Amber);
+            ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, unsaved ? Red : Amber);
             ImGuiNET.ImGui.TextUnformatted(note);
             ImGuiNET.ImGui.PopStyleColor();
             ImGuiNET.ImGui.PopTextWrapPos();

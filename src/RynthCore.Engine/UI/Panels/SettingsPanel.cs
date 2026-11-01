@@ -334,6 +334,8 @@ internal static class SettingsPanel
             case SettingKind.Spacer:
                 return Spacer();
             case SettingKind.Button:
+                // A button that asks first is the ImGui panel's only (this panel is being retired).
+                if (row.Confirm != null) return null;
                 return ButtonRow(row.Label, row.ButtonText ?? row.Label, () =>
                 {
                     // A settings edit is pushed like a typed value; the tab is rebuilt so the

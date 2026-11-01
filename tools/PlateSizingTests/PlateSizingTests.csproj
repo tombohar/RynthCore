@@ -15,6 +15,8 @@
     monster plates' and your plate's "Debuff icon size" default 100 %, an older file loads 100 %, they clamp to
     50-200, round-trip on their own (apart from the text sizes), reset with the sizes, the chat form parses; the
     row's lengths at 100 % are the old expressions exactly at every scale, and its height and width grow with it.
+    Also "Refresh others' health" (2026-10-31; src\RynthCore.Engine\ImGui\MonsterHud\HealthProbe.cs compiled in for its
+    range): on at 1 s by default and from an older file, round-trips, the interval clamps, reset restores it.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->
   <PropertyGroup>
@@ -28,6 +30,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\MonsterHudSettings.cs" Link="Engine\MonsterHudSettings.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\HealthProbe.cs" Link="Engine\HealthProbe.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ArgbOpacity.cs" Link="Engine\ArgbOpacity.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\PlateClass.cs" Link="Engine\PlateClass.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\PlateMetrics.cs" Link="Engine\PlateMetrics.cs" />

@@ -43,6 +43,8 @@ internal sealed class LuaPayload
     public bool? RynthAi { get; set; }
     /// <summary>A character is logged in (per-character autostart needs one). Null from older plugins.</summary>
     public bool? LoggedIn { get; set; }
+    /// <summary>Live reload: a running script restarts when its file is saved (/lua livereload). Null from a RynthLua without it.</summary>
+    public bool? LiveReload { get; set; }
 }
 
 /// <summary>One script in the v2 list (RynthLua's LuaScriptInfo).</summary>
@@ -140,4 +142,14 @@ internal static unsafe class LuaCommands
             UiSources.Lua.RequestRefreshAfterPluginTick();
         });
     }
+
+    /// <summary>
+    /// /lua &lt;args&gt; as if typed (it answers in chat), through RynthLua's remote command ("lua", args),
+    /// for a setting the panel command doesn't carry (live reload). Pump thread, like Send.
+    /// </summary>
+    public static void Chat(string args) => UiDataHub.Post("Lua /lua " + args, () =>
+    {
+        if (PluginManager.SendPluginCommand("RynthLua", "lua", args))
+            UiSources.Lua.RequestRefreshAfterPluginTick();
+    });
 }

@@ -56,4 +56,10 @@ public enum RynthUiHookFlags : uint
     ItemDropped = 1u << 6,
     /// <summary>The client's cleanup has started: no more ticks or events.</summary>
     CleanupStarted = 1u << 7,
+    /// <summary>
+    /// Not a hook (2026-10-30): the engine's Damage panel draws the optional "mstats" of a
+    /// RynthPluginGetMonsterDamageJson row (evades and resists both ways) under that monster.
+    /// Engines without it ignore the field.
+    /// </summary>
+    DamageRowStats = 1u << 8,
 }

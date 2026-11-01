@@ -122,7 +122,7 @@ internal static class ChatCommandReplies
         "debuffs [on|off] | debuffs size <50-200%> | others [on|off] | numbers [dealt|taken|heals|kills] [on|off] | " +
         "gains [xp|lum|radiance] [on|off] | npcs [on|off] | npcs dist <yd>|max <n> | players [on|off] | portals [on|off] | portals dist <yd> | " +
         "all|engaged |dist <yd>|max <n>|scale <x>|opacity <x>|lift <m> | " +
-        "names|hp|level|weak|distance|fade|click [on|off] | reset | status | test";
+        "names|hp|level|weak|distance|fade|click [on|off] | refresh [on|off] | refresh <seconds> | reset | status | test";
 
     public const string ServerUsage =
         "Usage: /rc server [<server> auto|on|off] | pick <server>|auto | [aelrynth|other|auto] | names ilt [add|remove <pattern>]";
@@ -189,14 +189,25 @@ internal static class ChatCommandReplies
         V("hotkey", HotkeyUsage, null),
         V("rl", "Usage: /rc rl (reloads RynthCore, as the bar's RL button)", NoArgs, "reload"),
         V("inventory", "Usage: /rc inventory (opens or closes the Inventory panel)", NoArgs, "inv"),
-        V("sense", "Usage: /rc sense (opens or closes the Sense panel)", NoArgs),
+        V("sense", RynthCore.Engine.UI.Data.SenseLayout.Usage, RynthCore.Engine.UI.Data.SenseLayout.IsValidArgs),
         V("characters", "Usage: /rc characters (opens or closes RynthNet's Characters window)", NoArgs, "chars"),
         V("itemcount", "Usage: /rc itemcount (opens or closes the Item Count panel)", NoArgs, "itemhud"),
         V("resetbar", "Usage: /rc resetbar (moves the RynthCore bar back to the top-left corner)", NoArgs, "barreset"),
         V("actionstate", "Usage: /rc actionstate (the client's item-action gates)", NoArgs, "actions"),
         V("unlockactions", "Usage: /rc unlockactions (opens the client's item-action gates now)", NoArgs, "unlock"),
         V("vitals", "Usage: /rc vitals (the old vitals HUD is gone: /rv plates self)", NoArgs, "hud"),
+        V("layout", "Usage: /rc layout [status] | default | reset [confirm]", LayoutArgs),
+        V("uicost", UiCostUsage, null),
     };
+
+    /// <summary>/rc uicost: the UI frame cost breakdown (ImGui/UiCost.cs).</summary>
+    public const string UiCostUsage =
+        "Usage: /rc uicost [on|off|<ms>|now|status]  (alone: now; <ms> = the slow-frame threshold, 5-2000)";
+
+    /// <summary>"/rc layout": nothing or status, default, reset, reset confirm (any spacing).</summary>
+    private static bool LayoutArgs(string a) =>
+        string.Join(' ', a.Split(' ', StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant()
+            is "" or "status" or "default" or "reset" or "reset confirm";
 
     /// <summary>The verb <paramref name="word"/> names (its name or another spelling), or null.</summary>
     public static ChatVerb? Find(string word)

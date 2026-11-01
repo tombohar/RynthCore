@@ -277,6 +277,9 @@ internal static partial class PluginManager
         if (UiElementHooks.DragStartLive) flags |= 1u << 5;
         if (UiElementHooks.DropLive) flags |= 1u << 6;
         if (UiFlowHooks.ClientCleanupStarted) flags |= 1u << 7;
+        // Not a hook: the Damage panel draws a row's "mstats" (UI/Data/DamageRowStats.cs, 2026-10-30), so
+        // RynthAi shows its monster stats there instead of its own window. No API version change.
+        flags |= 1u << 8;
         return flags;
     }
 }

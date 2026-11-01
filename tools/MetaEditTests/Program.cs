@@ -30,10 +30,55 @@ internal static class Program
         RowTextLeaves();
         RowTextLists();
         RowTextActions();
+        SaveIndicator();
 
         Console.WriteLine();
         Console.WriteLine(_failed == 0 ? $"PASS ({_checks} checks)" : $"FAIL: {_failed} of {_checks} checks");
         return _failed == 0 ? 0 : 1;
+    }
+
+    // ── The "Saved" indicator waits for RynthAi's answer (2026-11-01) ───────
+
+    private static void SaveIndicator()
+    {
+        Case("save indicator follows RynthAi's result");
+        var w = new MetaSaveWatch();
+        var loaded = new MetaSaveResult { Seq = 1, Ok = true, Text = "Loaded farm.af" };
+        Eq(w.State(0, loaded, 0), MetaSaveState.Saved, "nothing sent: saved");
+
+        w.Sent(1000, loaded.Seq, 0);
+        Eq(w.State(1100, loaded, 0), MetaSaveState.Saving, "sent, no answer yet");
+        var saved = new MetaSaveResult { Seq = 2, Ok = true, Text = "Saved farm.af (3 rules)" };
+        Eq(w.State(1200, saved, 0), MetaSaveState.Saved, "answered: saved");
+        Eq(w.State(99999, saved, 0), MetaSaveState.Saved, "and stays saved");
+
+        w.Sent(2000, saved.Seq, 0);
+        var failed = new MetaSaveResult { Seq = 3, Ok = false, Text = "NOT saved to farm.af: the file is open in another program." };
+        Eq(w.State(2100, failed, 0), MetaSaveState.Failed, "answered: failed");
+        Eq(w.State(60000, failed, 0), MetaSaveState.Failed, "a failure stays up until the next result");
+        w.Sent(61000, failed.Seq, 0);
+        Eq(w.State(61100, failed, 0), MetaSaveState.Saving, "the next change waits again");
+        Eq(w.State(61200, new MetaSaveResult { Seq = 4, Ok = true }, 0), MetaSaveState.Saved, "and its save clears the failure");
+
+        w.Sent(70000, 4, 0);
+        Eq(w.State(70000 + MetaSaveWatch.ConfirmMs - 1, new MetaSaveResult { Seq = 4 }, 0), MetaSaveState.Saving, "still waiting just before the limit");
+        Eq(w.State(70000 + MetaSaveWatch.ConfirmMs, new MetaSaveResult { Seq = 4 }, 0), MetaSaveState.Unconfirmed, "no answer: not confirmed (it used to say Saved)");
+
+        var d = new MetaSaveWatch();
+        d.Sent(0, 4, 7);
+        Eq(d.State(10, new MetaSaveResult { Seq = 4 }, 8), MetaSaveState.NotSent, "the command never reached RynthAi");
+        d.Sent(20, 4, 8);   // a second change in the same burst
+        Eq(d.State(30, new MetaSaveResult { Seq = 4 }, 8), MetaSaveState.NotSent, "a dropped command earlier in the burst still shows");
+
+        var old = new MetaSaveWatch();
+        old.Sent(0, 0, 0);
+        Eq(old.State(100, null, 0), MetaSaveState.Saving, "a RynthAi without results: the old timer");
+        Eq(old.State(MetaSaveWatch.LegacySavingMs, null, 0), MetaSaveState.Saved, "then saved, as before");
+
+        var r = new MetaSaveWatch();
+        r.Sent(0, 1, 0);
+        r.Reset();
+        Eq(r.State(MetaSaveWatch.ConfirmMs * 2, new MetaSaveResult { Seq = 1 }, 0), MetaSaveState.Saved, "reopened panel: nothing pending");
     }
 
     // ── New state names ──────────────────────────────────────────────────

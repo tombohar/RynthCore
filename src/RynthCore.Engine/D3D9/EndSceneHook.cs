@@ -296,12 +296,21 @@ internal static class EndSceneHook
         }
     }
 
+    // AC's own EndScene (and whatever AC does until the next frame): the hang watchdog's
+    // step goes back to "outside the engine" first.
+    private static int CallOriginalEndScene(IntPtr pDevice)
+    {
+        MainThreadHangWatchdog.Step = null;
+        return _originalEndScene!(pDevice);
+    }
+
     private static int EndSceneDetour(IntPtr pDevice)
     {
         // Liveness beacon for MainThreadHangWatchdog — this detour runs on AC's
         // main/render thread every frame (even with the ImGui backend disabled),
         // so a stalled beat means the main thread is wedged. Must never throw.
         try { MainThreadHangWatchdog.MainThreadBeat(); } catch { }
+        MainThreadHangWatchdog.Step = "EndScene: engine frame";
         try
         {
             if (!_offscreenFilterDisabled && !DX9Backend.IsRenderingToBackBuffer(pDevice))
@@ -320,7 +329,7 @@ internal static class EndSceneHook
                 // fall back with Decal; without Decal nothing changes.
                 if (DecalD3D9.Enabled ||
                     (_skipCount < MaxOffscreenSkipsBeforeFallback && offscreenElapsedMs < OffscreenFallbackDelayMs))
-                    return _originalEndScene!(pDevice);
+                    return CallOriginalEndScene(pDevice);
 
                 _offscreenFilterDisabled = true;
                 RynthLog.D3D9($"EndSceneHook: Falling back to unfiltered EndScene after {_skipCount} skipped offscreen pass(es) over {offscreenElapsedMs}ms.");
@@ -398,7 +407,7 @@ internal static class EndSceneHook
                         // New hook confirmed live — safe to free the old
                         // trampoline now.
                         MinHook.MH_RemoveHook(oldAddr);
-                        return _originalEndScene!(pDevice);
+                        return CallOriginalEndScene(pDevice);
                     }
 
                     RynthLog.D3D9("EndSceneHook: Rehook failed — restoring original hook.");
@@ -421,7 +430,7 @@ internal static class EndSceneHook
                 }
 
                 if (_renderCount < WarmupFrames)
-                    return _originalEndScene!(pDevice);
+                    return CallOriginalEndScene(pDevice);
 
                 _uiActivated = true;
                 RynthLog.D3D9("EndSceneHook: Warmup complete - initializing ImGui.");
@@ -450,6 +459,7 @@ internal static class EndSceneHook
             // The UI hides between characters: nothing is drawn at character select or
             // on the way out, and it's back the moment login completes (an engine
             // reload synthesises login for a player already in the world).
+            MainThreadHangWatchdog.Step = "EndScene: overlay blit and ImGui submit";
             try
             {
                 if (Compatibility.LoginLifecycleHooks.HasObservedLoginComplete)
@@ -542,6 +552,6 @@ internal static class EndSceneHook
         catch { /* never let the cap take EndScene down */ }
         _videoPatchTimer.Restart();
 
-        return _originalEndScene!(pDevice);
+        return CallOriginalEndScene(pDevice);
     }
 }

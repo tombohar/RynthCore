@@ -288,6 +288,7 @@ internal static class MonsterHud
                 if (track) Snapshot(now, trackMonsters);
             }
             if (monsters) ApplyDealtHits(now);
+            if (monsters && MonsterHudSettings.RefreshOthersHealth) ProbeHealth(now);
 
             _hasContent = Plates.Count > 0 || MonsterHudSettings.SelfPlate || CombatText.HasContent;
         }
@@ -316,6 +317,8 @@ internal static class MonsterHud
     {
         ClearPlates();
         MonsterHudData.Clear();
+        HealthProbe.Reset();
+        _nextProbeTicks = 0;
         PlateDebuffs.Clear();
         CombatText.Clear();
         PlayerPlate.Reset();
@@ -1590,6 +1593,45 @@ internal static class MonsterHud
         }
     }
 
+    // ── Health for the plates the server isn't streaming (HealthProbe) ──
+    private static readonly List<HealthProbe.Candidate> ProbeCandidates = new();
+    private static long _nextProbeTicks;
+    /// <summary>"Hit by you" keeps a plate in the fight this long (s) for the probe's refresh.</summary>
+    private const double ProbeHitMemorySec = 30;
+
+    /// <summary>
+    /// At most one health query per "Refresh others' health" interval for an on-screen plate the server
+    /// isn't streaming, then one for the stream's owner so the selected / fight target keeps its feed.
+    /// AC's main thread only (both sends go out back to back, in order); skipped otherwise and in a
+    /// death / portal / login window.
+    /// </summary>
+    private static void ProbeHealth(long now)
+    {
+        if (now < _nextProbeTicks || Plates.Count == 0) return;
+        float interval = Math.Clamp(MonsterHudSettings.HealthRefreshSec, HealthProbe.MinIntervalSec, HealthProbe.MaxIntervalSec);
+        _nextProbeTicks = now + (long)(interval * Stopwatch.Frequency);
+        if (!CombatActionHooks.HasQueryHealth || AcMainThreadQueue.MustQueue(teardown: false)) return;
+
+        if (!HealthProbe.TryGetOwner(out uint owner)) owner = ClientHelperHooks.GetSelectedItemId();
+        double freq = Stopwatch.Frequency;
+        long hitWindow = (long)(ProbeHitMemorySec * freq);
+        ProbeCandidates.Clear();
+        foreach (Plate p in Plates.Values)
+        {
+            if (p.IsLabel || p.Gone || !p.OnScreen || p.Alpha < 0.01f || p.Id == _playerId) continue;
+            bool has = MonsterHudData.TryGetHealth(p.Id, out HealthObservation h);
+            bool seen = has && h.ServerTicks != 0;
+            long lastHit = CombatText.LastHitTicks(p.Id);
+            bool active = p.IsAttacker || (has && (h.Ratio < 0.999f || h.Estimated)) ||
+                          (lastHit != long.MinValue && now - lastHit < hitWindow);
+            ProbeCandidates.Add(new HealthProbe.Candidate(p.Id, p.Distance, seen, seen ? (now - h.ServerTicks) / freq : 0,
+                active, Dead: seen && h.Ratio <= 0.001f));
+        }
+        uint id = HealthProbe.Pick(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(ProbeCandidates), owner);
+        if (id == 0) return;
+        CombatActionHooks.SendHudHealthProbe(id, owner, Environment.TickCount64);
+    }
+
     internal static uint FindPlateByName(string name)
     {
         uint target = ClientHelperHooks.GetSelectedItemId();
@@ -1696,7 +1738,9 @@ internal static class MonsterHud
             $"name labels {labels} ({labelsOnScreen} on screen, {portals} portals), {Classes.Count} objects classified; " +
             $"camera {(GameMatrixCapture.HasCapturedFrame ? "captured" : "not captured")} " +
             $"(frame lb 0x{GameMatrixCapture.FrameLandblock:X4}, viewport {GameMatrixCapture.ViewportWidth}x{GameMatrixCapture.ViewportHeight}); " +
-            $"weakness data {(_weakByWcid.Count + _weakByName.Count > 0 ? "loaded" : "none")}.",
+            $"weakness data {(_weakByWcid.Count + _weakByName.Count > 0 ? "loaded" : "none")}; " +
+            $"others' health refresh {(MonsterHudSettings.RefreshOthersHealth ? $"on, every {MonsterHudSettings.HealthRefreshSec:0.0#} s" : "off")} " +
+            $"({HealthProbe.ProbeCount} quer{(HealthProbe.ProbeCount == 1 ? "y" : "ies")} sent).",
             PlateDebuffs.Describe(),
             PlayerPlate.Describe() + " " + CombatText.Describe(),
             AcMouseOver.Describe(),

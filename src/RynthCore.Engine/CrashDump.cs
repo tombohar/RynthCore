@@ -12,12 +12,18 @@
 //  (AutoRestartWedgedClients, kept as it is). The hang dump is a small type and
 //  holds no heap, which is what an out-of-memory needs.
 //
-//  Safe to call from a background thread: MiniDumpWriteDump suspends all other
-//  threads internally while it snapshots them, which is exactly what we want for
-//  a hang. The dbghelp.dll P/Invoke is lazy-bound (no cost unless we ever fire).
+//  MiniDumpWriteDump on this process suspends all other threads and then allocates
+//  from the process heap: a suspended thread holding the heap lock deadlocks it for
+//  good. The hang watchdog's dump therefore goes out of process since 2026-11-01
+//  (WriteHangDumpOutOfProcess, rundll32 + SehTrampoline): a client hung on a reload (10-31
+//  21:17) with AC's main thread suspended inside RtlAllocateHeap and the dumping
+//  thread waiting on that heap's lock. The crash-exit and OUT OF MEMORY dumps still
+//  run in process (the process is dying, or held in a modal box).
+//  The dbghelp.dll P/Invoke is lazy-bound (no cost unless we ever fire).
 // ============================================================================
 
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -91,6 +97,99 @@ internal static class CrashDump
         catch (Exception ex)
         {
             RynthLog.Error($"CrashDump: exception {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    // Longest the dump helper may take for the small hang dump before it is stopped.
+    private const int DumpToolTimeoutMs = 120_000;
+
+    /// <summary>
+    /// The hang dump: a minidump of this process (thread stacks, no heap) written to
+    /// Logs\dumps\hang_&lt;pid&gt;_&lt;time&gt;.dmp from another process: the 32-bit rundll32 running
+    /// RynthCore.SehTrampoline.dll's RC_DumpProcess (v9+; the runtime's createdump.exe takes no
+    /// pid any more). Nothing here waits on a lock a suspended thread holds (see the header).
+    /// While it runs this process is in HIGH priority class: the dumper suspends each thread
+    /// and reads its context, and on a busy machine that read waits seconds for every
+    /// low-priority thread (the loader's hook freezes had the same wait, native\Loader\Hooks.c
+    /// BoostForFreeze), with every thread it already suspended frozen meanwhile. No dump when
+    /// the helper is missing or older (never the in-process fallback). Never throws.
+    /// </summary>
+    internal static bool WriteHangDumpOutOfProcess(string reason, out string dumpPath, string prefix = "hang")
+    {
+        dumpPath = string.Empty;
+        try
+        {
+            string dir = Path.Combine(LogPaths.LogDirectory, "dumps");
+            Directory.CreateDirectory(dir);
+            long free = FreeBytes(dir);
+            if (!DumpBudget.SmallDumpAllowed(free))
+            {
+                RynthLog.Error($"CrashDump: not writing the {prefix} dump - {(free < 0 ? "free space unknown" : (free / (1024 * 1024)) + " MB free")} on the dump volume, reason={reason}");
+                return false;
+            }
+            string? helper = Compatibility.SehTrampoline.DumpHelperPath();
+            if (helper == null)
+            {
+                RynthLog.Error($"CrashDump: the loaded RynthCore.SehTrampoline.dll has no RC_DumpProcess (older than v9; a client restart loads the new one) - {prefix} dump skipped (a dump written from inside a live client can deadlock it), reason={reason}");
+                return false;
+            }
+
+            dumpPath = Path.Combine(dir, $"{prefix}_{Environment.ProcessId}_{DateTime.Now:yyyyMMdd_HHmmss}.dmp");
+            // SysWOW64's rundll32: a 32-bit process, like the DLL.
+            string rundll = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.SystemX86), "rundll32.exe");
+            var psi = new ProcessStartInfo(rundll, HangDumpCommand.Arguments(helper, dumpPath, Environment.ProcessId))
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            long t0 = Stopwatch.GetTimestamp();
+            bool boosted = false;
+            ProcessPriorityClass before = ProcessPriorityClass.Normal;
+            int exitCode;
+            bool exited;
+            lock (DumpLock)
+            {
+                using Process self = Process.GetCurrentProcess();
+                try
+                {
+                    before = self.PriorityClass;
+                    if (before != ProcessPriorityClass.High && before != ProcessPriorityClass.RealTime)
+                    {
+                        self.PriorityClass = ProcessPriorityClass.High;
+                        boosted = true;
+                    }
+                }
+                catch { /* no boost: the dump just takes longer */ }
+                try
+                {
+                    using Process? dumper = Process.Start(psi);
+                    if (dumper == null) { RynthLog.Error($"CrashDump: the dump helper did not start, reason={reason}"); return false; }
+                    exited = dumper.WaitForExit(DumpToolTimeoutMs);
+                    if (!exited) { try { dumper.Kill(); } catch { } }
+                    exitCode = exited ? dumper.ExitCode : -1;
+                }
+                finally
+                {
+                    if (boosted) { try { self.PriorityClass = before; } catch { } }
+                }
+            }
+            double ms = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+            long size = 0;
+            try { size = File.Exists(dumpPath) ? new FileInfo(dumpPath).Length : 0; } catch { }
+            if (!exited || exitCode != 0 || size == 0)
+            {
+                RynthLog.Error($"CrashDump: dump helper {(exited ? $"exit {exitCode} ({HangDumpCommand.DescribeExit(exitCode)})" : $"still running after {DumpToolTimeoutMs / 1000}s, stopped")} after {ms:0} ms, no {prefix} dump, reason={reason}");
+                try { File.Delete(dumpPath); } catch { }
+                return false;
+            }
+            RynthLog.Error($"CrashDump: wrote {dumpPath} ({size / 1024}KB, out of process, {ms:0} ms) reason={reason}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            RynthLog.Error($"CrashDump: {prefix} dump failed {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }

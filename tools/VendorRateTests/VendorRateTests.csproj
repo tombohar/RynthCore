@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for VendorTrade's profile rate check (2026-10-30, a free storage vendor on a
+    custom server, buy=0 sell=0, had trading turned off): src\RynthCore.Engine\Compatibility\VendorRatePolicy.cs,
+    compiled in. 0 and ordinary rates pass; negative, NaN, infinite and huge rates fail. A 0 rate
+    prices at 0 (cost and payout), any rate above 0 keeps ACE's 1-per-stack floor. Reads
+    src\RynthCore.Engine\Compatibility\VendorTrade.cs (found by walking up) to pin that it calls
+    VendorRatePolicy. No AC. Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>VendorRateTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\VendorRatePolicy.cs" Link="Engine\VendorRatePolicy.cs" />
+  </ItemGroup>
+
+</Project>

@@ -101,6 +101,13 @@ namespace RynthCore.Engine.Compatibility;
 ///         hotkeys (<see cref="Hotkeys.HotkeyService"/>; saved for the PC in hotkeys.txt).</item>
 ///   <item><c>/rc diagnostics</c> (or <c>/rc serverpick</c>) - opens Settings &gt; Diagnostics, the server
 ///         picker: the one place a server is forced for this character (plugins' "Force a server" links).</item>
+///   <item><c>/rc layout [status] | default | reset [confirm]</c> - the panel layout this client uses
+///         (<see cref="UI.PanelLayout"/>: its character's own, or the PC-wide default and why) and its files;
+///         default makes this character's layout the one new characters start from; reset (then reset
+///         confirm) puts this character back to the default. Also Settings &gt; Display.</item>
+///   <item><c>/rc uicost [on|off|&lt;ms&gt;|now|status]</c> - the UI frame cost breakdown
+///         (<see cref="ImGuiBackend.UiCost"/>): timing on or off, the slow-frame threshold, and (now, or
+///         alone) which parts of the UI frame took the time over the last seconds. Also Settings &gt; Diagnostics.</item>
 /// </list>
 /// </summary>
 internal static class RynthCoreChatCommands
@@ -360,6 +367,13 @@ internal static class RynthCoreChatCommands
             return;
         }
 
+        // /rc uicost [on|off|<ms>|now|status] : the UI frame cost breakdown (ImGui/UiCost; alone: now)
+        if (IsVerb(sub, "uicost", out string uiCostArgs))
+        {
+            ReplyLines(ImGuiBackend.UiCost.HandleCommand(uiCostArgs));
+            return;
+        }
+
         // /rc netmsg [status|on|off|log on|off|capture on|off] : the v78 server message stream
         if (IsVerb(sub, "netmsg", out string netArgs))
         {
@@ -600,6 +614,17 @@ internal static class RynthCoreChatCommands
         if (IsVerb(sub, "settings", out string settingsArgs))
         {
             SettingsCommand(settingsArgs);
+            return;
+        }
+        if (IsVerb(sub, "sense", out string senseArgs) && senseArgs.Length > 0)
+        {
+            SenseLayoutCommand(senseArgs);   // alone, /rc sense opens or closes the panel (the switch below)
+            return;
+        }
+        // /rc layout [status] | default | reset [confirm]: this client's panel layout (UI/PanelLayout).
+        if (IsVerb(sub, "layout", out string layoutArgs))
+        {
+            HandleLayoutCommand(layoutArgs);
             return;
         }
         if (IsVerb(sub, "hotkey", out hotkeyArgs) || IsVerb(sub, "hotkeys", out hotkeyArgs))
@@ -1156,6 +1181,39 @@ internal static class RynthCoreChatCommands
         Reply(ChatCommandReplies.PanelReply(label, null, wasOpen));
     }
 
+    /// <summary>
+    /// "/rc sense compact on|off | collapse on|off | view full|compact|collapsed": the Sense panel's
+    /// look (saved in sense.txt), and the look now; alone, compact / collapse / view say the look now.
+    /// </summary>
+    private static void SenseLayoutCommand(string args)
+    {
+        string title = ImGuiBackend.Panels.SenseFace.Title;
+        if (!ImGuiBackend.ImGuiPanelHost.HasFace(title))
+        {
+            Fail("The Sense panel isn't available (the ImGui layer is off?).");
+            return;
+        }
+        if (!UI.Data.SenseStore.Loaded)
+        {
+            UI.Data.SenseStore.EnsureLoadQueued();
+            Fail("Can't change the Sense view yet: its settings are still loading. Try again in a moment.");
+            return;
+        }
+        UI.Data.SenseLayoutAnswer a = UI.Data.SenseLayout.Apply(args, UI.Data.SenseStore.Layout,
+            ImGuiBackend.ImGuiPanelHost.IsOpen(title));
+        if (!a.Ok)
+        {
+            Fail(a.Reply);
+            return;
+        }
+        if (!UI.Data.SenseStore.SetLayout(a.Next))
+        {
+            Fail("Can't change the Sense view yet: its settings are still loading. Try again in a moment.");
+            return;
+        }
+        Reply(a.Reply);
+    }
+
     /// <summary>Settings, opened on <paramref name="tab"/> (or switched to it when open).</summary>
     private static void OpenSettingsTab(string tab)
     {
@@ -1403,6 +1461,22 @@ internal static class RynthCoreChatCommands
             case "click":
             case "clickselect":
                 S.ClickToSelect = Flag(value, S.ClickToSelect); break;
+            case "refresh":
+            case "health":
+                // "refresh [on|off]" or "refresh <seconds>" (between two health queries for other plates).
+                if (value != null && !IsOnOff(value))
+                {
+                    if (!TryNum(value, out float rs))
+                    {
+                        Fail(FormattableString.Invariant(
+                            $"Usage: /rv plates refresh [on|off] | refresh {ImGuiBackend.Hud.HealthProbe.MinIntervalSec:0.0}-{ImGuiBackend.Hud.HealthProbe.MaxIntervalSec:0.0} (seconds; now {S.HealthRefreshSec:0.0#})"));
+                        return;
+                    }
+                    S.HealthRefreshSec = Math.Clamp(rs, ImGuiBackend.Hud.HealthProbe.MinIntervalSec, ImGuiBackend.Hud.HealthProbe.MaxIntervalSec);
+                    S.RefreshOthersHealth = true;
+                }
+                else S.RefreshOthersHealth = Flag(value, S.RefreshOthersHealth);
+                break;
             case "onscreen":
             case "keeponscreen":
                 S.KeepOnScreen = Flag(value, S.KeepOnScreen); break;
@@ -1601,7 +1675,55 @@ internal static class RynthCoreChatCommands
         ReplyLines(UI.Data.Discord.ChatDiscord.HandleCommand(verb));
     }
 
+    /// <summary>
+    /// /rc layout: which panel layout this client uses and its files (UI/PanelLayout: the character's own,
+    /// or the PC-wide default and why); default makes this character's the default for new characters;
+    /// reset asks, reset confirm copies the default over this character's. Those two answer when their
+    /// files are written (from the UI writer), or at once with why they can't run.
+    /// </summary>
+    private static void HandleLayoutCommand(string args)
+    {
+        UI.LayoutCommand cmd = UI.PanelLayoutPolicy.ParseCommand(args);
+        switch (cmd)
+        {
+            case UI.LayoutCommand.Status:
+                ReplyLines(UI.PanelLayout.DescribeLines());
+                return;
+            case UI.LayoutCommand.ResetAsk:
+            {
+                string? problem = UI.PanelLayout.Check(cmd, out string ask);
+                Answer(problem == null, ask, problem ?? "");
+                return;
+            }
+            case UI.LayoutCommand.MakeDefault:
+            case UI.LayoutCommand.ResetConfirm:
+            {
+                string? problem = UI.PanelLayout.Request(cmd, LaterReply());
+                if (problem != null) Fail(problem);
+                return;
+            }
+            default:
+                Fail(UI.PanelLayoutPolicy.Usage);
+                return;
+        }
+    }
+
     // ── replies (ChatCommandReplies says where each goes and its colour) ─────
+
+    /// <summary>
+    /// The answer of a command whose result comes later from another thread (a file job on the UI
+    /// writer): (text, ok), sent as this line's origin would send it. Marks this line answered.
+    /// </summary>
+    private static Action<string, bool> LaterReply()
+    {
+        ChatCommandOrigin origin = _origin;
+        _answered = true;
+        return (text, ok) =>
+        {
+            ChatReplyKind kind = ok ? ChatReplyKind.Ok : ChatReplyKind.Fail;
+            Reply(text, kind, ChatCommandReplies.ToChat(kind, origin));
+        };
+    }
 
     /// <summary>It worked, or the state now: in chat (green) for the player, the log only for a script.</summary>
     private static void Reply(string text) => Reply(text, ChatReplyKind.Ok, ChatCommandReplies.ToChat(ChatReplyKind.Ok, _origin));

@@ -3,12 +3,14 @@
 //  Sense, our take on Virindi Sense: a watch list of names, and every object
 //  the client knows about, anywhere, whose name matches one.
 //
-//    SenseStore    the watch list and the alert settings, in
+//    SenseStore    the watch list, the alert settings and the panel's look
+//                  (full, compact, collapsed), in
 //                  %LocalAppData%\RynthCore\sense.txt (read and written on
-//                  UiBackgroundWriter, never on AC's render thread).
-//    SensePattern  one term, case-insensitive. Without wildcards the name only
-//                  has to contain it ("drake" finds "Dragon's Isle Drake");
-//                  with * or ? the whole name must match ("Drake*", "?ire Ant").
+//                  UiBackgroundWriter, never on AC's render thread; the text
+//                  format is SenseFile in SenseModel.cs).
+//    SensePattern  (SenseModel.cs) one term, case-insensitive. Without wildcards
+//                  the name only has to contain it ("drake" finds "Dragon's Isle
+//                  Drake"); with * or ? the whole name must match ("Drake*").
 //    SenseSource   the scan: on the plugin pump thread at 2 Hz, reading only the
 //                  engine's main-thread snapshots (LiveObjectIds, the identity,
 //                  position, PWD and attackable snapshots, the player pose),
@@ -43,60 +45,15 @@ using RynthCore.Engine.Compatibility;
 
 namespace RynthCore.Engine.UI.Data;
 
-/// <summary>One watch-list term. Immutable.</summary>
-internal sealed class SensePattern
-{
-    public SensePattern(string text, bool enabled)
-    {
-        Text = (text ?? string.Empty).Trim();
-        Enabled = enabled;
-        IsGlob = Text.IndexOfAny(Wildcards) >= 0;
-    }
-
-    private static readonly char[] Wildcards = { '*', '?' };
-
-    public string Text { get; }
-    public bool Enabled { get; }
-    /// <summary>True when the term has * or ?: the whole name must match it.</summary>
-    public bool IsGlob { get; }
-
-    public bool Matches(string name)
-    {
-        if (Text.Length == 0 || string.IsNullOrEmpty(name)) return false;
-        return IsGlob ? Glob(name, Text) : name.Contains(Text, StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// Case-insensitive whole-string match of <paramref name="s"/> against
-    /// <paramref name="p"/> (* any run, ? one character). Iterative, backtracking
-    /// only to the last *; no allocation.
-    /// </summary>
-    internal static bool Glob(string s, string p)
-    {
-        int si = 0, pi = 0, star = -1, mark = 0;
-        while (si < s.Length)
-        {
-            if (pi < p.Length && p[pi] == '*') { star = pi++; mark = si; }
-            else if (pi < p.Length && (p[pi] == '?' || Same(p[pi], s[si]))) { si++; pi++; }
-            else if (star >= 0) { pi = star + 1; si = ++mark; }
-            else return false;
-        }
-        while (pi < p.Length && p[pi] == '*') pi++;
-        return pi == p.Length;
-    }
-
-    private static bool Same(char a, char b) => a == b || char.ToUpperInvariant(a) == char.ToUpperInvariant(b);
-}
-
 /// <summary>
-/// The watch list and alert settings. Edited on AC's thread (the face, /rc sense),
-/// read by the scan on the pump thread: the term list is an immutable array
+/// The watch list, alert settings and the panel's look. Edited on AC's thread (the face,
+/// /rc sense), read by the scan on the pump thread: the term list is an immutable array
 /// swapped whole, with a version the scan compares. File I/O on UiBackgroundWriter.
 /// </summary>
 internal static class SenseStore
 {
-    public const int MaxTerms = 40;
-    public const int MaxTermLength = 64;
+    public const int MaxTerms = SenseFile.MaxTerms;
+    public const int MaxTermLength = SenseFile.MaxTermLength;
 
     private static readonly object Sync = new();
     private static SensePattern[] _terms = Array.Empty<SensePattern>();
@@ -105,6 +62,7 @@ internal static class SenseStore
     private static bool _loadQueued;
     private static volatile bool _alertChat;
     private static volatile bool _alertBeep;
+    private static volatile int _layout;   // SenseLayoutMode
     private static bool _alertSubscribed;
 
     /// <summary>The current terms (never null; do not modify). Any thread.</summary>
@@ -120,6 +78,9 @@ internal static class SenseStore
 
     /// <summary>The system beep when a new match appears (off by default).</summary>
     public static bool AlertBeep => _alertBeep;
+
+    /// <summary>How the panel looks: full (the default), compact or collapsed. Any thread.</summary>
+    public static SenseLayoutMode Layout => (SenseLayoutMode)_layout;
 
     public static bool AnyEnabled
     {
@@ -148,44 +109,11 @@ internal static class SenseStore
 
     private static void LoadNow()
     {
-        var list = new List<SensePattern>();
-        bool chat = false, beep = false;
+        SenseFileData data = new();
         try
         {
             string path = FilePath;
-            if (File.Exists(path))
-            {
-                foreach (string raw in File.ReadAllLines(path))
-                {
-                    string line = raw.Trim();
-                    if (line.Length == 0 || line.StartsWith('#')) continue;
-                    int eq = line.IndexOf('=');
-                    if (eq <= 0) continue;
-                    string key = line[..eq].Trim();
-                    string val = line[(eq + 1)..];
-                    switch (key)
-                    {
-                        case "alertChat": chat = val.Trim() == "1"; break;
-                        case "alertBeep": beep = val.Trim() == "1"; break;
-                        case "term":
-                        {
-                            // term=1|pattern (1 on, 0 off); a bare term=pattern is on.
-                            bool on = true;
-                            string text = val;
-                            int bar = val.IndexOf('|');
-                            if (bar is 1 && (val[0] == '0' || val[0] == '1'))
-                            {
-                                on = val[0] == '1';
-                                text = val[2..];
-                            }
-                            text = Clean(text);
-                            if (text.Length > 0 && list.Count < MaxTerms && IndexOf(list, text) < 0)
-                                list.Add(new SensePattern(text, on));
-                            break;
-                        }
-                    }
-                }
-            }
+            if (File.Exists(path)) data = SenseFile.Parse(File.ReadAllLines(path));
         }
         catch (Exception ex)
         {
@@ -194,26 +122,14 @@ internal static class SenseStore
 
         lock (Sync)
         {
-            Volatile.Write(ref _terms, list.ToArray());
-            _alertChat = chat;
-            _alertBeep = beep;
+            Volatile.Write(ref _terms, data.Terms.ToArray());
+            _alertChat = data.AlertChat;
+            _alertBeep = data.AlertBeep;
+            _layout = (int)data.Layout;
             Interlocked.Increment(ref _version);
             _loaded = true;
         }
         SyncAlertSubscription();
-    }
-
-    private static string Clean(string text)
-    {
-        text = (text ?? string.Empty).Replace('\r', ' ').Replace('\n', ' ').Trim();
-        return text.Length > MaxTermLength ? text[..MaxTermLength] : text;
-    }
-
-    private static int IndexOf(IReadOnlyList<SensePattern> list, string text)
-    {
-        for (int i = 0; i < list.Count; i++)
-            if (string.Equals(list[i].Text, text, StringComparison.OrdinalIgnoreCase)) return i;
-        return -1;
     }
 
     /// <summary>
@@ -222,13 +138,13 @@ internal static class SenseStore
     /// </summary>
     public static bool Add(string text, out string message)
     {
-        text = Clean(text);
+        text = SenseFile.Clean(text);
         if (!_loaded) { message = "The watch list is still loading."; return false; }
         if (text.Length == 0) { message = "Type a name first."; return false; }
         lock (Sync)
         {
             SensePattern[] cur = _terms;
-            int at = IndexOf(cur, text);
+            int at = SenseFile.IndexOf(cur, text);
             if (at >= 0)
             {
                 message = cur[at].Enabled ? $"\"{cur[at].Text}\" is already on the list." : $"\"{cur[at].Text}\" switched on.";
@@ -277,6 +193,19 @@ internal static class SenseStore
         Save();
     }
 
+    /// <summary>
+    /// Sets the panel's look and saves it with the list. False (nothing changes) while the list is
+    /// still loading: the file would be written before it was read. Any thread.
+    /// </summary>
+    public static bool SetLayout(SenseLayoutMode mode)
+    {
+        if (!_loaded) return false;
+        if ((int)mode == _layout) return true;
+        _layout = (int)mode;
+        Save();
+        return true;
+    }
+
     // Under Sync.
     private static void Replace(int index, SensePattern pattern)
     {
@@ -322,18 +251,11 @@ internal static class SenseStore
     {
         try
         {
-            SensePattern[] terms = Terms;
-            var sb = new StringBuilder();
-            sb.AppendLine("# RynthCore Sense watch list - auto-generated, hand-edits OK. /rc sense in game.");
-            sb.AppendLine("# term=1|name (1 on, 0 off). No * or ?: the name contains it. With * or ?: the whole name matches.");
-            sb.AppendLine(_alertChat ? "alertChat=1" : "alertChat=0");
-            sb.AppendLine(_alertBeep ? "alertBeep=1" : "alertBeep=0");
-            foreach (SensePattern t in terms)
-                sb.Append("term=").Append(t.Enabled ? '1' : '0').Append('|').AppendLine(t.Text);
+            string text = SenseFile.Format(Terms, _alertChat, _alertBeep, Layout);
             string path = FilePath;
             string? dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(path, sb.ToString());
+            File.WriteAllText(path, text);
         }
         catch (Exception ex)
         {
