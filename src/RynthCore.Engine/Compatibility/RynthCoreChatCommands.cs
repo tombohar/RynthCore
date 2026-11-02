@@ -675,6 +675,12 @@ internal static class RynthCoreChatCommands
                     "The Item Count panel isn't available (the ImGui layer is off?).");
                 return;
 
+            case "itemtool":
+                // The ImGui Item Tool panel (chest looter + Quick give), like its bar button.
+                TogglePanel(ImGuiBackend.Panels.ItemToolFace.Title, "Item Tool panel",
+                    "The Item Tool panel isn't available (the ImGui layer is off, or RynthAi isn't loaded).");
+                return;
+
             case "resetbar":
             case "barreset":
                 RynthLog.Compat("RynthCoreChatCommands: /rc resetbar — resetting overlay bar position.");

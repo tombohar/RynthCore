@@ -65,6 +65,7 @@ internal static class Program
             Run(nameof(DedupeSameNameTwoFolders), DedupeSameNameTwoFolders);
             Run(nameof(DedupeAgainstAlreadyLoaded), DedupeAgainstAlreadyLoaded);
             Run(nameof(DedupeKeepsOrderAndText), DedupeKeepsOrderAndText);
+            Run(nameof(PrefetchListOrderAndScope), PrefetchListOrderAndScope);
             foreach (string dll in args)
                 Run("Plugin " + Path.GetFileName(dll), () => CheckBuiltPlugin(dll));
         }
@@ -781,6 +782,35 @@ internal static class Program
         Eq(string.Join("|", r.Load), paths[0] + "|" + paths[2] + "|" + paths[3], "no duplicates: everything loads, as listed, text unchanged");
         Eq(r.Skipped.Count, 0, "nothing skipped");
         Eq(PluginPathDedupe.Dedupe(Array.Empty<string>()).Load.Count, 0, "empty list");
+    }
+
+    // ── Prefetch file list (src\RynthCore.Engine\Plugins\PluginFilePrefetchList.cs) ──
+
+    private static void PrefetchListOrderAndScope()
+    {
+        string suite = Path.Combine(_root, "prefetch");
+        string ai = Path.Combine(suite, "RynthAi"), chat = Path.Combine(suite, "RynthChat"), shared = Path.Combine(suite, "PluginShared");
+        foreach (string d in new[] { ai, chat, shared, Path.Combine(ai, "Sub") }) Directory.CreateDirectory(d);
+        void Touch(string path) => File.WriteAllText(path, "x");
+        string aiDll = Path.Combine(ai, "RynthCore.Plugin.RynthAi.dll"), chatDll = Path.Combine(chat, "RynthCore.Plugin.RynthChat.dll");
+        Touch(aiDll); Touch(Path.Combine(ai, "RynthCore.Plugin.RynthAi.pdb")); Touch(Path.Combine(ai, "ImGui.NET.dll"));
+        Touch(Path.Combine(ai, "settings.json")); Touch(Path.Combine(ai, "Sub", "Nested.dll"));
+        Touch(chatDll); Touch(Path.Combine(chat, "ImGui.NET.dll"));
+        Touch(Path.Combine(shared, "RynthCore.PluginSdk.dll")); Touch(Path.Combine(shared, "RynthCore.PluginSdk.pdb"));
+
+        string[] listed = { chatDll, Path.Combine(suite, "Missing", "RynthCore.Plugin.Missing.dll"), Path.Combine(ai, "RYNTHCORE.PLUGIN.RYNTHAI.DLL"), "" };
+        List<string> files = PluginFilePrefetchList.Build(listed, shared);
+        string Rel(string f) => Path.GetRelativePath(suite, f).Replace('\\', '/');
+        string got = string.Join("|", files.Select(Rel));
+        Eq(Rel(files[0]), "RynthChat/RynthCore.Plugin.RynthChat.dll", "listed plugins first, in list order");
+        Check(Rel(files[1]).Equals("RynthAi/RynthCore.Plugin.RynthAi.dll", StringComparison.OrdinalIgnoreCase), $"second listed plugin second: {got}");
+        Eq(files.Count(f => f.EndsWith("RynthCore.Plugin.RynthAi.dll", StringComparison.OrdinalIgnoreCase)), 1, "a plugin listed in another case is opened once");
+        Check(files.Any(f => Rel(f) == "RynthAi/RynthCore.Plugin.RynthAi.pdb") && files.Any(f => Rel(f) == "RynthAi/ImGui.NET.dll")
+              && files.Any(f => Rel(f) == "RynthChat/ImGui.NET.dll"), $"each plugin folder's DLLs and PDBs: {got}");
+        Check(!files.Any(f => f.EndsWith(".json")) && !files.Any(f => f.Contains("Nested")), $"no other files, no subfolders: {got}");
+        Check(!files.Any(f => f.Contains("Missing")), "a missing plugin adds nothing");
+        Eq(Rel(files[^1]), "PluginShared/RynthCore.PluginSdk.dll", "the shared folder's DLLs last, without PDBs");
+        Eq(PluginFilePrefetchList.Build(Array.Empty<string>(), null).Count, 0, "nothing listed, nothing opened");
     }
 
     private static string FindUp(string relative)

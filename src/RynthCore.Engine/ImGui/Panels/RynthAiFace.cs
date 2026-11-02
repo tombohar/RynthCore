@@ -1144,6 +1144,7 @@ internal sealed partial class RynthAiFace : IImGuiPanel
             SkillsMenuItem("Progress", "/rc progression", 2, "Augmentation, Enlightenment and XP planners (Infinite Leaftide).");
             PanelMenuItem(InventoryFace.Title, "/rc inventory");
             PanelMenuItem(ItemCountFace.Title, "/rc itemcount");
+            PanelMenuItem(ItemToolFace.Title, "/rc itemtool");
             // RynthInventory's script window (same as /ginv and Inventory's GInv button).
             const string ginvKey = "RynthInventory/Main";
             bool hasGinv = UI.ScriptWindows.ScriptWindowRegistry.Has(ginvKey);

@@ -81,7 +81,8 @@ internal static class ImGuiBar
     // Skills moves under RynthOracle (Skills / Attributes / Progress tabs): its icon shows only while Oracle's
     // tabs can't be reached (SkillsRouting.ShowSkillsBarIcon), so nobody loses the way in. Mini Remote stays.
     private static readonly string[] ImGuiOnlyBarPanels =
-        { Panels.InventoryFace.Title, Panels.SkillsFace.Title, Panels.SenseFace.Title, Panels.MiniRemoteFace.Title };
+        { Panels.InventoryFace.Title, Panels.SkillsFace.Title, Panels.SenseFace.Title, Panels.MiniRemoteFace.Title,
+          Panels.ItemToolFace.Title };
 
     /// <summary>An ImGui-only panel's bar button is wanted: it has a face, and Skills only while Oracle can't host it.</summary>
     private static bool ImGuiOnlyWanted(string title) =>
@@ -117,8 +118,10 @@ internal static class ImGuiBar
         ["Inventory"] = PhosphorIcons.Package,   // not Backpack: the dashboard's Items launcher has that
         ["Log"] = PhosphorIcons.TerminalWindow,
         ["Item Count"] = PhosphorIcons.Bag,
+        ["Item Tool"] = PhosphorIcons.Wrench,
         ["Mini Remote"] = PhosphorIcons.SquaresFour,
         ["Characters"] = PhosphorIcons.UsersThree,
+        ["Item Tool"] = PhosphorIcons.Wrench,   // RynthAi's chest looter + Quick give
         // Plugin windows with a bar button of their own (script windows, by title).
         ["RynthSort"] = PhosphorIcons.SortAscending,
         ["Oracle"] = PhosphorIcons.Sparkle,

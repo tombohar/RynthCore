@@ -100,6 +100,7 @@ internal static class LogPaths
             if (size < MaxLogBytes) return;
 
             string rotated = RotatedLogFilePath;
+            EntryPoint.ReleaseLogFile();   // the engine's open handle would follow the file to .old
             try { if (File.Exists(rotated)) File.Delete(rotated); } catch { }
 
             try { File.Move(active, rotated); }

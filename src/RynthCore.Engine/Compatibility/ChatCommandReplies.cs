@@ -192,6 +192,7 @@ internal static class ChatCommandReplies
         V("sense", RynthCore.Engine.UI.Data.SenseLayout.Usage, RynthCore.Engine.UI.Data.SenseLayout.IsValidArgs),
         V("characters", "Usage: /rc characters (opens or closes RynthNet's Characters window)", NoArgs, "chars"),
         V("itemcount", "Usage: /rc itemcount (opens or closes the Item Count panel)", NoArgs, "itemhud"),
+        V("itemtool", "Usage: /rc itemtool (opens or closes the Item Tool panel: chest looter and Quick give)", NoArgs),
         V("resetbar", "Usage: /rc resetbar (moves the RynthCore bar back to the top-left corner)", NoArgs, "barreset"),
         V("actionstate", "Usage: /rc actionstate (the client's item-action gates)", NoArgs, "actions"),
         V("unlockactions", "Usage: /rc unlockactions (opens the client's item-action gates now)", NoArgs, "unlock"),

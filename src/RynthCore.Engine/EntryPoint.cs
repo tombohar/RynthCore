@@ -812,6 +812,12 @@ public static class EntryPoint
                 return;
             }
 
+            // The plugin files' antivirus scans (after an update every one is new) run on
+            // workers from here, during the hook steps, not one file at a time in
+            // LoadPlugins (Plugins/PluginFilePrefetch.cs).
+            if (Plugins.EngineSettings.EnablePlugins)
+                PluginFilePrefetch.Start(Plugins.EngineSettings.PluginPaths);
+
             // One-shot read-only string-anchor diagnostic. Runs only if the
             // user has dropped a candidate-string list at
             // %APPDATA%\RynthCore\string_anchors.txt — otherwise no-ops.
@@ -986,14 +992,11 @@ public static class EntryPoint
             // Panel layout per character (UI/PanelLayout): before the EndScene hook, so the first
             // frame already asks for the right layout (after a hot reload, the character's).
             UI.PanelLayout.Initialize();
-            if (Plugins.EngineSettings.EnablePlugins)
-            {
-                RynthLog.Info("InitWorker DIAG — calling PluginManager.LoadPlugins.");
-                PluginManager.LoadPlugins(engineDir);
-                RynthLog.Info("InitWorker DIAG — PluginManager.LoadPlugins returned.");
-            }
-            else
-                RynthLog.Info("InitWorker: plugin loading disabled via engine.json (EnablePlugins=false).");
+
+            // The first font atlas bakes now, during the world load, instead of after the
+            // EndScene hook's warm-up (~2 s of every login; ImGuiFonts.StartInitialBake).
+            if (WillRunImGui())
+                ImGuiBackend.EngineFrameController.StartEarlyFontBake();
 
             // Defer D3D9 hooking until after character login. By that point
             // the game's device is fully initialized and stable, avoiding the
@@ -1009,12 +1012,17 @@ public static class EntryPoint
             // viewport platform/renderer. Avalonia floating panels still
             // work because they ride a separate LayeredWindow (GDI), not
             // the D3D9 swap chain.
+            //
+            // Subscribed before the plugins load (2026-11-02): the EndScene hook, ImGui and the
+            // engine's panels don't need them, and a login during a slow load (15-20 s after an
+            // update) used to wait for all of it. The plugin pump still starts only once they
+            // are loaded (OpenPluginPumpGate), so InitPlugins sees the whole list.
             if (InitAborted()) return;
             LoginLifecycleHooks.LoginComplete += RunPostLoginBootstrap;
 
             // ── Fast-login race guard (first launch, initCount==1) ───────────
             // AC's SendLoginCompleteNotification can fire DURING the ~9 s
-            // hook-init / plugin-load window above — i.e. BEFORE the line above
+            // hook-init window above (before 2026-11-02 the plugin load too) — i.e. BEFORE the line above
             // subscribed RunPostLoginBootstrap. SignalLoginComplete raises the
             // event exactly once and does NOT replay for late subscribers, so a
             // fast login leaves RunPostLoginBootstrap never called: no EndScene
@@ -1030,6 +1038,17 @@ public static class EntryPoint
                 RynthLog.Info("D3D9: LoginComplete already observed before the bootstrap handler subscribed (fast-login race) — starting bootstrapper directly.");
                 RunPostLoginBootstrap();
             }
+
+            if (InitAborted()) return;
+            if (Plugins.EngineSettings.EnablePlugins)
+            {
+                RynthLog.Info("InitWorker DIAG — calling PluginManager.LoadPlugins.");
+                PluginManager.LoadPlugins(engineDir);
+                RynthLog.Info("InitWorker DIAG — PluginManager.LoadPlugins returned.");
+            }
+            else
+                RynthLog.Info("InitWorker: plugin loading disabled via engine.json (EnablePlugins=false).");
+            OpenPluginPumpGate(PumpGatePluginsLoaded);
 
             RynthLog.Info($"InitWorker: post-init checkpoint, _initCount={_initCount}");
             if (InitAborted()) return;
@@ -1231,6 +1250,7 @@ public static class EntryPoint
                     ImGuiBackend.Panels.MonstersFace.Register();
                     ImGuiBackend.Panels.NavFace.Register();
                     ImGuiBackend.Panels.ItemsFace.Register();
+                    ImGuiBackend.Panels.ItemToolFace.Register();   // chest looter + Quick give (RynthAi's Item Tool)
                     // Load the dashboard state file here, not on AC's thread. NOT through
                     // RynthAiPanel: see the dispatcher invariant above ChatModel.EnsureSettingsLoaded.
                     RynthAiDashboardState.EnsureLoaded();
@@ -1479,10 +1499,8 @@ public static class EntryPoint
                 $"D3D9: Decal coexistence — '{DecalDetection.DetectedModule}' loaded, " +
                 "skipping EndScene hook and ImGui init. " +
                 "In-game overlay bars are disabled; Avalonia floating panels still work.");
-            if (Plugins.EngineSettings.EnablePlugins)
-                InitPluginsForDecalCoexistence();
-            else
-                RynthLog.Info("DecalCoexistence: plugin pump disabled via engine.json (EnablePlugins=false).");
+            _pumpForDecal = true;
+            OpenPluginPumpGate(PumpGateLogin);
             return;
         }
 
@@ -1493,6 +1511,41 @@ public static class EntryPoint
         }
         RynthLog.Info("D3D9: Login complete — starting D3D9 bootstrapper.");
         D3D9Bootstrapper.Start();
+        OpenPluginPumpGate(PumpGateLogin);
+    }
+
+    // The plugin pump's two conditions (2026-11-02): login (RunPostLoginBootstrap) and the
+    // plugins loaded (InitWorker, after LoadPlugins, or at once without plugins). The
+    // bootstrap now runs as soon as login comes, which can be while the plugins still load;
+    // the pump waits for both, so InitPlugins never runs on a half-built list.
+    private const int PumpGateLogin = 1;
+    private const int PumpGatePluginsLoaded = 2;
+    private static int _pumpGate;
+    private static bool _pumpForDecal;   // written before the login bit is set
+
+    private static void OpenPluginPumpGate(int condition)
+    {
+        const int both = PumpGateLogin | PumpGatePluginsLoaded;
+        int before = Interlocked.Or(ref _pumpGate, condition);
+        if (before == both)
+            return;   // opened already
+        if ((before | condition) != both)
+        {
+            if (condition == PumpGateLogin && Plugins.EngineSettings.EnablePlugins)
+                RynthLog.Info("NormalPluginPump: login came while the plugins load; it starts once they are loaded (the EndScene hook and ImGui start now).");
+            return;
+        }
+        if (EngineLifecycle.IsShuttingDown)
+            return;
+
+        if (_pumpForDecal)
+        {
+            if (Plugins.EngineSettings.EnablePlugins)
+                InitPluginsForDecalCoexistence();
+            else
+                RynthLog.Info("DecalCoexistence: plugin pump disabled via engine.json (EnablePlugins=false).");
+            return;
+        }
 
         // 2026-05-16: the plugin lifecycle no longer ticks from the EndScene
         // path. The 2026-05-10 design ran InitPlugins/ProcessPendingActions/
@@ -1511,6 +1564,14 @@ public static class EntryPoint
         else
             RynthLog.Info("NormalPluginPump: disabled via engine.json (EnablePlugins=false).");
     }
+
+    /// <summary>
+    /// The D3D9 path will make an ImGui context after login: the EndScene hook and the ImGui
+    /// backend are on, cimgui is loaded and Decal isn't in the way. Init worker.
+    /// </summary>
+    private static bool WillRunImGui() =>
+        Plugins.EngineSettings.EnableD3D9Hook && Plugins.EngineSettings.EnableImGuiBackend
+        && _imGuiNativeHandle != IntPtr.Zero && !UseDecalCoexistencePath();
 
     private static int _decalInGameLogged;
 
@@ -1912,8 +1973,71 @@ public static class EntryPoint
         }
     }
 
+    // The log stays open while the engine runs (2026-11-02). Opened and closed for every line, it made
+    // Windows Defender rescan the whole file (2-4 MB) on each close, dozens of times a second per client
+    // in a fight: two cores for five clients. Each line is still flushed to the OS at once. Delete sharing
+    // lets the next engine's startup rotation rename it; after shutdown (CloseLogFile) every line opens
+    // and closes the file again, so an unloaded engine never holds it. Under LogLock.
+    private static FileStream? _logStream;
+    private static bool _logStreamClosed;
+    // The open handle follows a renamed file: the startup rotation (LogPaths.RotateAtStartup) runs
+    // after the first lines are written, so it lets go first (ReleaseLogFile); and the path is checked
+    // every LogPathCheckMs, so a file moved or deleted by anything else is reopened at its path
+    // (2026-11-02: a reload's rotation left a client writing into its .log.old).
+    private const long LogPathCheckMs = 2000;
+    private static long _logPathCheckedAt;
+
+    /// <summary>Lets go of the open log (the next line opens it again). Before the log is renamed.</summary>
+    internal static void ReleaseLogFile()
+    {
+        lock (LogLock)
+        {
+            try { _logStream?.Dispose(); } catch { }
+            _logStream = null;
+        }
+    }
+
+    /// <summary>EngineLifecycle's last step: lines after it open and close the file each time.</summary>
+    internal static void CloseLogFile()
+    {
+        lock (LogLock)
+        {
+            _logStreamClosed = true;
+            try { _logStream?.Dispose(); } catch { }
+            _logStream = null;
+        }
+    }
+
     private static void AppendWithRetry(string line)
     {
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(line);
+        if (!_logStreamClosed)
+        {
+            try
+            {
+                long now = Environment.TickCount64;
+                if (_logStream != null && now - _logPathCheckedAt >= LogPathCheckMs)
+                {
+                    _logPathCheckedAt = now;
+                    if (!File.Exists(LogPaths.LogFilePath)) { try { _logStream.Dispose(); } catch { } _logStream = null; }
+                }
+                _logStream ??= new FileStream(
+                    LogPaths.LogFilePath,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite | FileShare.Delete);
+                _logStream.Seek(0, SeekOrigin.End);   // the loader and the injector append to it too
+                _logStream.Write(bytes, 0, bytes.Length);
+                _logStream.Flush();
+                return;
+            }
+            catch
+            {
+                try { _logStream?.Dispose(); } catch { }
+                _logStream = null;   // the open-per-line path below, and a fresh handle next line
+            }
+        }
+
         // Retry briefly to tolerate concurrent writers (loader DLL, injector
         // process). FileShare.ReadWrite on each open lets multiple writers
         // append; the small delays smooth over rare lock collisions.
@@ -1927,7 +2051,6 @@ public static class EntryPoint
                     FileMode.Append,
                     FileAccess.Write,
                     FileShare.ReadWrite);
-                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(line);
                 fs.Write(bytes, 0, bytes.Length);
                 return;
             }

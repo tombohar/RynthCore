@@ -105,6 +105,7 @@ internal static class Program
         ("sense", "sense compact", "sense frob on"),
         ("characters", "chars", "characters now"),
         ("itemcount", "itemhud", "itemcount now"),
+        ("itemtool", "itemtool", "itemtool now"),
         ("resetbar", "barreset", "resetbar now"),
         ("actionstate", "actions", "actionstate now"),
         ("unlockactions", "unlock", "unlockactions now"),

@@ -433,6 +433,7 @@ internal static unsafe class ImGuiFonts
 
     private static System.Threading.Thread? _bakeThread;
     private static Bake? _bakeDone;                       // set by the worker as it ends
+    private static float _bakeScale;                      // the scale _bakeThread bakes for
     private static readonly List<System.Threading.Thread> FreeThreads = new();
 
     /// <summary>
@@ -452,6 +453,7 @@ internal static unsafe class ImGuiFonts
         try
         {
             _bakeDone = null;
+            _bakeScale = scale;
             _bakeThread = EngineThreads.Start("ImGuiFonts.Bake", () => BakeWorker(scale, steps, prepare: false));
             return false;
         }
@@ -468,16 +470,26 @@ internal static unsafe class ImGuiFonts
     /// <summary>
     /// The first atlas of a context, baked on a worker (see the header): reading the font files if
     /// the init worker hasn't, making their native copies, queueing every font, rasterizing, the
-    /// BGRA copy and freeing the TTF copies all happen there. AC thread, once the scale is known.
-    /// False when no worker could be started (the caller then calls <see cref="Build"/>).
+    /// BGRA copy and freeing the TTF copies all happen there. AC thread, once the scale is known,
+    /// or the init worker before login (EngineFrameController.StartEarlyFontBake; never both at
+    /// once: the EndScene hook goes in after that call). False when no worker could be started
+    /// (the caller then calls <see cref="Build"/>).
     /// </summary>
     public static bool StartInitialBake(float scale)
     {
-        if (_bakeThread != null) return true;
+        if (_bakeThread != null)
+        {
+            // Started early, on the init worker before login (EngineFrameController.StartEarlyFontBake),
+            // for the scale the game window had then: kept when the context gets that scale too.
+            if (_bakeScale == scale) return true;
+            RynthLog.UI($"ImGuiFonts: the atlas baked before login is for scale {_bakeScale:0.##}, the context's is {scale:0.##}: baking again.");
+            DropBake();
+        }
         List<int> steps = RynthCore.Engine.UI.PanelTextScale.StepsInUse();
         try
         {
             _bakeDone = null;
+            _bakeScale = scale;
             _bakeThread = EngineThreads.Start("ImGuiFonts.Bake", () => BakeWorker(scale, steps, prepare: true));
             return true;
         }
@@ -487,6 +499,18 @@ internal static unsafe class ImGuiFonts
             RynthLog.UI($"ImGuiFonts: no bake thread for the first atlas ({ex.GetType().Name}: {ex.Message}); baking it on the render thread.");
             return false;
         }
+    }
+
+    /// <summary>Waits for the running bake and frees what it made, never swapped in.</summary>
+    private static void DropBake()
+    {
+        _bakeThread?.Join();
+        _bakeThread = null;
+        Bake? pending = _bakeDone;
+        _bakeDone = null;
+        if (pending == null) return;
+        if (pending.Atlas != IntPtr.Zero) ImGuiNative.ImFontAtlas_destroy((ImFontAtlas*)pending.Atlas);
+        FreeBgraPixels(pending.Bgra);
     }
 
     /// <summary>
@@ -642,15 +666,7 @@ internal static unsafe class ImGuiFonts
     {
         // A worker may still read the buffers below (a bake) or free an atlas.
         WaitForWorkers();
-        if (_bakeThread != null || _bakeDone != null)
-        {
-            _bakeThread = null;
-            Bake? pending = _bakeDone;
-            _bakeDone = null;
-            if (pending != null && pending.Atlas != IntPtr.Zero)
-                ImGuiNative.ImFontAtlas_destroy((ImFontAtlas*)pending.Atlas);   // baked, never swapped in
-            if (pending != null) FreeBgraPixels(pending.Bgra);
-        }
+        DropBake();   // baked, never swapped in
         FreeBgraPixels(_bgra);
         _bgra = IntPtr.Zero;
         _bgraWidth = _bgraHeight = 0;

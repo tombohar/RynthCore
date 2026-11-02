@@ -38,6 +38,21 @@ internal static unsafe partial class Program
             ? string.Join(",", ids.Select(i => (i & 0xFFFF).ToString("X")))
             : "unknown";
 
+    // The order file as engines before version 2 wrote it: no player id after the list count.
+    private static byte[] OldFormatFile((uint Container, bool Slot, uint[] Ids)[] lists)
+    {
+        var ms = new MemoryStream();
+        var w = new BinaryWriter(ms);
+        w.Write(0x44524F49u); w.Write(1u); w.Write((uint)lists.Length);
+        foreach ((uint c, bool slot, uint[] ids) in lists)
+        {
+            w.Write(c); w.Write(slot ? (byte)1 : (byte)0); w.Write((uint)ids.Length);
+            foreach (uint id in ids) w.Write(id);
+        }
+        w.Flush();
+        return ms.ToArray();
+    }
+
     private static byte[] MessageWithGuid(uint opcode, uint guid)
     {
         var b = new byte[8];
@@ -117,6 +132,49 @@ internal static unsafe partial class Program
         Check(!InventoryOrder.Restore(new byte[] { 1, 2, 3 }), "garbage is refused");
         Check(!InventoryOrder.Restore(saved.AsSpan(0, saved.Length - 3)), "a truncated file is refused");
         Eq(Order(Player, false) + "|" + Order(Player, true), before, "and a refused file changes nothing");
+
+        Case("inventory order: after a restore the player's lists are still never dropped for room");
+        Check(InventoryOrder.Restore(saved), "restored");
+        Eq(InventoryOrder.Player, Player, "the file says whose lists they are");
+        for (uint c = 0; c < 200; c++)
+            InventoryOrder.Observe(GameEvent(0x0196, 0x90000000 + c, 1, 0xA0000000 + c, 0));
+        Eq(Order(Player, false) + "|" + Order(Player, true), before, "the main pack and the pack column survive 200 corpses");
+
+        Case("inventory order: a version 1 file (no player in it) still keeps the player's lists");
+        byte[] v1 = OldFormatFile(new[] { (Player, false, new uint[] { 0x80000001 }), (Player, true, new uint[] { 0x80000004, 0x80000005 }),
+                                          (0x80000004u, false, new uint[] { 0x80000009 }), (0x80000004u, true, Array.Empty<uint>()) });
+        Check(InventoryOrder.Restore(v1), "a version 1 file is accepted");
+        Eq(InventoryOrder.Player, Player, "the player is the one container in the player id range with a pack column");
+        for (uint c = 0; c < 200; c++)
+            InventoryOrder.Observe(GameEvent(0x0196, 0x90000000 + c, 1, 0xA0000000 + c, 0));
+        Eq(Order(Player, true), "4,5", "its pack column survives 200 corpses");
+        Eq(InventoryOrder.PlayerOf(new[] { (Player, true), (Player + 1, true) }), 0u, "two candidates: none guessed");
+        Eq(InventoryOrder.PlayerOf(new[] { (0x80000004u, true) }), 0u, "an item id is never the player");
+
+        Case("inventory order: a saved file is this client's when written after it started, however old");
+        var start = new DateTime(2026, 10, 30, 12, 0, 0, DateTimeKind.Utc);
+        Check(InventoryOrder.SavedFileIsOurs(start.AddDays(2), start), "written two days ago by this client: used");
+        Check(InventoryOrder.SavedFileIsOurs(start.AddSeconds(-20), start), "clock rounding: used");
+        Check(!InventoryOrder.SavedFileIsOurs(start.AddHours(-1), start), "written before this client started (a recycled pid): not used");
+        Check(InventoryOrder.SavedFileIsOurs(start, null), "start time unknown: used");
+
+        Case("inventory order: a list's hash changes when the list does");
+        InventoryOrder.Reset();
+        Eq(InventoryOrder.ListHash(Player, true), 0u, "unknown: 0");
+        InventoryOrder.Observe(PlayerDescriptionMsg(40, new uint[] { 0x80000001, 0x80000004, 0x80000005 }, new uint[] { 0, 1, 1 }, 0));
+        uint h1 = InventoryOrder.ListHash(Player, true);
+        Check(h1 != 0, "known: not 0");
+        InventoryOrder.Observe(GameEvent(0x0022, 0x80000005, Player, 0, 1));
+        Eq(Order(Player, true), "5,4", "a pack moved to the top of the column");
+        Check(InventoryOrder.ListHash(Player, true) != h1, "and the hash changed");
+
+        Case("inventory order: side packs sorted into the pack column's order");
+        uint[] packs = { Player, 0x80000002, 0x80000003, 0x80000004 };
+        Check(InventoryOrder.SortByColumn(packs, 1, x => x, new uint[] { 0x80000004, 0x80000F01, 0x80000002, 0x80000003 }), "a column naming every pack (a focus between)");
+        Eq(string.Join(",", packs.Select(x => (x & 0xFFFF).ToString("X"))), "1,4,2,3", "main pack stays first, the top pack next");
+        uint[] packs2 = { Player, 0x80000002, 0x80000003 };
+        Check(!InventoryOrder.SortByColumn(packs2, 1, x => x, new uint[] { 0x80000003 }), "a pack the column lacks: refused");
+        Eq(string.Join(",", packs2.Select(x => (x & 0xFFFF).ToString("X"))), "1,2,3", "and left in id order");
 
         Case("inventory order: junk never throws and never invents a list");
         InventoryOrder.Reset();

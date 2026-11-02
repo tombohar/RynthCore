@@ -23,6 +23,7 @@ internal static class UiSources
     public static readonly LuaSource Lua = new();
     public static readonly NavSource Nav = new();
     public static readonly ItemsSource Items = new();
+    public static readonly ItemToolSource ItemTool = new();
     public static readonly VisionSource Vision = new();
     public static readonly RynthNavSource RynthNav = new();
     public static readonly RynthNavAtlasSource RynthNavAtlas = new();
@@ -48,6 +49,7 @@ internal static class UiSources
         UiDataHub.Register(Lua);
         UiDataHub.Register(Nav);
         UiDataHub.Register(Items);
+        UiDataHub.Register(ItemTool);
         UiDataHub.Register(Vision);
         UiDataHub.Register(RynthNav);
         UiDataHub.Register(RynthNavAtlas);

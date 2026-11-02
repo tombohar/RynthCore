@@ -125,10 +125,22 @@ internal static unsafe class ServerMessageStream
             {
                 _orderRestored = true;
                 string f = OrderFile;
-                // Only this client's own file, and not a stale one (a recycled process id).
-                if (File.Exists(f) && DateTime.UtcNow - File.GetLastWriteTimeUtc(f) < TimeSpan.FromHours(24)
-                    && InventoryOrder.Restore(File.ReadAllBytes(f)))
-                    RynthLog.Compat("ServerMessageStream: restored the server's item order saved before this engine loaded.");
+                // Only this client's own file: one written since this process started (an older one
+                // is a recycled process id's). The file is only written when an order changes, so its
+                // age says nothing else: the 24-hour limit this replaces refused a quiet client's file
+                // a day after its last move, and that client then had no order until it logged in again.
+                if (File.Exists(f))
+                {
+                    DateTime written = File.GetLastWriteTimeUtc(f);
+                    if (!InventoryOrder.SavedFileIsOurs(written, ProcessStartUtc()))
+                        RynthLog.Compat($"ServerMessageStream: item order file is older than this client ({written:yyyy-MM-dd HH:mm} UTC): not used. Pack orders are known again after the next login.");
+                    else if (InventoryOrder.Restore(File.ReadAllBytes(f)))
+                        RynthLog.Compat($"ServerMessageStream: restored the server's item order saved before this engine loaded (player 0x{InventoryOrder.Player:X8}).");
+                    else
+                        RynthLog.Compat("ServerMessageStream: item order file unreadable: not used. Pack orders are known again after the next login.");
+                }
+                else
+                    RynthLog.Compat("ServerMessageStream: no saved item order for this client (normal before its first login).");
                 _orderSavedVersion = InventoryOrder.Version;
                 return;
             }
@@ -143,6 +155,12 @@ internal static unsafe class ServerMessageStream
             RynthLog.Compat($"ServerMessageStream: item order file failed - {ex.GetType().Name}: {ex.Message}");
             _orderSavedVersion = InventoryOrder.Version;   // do not retry every pump
         }
+    }
+
+    private static DateTime? ProcessStartUtc()
+    {
+        try { using var me = System.Diagnostics.Process.GetCurrentProcess(); return me.StartTime.ToUniversalTime(); }
+        catch { return null; }
     }
 
     public static void Pump(bool pluginsWant)

@@ -77,6 +77,21 @@ internal static class InventoryOrder
     }
 
     /// <summary>
+    /// A hash of one list (FNV-1a over its ids), 0 when it isn't known: a cheap "did this list
+    /// change" for a view that is rebuilt only on change. Allocates nothing.
+    /// </summary>
+    public static uint ListHash(uint container, bool slotKind)
+    {
+        lock (Gate)
+        {
+            if (!Lists.TryGetValue((container, slotKind), out List<uint>? l)) return 0;
+            uint h = 2166136261u ^ (uint)l.Count;
+            foreach (uint id in l) h = (h ^ id) * 16777619u;
+            return h == 0 ? 1u : h;
+        }
+    }
+
+    /// <summary>
     /// One whole server message, starting at its opcode (the way ServerMessageStream delivers it).
     /// Anything else is ignored; a malformed one is dropped.
     /// </summary>
@@ -104,9 +119,16 @@ internal static class InventoryOrder
     // The login message is the only place the main pack's order arrives, and a hot reload of the engine
     // (every deploy, and any crash recovery) would lose it until the next login. So the lists are
     // saved as they change and read back when the engine starts. Layout: 'IORD', version u32, list count
-    // u32, then per list: container u32, slot-kind u8, count u32, ids u32 each.
+    // u32, then per list: container u32, slot-kind u8, count u32, ids u32 each; version 2 adds the
+    // player's id (u32) after the list count. The player matters after a restore: their lists are the
+    // ones never dropped for room (Evict), and a version 1 file didn't say who they were, so a hunt
+    // that opened 64 corpses after an engine reload pushed the main pack's lists out.
 
     private const uint Magic = 0x44524F49;   // "IORD"
+    private const uint FormatVersion = 2;
+
+    /// <summary>The character whose login list this is (0 before one was seen or restored).</summary>
+    public static uint Player { get { lock (Gate) return _player; } }
 
     public static byte[] Serialize()
     {
@@ -114,7 +136,7 @@ internal static class InventoryOrder
         {
             var ms = new System.IO.MemoryStream();
             var w = new System.IO.BinaryWriter(ms);
-            w.Write(Magic); w.Write(1u); w.Write((uint)Lists.Count);
+            w.Write(Magic); w.Write(FormatVersion); w.Write((uint)Lists.Count); w.Write(_player);
             foreach (KeyValuePair<(uint, bool), List<uint>> kv in Lists)
             {
                 w.Write(kv.Key.Item1); w.Write(kv.Key.Item2 ? (byte)1 : (byte)0); w.Write((uint)kv.Value.Count);
@@ -130,10 +152,19 @@ internal static class InventoryOrder
     {
         try
         {
-            if (data.Length < 12 || U32(data, 0) != Magic || U32(data, 4) != 1) return false;
+            if (data.Length < 12 || U32(data, 0) != Magic) return false;
+            uint format = U32(data, 4);
+            if (format is not (1 or 2)) return false;
             uint lists = U32(data, 8);
             if (lists > 4096) return false;
             int at = 12;
+            uint player = 0;
+            if (format >= 2)
+            {
+                if (data.Length < 16) return false;
+                player = U32(data, 12);
+                at = 16;
+            }
             var loaded = new Dictionary<(uint, bool), List<uint>>();
             for (uint i = 0; i < lists; i++)
             {
@@ -145,10 +176,12 @@ internal static class InventoryOrder
                 for (uint k = 0; k < n; k++) { l.Add(U32(data, at)); at += 4; }
                 loaded[(container, slot)] = l;
             }
+            if (player == 0) player = PlayerOf(loaded.Keys);
             lock (Gate)
             {
                 Lists.Clear();
                 Touched.Clear();
+                _player = player;
                 foreach (KeyValuePair<(uint, bool), List<uint>> kv in loaded) { Lists[kv.Key] = kv.Value; Touched[kv.Key.Item1] = ++_clock; }
                 Evict();
                 _version++;
@@ -156,6 +189,49 @@ internal static class InventoryOrder
             return true;
         }
         catch (ArgumentOutOfRangeException) { return false; }
+    }
+
+    /// <summary>
+    /// Puts <paramref name="items"/>[<paramref name="start"/>..] in <paramref name="column"/>'s
+    /// order (a pack-slot list: the pack column, top first) when it names every one of them; else
+    /// leaves them as they are and returns false (one the list lacks would land somewhere made up).
+    /// Entries of the list that aren't among them (foci, packs not read) don't matter. Pure.
+    /// </summary>
+    public static bool SortByColumn<T>(T[] items, int start, Func<T, uint> idOf, IReadOnlyList<uint> column)
+    {
+        if (start < 0 || start > items.Length) return false;
+        var rank = new Dictionary<uint, int>(column.Count);
+        for (int i = 0; i < column.Count; i++) rank.TryAdd(column[i], i);
+        for (int i = start; i < items.Length; i++)
+            if (!rank.ContainsKey(idOf(items[i]))) return false;
+        Array.Sort(items, start, items.Length - start, Comparer<T>.Create((a, b) => rank[idOf(a)].CompareTo(rank[idOf(b)])));
+        return true;
+    }
+
+    /// <summary>
+    /// A saved order file belongs to this client when it was written after the client's process
+    /// started (a minute's slack for clock rounding); an older one is a recycled process id's.
+    /// Its age says nothing else: it is only written when an order changes, so a quiet client's
+    /// file can be days old and still right. Unknown start time: trust it (the name has the pid).
+    /// </summary>
+    internal static bool SavedFileIsOurs(DateTime writtenUtc, DateTime? processStartUtc) =>
+        processStartUtc is not DateTime start || writtenUtc >= start - TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// The player in a version 1 file: the one container with a pack-slot list in the player id
+    /// range (ACE's player guids, 0x50000001-0x5FFFFFFF). Only the login list has that; an opened
+    /// side pack or corpse is an item id. 0 when none or several.
+    /// </summary>
+    internal static uint PlayerOf(IEnumerable<(uint Container, bool Slot)> keys)
+    {
+        uint found = 0;
+        foreach ((uint c, bool slot) in keys)
+        {
+            if (!slot || c < 0x50000000u || c > 0x5FFFFFFFu || c == found) continue;
+            if (found != 0) return 0;
+            found = c;
+        }
+        return found;
     }
 
     // ── ViewContents: container, count, count x (id, type) ──────────────────

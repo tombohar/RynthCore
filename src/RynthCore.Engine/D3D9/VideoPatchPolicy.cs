@@ -137,11 +137,15 @@ internal static class VideoPatchPolicy
             return VideoPatchMode.Off;
         }
 
-        /// <summary>Stores a character's mode; "all" is never stored, "off" removes the line.</summary>
+        /// <summary>
+        /// Stores a character's mode; "all" is never stored. A character's "off" is a line of its own
+        /// (2026-11-02): removing the line let the Default line ("Default=unfocused") come back on
+        /// the next login, so Off never stuck. Default's own "off" removes its line.
+        /// </summary>
         public bool Set(string key, VideoPatchMode mode)
         {
             if (!IsSaved(mode)) return false;
-            if (mode == VideoPatchMode.Off) Modes.Remove(key);
+            if (mode == VideoPatchMode.Off && key.Equals(DefaultCharacterKey, StringComparison.OrdinalIgnoreCase)) Modes.Remove(key);
             else Modes[key] = mode;
             return true;
         }
@@ -171,7 +175,8 @@ internal static class VideoPatchPolicy
             }
             if (TryParse(value, out VideoPatchMode mode) && IsSaved(mode))
             {
-                if (mode != VideoPatchMode.Off) model.Modes[key] = mode;
+                if (mode != VideoPatchMode.Off || !key.Equals(DefaultCharacterKey, StringComparison.OrdinalIgnoreCase))
+                    model.Modes[key] = mode;   // a character's "off" overrides the Default line
                 continue;
             }
             model.Other.Add(raw);

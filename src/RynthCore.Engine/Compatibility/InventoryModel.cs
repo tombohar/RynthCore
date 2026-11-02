@@ -513,7 +513,7 @@ internal static partial class InventoryModel
             _playerName = name ?? string.Empty;
         }
         sig = Mix(sig, (uint)burden, (uint)pyreals, (uint)capacity, (uint)(pyreals >> 32), (uint)_scratchItems.Count,
-            aetheria, (uint)_playerName.Length, (uint)containerSlots, 0);
+            aetheria, (uint)_playerName.Length, (uint)containerSlots, Net.InventoryOrder.ListHash(player, true));
 
         if (sig == _lastSignature && _current.PlayerId == player) return;
         _lastSignature = sig;
@@ -577,6 +577,10 @@ internal static partial class InventoryModel
             packs[p + 1].Used = CountTowardCapacity(packs[p + 1].Items);
             packs[p + 1].FillText = Fill(packs[p + 1].Used, cap);
         }
+        // The side packs in the pack column's order, top first (the server's pack-slot list, as retail's
+        // column and RynthSort's pack numbers have them), when that list names every one; else id order.
+        if (Net.InventoryOrder.TryGetOrder(player, true, out uint[] column))
+            Net.InventoryOrder.SortByColumn(packs, 1, static p => p.Id, column);
         view.Packs = packs;
         view.SlotItems = slotItems.ToArray();
         view.Worn = worn.ToArray();

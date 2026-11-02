@@ -8,7 +8,7 @@
 //                   (the subsystem toggles) with a live line
 //    Ranges         monster range, ring range, approach, follow/nav min
 //    Behavior       autostack, autocram, peace mode / rebuff when idle,
-//                   navigation first, looting first, rare corpses only,
+//                   navigate only, looting first, rare corpses only,
 //                   manage fellowship
 //    Magic and pets dispel items / self, M. charges when off, summon pets,
 //                   pet range, pet min monsters
@@ -50,7 +50,7 @@ internal sealed class ClassicMainTab : IClassicTab
 
     private static readonly (string Schema, string Label)[] BehaviorRight =
     {
-        ("Boost Nav Priority", "Navigation first"), ("Boost Loot Priority", "Looting first"),
+        ("Boost Nav Priority", "Navigate only (no hunting, no looting)"), ("Boost Loot Priority", "Looting first"),
         ("Loot Only Rare Corpses", "Rare corpses only"), ("Auto Fellowship Management", "Manage fellowship"),
     };
 

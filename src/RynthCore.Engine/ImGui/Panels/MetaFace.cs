@@ -288,7 +288,7 @@ internal sealed partial class MetaFace : IImGuiPanel
         Vector2 p = ImGuiNET.ImGui.GetCursorScreenPos();
         const float refreshW = 26;
         float saveAsW = BtnW("Save As", 60), indW = SaveIndicatorWidth();
-        float pickW = Math.Max(60, w - refreshW - saveAsW - indW - 12);
+        float pickW = Math.Max(60, w - refreshW * 2 - saveAsW - indW - 16);
         int picked = Picker("##file", _fileDisplay, _fileDisplays, MetaVocabulary.CurrentFileIndex(_data), p, pickW);
         if (picked >= 0 && picked < _data.Files.Count)
         {
@@ -301,6 +301,18 @@ internal sealed partial class MetaFace : IImGuiPanel
                 font: UiFont.Ui14))
             UiSources.Meta.RequestRefresh();
         ImGuiNET.ImGui.SetItemTooltip("Refresh file list");
+        x += refreshW + 4;
+        // Reload: read the loaded meta's file again (the same as picking it in the list), e.g. after
+        // a new build of it was copied in.
+        int cur = MetaVocabulary.CurrentFileIndex(_data);
+        string? reloadPath = cur >= 0 && cur < _data.Files.Count ? _data.Files[cur].Path : _data.CurrentMetaPath;
+        if (IconButton("##reload", PhosphorIcons.ArrowCounterClockwise, new Vector2(x, p.Y), new Vector2(refreshW, 22), TextDim, BtnFill, BtnBord,
+                font: UiFont.Ui14) && !string.IsNullOrEmpty(reloadPath))
+        {
+            FlushEdit();
+            MetaCommands.Simple("load_file", path: reloadPath);
+        }
+        ImGuiNET.ImGui.SetItemTooltip("Reload this meta from its file");
         x += refreshW + 4;
         bool noFile = string.IsNullOrEmpty(_data.CurrentMetaPath);
         if (Button("Save As##save_as", new Vector2(x, p.Y), new Vector2(saveAsW, 22), TextDim, noFile ? NewFill : BtnFill, noFile ? Green : BtnBord))
@@ -875,6 +887,9 @@ internal sealed partial class MetaFace : IImGuiPanel
     /// one more entry after the items ("+ New state..."): picking it returns items.Length. Returns the
     /// picked index or -1.
     /// </summary>
+    // Set when a picker's list is opened; the first frame of the list scrolls its chosen row to the top.
+    private bool _pickerScrollToSelected;
+
     private int Picker(string id, string shown, string[] items, int selected, Vector2 pos, float width, float height = 22,
         string? extra = null, string? badge = null)
     {
@@ -888,6 +903,7 @@ internal sealed partial class MetaFace : IImGuiPanel
             Vector2 display = ImGuiNET.ImGui.GetIO().DisplaySize;
             ImGuiNET.ImGui.SetNextWindowPos(new Vector2(Math.Clamp(pos.X, 0, Math.Max(0, display.X - listW)), pos.Y + height));
             ImGuiNET.ImGui.OpenPopup("##list");
+            _pickerScrollToSelected = true;
         }
         bool hot = ImGuiNET.ImGui.IsItemHovered();
         dl.AddRectFilled(pos, pos + new Vector2(width, height), hot ? Lighten(BtnFill) : BtnFill, 3);
@@ -931,6 +947,8 @@ internal sealed partial class MetaFace : IImGuiPanel
                 ImGuiNET.ImGui.PopID();
                 bool isExtra = i == items.Length;
                 bool sel = !isExtra && i == selected;
+                // The list opens with the chosen row at its top, not at the first row every time.
+                if (sel && _pickerScrollToSelected) ImGuiNET.ImGui.SetScrollHereY(0f);
                 pdl.AddRectFilled(ip, ip + new Vector2(iw, 20), sel ? PickSel : ih ? Lighten(BtnFill) : isExtra ? NewFill : BtnFill);
                 pdl.AddRect(ip, ip + new Vector2(iw, 20), isExtra ? Green : BtnBord);
                 pdl.AddText(ip + new Vector2(6, (20 - ImGuiNET.ImGui.GetFontSize()) * 0.5f), isExtra ? Green : sel ? Teal : TextDim,
@@ -942,6 +960,7 @@ internal sealed partial class MetaFace : IImGuiPanel
                 }
             }
             ImGuiNET.ImGui.EndPopup();
+            _pickerScrollToSelected = false;
         }
         ImGuiNET.ImGui.PopID();
         ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(pos.X, pos.Y + height));

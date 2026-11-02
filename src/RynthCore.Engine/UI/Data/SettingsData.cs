@@ -252,6 +252,7 @@ internal sealed class RynthAiSettings
     public bool BoostLootPriority { get; set; }
     public bool LootOnlyRareCorpses { get; set; }
     public bool LootJumpEnabled { get; set; }
+    public bool LootChestsMacroOff { get; set; } = true;   // Pickup with macro off; a RynthAi that doesn't send it leaves it on
     public int LootJumpHeight { get; set; } = 10;
     public int LootOwnership { get; set; }
     // Recover your own death corpse whole (default on), and travel back to it after a death
@@ -1237,7 +1238,8 @@ internal static class SettingsSchema
 
         new("Navigation", new[]
         {
-            Bool("Boost Nav Priority", s => s.BoostNavPriority, (s, v) => s.BoostNavPriority = v),
+            Bool("Boost Nav Priority", s => s.BoostNavPriority, (s, v) => s.BoostNavPriority = v,
+                "Navigate only: no hunting, no looting, no fighting back. With a route it walks it; without one it stands idle. Buffs and heals still run."),
             Float(NavPointReachLabel, s => s.FollowNavMin, (s, v) => s.FollowNavMin = v, 0.5f, 20f, 0.1f, NavPointReachTip),
             Spacer(),
             Section("Infinite Leaftide"),
@@ -1392,6 +1394,8 @@ internal static class SettingsSchema
             Bool("Loot Only Rare Corpses", s => s.LootOnlyRareCorpses, (s, v) => s.LootOnlyRareCorpses = v),
             Bool("Learn Unknown Spells", s => s.ReadUnknownScrolls, (s, v) => s.ReadUnknownScrolls = v,
                 "Loots scrolls of spells you don't know and can learn (magic school trained or\nspecialized, skill high enough), and reads them when it's safe. Scrolls already\nin your pack are read too. Needs Enable Looting for corpses."),
+            Bool("Pickup with macro off", s => s.LootChestsMacroOff, (s, v) => s.LootChestsMacroOff = v,
+                "A chest you open is looted by the loaded loot profile even with the macro or Looting off."),
             Bool("Stop Looting When Pack Full", s => s.StopLootingWhenPackFull, (s, v) => s.StopLootingWhenPackFull = v,
                 "Don't start on another corpse when no pack has a free slot (says so once in chat)."),
             Bool("Jump When Looting", s => s.LootJumpEnabled, (s, v) => s.LootJumpEnabled = v, gates: true),

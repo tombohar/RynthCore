@@ -163,6 +163,8 @@ internal static class EngineLifecycle
         // The ambient light floor's hook passes AC's own colour from here on (no floor).
         Step("AmbientLight.Uninstall", () => AmbientLight.Uninstall());
         Step("EndSceneHook.Uninstall", () => EndSceneHook.Uninstall());
+        // The font atlas baked before login, when no ImGui context took it (EngineFrameController).
+        Step("ImGui fonts without a context", () => ImGuiBackend.EngineFrameController.FreeFontsWithoutContext());
 
         // Give in-flight EndScene calls a chance to drain. AC's render thread
         // may still be inside our detour right now; sleeping a few frames is
@@ -241,6 +243,7 @@ internal static class EngineLifecycle
 
         Volatile.Write(ref _hasShutDown, 1);
         RynthLog.Info("EngineLifecycle: Shutdown complete.");
+        EntryPoint.CloseLogFile();   // the log's open handle (EntryPoint.AppendWithRetry)
     }
 
     private static void Step(string name, Action action)

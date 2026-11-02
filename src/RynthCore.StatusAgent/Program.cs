@@ -146,6 +146,10 @@ FileSystemWatcher? watcher = opts.Once ? null : TryArmStatusWatcher(cfg.StatusDi
 string _lastSummaryShape = "";
 long _lastSummaryMs = 0;
 const long SummaryEveryMs = 10 * 60_000;
+// aggregate.json is a debugging copy: at most every 5 s (2026-11-02). The cycle runs on every status
+// write (several a second), and Windows Defender scans each rewrite of the file.
+long _lastAggregateWriteMs = long.MinValue / 2;
+const long AggregateEveryMs = 5_000;
 
 try
 {
@@ -220,8 +224,9 @@ async Task RunCycleAsync()
     server?.UpdateLatest(bytes);
     server?.UpdateRaiseClients(clients);
 
-    if (cfg.WriteAggregateFile)
+    if (cfg.WriteAggregateFile && Environment.TickCount64 - _lastAggregateWriteMs >= AggregateEveryMs)
     {
+        _lastAggregateWriteMs = Environment.TickCount64;
         try
         {
             Directory.CreateDirectory(cfg.StatusDirectory);

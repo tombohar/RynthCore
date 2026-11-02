@@ -2706,6 +2706,7 @@ internal static partial class PluginManager
     private static void LoadPluginsFromDisk()
     {
         _loadGeneration++;
+        long loadT0 = System.Diagnostics.Stopwatch.GetTimestamp();
 
         // Plugin discovery is opt-in via the launcher UI: users add specific
         // DLL paths through "Add Plugin DLL", which the launcher persists to
@@ -2754,10 +2755,14 @@ internal static partial class PluginManager
         // a newer engine API or a missing plugin, and put required plugins first. Without
         // manifests the list loads exactly as before. Server plugins: the connect host picks this
         // server's (the others stay unloaded; their runtimes would only take address space).
+        long planT0 = System.Diagnostics.Stopwatch.GetTimestamp();
         PluginManifestGate.LoadPlan plan = PluginManifestGate.Plan(candidates, PluginContractVersion.Current, RawFileVersion,
             Compatibility.ServerInfo.LaunchHost, EngineSettings.LoadAllServerPlugins);
+        double planMs = System.Diagnostics.Stopwatch.GetElapsedTime(planT0).TotalMilliseconds;
         foreach (string line in plan.Log)
             RynthLog.Plugin($"PluginManager: {line}");
+        // A first open after an update waits for the antivirus scan of the file (PluginFilePrefetch).
+        RynthLog.Plugin($"PluginManager: {candidates.Count} manifest(s) read in {planMs:0} ms.");
         if (plan.SkippedForServer.Count > 0)
             RynthLog.Info($"PluginManager: {plan.SkippedForServer.Count} server plugin(s) for other servers not loaded (host {Compatibility.ServerInfo.HostDescription}).");
         RememberSkippedServerPlugins(plan.SkippedServerPlugins);
@@ -2777,8 +2782,10 @@ internal static partial class PluginManager
             // Address space before and after each load: a 32-bit client runs out on the largest
             // free block, and a reload stacks copies (Compatibility/AddressSpace.cs).
             RynthLog.Plugin($"PluginManager: Loading extra plugin: {dllPath} (va before: {Compatibility.AddressSpace.Describe()})");
+            long oneT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             var plugin = PluginLoader.LoadSingle(dllPath, _shadowRootDir, _loadGeneration);
-            RynthLog.Plugin($"PluginManager: loaded {Path.GetFileName(dllPath)}{(plugin == null ? " (FAILED)" : "")} (va after: {Compatibility.AddressSpace.Describe()})");
+            double oneMs = System.Diagnostics.Stopwatch.GetElapsedTime(oneT0).TotalMilliseconds;
+            RynthLog.Plugin($"PluginManager: loaded {Path.GetFileName(dllPath)}{(plugin == null ? " (FAILED)" : "")} in {oneMs:0} ms (va after: {Compatibility.AddressSpace.Describe()})");
             Compatibility.MemoryUse.Mark($"{Path.GetFileNameWithoutExtension(dllPath)} loaded");
             if (plugin != null)
             {
@@ -2791,7 +2798,7 @@ internal static partial class PluginManager
 
         // RenderAll / RenderOverlayAll iterate only this snapshot; without it they see no plugins.
         PublishPluginsRenderSnapshot();
-        RynthLog.Plugin($"PluginManager: render snapshot published ({_plugins.Count} plugin(s)).");
+        RynthLog.Plugin($"PluginManager: render snapshot published ({_plugins.Count} plugin(s)); the plugins loaded in {System.Diagnostics.Stopwatch.GetElapsedTime(loadT0).TotalMilliseconds:0} ms (manifests {planMs:0} ms).");
     }
 
     private static void TryAddCanonicalPath(HashSet<string> set, string path)
@@ -2909,6 +2916,7 @@ internal static partial class PluginManager
         plugin.NotStartedReason = "";
 
         LoadedPlugin? outer = EnterDispatch(plugin);
+        long initT0 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             int result = plugin.Init!(ref _api);
@@ -2918,7 +2926,7 @@ internal static partial class PluginManager
                 plugin.Failed = false;
                 plugin.UIInitializedDispatched = false;
                 plugin.LoginCompleteDispatched = false;
-                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} initialized OK (api v{PluginContractVersion.Current}).");
+                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} initialized OK (api v{PluginContractVersion.Current}) in {System.Diagnostics.Stopwatch.GetElapsedTime(initT0).TotalMilliseconds:0} ms.");
                 Compatibility.MemoryUse.Mark($"{plugin.DisplayName} Init");
             }
             else
@@ -3027,11 +3035,12 @@ internal static partial class PluginManager
                 continue;
 
             LoadedPlugin? outer = EnterDispatch(plugin);
+            long loginT0 = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
                 plugin.OnLoginComplete();
                 plugin.LoginCompleteDispatched = true;
-                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} received OnLoginComplete.");
+                RynthLog.Plugin($"PluginManager: {plugin.DisplayName} received OnLoginComplete ({System.Diagnostics.Stopwatch.GetElapsedTime(loginT0).TotalMilliseconds:0} ms).");
                 Compatibility.MemoryUse.Mark($"{plugin.DisplayName} OnLoginComplete");
             }
             catch (Exception ex)

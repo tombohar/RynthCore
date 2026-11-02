@@ -234,6 +234,30 @@ internal static class EngineFrameController
         }
     }
 
+    /// <summary>
+    /// Init worker, before the plugins load and before the EndScene hook can go in (2026-11-02):
+    /// starts the first atlas's bake (~2 s) for the game window's DPI scale, so it runs during the
+    /// world load rather than after login. Init's first part then finds it baking or baked; for a
+    /// different scale it bakes again (ImGuiFonts.StartInitialBake).
+    /// </summary>
+    internal static void StartEarlyFontBake()
+    {
+        float scale = UiScale.ForWindow(FindGameWindow());
+        if (ImGuiFonts.StartInitialBake(scale))
+            RynthLog.UI($"EngineFrameController: the font atlas bakes now, before login (scale {scale:0.##}).");
+    }
+
+    /// <summary>
+    /// Engine shutdown, after the EndScene hook is gone: frees an atlas baked before login for a
+    /// context that was never made (no login, or the hook never got that far). With a context,
+    /// <see cref="Shutdown"/> did it; a second call finds nothing to free.
+    /// </summary>
+    internal static void FreeFontsWithoutContext()
+    {
+        if (_context == IntPtr.Zero && !_imguiInitialized)
+            ImGuiFonts.Free();
+    }
+
     /// <summary>The new context's ini handling, flags, DPI scale and theme (Init's first part). Context current.</summary>
     private static void SetUpContext(ImGuiIOPtr io)
     {

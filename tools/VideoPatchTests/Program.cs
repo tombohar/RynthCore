@@ -173,13 +173,20 @@ internal static class Program
         Check(hand.ModeFor("X/Z") == VideoPatchMode.Off, "a hand-written 'all' loads as off (a start never hides AC's UI)");
     }
 
+    // 2026-11-02: Off chosen in Settings came back as "World when unfocused" on the next login: the
+    // character's line was removed and the Default line applied. A character's off is now kept.
     private static void OffRemovesTheLine()
     {
         Case("OffRemovesTheLine");
-        var m = VideoPatchPolicy.Parse(null);
+        var m = VideoPatchPolicy.Parse(new[] { "Default=unfocused" });
         m.Set("X/Y", VideoPatchMode.World);
         m.Set("X/Y", VideoPatchMode.Off);
-        Check(!VideoPatchPolicy.Serialize(m).Any(l => l.StartsWith("X/Y")), "off leaves no line");
+        Check(VideoPatchPolicy.Serialize(m).Contains("X/Y=off"), "a character's off is a line of its own");
+        var back = RoundTripModel(m);
+        Check(back.ModeFor("X/Y") == VideoPatchMode.Off, "and it wins over Default=unfocused after a reload");
+        Check(back.ModeFor("X/Q") == VideoPatchMode.Unfocused, "a character without a line still gets Default");
+        back.Set("Default", VideoPatchMode.Off);
+        Check(!VideoPatchPolicy.Serialize(back).Any(l => l.StartsWith("Default=")), "Default's off removes its line");
     }
 
     private static void DefaultLineAndUnknownLines()

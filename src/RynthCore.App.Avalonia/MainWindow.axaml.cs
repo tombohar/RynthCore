@@ -4089,6 +4089,31 @@ internal partial class MainWindow : Window
     // thread not draining the marshalled-action queue), and a stale heartbeat
     // file.
     private readonly Dictionary<int, DateTime> _wedgeZeroFpsSinceUtc = new();
+    // One open handle per client log for the wedge check's tail read (2026-11-02): reopening the
+    // log every poll made Windows Defender rescan the whole changed file on each open (300 ms at
+    // worst on an old PC). Reopened when the engine's startup rotation has moved the file: the open
+    // one (now .log.old) is shorter than the file on disk once that outgrows it, or far longer
+    // while the new one is small. Closed when the client goes.
+    private readonly Dictionary<int, FileStream> _wedgeLogStreams = new();
+
+    private FileStream WedgeLog(int pid, string path, long lengthOnDisk)
+    {
+        if (_wedgeLogStreams.TryGetValue(pid, out FileStream? open))
+        {
+            long held = open.Length;   // the engine may have written since lengthOnDisk was read
+            if (held >= lengthOnDisk && held - lengthOnDisk < 1_000_000) return open;
+            CloseWedgeLog(pid);
+        }
+        var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        _wedgeLogStreams[pid] = fs;
+        return fs;
+    }
+
+    private void CloseWedgeLog(int pid)
+    {
+        if (_wedgeLogStreams.Remove(pid, out FileStream? fs))
+            try { fs.Dispose(); } catch { }
+    }
     // PIDs held off for a full-memory dump, and since when (DumpInProgressRule.Decide caps the
     // hold at MaxHold). Kept while held or expired, dropped once no dump is in progress.
     private readonly Dictionary<int, DateTime> _dumpHoldSinceUtc = new();
@@ -4201,6 +4226,9 @@ internal partial class MainWindow : Window
         foreach (int stale in _wedgeZeroFpsSinceUtc.Keys.ToList())
             if (!targets.Any(p => { try { return p.Id == stale; } catch { return false; } }))
                 _wedgeZeroFpsSinceUtc.Remove(stale);
+        foreach (int gone in _wedgeLogStreams.Keys.ToList())
+            if (!targets.Any(p => { try { return p.Id == gone; } catch { return false; } }))
+                CloseWedgeLog(gone);
 
         foreach (Process process in targets)
         {
@@ -4238,7 +4266,7 @@ internal partial class MainWindow : Window
                 // as wedged too (same containment applies).
                 bool hbStale = (DateTime.Now - fi.LastWriteTime).TotalSeconds > 120;
 
-                using var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                FileStream fs = WedgeLog(pid, logPath, fi.Length);
                 // 16KB tail: enough to contain the every-30s combat-mode-stuck
                 // line for the item-lock detector, still cheap per poll.
                 long want = Math.Min(16384, fs.Length);
@@ -4283,7 +4311,7 @@ internal partial class MainWindow : Window
                     continue;
                 }
             }
-            catch { continue; }
+            catch { CloseWedgeLog(pid); continue; }
 
             // STRONGEST signal: the engine's own watchdog confirmed a permanent
             // main-thread wedge. Act immediately — it already held ~10s+ before
