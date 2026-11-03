@@ -136,6 +136,10 @@ internal static class MonsterHudSettingsUi
             "Icons under your mana bar for harmful spells on you (vulnerabilities, Imperil, Magic Yield, attribute and skill debuffs...), " +
             "the monster plates' icons: one per kind, a line that runs out with the spell, blinking in its last 5 seconds, \"+N\" when more than fit. " +
             "Only shows while you have one. Chat: /rv plates self debuffs.", sub: true);
+        changed |= Toggle("Grey out what debuffs take", ref MonsterHudSettings.SelfDebuffLoss,
+            "While a debuff lowers your maximum health, stamina or mana (Endurance or Self lowered, a spell on the vital itself), " +
+            "the bar keeps its full length and the part the debuff takes shows grey at its end, instead of the bar filling up " +
+            "to the lowered maximum. The numbers stay what the game says. Vitae isn't counted. Chat: /rv plates self lost.", sub: true);
         changed |= PercentSlider("Your debuff icon size", ref MonsterHudSettings.SelfDebuffIconSize,
             MonsterHudSettings.MinDebuffIconSize, MonsterHudSettings.MaxDebuffIconSize, w,
             "How big the icons under your bars are (100% = the default), apart from the monster plates' and from " +

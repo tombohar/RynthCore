@@ -117,7 +117,7 @@ internal static class ChatCommandReplies
     // ── the verbs ──────────────────────────────────────────────────────────
 
     public const string PlatesUsage =
-        "Usage: /rv plates [on|off] | all on|off | self [numbers|name|firstperson|lock|debuffs] [on|off] | " +
+        "Usage: /rv plates [on|off] | all on|off | self [numbers|name|firstperson|lock|debuffs|lost] [on|off] | " +
         "self fixed|follow|unlock|reset | self debuffs size <50-200%> | " +
         "debuffs [on|off] | debuffs size <50-200%> | others [on|off] | numbers [dealt|taken|heals|kills] [on|off] | " +
         "gains [xp|lum|radiance] [on|off] | npcs [on|off] | npcs dist <yd>|max <n> | players [on|off] | portals [on|off] | portals dist <yd> | " +

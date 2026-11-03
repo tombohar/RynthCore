@@ -1439,6 +1439,8 @@ internal static class RynthCoreChatCommands
                         }
                         else S.SelfDebuffs = Flag(subValue, S.SelfDebuffs);
                         break;
+                    // "Grey out what debuffs take" on your bars.
+                    case "lost": case "loss": case "grey": case "gray": S.SelfDebuffLoss = Flag(subValue, S.SelfDebuffLoss); break;
                     // Placement: fixed on screen (drag it while unlocked) or following the character.
                     case "fixed": case "screen": S.SelfPlacement = ImGuiBackend.Hud.SelfPlacement.Fixed; break;
                     case "follow": case "world": S.SelfPlacement = ImGuiBackend.Hud.SelfPlacement.Follow; break;

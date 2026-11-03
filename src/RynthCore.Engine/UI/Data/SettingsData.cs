@@ -253,6 +253,7 @@ internal sealed class RynthAiSettings
     public bool LootOnlyRareCorpses { get; set; }
     public bool LootJumpEnabled { get; set; }
     public bool LootChestsMacroOff { get; set; } = true;   // Pickup with macro off; a RynthAi that doesn't send it leaves it on
+    public bool LootChestsMacroOffLeaveOpen { get; set; }   // its "Leave the chest open", off by default
     public int LootJumpHeight { get; set; } = 10;
     public int LootOwnership { get; set; }
     // Recover your own death corpse whole (default on), and travel back to it after a death
@@ -636,6 +637,20 @@ internal static class SettingsSchema
         ImGuiBackend.Hud.MonsterHudSettings.Save();
     }
 
+    // "Grey out what debuffs take" (MonsterHudSettings.SelfDebuffLoss); saved at once.
+    private static bool SelfDebuffLoss()
+    {
+        if (!ImGuiBackend.Hud.MonsterHudSettings.Loaded) { ImGuiBackend.Hud.MonsterHudSettings.EnsureLoadQueued(); return true; }
+        return ImGuiBackend.Hud.MonsterHudSettings.SelfDebuffLoss;
+    }
+
+    private static void SetSelfDebuffLoss(bool on)
+    {
+        if (!ImGuiBackend.Hud.MonsterHudSettings.Loaded) { ImGuiBackend.Hud.MonsterHudSettings.EnsureLoadQueued(); return; }
+        ImGuiBackend.Hud.MonsterHudSettings.SelfDebuffLoss = on;
+        ImGuiBackend.Hud.MonsterHudSettings.Save();
+    }
+
     private static SettingRow TextSize(string label, string panelTitle) =>
         Combo("   " + label, PanelTextScale.SizeNames, _ => PanelTextScale.GetOwn(panelTitle), (_, v) => PanelTextScale.Set(panelTitle, v),
             "This panel's size: 100% = normal, 10% a step. Also: Ctrl+wheel over the panel.")
@@ -882,6 +897,11 @@ internal static class SettingsSchema
                 "drag it where you want it, then tick this again to lock it there. A plate that follows your character\n" +
                 "is fixed on screen when you untick this. Same as Vision > Nameplates > Your plate > Lock position.\n" +
                 "Also: /rv plates self lock on|off.",
+                when: _ => ImGuiBackend.Hud.HudFeed.VisionInstalled),
+            Bool("Grey out what debuffs take", _ => SelfDebuffLoss(), (_, v) => SetSelfDebuffLoss(v),
+                "On your RynthVision plate: while a debuff lowers your maximum health, stamina or mana, the bar keeps its full\n" +
+                "length and the part the debuff takes shows grey at its end, instead of the bar filling up to the lowered maximum.\n" +
+                "Same as Vision > Nameplates > Your plate > Grey out what debuffs take. Also: /rv plates self lost on|off.",
                 when: _ => ImGuiBackend.Hud.HudFeed.VisionInstalled),
             Note("To move it: untick, drag the plate itself (not where a panel covers it), then tick to lock it.",
                 when: _ => ImGuiBackend.Hud.HudFeed.VisionInstalled && ImGuiBackend.Hud.MonsterHudSettings.SelfPlate),
@@ -1239,7 +1259,7 @@ internal static class SettingsSchema
         new("Navigation", new[]
         {
             Bool("Boost Nav Priority", s => s.BoostNavPriority, (s, v) => s.BoostNavPriority = v,
-                "Navigate only: no hunting, no looting, no fighting back. With a route it walks it; without one it stands idle. Buffs and heals still run."),
+                "While a nav route runs, only navigate: no hunting, no looting, no fighting back. With no route, at the end of a Once route or in Outdoor Hunt it hunts and loots as usual. Buffs and heals still run."),
             Float(NavPointReachLabel, s => s.FollowNavMin, (s, v) => s.FollowNavMin = v, 0.5f, 20f, 0.1f, NavPointReachTip),
             Spacer(),
             Section("Infinite Leaftide"),
@@ -1395,7 +1415,11 @@ internal static class SettingsSchema
             Bool("Learn Unknown Spells", s => s.ReadUnknownScrolls, (s, v) => s.ReadUnknownScrolls = v,
                 "Loots scrolls of spells you don't know and can learn (magic school trained or\nspecialized, skill high enough), and reads them when it's safe. Scrolls already\nin your pack are read too. Needs Enable Looting for corpses."),
             Bool("Pickup with macro off", s => s.LootChestsMacroOff, (s, v) => s.LootChestsMacroOff = v,
-                "A chest you open is looted by the loaded loot profile even with the macro or Looting off."),
+                "A chest you open is looted by the loaded loot profile even with the macro or Looting off.", gates: true),
+            Bool("   Leave the chest open", s => s.LootChestsMacroOffLeaveOpen, (s, v) => s.LootChestsMacroOffLeaveOpen = v,
+                "When the pickup is done the chest stays open and chat says what was taken, so you can check it\n" +
+                "and take anything your profile missed. Untick it and RynthAi closes the chest when it's done\n" +
+                "(some chests lock again on close).", when: s => s.LootChestsMacroOff),
             Bool("Stop Looting When Pack Full", s => s.StopLootingWhenPackFull, (s, v) => s.StopLootingWhenPackFull = v,
                 "Don't start on another corpse when no pack has a free slot (says so once in chat)."),
             Bool("Jump When Looting", s => s.LootJumpEnabled, (s, v) => s.LootJumpEnabled = v, gates: true),

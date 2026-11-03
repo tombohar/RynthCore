@@ -108,6 +108,11 @@ internal static class MonsterHudSettings
     public static bool SelfNumberBand = true;
     /// <summary>"Debuffs on you": icons for harmful spells on you under your mana bar (only while you have one).</summary>
     public static bool SelfDebuffs = true;
+    /// <summary>
+    /// "Grey out what debuffs take" (2026-11-02): each bar spans your maximum without the harmful spells on you,
+    /// and what they take off it shows grey at the bar's end, instead of the bar filling up to the lowered maximum.
+    /// </summary>
+    public static bool SelfDebuffLoss = true;
 
     // Combat text (CombatText): floating numbers and the kill burst.
     public static bool Numbers = true;
@@ -258,6 +263,7 @@ internal static class MonsterHudSettings
                 case "selfTextOutline": SelfTextOutline = val == "1"; break;
                 case "selfNumberBand": SelfNumberBand = val == "1"; break;
                 case "selfDebuffs": SelfDebuffs = val == "1"; break;
+                case "selfDebuffLoss": SelfDebuffLoss = val == "1"; break;
                 case "numbers": Numbers = val == "1"; break;
                 case "numDealt": NumDealt = val == "1"; break;
                 case "numTaken": NumTaken = val == "1"; break;
@@ -375,6 +381,7 @@ internal static class MonsterHudSettings
         sw.WriteLine($"selfTextOutline={B(SelfTextOutline)}");
         sw.WriteLine($"selfNumberBand={B(SelfNumberBand)}");
         sw.WriteLine($"selfDebuffs={B(SelfDebuffs)}");
+        sw.WriteLine($"selfDebuffLoss={B(SelfDebuffLoss)}");
         sw.WriteLine($"numbers={B(Numbers)}");
         sw.WriteLine($"numDealt={B(NumDealt)}");
         sw.WriteLine($"numTaken={B(NumTaken)}");
@@ -417,7 +424,7 @@ internal static class MonsterHudSettings
         PortalNames = true; PortalMaxDistance = DefaultPortalDistance;
         SelfPlate = true; SelfNumbers = false; SelfName = false; SelfHideFirstPerson = true;
         SelfPlacement = SelfPlacement.Fixed; SelfLocked = true; SelfFixedX = DefaultSelfFixedX; SelfFixedY = DefaultSelfFixedY;
-        SelfBarTrack = true; SelfBarChip = true; SelfTextOutline = true; SelfNumberBand = true; SelfDebuffs = true;
+        SelfBarTrack = true; SelfBarChip = true; SelfTextOutline = true; SelfNumberBand = true; SelfDebuffs = true; SelfDebuffLoss = true;
         Numbers = true; NumDealt = true; NumTaken = true; NumHeals = true; NumKills = true;
         NumSize = 1.0f; NumTime = 1.0f; NumRestores = true; KeepOnScreen = true;
         GainSize = 1.0f; GainTime = 1.0f; SelfPosition = SelfPlatePosition.Above;
@@ -483,7 +490,7 @@ internal static class MonsterHudSettings
         $"portal names {OnOff(PortalNames)} ({PortalMaxDistance:0}yd); " +
         $"self {OnOff(SelfPlate)} ({(SelfPlacement == SelfPlacement.Fixed ? "fixed on screen, " + (SelfLocked ? "locked" : "unlocked") : "follows you, " + SelfPosition.ToString().ToLowerInvariant())}, " +
         $"numbers {OnOff(SelfNumbers)}, name {OnOff(SelfName)}, hide in first person {OnOff(SelfHideFirstPerson)}, " +
-        $"debuffs on you {OnOff(SelfDebuffs)}, track {OnOff(SelfBarTrack)}, damage trail {OnOff(SelfBarChip)}, " +
+        $"debuffs on you {OnOff(SelfDebuffs)}, debuff loss greyed {OnOff(SelfDebuffLoss)}, track {OnOff(SelfBarTrack)}, damage trail {OnOff(SelfBarChip)}, " +
         $"text outline {OnOff(SelfTextOutline)}, number band {OnOff(SelfNumberBand)}); " +
         $"combat text {OnOff(Numbers)} (dealt {OnOff(NumDealt)}, taken {OnOff(NumTaken)}, heals {OnOff(NumHeals)}, kills {OnOff(NumKills)}); " +
         $"gains {OnOff(Gains)} (xp {OnOff(GainXp)}, lum {OnOff(GainLum)}, radiance {OnOff(GainRadiance)}); " +

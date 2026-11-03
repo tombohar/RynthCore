@@ -50,7 +50,7 @@ internal sealed class ClassicMainTab : IClassicTab
 
     private static readonly (string Schema, string Label)[] BehaviorRight =
     {
-        ("Boost Nav Priority", "Navigate only (no hunting, no looting)"), ("Boost Loot Priority", "Looting first"),
+        ("Boost Nav Priority", "Route only (no fights on a route)"), ("Boost Loot Priority", "Looting first"),
         ("Loot Only Rare Corpses", "Rare corpses only"), ("Auto Fellowship Management", "Manage fellowship"),
     };
 

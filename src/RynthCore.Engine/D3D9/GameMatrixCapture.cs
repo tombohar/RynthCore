@@ -67,6 +67,8 @@ internal static unsafe class GameMatrixCapture
 
     // Diagnostics
     private static int _framesSinceLog;
+    // The last landblock-shift state logged (BuildViewProjFromCamera): logged only on a change.
+    private static (uint Viewer, uint Player, bool Shifted, string Guard) _lastShiftLogged;
     private static bool _loggedFirstCapture;
 
     public static bool HasCapturedFrame => _hasValidViewProj;
@@ -291,13 +293,23 @@ internal static unsafe class GameMatrixCapture
 
         // Log when a non-zero shift fires (camera crossed a landblock) or when
         // the guard blocked one. Helps catch "paintings move with camera"
-        // without spamming when player and viewer landblocks agree.
+        // without spamming when player and viewer landblocks agree. Only when the
+        // (viewer, player, shift/guard) state changes: while the camera sits in the
+        // next landblock every rebuild shifts, and RefreshView rebuilds many times a
+        // frame, so this line filled a whole 2,000-line problem-report log in 4 s
+        // (R-20261103-000159-a65e, 2026-11-02) and hid everything else.
         if (shiftApplied || guardBlocked)
         {
-            RynthLog.D3D9($"GameMatrixCapture: viewer lb=0x{viewerLbForLog:X4} player lb=0x{playerLbForLog:X4} " +
-                          $"d=({dXBlocks},{dYBlocks}) raw=({rawCx:F1},{rawCy:F1}) adj=({cx:F1},{cy:F1}) " +
-                          $"{(shiftApplied ? "SHIFTED" : "GUARD-BLOCKED " + guardReason)}");
+            var shiftState = (viewerLbForLog, playerLbForLog, shiftApplied, guardReason);
+            if (shiftState != _lastShiftLogged)
+            {
+                _lastShiftLogged = shiftState;
+                RynthLog.D3D9($"GameMatrixCapture: viewer lb=0x{viewerLbForLog:X4} player lb=0x{playerLbForLog:X4} " +
+                              $"d=({dXBlocks},{dYBlocks}) raw=({rawCx:F1},{rawCy:F1}) adj=({cx:F1},{cy:F1}) " +
+                              $"{(shiftApplied ? "SHIFTED" : "GUARD-BLOCKED " + guardReason)} (logged again only when this changes)");
+            }
         }
+        else _lastShiftLogged = default;
 
         // View matrix rotation block (D3D Y-up, with AC Y/Z swap).
         // AC camera rows: row1=Right, row2=Forward, row3=Up

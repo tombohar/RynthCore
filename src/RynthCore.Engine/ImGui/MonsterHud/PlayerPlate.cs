@@ -48,6 +48,12 @@
 //  area cover the row at any size, and an enlarged row wider than the bars
 //  (IconsOver) too.
 //
+//  "Grey out what debuffs take" (2026-11-02, setting, on by default): while a
+//  harmful spell lowers a maximum, the bar spans the maximum without it
+//  (VitalLoss.FullMax, worked back from the shown one with the same snapshot's
+//  StatMods) and the part it takes is grey at the bar's end, instead of the bar
+//  filling up to the lowered maximum. The numbers stay AC's.
+//
 //  Render thread only. Engine-owned statics.
 // ============================================================================
 
@@ -73,6 +79,8 @@ internal static class PlayerPlate
     private struct BarState
     {
         public float Shown, Trail;
+        // Where the debuffed maximum ends on a bar that spans the full one (1 = nothing lost); eased.
+        public float Cap;
         public long Hold;
         public bool Init;
         public uint Cur, Max;
@@ -95,6 +103,8 @@ internal static class PlayerPlate
     private static int _overflowKey = -1;
     private static string _overflowText = "";
     private static readonly HarmfulSpellLookup Harmful = LookupHarmful;
+    // "Grey out what debuffs take": the buff/debuff totals per vital (health, stamina, mana) from the same read.
+    private static readonly VitalMods[] _vitalMods = { VitalMods.None, VitalMods.None, VitalMods.None };
 
     // Fixed mode: dragging (unlocked only).
     private static bool _hover, _dragging, _wantsMouse;
@@ -120,6 +130,7 @@ internal static class PlayerPlate
         _alpha = 0f;
         _iconCount = 0;
         _nextDebuffRead = 0;
+        for (int i = 0; i < _vitalMods.Length; i++) _vitalMods[i] = VitalMods.None;
         HeadOnScreen = false;
         FirstPerson = false;
         DropDrag();
@@ -299,24 +310,35 @@ internal static class PlayerPlate
         if (!show) { if (_alpha < 0.02f) _alpha = 0f; return false; }
         if (_alpha < 0.01f) return false;
 
+        RefreshDebuffs(f.Now);
         PlayerVitalsHooks.TryGetSnapshot(out PlayerVitalsSnapshot v);
         float kBar = 1f - MathF.Exp(-f.Dt * 14f);
-        Step(ref _hp, v.Health, v.MaxHealth, f.Now, kBar, f.Dt);
-        Step(ref _st, v.Stamina, v.MaxStamina, f.Now, kBar, f.Dt);
-        Step(ref _mn, v.Mana, v.MaxMana, f.Now, kBar, f.Dt);
-        RefreshDebuffs(f.Now);
+        bool loss = MonsterHudSettings.SelfDebuffLoss;
+        // The full maximums each frame from the latest totals, so a debuff's lowered maximum (which AC
+        // sends at once) and its totals (read 4x a second) only disagree until the next read.
+        Step(ref _hp, v.Health, v.MaxHealth, loss ? VitalLoss.FullMax(v.MaxHealth, in _vitalMods[VitalLoss.Health]) : v.MaxHealth, f.Now, kBar, f.Dt);
+        Step(ref _st, v.Stamina, v.MaxStamina, loss ? VitalLoss.FullMax(v.MaxStamina, in _vitalMods[VitalLoss.Stamina]) : v.MaxStamina, f.Now, kBar, f.Dt);
+        Step(ref _mn, v.Mana, v.MaxMana, loss ? VitalLoss.FullMax(v.MaxMana, in _vitalMods[VitalLoss.Mana]) : v.MaxMana, f.Now, kBar, f.Dt);
         return true;
     }
 
-    /// <summary>"Debuffs on you": the snapshot read and the icons picked, four times a second. Render thread.</summary>
+    /// <summary>
+    /// "Debuffs on you" and "Grey out what debuffs take": the snapshot read, the icons picked and the
+    /// vitals' totals summed, four times a second. Render thread.
+    /// </summary>
     private static void RefreshDebuffs(long nowTicks)
     {
-        if (!MonsterHudSettings.SelfDebuffs) { _iconCount = 0; return; }
+        bool icons = MonsterHudSettings.SelfDebuffs, loss = MonsterHudSettings.SelfDebuffLoss;
+        if (!icons) _iconCount = 0;
+        if (!loss) for (int i = 0; i < _vitalMods.Length; i++) _vitalMods[i] = VitalMods.None;
+        if (!icons && !loss) return;
         long ms = Environment.TickCount64;
         if (ms < _nextDebuffRead) return;
         _nextDebuffRead = ms + DebuffReadMs;
-        if (!PortalSpellTable.Ready) { _iconCount = 0; return; }   // MonsterHud.Update queued the load
         int n = EnchantmentHooks.CopyPlayerStatMods(_eIds, _eExp, _eTypes, _eKeys, _eVals, _eCats);
+        if (loss) VitalLoss.Collect(_eIds, _eTypes, _eKeys, _eVals, _eCats, n, _vitalMods);
+        if (!icons) return;
+        if (!PortalSpellTable.Ready) { _iconCount = 0; return; }   // MonsterHud.Update queued the load
         _iconCount = n > 0
             ? SelfDebuffs.Select(_eIds, _eExp, _eCats, n, TimeSyncHooks.GetCurrentServerTime(), nowTicks, Stopwatch.Frequency, Harmful, _icons)
             : 0;
@@ -422,17 +444,26 @@ internal static class PlayerPlate
         return dx * dx + dy * dy + dz * dz < FirstPersonDistance * FirstPersonDistance;
     }
 
-    private static void Step(ref BarState b, uint cur, uint max, long now, float kBar, float dt)
+    /// <summary>
+    /// One bar's step: <paramref name="max"/> is AC's (debuffed) maximum, <paramref name="full"/> the one
+    /// without debuffs that the bar spans (= max when nothing is lost or the option is off).
+    /// </summary>
+    private static void Step(ref BarState b, uint cur, uint max, uint full, long now, float kBar, float dt)
     {
-        float ratio = max > 0 ? Math.Clamp((float)cur / max, 0f, 1f) : 0f;
+        if (full < max) full = max;
+        float ratio = full > 0 ? Math.Clamp((float)cur / full, 0f, 1f) : 0f;
+        float cap = full > 0 ? Math.Clamp((float)max / full, 0f, 1f) : 1f;
         b.Cur = cur; b.Max = max;
         if (!b.Init || _alpha <= 0.02f)
         {
             b.Shown = b.Trail = ratio;
+            b.Cap = cap;
             b.Hold = 0;
             b.Init = true;
             return;
         }
+        b.Cap += (cap - b.Cap) * kBar;
+        if (MathF.Abs(cap - b.Cap) < 0.0005f) b.Cap = cap;
         MonsterHud.StepBar(ref b.Shown, ref b.Trail, ref b.Hold, ratio, now, kBar, dt);
     }
 
@@ -442,7 +473,7 @@ internal static class PlayerPlate
         ImFontPtr font = l.Small;
         var b0 = new Vector2(left, top);
         var b1 = new Vector2(left + w, top + h);
-        MonsterHud.PaintBar(dl, b0, b1, l.M.Round, a, b.Shown, b.Trail, col, ticks: false, track: l.Track, chip: l.Chip);
+        MonsterHud.PaintBar(dl, b0, b1, l.M.Round, a, b.Shown, b.Trail, col, ticks: false, track: l.Track, chip: l.Chip, cap: b.Cap);
         if (!l.Numbers || h < 8f || b.Max == 0) return;
         long key = ((long)b.Max << 32) | b.Cur;
         string? text = b.Text;

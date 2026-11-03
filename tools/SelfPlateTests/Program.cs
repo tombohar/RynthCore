@@ -48,6 +48,13 @@ namespace SelfPlateTests
             MeasuredHeightIncludesTheScaledRow();
             ClampKeepsTheRowOnScreen();
 
+            NoDebuffsNoLoss();
+            AttributeDebuffs();
+            VitalDebuffs();
+            MixedBuffsAndDebuffs();
+            StrongestOfACategory();
+            SkippedEntries();
+
             Console.WriteLine();
             Console.WriteLine($"{_checks - _failed}/{_checks} checks passed.");
             Console.WriteLine(_failed == 0 ? "ALL SELF PLATE TESTS PASSED." : $"{_failed} FAILED.");
@@ -63,6 +70,7 @@ namespace SelfPlateTests
             ("selfTextOutline", () => S.SelfTextOutline, v => S.SelfTextOutline = v),
             ("selfNumberBand", () => S.SelfNumberBand, v => S.SelfNumberBand = v),
             ("selfDebuffs", () => S.SelfDebuffs, v => S.SelfDebuffs = v),
+            ("selfDebuffLoss", () => S.SelfDebuffLoss, v => S.SelfDebuffLoss = v),
         };
 
         private static string[] Written()
@@ -87,7 +95,7 @@ namespace SelfPlateTests
             S.ResetToDefaults();
             S.SelfNumbers = true; S.Scale = 1.4f; S.SelfPlacement = SelfPlacement.Follow; S.SelfLocked = false;
             string[] old = Written().Where(l => !Toggles.Any(t => l.StartsWith(t.Key + "=", StringComparison.Ordinal))).ToArray();
-            Check(old.Length == Written().Length - Toggles.Length, "the old file lacks exactly the five keys");
+            Check(old.Length == Written().Length - Toggles.Length, "the old file lacks exactly the new keys");
             S.ResetToDefaults();
             S.ApplyLines(old);
             foreach (var t in Toggles) Check(t.Get(), $"{t.Key} on after loading the old file");
@@ -485,6 +493,95 @@ namespace SelfPlateTests
             SelfPlateMetrics def = SelfPlateMetrics.Measure(1f, false, 1f, 1f, 0f, true, 100);
             Check(big.ClampTop(9999f, h) == h - 4f - big.BlockH - big.IconsH && big.ClampTop(9999f, h) < def.ClampTop(9999f, h),
                 "at the bottom edge a bigger row lifts the bars by exactly its extra height");
+        }
+
+        // ── "Grey out what debuffs take" (VitalLoss) ───────────────────────
+
+        private const uint AttrAdd = VitalLoss.ModAttribute | VitalLoss.ModAdditive;
+        private const uint VitalAdd = VitalLoss.ModSecondAttribute | VitalLoss.ModAdditive;
+        private const uint VitalMult = VitalLoss.ModSecondAttribute | VitalLoss.ModMultiplicative;
+
+        /// <summary>The three vitals' totals for (spell id, type, key, value, category) entries.</summary>
+        private static VitalMods[] Mods(params (uint Id, uint Type, uint Key, float Val, uint Cat)[] e)
+        {
+            var mods = new VitalMods[3];
+            VitalLoss.Collect(e.Select(x => x.Id).ToArray(), e.Select(x => x.Type).ToArray(), e.Select(x => x.Key).ToArray(),
+                e.Select(x => x.Val).ToArray(), e.Select(x => x.Cat).ToArray(), e.Length, mods);
+            return mods;
+        }
+
+        private static void NoDebuffsNoLoss()
+        {
+            Case("no enchantments, or buffs only: the full maximum is the shown one");
+            VitalMods[] none = Mods();
+            Check(VitalLoss.FullMax(400, none[0]) == 400 && VitalLoss.FullMax(300, none[1]) == 300 && VitalLoss.FullMax(250, none[2]) == 250,
+                "nothing on you: the shown maximums");
+            VitalMods[] buffs = Mods((1, AttrAdd, VitalLoss.Endurance, 50f, 10), (2, AttrAdd, VitalLoss.Self, 40f, 11),
+                (3, VitalMult, 1, 1.1f, 12), (4, VitalAdd, 3, 20f, 13));
+            Check(!buffs[0].AnyDebuff && !buffs[1].AnyDebuff && !buffs[2].AnyDebuff, "buffs aren't debuffs");
+            Check(VitalLoss.FullMax(480, buffs[0]) == 480 && VitalLoss.FullMax(370, buffs[1]) == 370 && VitalLoss.FullMax(290, buffs[2]) == 290,
+                "buffed maximums stay as shown");
+            Check(VitalLoss.FullMax(0, Mods((1, AttrAdd, VitalLoss.Endurance, -50f, 10))[0]) == 0, "a maximum of 0 (not read yet) stays 0");
+        }
+
+        private static void AttributeDebuffs()
+        {
+            Case("Endurance lowered: health gets back half, stamina all; Self lowered: mana");
+            VitalMods[] end = Mods((7, AttrAdd, VitalLoss.Endurance, -50f, 20));
+            Check(VitalLoss.FullMax(400, end[0]) == 425, "health 400 with Endurance -50 is 425 in full");
+            Check(VitalLoss.FullMax(300, end[1]) == 350, "stamina 300 with Endurance -50 is 350 in full");
+            Check(VitalLoss.FullMax(250, end[2]) == 250 && !end[2].AnyDebuff, "mana untouched by Endurance");
+            VitalMods[] self = Mods((8, AttrAdd, VitalLoss.Self, -40f, 21));
+            Check(VitalLoss.FullMax(250, self[2]) == 290 && !self[0].AnyDebuff && !self[1].AnyDebuff, "Self -40: mana 250 is 290, the others untouched");
+            VitalMods[] str = Mods((9, AttrAdd, 1, -40f, 22), (10, AttrAdd, 3, -40f, 23));
+            Check(!str[0].AnyDebuff && !str[1].AnyDebuff && !str[2].AnyDebuff, "Strength and Quickness debuffs take no vital");
+        }
+
+        private static void VitalDebuffs()
+        {
+            Case("a spell on the vital itself: a multiplier below 1 or an additive below 0");
+            Check(VitalLoss.FullMax(320, Mods((11, VitalMult, 1, 0.8f, 30))[0]) == 400, "health x0.8: 320 is 400 in full");
+            Check(VitalLoss.FullMax(270, Mods((12, VitalAdd, 3, -30f, 31))[1]) == 300, "stamina -30: 270 is 300 in full");
+            Check(VitalLoss.FullMax(200, Mods((13, VitalMult, 5, 0.5f, 32))[2]) == 400, "mana x0.5: 200 is 400 in full");
+            Check(VitalLoss.FullMax(320, Mods((14, VitalMult, 2, 0.8f, 33))[0]) == 400, "the current-health key counts for health too");
+            Check(VitalLoss.FullMax(100, Mods((15, VitalMult, 1, 0.001f, 34))[0]) <= 1000, "an absurd multiplier is held to 10x");
+        }
+
+        private static void MixedBuffsAndDebuffs()
+        {
+            Case("buffs and debuffs together: the buffs stay, only the debuffs come off");
+            // Attribute part 400 (Endurance -50 took 25 of it), x0.75 debuff, +20 buff: AC shows (375 x 0.75) + 20 = 301.
+            VitalMods[] m = Mods((16, AttrAdd, VitalLoss.Endurance, -50f, 40), (17, VitalMult, 1, 0.75f, 41), (18, VitalAdd, 1, 20f, 42));
+            Check(VitalLoss.FullMax(301, m[0]) == 420, $"health 301 is 420 in full (400 + 20), got {VitalLoss.FullMax(301, m[0])}");
+            // x1.2 buff, Endurance -50: AC shows 375 x 1.2 = 450; in full 400 x 1.2 = 480.
+            VitalMods[] b = Mods((19, AttrAdd, VitalLoss.Endurance, -50f, 40), (20, VitalMult, 1, 1.2f, 43));
+            Check(VitalLoss.FullMax(450, b[0]) == 480, $"health 450 under a x1.2 buff is 480 in full, got {VitalLoss.FullMax(450, b[0])}");
+            Check(VitalLoss.FullMax(450, b[0]) >= 450 && VitalLoss.FullMax(1, b[0]) >= 1, "never below the shown maximum");
+        }
+
+        private static void StrongestOfACategory()
+        {
+            Case("one spell category counts once (its strongest); category 0 entries each count");
+            VitalMods[] same = Mods((21, AttrAdd, VitalLoss.Endurance, -30f, 50), (22, AttrAdd, VitalLoss.Endurance, -50f, 50));
+            Check(VitalLoss.FullMax(300, same[1]) == 350, "Endurance -30 and -50 of one category: only -50");
+            VitalMods[] tie = Mods((23, AttrAdd, VitalLoss.Endurance, -50f, 50), (24, AttrAdd, VitalLoss.Endurance, -50f, 50));
+            Check(VitalLoss.FullMax(300, tie[1]) == 350, "two equal ones of a category count once");
+            VitalMods[] two = Mods((25, AttrAdd, VitalLoss.Endurance, -30f, 50), (26, AttrAdd, VitalLoss.Endurance, -20f, 51));
+            Check(VitalLoss.FullMax(300, two[1]) == 350, "two categories add up (-30 and -20)");
+            VitalMods[] zero = Mods((27, AttrAdd, VitalLoss.Endurance, -30f, 0), (28, AttrAdd, VitalLoss.Endurance, -20f, 0));
+            Check(VitalLoss.FullMax(300, zero[1]) == 350, "category 0 entries each count");
+        }
+
+        private static void SkippedEntries()
+        {
+            Case("vitae, cooldowns, zero ids, skills, NaN and short arrays are left out");
+            VitalMods[] m = Mods((29, VitalMult | VitalLoss.ModVitae, 1, 0.9f, 60), (0x8001, AttrAdd, VitalLoss.Endurance, -50f, 61),
+                (0, AttrAdd, VitalLoss.Endurance, -50f, 62), (30, 0x10 | VitalLoss.ModAdditive, 2, -50f, 63),
+                (31, AttrAdd, VitalLoss.Endurance, float.NaN, 64), (32, VitalLoss.ModSecondAttribute, 1, -50f, 65));
+            Check(!m[0].AnyDebuff && !m[1].AnyDebuff && !m[2].AnyDebuff, "none of them is a debuff here");
+            var mods = new VitalMods[3];
+            VitalLoss.Collect(new uint[] { 33 }, new uint[] { AttrAdd }, new uint[0], new float[] { -50f }, new uint[] { 70 }, 5, mods);
+            Check(!mods[1].AnyDebuff, "a short array is cut to its length (nothing read past it)");
         }
 
         // ── harness ─────────────────────────────────────────────────────────
