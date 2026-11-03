@@ -101,6 +101,7 @@ internal sealed class RynthAiSettings
     public bool UseKitsInMagicMode { get; set; } = true;
     public bool PeaceModeForKits { get; set; }
     public int KitMinSuccessPct { get; set; } = 70;
+    public int StaminaKitMinSuccessPct { get; set; } = 70;   // a RynthAi that doesn't send it: 70
     public int EmergencyHealAt { get; set; } = 30;
     public int StaminaToHealthAt { get; set; } = 30;
     public int StaminaToHealthMinStamina { get; set; } = 20;
@@ -1061,7 +1062,9 @@ internal static class SettingsSchema
             Int("Stamina To Health Min Stamina", s => s.StaminaToHealthMinStamina, (s, v) => s.StaminaToHealthMinStamina = v, 0, 100, 1,
                 "Cast Stamina to Health only while stamina is over this %, so it doesn't\ndrain you to nothing. Starts at 20."),
             Int("Kit Min Success %", s => s.KitMinSuccessPct, (s, v) => s.KitMinSuccessPct = v, 0, 100, 1,
-                "Use a healing or stamina kit only when its chance to work is at least this %,\nworked out like the server does: Healing skill + the kit's bonus vs. what's missing.\nBelow it, the spell is cast instead. 0 = always use kits. Starts at 70."),
+                "Use a healing kit only when its chance to work is at least this %,\nworked out like the server does: Healing skill + the kit's bonus vs. what's missing.\nBelow it, the spell is cast instead. 0 = always use kits. Starts at 70."),
+            Int("Stamina Kit Min Success %", s => s.StaminaKitMinSuccessPct, (s, v) => s.StaminaKitMinSuccessPct = v, 0, 100, 1,
+                "The same for stamina kits: use one only when its chance to work is at least this %\n(Healing skill + the kit's bonus vs. the stamina missing). Below it Revitalize Self\nor a stamina potion goes instead. 0 = always use stamina kits. Starts at 70."),
             Spacer(),
             Section("Safety Stops"),
             Bool("Stop Macro On Death", s => s.StopMacroOnDeath, (s, v) => s.StopMacroOnDeath = v,
