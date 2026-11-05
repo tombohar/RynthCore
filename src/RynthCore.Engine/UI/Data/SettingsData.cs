@@ -39,6 +39,8 @@ internal sealed class RynthAiSettings
     public int TargetFPSFocused { get; set; } = 60;
     public int TargetFPSBackground { get; set; } = 30;
     public bool EnableAutocram { get; set; }
+    /// <summary>RynthSort's auto-sort is on (RynthAi sends it; never saved): Auto Cram is greyed out and off.</summary>
+    public bool AutoSortOn { get; set; }
     public bool PeaceModeWhenIdle { get; set; }
     // RynthAi's Weapons Back After Heals. Nullable: an older RynthAi doesn't send it, and the
     // engine then sends none back (a false would turn it off).
@@ -51,7 +53,7 @@ internal sealed class RynthAiSettings
     // Decal bridge: stop RynthAi's macro when VTank's starts (one bot per client). Default on;
     // an older RynthAi doesn't send it, and a missing field must not read as "off".
     public bool YieldToVTank { get; set; } = true;
-    public bool EnableRaycasting { get; set; }
+    public bool EnableRaycasting { get; set; } = true;   // RynthAi's own default (2026-11-05)
     public bool UseArcs { get; set; }
     public float BowArcVelocity { get; set; } = 25f;
     public float MissileArcClearance { get; set; } = 0.5f;
@@ -305,7 +307,20 @@ internal sealed class RynthAiSettings
     public bool? MChargesWhenOff { get; set; }
     public int? CustomPetRange { get; set; }
 
-    public RynthAiSettings Clone() => (RynthAiSettings)MemberwiseClone();
+    /// <summary>
+    /// The snapshot this copy was cloned from (null on a snapshot itself). <see cref="SettingsCommands.Save"/>
+    /// sends only the fields that differ from it, so a face holding an old or default copy can change
+    /// nothing but what the player just edited (2026-11-05: after a hot reload the dashboard held
+    /// RynthAi's built-in defaults, and one click wrote them all over the character's profile).
+    /// </summary>
+    [JsonIgnore] public RynthAiSettings? Base { get; private set; }
+
+    public RynthAiSettings Clone()
+    {
+        var copy = (RynthAiSettings)MemberwiseClone();
+        copy.Base = Base ?? this;
+        return copy;
+    }
 }
 
 [JsonSerializable(typeof(RynthAiSettings))]
@@ -327,7 +342,14 @@ internal sealed unsafe class SettingsSource : UiSource<RynthAiSettings>
         if (_getSettingsJson == null) return;
         IntPtr ptr = _getSettingsJson();
         string? json = ptr == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(ptr);
-        if (string.IsNullOrEmpty(json) || json == _lastJson) return;
+        if (string.IsNullOrEmpty(json) || json == "{}")
+        {
+            // RynthAi hasn't loaded the character's profile (it answers nothing until then): drop any
+            // copy held from before, so no face shows or saves values that aren't the character's.
+            if (_lastJson != null) { _lastJson = null; ClearSnapshot(); }
+            return;
+        }
+        if (json == _lastJson) return;
         _lastJson = json;
         RynthAiSettings? parsed = JsonSerializer.Deserialize(json, RynthAiSettingsJsonContext.Default.RynthAiSettings);
         if (parsed != null) Publish(parsed);
@@ -352,6 +374,32 @@ internal static unsafe class SettingsCommands
     }
 
     /// <summary>
+    /// The fields of <paramref name="settings"/> that differ from the snapshot it was cloned from, as a
+    /// JSON object (RynthAi lays sent fields over its own and keeps the rest). Null when nothing differs,
+    /// or when the copy has no snapshot behind it (it was never filled from RynthAi: never sent whole).
+    /// </summary>
+    internal static string? ChangedFieldsJson(RynthAiSettings settings)
+    {
+        RynthAiSettings? baseline = settings.Base;
+        if (baseline == null)
+        {
+            RynthLog.Compat("SettingsCommands: a settings save with no RynthAi snapshot behind it was not sent.");
+            return null;
+        }
+        var now = JsonSerializer.SerializeToNode(settings, RynthAiSettingsJsonContext.Default.RynthAiSettings)?.AsObject();
+        var before = JsonSerializer.SerializeToNode(baseline, RynthAiSettingsJsonContext.Default.RynthAiSettings)?.AsObject();
+        if (now == null || before == null) return null;
+        var changed = new System.Text.Json.Nodes.JsonObject();
+        foreach (var (name, value) in now)
+        {
+            string a = value?.ToJsonString() ?? "null";
+            string b = before.TryGetPropertyValue(name, out var old) ? old?.ToJsonString() ?? "null" : "\u0000";
+            if (a != b) changed[name] = value?.DeepClone();
+        }
+        return changed.Count == 0 ? null : changed.ToJsonString();
+    }
+
+    /// <summary>
     /// <paramref name="settings"/> must be a copy the caller no longer changes
     /// (it is serialized later, on the pump thread). Any thread.
     /// </summary>
@@ -362,7 +410,8 @@ internal static unsafe class SettingsCommands
             if (_setSettingsJson == null)
                 _setSettingsJson = (delegate* unmanaged[Cdecl]<IntPtr, void>)PluginExportBinder.Resolve("RynthAi", "RynthPluginSetSettingsJson");
             if (_setSettingsJson == null) return;
-            string json = JsonSerializer.Serialize(settings, RynthAiSettingsJsonContext.Default.RynthAiSettings);
+            string? json = ChangedFieldsJson(settings);
+            if (json == null) return;   // nothing changed, or a copy with no snapshot behind it
             IntPtr ansi = Marshal.StringToHGlobalAnsi(json);
             try { _setSettingsJson(ansi); }
             finally { Marshal.FreeHGlobal(ansi); }
@@ -501,8 +550,13 @@ internal sealed record SettingRow(
     Func<string[]>? ItemsNow = null,
     // Button rows that can't be undone: the question a click asks first (asked when it opens);
     // Click/Edit run only when the player confirms.
-    Func<string>? Confirm = null)
+    Func<string>? Confirm = null,
+    // Bool rows: greyed out, shown off and not clickable while this holds; DisabledTip says why.
+    Func<RynthAiSettings, bool>? DisabledWhen = null,
+    string? DisabledTip = null)
 {
+    public bool IsDisabled(RynthAiSettings s) => DisabledWhen != null && DisabledWhen(s);
+
     public bool IsVisible(RynthAiSettings s) => VisibleWhen == null || VisibleWhen(s);
 
     /// <summary>A Combo row's list now: ItemsNow's when it has one, else Items.</summary>
@@ -585,8 +639,13 @@ internal static class SettingsSchema
     }
 
     private static SettingRow Bool(string label, Func<RynthAiSettings, bool> get, Action<RynthAiSettings, bool> set,
-        string? tip = null, Func<RynthAiSettings, bool>? when = null, bool gates = false) =>
-        new(SettingKind.Bool, label, tip, s => get(s) ? 1 : 0, (s, v) => set(s, v != 0), VisibleWhen: when, Gates: gates);
+        string? tip = null, Func<RynthAiSettings, bool>? when = null, bool gates = false,
+        Func<RynthAiSettings, bool>? disabledWhen = null, string? disabledTip = null) =>
+        new(SettingKind.Bool, label, tip, s => get(s) ? 1 : 0, (s, v) => set(s, v != 0), VisibleWhen: when, Gates: gates,
+            DisabledWhen: disabledWhen, DisabledTip: disabledTip);
+
+    /// <summary>Auto Cram's rows: off and greyed out while RynthSort's auto-sort is on (the two fought, 2026-11-03).</summary>
+    private const string CramOffForSortTip = "Off while RynthSort's auto-sort is on: RynthSort keeps your packs sorted, and the two fight.\nTurn auto-sort off (RynthSort, or the dashboard's Sort key) to use Auto Cram.";
 
     private static SettingRow Int(string label, Func<RynthAiSettings, int> get, Action<RynthAiSettings, int> set,
         int min, int max, int step, string? tip = null, Func<RynthAiSettings, bool>? when = null) =>
@@ -981,7 +1040,8 @@ internal static class SettingsSchema
                 when: _ => Plugins.EngineSettings.HoldReloadInWorld),
             Spacer(),
             Bool("Auto Cram", s => s.EnableAutocram, (s, v) => s.EnableAutocram = v,
-                "Automatically moves items from your main pack into side packs.\nNote: recently used weapons stay in the main pack."),
+                "Automatically moves items from your main pack into side packs.\nNote: recently used weapons stay in the main pack.",
+                disabledWhen: s => s.AutoSortOn, disabledTip: CramOffForSortTip),
             Bool("Peace Mode When Idle", s => s.PeaceModeWhenIdle, (s, v) => s.PeaceModeWhenIdle = v),
             Bool("Weapons Back After Heals", s => s.RearmAfterVitals == true, (s, v) => s.RearmAfterVitals = v,
                 "After a heal, restam or remana spell with nothing to fight, put the last fight's weapons\n(main hand and off hand) back on instead of waiting for the next monster."),
@@ -1446,7 +1506,8 @@ internal static class SettingsSchema
             Section("Inventory Management"),
             Bool("Enable Autostack", s => s.EnableAutostack, (s, v) => s.EnableAutostack = v),
             Bool("Enable Autocram", s => s.EnableAutocram, (s, v) => s.EnableAutocram = v,
-                "Automatically moves items from your main pack into side packs.\nNote: recently used weapons stay in the main pack."),
+                "Automatically moves items from your main pack into side packs.\nNote: recently used weapons stay in the main pack.",
+                disabledWhen: s => s.AutoSortOn, disabledTip: CramOffForSortTip),
             Bool("Combine Salvage Bags", s => s.EnableCombineSalvage, (s, v) => s.EnableCombineSalvage = v,
                 "After the salvage queue empties, move same-name bags together so the server merges them."),
             Bool("Combine Bags During Salvage", s => s.CombineBagsDuringSalvage, (s, v) => s.CombineBagsDuringSalvage = v,

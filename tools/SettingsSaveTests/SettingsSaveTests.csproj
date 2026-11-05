@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks that a Settings save can never rewrite the character's settings wholesale (2026-11-05: after
+    an engine hot reload the dashboard held RynthAi's built-in defaults, and one click wrote them all over the
+    profile). SettingsCommands.ChangedFieldsJson sends only the fields that differ from the snapshot a copy
+    was cloned from, nothing for a copy with no snapshot; the engine's raycasting default is on.
+    References the built engine and reaches its internal types by reflection, like CombatSettingsTests.
+    x86. Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Platforms>x86</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>SettingsSaveTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.Engine\RynthCore.Engine.csproj" />
+  </ItemGroup>
+
+</Project>

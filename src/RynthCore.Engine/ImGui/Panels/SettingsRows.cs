@@ -310,19 +310,26 @@ internal sealed class SettingsRows
     }
 
     // Square dot + label; the whole row toggles.
+    /// <summary><paramref name="abgr"/> at <paramref name="a"/> of its alpha (a greyed-out row).</summary>
+    private static uint Faded(uint abgr, float a) => a >= 1f ? abgr : (abgr & 0x00FFFFFFu) | ((uint)((abgr >> 24) * a) << 24);
+
     private void BoolRow(SettingRow row, float w)
     {
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
         ImGuiNET.ImGui.Dummy(new Vector2(0, 2));
         Vector2 p = ImGuiNET.ImGui.GetCursorScreenPos();
-        bool on = row.Get!(_data) != 0;
+        // Greyed out (DisabledWhen): shown off, not clickable, and the tooltip says why.
+        bool disabled = row.IsDisabled(_data);
+        bool on = !disabled && row.Get!(_data) != 0;
         float labelW = ImGuiNET.ImGui.CalcTextSize(row.Label).X;
-        if (ImGuiNET.ImGui.InvisibleButton("##b", new Vector2(Math.Min(w, 18 + labelW), 16)))
+        if (ImGuiNET.ImGui.InvisibleButton("##b", new Vector2(Math.Min(w, 18 + labelW), 16)) && !disabled)
             Changed(row, on ? 0 : 1);
-        if (ImGuiNET.ImGui.IsItemHovered()) ImGuiNET.ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-        Tooltip(row);
-        dl.AddRectFilled(p + new Vector2(0, 2), p + new Vector2(12, 14), on ? ToggleOn : ToggleOff, 2);
-        dl.AddText(p + new Vector2(18, (16 - ImGuiNET.ImGui.GetFontSize()) * 0.5f), TextDim, row.Label);
+        if (ImGuiNET.ImGui.IsItemHovered() && !disabled) ImGuiNET.ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+        if (disabled && row.DisabledTip != null) { if (ImGuiNET.ImGui.IsItemHovered()) SafeImGui.SetTooltip(row.DisabledTip); }
+        else Tooltip(row);
+        float alpha = disabled ? 0.4f : 1f;
+        dl.AddRectFilled(p + new Vector2(0, 2), p + new Vector2(12, 14), Faded(on ? ToggleOn : ToggleOff, alpha), 2);
+        dl.AddText(p + new Vector2(18, (16 - ImGuiNET.ImGui.GetFontSize()) * 0.5f), Faded(TextDim, alpha), row.Label);
         ImGuiNET.ImGui.Dummy(new Vector2(0, 2));
     }
 
