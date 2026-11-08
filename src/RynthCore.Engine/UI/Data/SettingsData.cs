@@ -47,6 +47,9 @@ internal sealed class RynthAiSettings
     public bool? RearmAfterVitals { get; set; }
     public bool StartMacroOnLogin { get; set; }
     public bool PatrolOnLogin { get; set; }
+    // RynthAi's Resume Meta After Reload (2026-11-07). Nullable: an older RynthAi doesn't send it,
+    // and then the row is hidden and nothing is sent back.
+    public bool? ResumeMetaOnReload { get; set; }
     // RynthAi's Escape Acid and Lava. Default on; an older RynthAi doesn't send it, and a missing
     // field must not read as "off".
     public bool EscapeHazards { get; set; } = true;
@@ -205,6 +208,11 @@ internal sealed class RynthAiSettings
     public float DunPatrolWallDistance { get; set; } = 1f;   // every patrol point this far from walls where there is room
     public float DunPatrolLookInSize { get; set; } = 10f;    // rooms this big the patrol only skirts get a walk to their middle
     public float DunPatrolSightYd { get; set; } = 20f;       // sweep: how far a monster notices you (lane spacing)
+    // RynthAi outdoor hunt (/ra hunt; OutdoorHunt, 2026-10-23). Null = a RynthAi without it: the rows hide,
+    // and a save sends null back, which RynthAi reads as unchanged.
+    public float? OutdoorHuntRange { get; set; }             // yd from the character: how far the next monster may be
+    public float? OutdoorHuntRadius { get; set; }            // yd from where the hunt started (0 = anywhere)
+    public int? OutdoorHuntPick { get; set; }                // what it goes for: 0 nearest monster, 1 biggest pack, 2 most XP
     public bool OpenDoors { get; set; }
     public float OpenDoorRange { get; set; } = 5f;
     // RynthAi OpenDoorsOnPathOnly: Open Doors opens only a closed door on the path of travel. An older plugin ignores it.
@@ -267,6 +275,8 @@ internal sealed class RynthAiSettings
     public bool ItemInfoOnSelect { get; set; } = true;
     public bool EnableAutostack { get; set; } = true;
     public bool ReadUnknownScrolls { get; set; } = true;   // VTank's default
+    // Unbox Aetheria When Idle (default off; a RynthAi that predates it doesn't send it: off).
+    public bool UnboxAetheriaWhenIdle { get; set; }
     public bool EnableCombineSalvage { get; set; } = true;
     public bool CombineBagsDuringSalvage { get; set; } = true;
     // Salvage with the 0x027D request sent straight to the server, no salvage panel on screen
@@ -304,6 +314,8 @@ internal sealed class RynthAiSettings
     // hidden, and a save sends null, which RynthAi leaves alone.
     public bool? UseDispelItems { get; set; }
     public bool? AutoFellowMgmt { get; set; }
+    // Open fellowship on create (2026-11-04): a fellowship RynthAi creates is opened, with AutoFellowMgmt on.
+    public bool? OpenFellowOnCreate { get; set; }
     public bool? MChargesWhenOff { get; set; }
     public int? CustomPetRange { get; set; }
 
@@ -620,6 +632,8 @@ internal static class SettingsSchema
     public static readonly string[] LootOwnershipModes = { "My Kills Only", "Fellowship Kills", "All Corpses" };
     public static readonly string[] NavLabelModes = { "Off", "Numbers", "Numbers and names" };
     public static readonly string[] DunPatrolCoverages = { "Whole dungeon", "Loops only", "Everything", "Sweep (by sight)" };
+    // RynthAi OutdoorHuntPick: 0 = nearest monster, 1 = biggest pack, 2 = most XP.
+    public static readonly string[] OutdoorHuntPicks = { "Nearest monster", "Biggest pack", "Most XP" };
     public static readonly string[] DeathRecallModes = { "Off", "Cast a recall spell", "Use a recall item" };
 
     // The nav editor's recall spells. Filled with "Spell N (N)" and named from the client's spell
@@ -666,7 +680,15 @@ internal static class SettingsSchema
     // Text size rows are stored by the engine (PanelTextScale), not in the
     // RynthAi profile, so the settings object is ignored here.
     // RynthDefective's window titles (its sections manifest).
-    private const string ShortcutsWindow = "Shortcuts", GamePanelsWindow = "Game Panels", SelectionWindow = "Selection";
+    private const string ShortcutsWindow = "Shortcuts", GamePanelsWindow = "Game Panels", SelectionWindow = "Selection",
+        DayNightWindow = "Day/Night";
+
+    // RynthDefective's extra Shortcuts bars (2026-11-04): "Shortcuts 2" ... "Shortcuts 5".
+    private static string ExtraShortcutsWindow(int n) => ShortcutsWindow + " " + n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string ExtraShortcutsTip(int n) =>
+        $"RynthDefective's extra shortcut bar {n}: slots of its own, clicked (no keys), in a window you can put anywhere.\n" +
+        $"Add or remove bars from the Shortcuts bar's right-click menu. Also: /rdef bars show {n}.";
 
     // A plugin window shown or not; the row shows only while a plugin hosts it.
     private static SettingRow WindowShown(string label, string title, string tip) =>
@@ -924,7 +946,7 @@ internal static class SettingsSchema
             Bool("Describe Items When Selected", s => s.ItemInfoOnSelect, (s, v) => s.ItemInfoOnSelect = v,
                 "Print a Mag-style description of an item in chat when you select it, identifying it\nfirst when needed. Items the bot selects while looting are skipped.\nAlso: /ra iteminfo on|off."),
             Button("Item Info Options", "Open...", () => RynthAiCommands.ApplyRemoteCommand("iteminfo", "window"),
-                "Which fields the description shows and which item types are described on select (/ra iteminfo window)."),
+                "Which fields the description shows, which item types are described on select, and its chat\ntype and text colour (/ra iteminfo window)."),
         }),
 
         new("UI", new[]
@@ -986,6 +1008,17 @@ internal static class SettingsSchema
             WindowShown("Selection", SelectionWindow,
                 "What you have selected, as the retail toolbar showed it: its name, how far and which way it is, a creature's health, and Use.\nAlso: /rdef selection."),
             WindowSize("Selection size", SelectionWindow),
+            WindowShown("Day/Night timer", DayNightWindow,
+                "A small timer: day or night in Dereth now, and the real time until the next dawn or dusk (a Dereth day is 2 h 7 min).\nAlso: /rdef daynight."),
+            WindowSize("Day/Night timer size", DayNightWindow),
+            // RynthDefective's extra bars (2026-11-04): up to three more windows, "Shortcuts 2" ... "Shortcuts 4"
+            // (its ExtraBar), each row shown only while the plugin hosts that bar (the character has it).
+            WindowShown("Shortcut bar 2", ExtraShortcutsWindow(2), ExtraShortcutsTip(2)),
+            WindowSize("Shortcut bar 2 size", ExtraShortcutsWindow(2)),
+            WindowShown("Shortcut bar 3", ExtraShortcutsWindow(3), ExtraShortcutsTip(3)),
+            WindowSize("Shortcut bar 3 size", ExtraShortcutsWindow(3)),
+            WindowShown("Shortcut bar 4", ExtraShortcutsWindow(4), ExtraShortcutsTip(4)),
+            WindowSize("Shortcut bar 4 size", ExtraShortcutsWindow(4)),
         }),
 
         // The user hotkeys: stored by the engine for the PC (Hotkeys/HotkeyService.cs, hotkeys.txt),
@@ -1049,6 +1082,12 @@ internal static class SettingsSchema
                 "Automatically starts the macro when RynthAi loads."),
             Bool("Patrol On Login", s => s.PatrolOnLogin, (s, v) => s.PatrolOnLogin = v,
                 "Automatically starts dungeon patrol when RynthAi loads."),
+            Bool("Resume Meta After Reload", s => s.ResumeMetaOnReload != false, (s, v) => s.ResumeMetaOnReload = v,
+                "After a hot reload (RynthCore or RynthAi updated while you play), the meta carries on where it was:\n" +
+                "the same state, its variables, the rules that had already fired, the call stack, the watchdog and\n" +
+                "the route with its waypoint. Nothing in Default runs again, so a meta that recalls in Default doesn't recall.\n" +
+                "A real login (or a changed meta file) still starts in Default. Off: every reload starts the meta in Default.",
+                when: s => s.ResumeMetaOnReload != null),
             Bool("Escape Acid and Lava", s => s.EscapeHazards, (s, v) => s.EscapeHazards = v,
                 "When acid or lava hurts you, stop everything (combat, buffs, healing, looting)\nand walk back out the way you came. The spot is remembered so the patrol avoids it.\nTurn off for a character that walks through acid on purpose."),
             Bool("Yield to VTank", s => s.YieldToVTank, (s, v) => s.YieldToVTank = v,
@@ -1250,7 +1289,12 @@ internal static class SettingsSchema
                 when: s => s.UseDispelItems.HasValue),
             Bool("Auto Fellowship Management", s => s.AutoFellowMgmt ?? false, (s, v) => s.AutoFellowMgmt = v,
                 "VTank's Auto Fellow Mgmt., saved with the profile. Metas read it (AutoFellowMgmt).",
-                when: s => s.AutoFellowMgmt.HasValue),
+                when: s => s.AutoFellowMgmt.HasValue, gates: true),
+            Bool("   Open fellowship on create", s => s.OpenFellowOnCreate ?? true, (s, v) => s.OpenFellowOnCreate = v,
+                "A fellowship RynthAi creates (/mt fellow create, or a meta's /fellowship create) is opened\n" +
+                "as soon as you lead it, so every member can recruit, not just the leader. AC makes a new\n" +
+                "fellowship closed.\nOnly right after RynthAi creates it: one you made or closed by hand is left alone.",
+                when: s => s.AutoFellowMgmt == true && s.OpenFellowOnCreate.HasValue),
             Bool("M. Charges When Off", s => s.MChargesWhenOff ?? false, (s, v) => s.MChargesWhenOff = v,
                 "VTank's option of this name, saved with the profile for VTank users. RynthAi doesn't act on it yet.",
                 when: s => s.MChargesWhenOff.HasValue),
@@ -1408,6 +1452,27 @@ internal static class SettingsSchema
                 "(across its corners). Smaller rooms are only looked into from the doorway. Once per room per lap. Default 10."),
             Note("Changing these rebuilds a running patrol from where you stand; the macro keeps running."),
             Spacer(),
+            Section("Outdoor Hunt", when: s => s.OutdoorHuntRange.HasValue),
+            Float("Hunt Range (yd)", s => s.OutdoorHuntRange ?? 60f, (s, v) => s.OutdoorHuntRange = Math.Clamp(v, 10f, 2000f), 10f, 2000f, 5f,
+                "Outdoor hunting (/ra hunt, the dashboard's Hunt button) walks from monster to monster round buildings,\n" +
+                "trees, rocks and slopes too steep to climb (RynthNav's map; portals are kept clear of). This is how far\n" +
+                "from you the next monster may be. It picks the one with the shortest walk, a higher Priority first, from\n" +
+                "the monsters combat would fight; combat takes over once it is in range and in sight. Default 60.",
+                when: s => s.OutdoorHuntRange.HasValue),
+            Float("Hunt Radius (yd)", s => s.OutdoorHuntRadius ?? 0f, (s, v) => s.OutdoorHuntRadius = Math.Clamp(v, 0f, 2000f), 0f, 2000f, 10f,
+                "Only monsters within this far of where you started hunting are picked. 0 = anywhere: it follows the\n" +
+                "monsters across the map. With none in range it waits where it is. Default 0.",
+                when: s => s.OutdoorHuntRadius.HasValue),
+            Combo("Go for", OutdoorHuntPicks,
+                s => Math.Clamp(s.OutdoorHuntPick ?? 0, 0, OutdoorHuntPicks.Length - 1),
+                (s, v) => s.OutdoorHuntPick = Math.Clamp(v, 0, OutdoorHuntPicks.Length - 1),
+                "Nearest monster: the closest one, as before.\n" +
+                "Biggest pack: the most monsters together, a near pack preferred unless a farther one is clearly bigger.\n" +
+                "Most XP: the pack worth the most experience, learned from your kills (unknown monsters count like a pack).",
+                when: s => s.OutdoorHuntPick.HasValue),
+            Note("Outdoors only (in a dungeon the Dungeon Patrol hunts). Loading a route, stopping the macro or going\ninto a dungeon ends it. Needs RynthNav.",
+                when: s => s.OutdoorHuntRange.HasValue),
+            Spacer(),
             Section("Steering"),
             Float("Stop & Turn Angle", s => s.NavStopTurnAngle, (s, v) => s.NavStopTurnAngle = v, 1f, 90f, 1f,
                 "Stop forward motion and turn in place when heading error exceeds this."),
@@ -1508,6 +1573,14 @@ internal static class SettingsSchema
             Bool("Enable Autocram", s => s.EnableAutocram, (s, v) => s.EnableAutocram = v,
                 "Automatically moves items from your main pack into side packs.\nNote: recently used weapons stay in the main pack.",
                 disabledWhen: s => s.AutoSortOn, disabledTip: CramOffForSortTip),
+            Bool("Unbox Aetheria When Idle", s => s.UnboxAetheriaWhenIdle, (s, v) => s.UnboxAetheriaWhenIdle = v,
+                "With the macro on and nothing to fight or loot, uses an Aetheria Mana Stone on each Coalesced\n" +
+                "Aetheria in your pack, one at a time, to reveal its sigil. The server puts you in peace mode for\n" +
+                "the clap; combat takes its stance again for the next fight. The stone isn't used up.\n" +
+                "Says once in chat when coalesced aetheria are left and no stone is. Status: /ra aetheria."),
+            ChatButton("Unbox Aetheria Now", "Unbox", "/ra aetheria unbox",
+                "Unbox every Coalesced Aetheria in your pack now, one at a time, setting on or off\n" +
+                "(with the macro on it waits for a quiet moment) (/ra aetheria unbox)."),
             Bool("Combine Salvage Bags", s => s.EnableCombineSalvage, (s, v) => s.EnableCombineSalvage = v,
                 "After the salvage queue empties, move same-name bags together so the server merges them."),
             Bool("Combine Bags During Salvage", s => s.CombineBagsDuringSalvage, (s, v) => s.CombineBagsDuringSalvage = v,
@@ -1554,7 +1627,7 @@ internal static class SettingsSchema
         {
             Section("AutoVendor"),
             Bool("Enabled", s => s.AutoVendorEnabled, (s, v) => s.AutoVendorEnabled = v,
-                "Buy and sell by a loot profile when a vendor opens (and allow /ub autovendor).\nProfile: <Vendor Name>.utl, else default.utl, in the AutoVendor folder."),
+                "Buy and sell by a loot profile when a vendor opens (and allow /ub autovendor).\nProfile: <Vendor Name>.utl, else default.utl, from your character's AutoVendor folder,\nthen the server's (RynthAi\\AutoVendor\\<server>), then RynthAi\\AutoVendor."),
             Bool("Test Mode (only print what it would do)", s => s.AutoVendorTestMode, (s, v) => s.AutoVendorTestMode = v,
                 "Lists what would be bought and sold without trading. Leave this on until the lists look right."),
             Bool("Buy", s => s.AutoVendorEnableBuying, (s, v) => s.AutoVendorEnableBuying = v),

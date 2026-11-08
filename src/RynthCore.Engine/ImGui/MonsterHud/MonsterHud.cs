@@ -41,6 +41,10 @@
 //      position is read (main thread, a handful of objects) and projected with
 //      the engine's camera capture (GameMatrixCapture), so plates stick to
 //      moving monsters without the 10 Hz snapshot's stepping.
+//    Behind walls (2026-11-04, report R-20261105-020337-67aa; PlateSight): the
+//      scan skips objects AC's cell lists rule out from the camera's cell, and
+//      each frame a plate whose room AC didn't draw (or, seen from inside, an
+//      outdoor object no drawn doorway covers) is hidden and takes no click.
 //
 //  World -> screen: AC transforms geometry on the CPU; GameMatrixCapture
 //  rebuilds the view from SmartBox's camera frame and hooks SetTransform for
@@ -121,6 +125,7 @@ internal static class MonsterHud
         public bool Chosen;              // in the latest snapshot
         public bool Gone;                // live position read failed (despawned / died)
         public bool OnScreen;
+        public bool Hidden;              // behind walls this frame (PlateSight): fades out, takes no click
         public bool Appeared;            // became visible this frame: layout snaps instead of easing
         public float Alpha;              // smoothed, 0..1
         public float Scale = 1f;         // smoothed
@@ -324,6 +329,7 @@ internal static class MonsterHud
         PlateDebuffs.Clear();
         CombatText.Clear();
         PlayerPlate.Reset();
+        PlateSight.Reset();
         Classes.Clear();
         _playerId = 0;
     }
@@ -387,6 +393,11 @@ internal static class MonsterHud
         float portalD2 = portalD * portalD;
         float portalTargetD2 = MathF.Max(portalD2, 100f * 100f);   // and a selected portal
         bool targetIsPortal = false;
+        // Behind walls (2026-11-04, report R-20261105-020337-67aa): objects the cell lists already rule
+        // out (another room, another building, outdoors from a dungeon) are no candidates, so the
+        // hidden NPCs of a town don't use up the caps; DrawPlates asks AC's draw stamps each frame.
+        bool walls = MonsterHudSettings.HideBehindWalls;
+        if (walls) PlateSight.Refresh(pCell);
 
         int pass = ++_classPass;
         Candidates.Clear();
@@ -442,6 +453,7 @@ internal static class MonsterHud
 
             if (!ClientObjectHooks.TryGetSnapshotPosition(id, out uint cell, out float x, out float y, out float z)) continue;
             if (!TryOffset(pCell, cell, out float ox, out float oy)) continue;
+            if (walls && !PlateSight.ShowCoarse(cell)) continue;
             float dx = x + ox - px, dy = y + oy - py, dz = z - pz;
             float d2 = dx * dx + dy * dy + dz * dz;
             if (portal)
@@ -797,6 +809,7 @@ internal static class MonsterHud
     /// </summary>
     public static void Draw(float uiScale, bool worldVisible = true)
     {
+        DebuffIconRow.BeginHover();
         if (!_hasContent) { ResetClick(); PlayerPlate.DropDrag(); return; }
         try
         {
@@ -809,6 +822,8 @@ internal static class MonsterHud
             }
             // The player plate fixed on screen: ImGui's background list (the normal UI pass), not the layer above.
             PlayerPlate.DrawScreen(ref f);
+            // The debuff icon under the cursor (any plate's): its tooltip.
+            DebuffIconRow.ShowHoverTip(f.Now);
         }
         catch (Exception ex)
         {
@@ -902,6 +917,9 @@ internal static class MonsterHud
         float kScale = 1f - MathF.Exp(-dt * 10f);
         float kBar = 1f - MathF.Exp(-dt * 14f);
         uint target = ClientHelperHooks.GetSelectedItemId();
+        // Behind walls (2026-11-04, report R-20261105-020337-67aa): AC's draw stamp, sampled once a frame.
+        bool walls = MonsterHudSettings.HideBehindWalls;
+        if (walls) PlateSight.BeginFrame(f.PlayerCell);
 
         DrawOrder.Clear();
         Evict.Clear();
@@ -937,9 +955,13 @@ internal static class MonsterHud
             p.IsAttacker = !label && MonsterHudData.AttackedRecently(p.Name, AttackerMemorySec);
 
             p.OnScreen = false;
+            bool headFront = false;
+            Vector2 headPx = default;   // where the head projects, before Keep on screen pins it
             if (p.HasWorld && GameMatrixCapture.WorldToScreen(p.LastWx, p.LastWy, p.LastWz, out float sx, out float sy))
             {
                 sx *= f.MapX; sy *= f.MapY;
+                headFront = true;
+                headPx = new Vector2(sx, sy);
                 const float margin = 60f;
                 if (MonsterHudSettings.KeepOnScreen)
                 {
@@ -964,7 +986,11 @@ internal static class MonsterHud
             float maxD = !label ? monsterMaxD : p.Kind == RadarKind.Portal ? portalMaxD : labelMaxD;
             float t = maxD > 1f ? Math.Clamp(p.Distance / maxD, 0f, 1f) : 0f;
             float distFade = fade ? 1f - 0.55f * SmoothStep(0.45f, 1f, t) : 1f;
-            bool show = p.OnScreen && (p.Chosen || p.IsTarget) && !p.Gone;
+            // An object the player can't see because of walls: no plate (it fades as one leaving the
+            // screen does) and, from this frame, no click (PlateClick skips it). Asked only for a plate that would draw.
+            p.Hidden = walls && p.OnScreen && (p.Chosen || p.IsTarget) && !p.Gone &&
+                       !PlateSight.Show(ref f, p.Id, p.LastCell, headFront, headPx, p.LastWx, p.LastZ, p.LastWz);
+            bool show = p.OnScreen && !p.Hidden && (p.Chosen || p.IsTarget) && !p.Gone;
             float alphaTarget = show ? opacity * (p.IsTarget ? 1f : distFade) : 0f;
             bool wasVisible = p.Alpha > 0.01f;
             p.Appeared = !wasVisible;
@@ -1013,6 +1039,7 @@ internal static class MonsterHud
         PlateClick(f.UiScale, f.UnderUi);
 
         // ── Paint: farthest first, nearest (and the target) on top ──
+        _paintUnderUi = f.UnderUi;
         for (int i = DrawOrder.Count - 1; i >= 0; i--)
         {
             Plate p = DrawOrder[i];
@@ -1213,7 +1240,7 @@ internal static class MonsterHud
             Vector2 m = io.MousePos;
             foreach (Plate p in DrawOrder)
             {
-                if (p.Gone || p.Alpha < 0.25f) continue;   // fading in or out: not a target yet
+                if (p.Gone || p.Hidden || p.Alpha < 0.25f) continue;   // fading in or out (or behind walls): not a target
                 Vector4 r = RectAt(p, p.Nudge, uiScale);
                 if (m.X < r.X || m.X > r.Z || m.Y < r.Y || m.Y > r.W) continue;
                 _hoverId = p.Id;
@@ -1251,6 +1278,14 @@ internal static class MonsterHud
     }
 
     private static int _leftToAcLogged;
+    private static bool _paintUnderUi;   // this frame's plates are on the layer under AC's windows
+
+    /// <summary>
+    /// One of AC's windows is under the cursor (the debuff tooltips of rows drawn under AC's UI skip it).
+    /// Same rule as the plate click, without its log line. AC's UI state unreadable: false.
+    /// </summary>
+    internal static bool AcWindowCoversCursor() =>
+        !AcMouseOverRules.UnderUiOverlayMayTakeClick(AcMouseOver.Read().Target);
 
     /// <summary>AC's own UI has one of its windows under the cursor (not the 3D world). AC's main thread.</summary>
     private static bool AcWindowUnderCursor()
@@ -1352,7 +1387,8 @@ internal static class MonsterHud
         // Under the bar: the debuff icons.
         if (icons)
             DebuffIconRow.Paint(dl, p.Icons, p.IconCount, p.Others, in p.Row, p.SmallFont, p.SmallSize,
-                ref p.OverflowKey, ref p.OverflowString, cx, iconTop, a, now);
+                ref p.OverflowKey, ref p.OverflowString, cx, iconTop, a, now,
+                p.Gone || p.Hidden ? DebuffRowTips.Off : DebuffRowTips.Monster, _paintUnderUi);
 
         // ── Name line: [level badge] Name ──
         if (p.NameW > 0 || p.BadgeW > 0)
@@ -1757,6 +1793,7 @@ internal static class MonsterHud
             $"({HealthProbe.ProbeCount} quer{(HealthProbe.ProbeCount == 1 ? "y" : "ies")} sent).",
             PlateDebuffs.Describe(),
             PlayerPlate.Describe() + " " + CombatText.Describe(),
+            PlateSight.Describe(),
             AcMouseOver.Describe(),
         };
     }

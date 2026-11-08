@@ -62,6 +62,9 @@ namespace PanelLayoutTests
                 Run(TwoSessionsNeverShareAFile);
                 Run(TwoClientsNeverWriteEachOthersFiles);
                 Run(AutoSaveRules);
+                Run(IdentityFromThePlayerWhenTheLaunchHasNone);
+                Run(HotReloadWithTheNameNotKnownYet);
+                Run(TheDefaultIsOnlyReadInUse);
                 Run(CommandReplies);
             }
             finally
@@ -617,16 +620,139 @@ namespace PanelLayoutTests
 
         private static void AutoSaveRules()
         {
-            Case("automatic imgui.ini saves");
-            Check(PanelLayoutPolicy.MayAutoSaveIni(characterLayout: true, perCharacter: true, inWorld: true, contextHeldCharacter: true), "a character's layout: always saved");
-            Check(PanelLayoutPolicy.MayAutoSaveIni(true, true, inWorld: false, contextHeldCharacter: true), "...also at a logout's last save");
-            Check(PanelLayoutPolicy.MayAutoSaveIni(false, perCharacter: false, inWorld: true, contextHeldCharacter: true), "the setting off: the shared default is saved, as before");
-            Check(PanelLayoutPolicy.MayAutoSaveIni(false, perCharacter: false, inWorld: false, contextHeldCharacter: false), "the setting off, at character select: saved, as before");
-            Check(PanelLayoutPolicy.MayAutoSaveIni(false, true, inWorld: true, contextHeldCharacter: false), "in the world with no character name (the default in use): saved, as before");
-            Check(!PanelLayoutPolicy.MayAutoSaveIni(false, true, inWorld: false, contextHeldCharacter: false),
-                "character select with the setting on: the default isn't written (it could undo another client's /rc layout default)");
-            Check(!PanelLayoutPolicy.MayAutoSaveIni(false, true, inWorld: false, contextHeldCharacter: true), "the default after a character logged out: not saved (its windows would leak into it)");
-            Check(!PanelLayoutPolicy.MayAutoSaveIni(false, true, inWorld: true, contextHeldCharacter: true), "the default in the world after a character's layout was used: not saved");
+            Case("saves of the layout in use (imgui.ini and panel_state.txt)");
+            Check(PanelLayoutPolicy.MaySaveLayoutInUse(characterLayout: true, perCharacter: true), "a character's layout: always saved");
+            Check(PanelLayoutPolicy.MaySaveLayoutInUse(false, perCharacter: false), "the setting off: the shared default is saved, as before");
+            Check(!PanelLayoutPolicy.MaySaveLayoutInUse(false, perCharacter: true),
+                "the setting on: the default is never saved (character select, a client that doesn't know its character yet, Save Layout Now)");
+            string why = PanelLayoutPolicy.DefaultReadOnlyText(inWorld: true);
+            Check(why.Contains(PanelLayoutPolicy.ReasonText(DefaultReason.NoCharacterName), StringComparison.Ordinal) && why.Contains("/rc layout default", StringComparison.Ordinal),
+                "Save Layout Now on the default says why and what writes it");
+            Check(PanelLayoutPolicy.DefaultReadOnlyText(false).Contains(PanelLayoutPolicy.ReasonText(DefaultReason.NotInWorld), StringComparison.Ordinal), "...at character select too");
+        }
+
+        // ── 2026-11-05: a client launched with no character picked ─────────────
+
+        private static void IdentityFromThePlayerWhenTheLaunchHasNone()
+        {
+            Case("the key: the launch context's name, else the player's own");
+            Eq(PanelLayoutPolicy.Identity(ServerOne, CharA, CharB), WhoA, "the launch context names one: that one (the key the other per-character files use)");
+            Eq(PanelLayoutPolicy.Identity(ServerOne, "", CharB), WhoB, "the launch context names none: the player in the world");
+            Eq(PanelLayoutPolicy.Identity(ServerOne, "  ", " " + CharB + " "), WhoB, "a blank launch name is none; the player's name is trimmed");
+            Check(PanelLayoutPolicy.Identity(ServerOne, "", "") == null, "neither known: no owner");
+            Check(PanelLayoutPolicy.Identity(ServerOne, null, null) == null, "nothing at all: no owner");
+        }
+
+        private static void HotReloadWithTheNameNotKnownYet()
+        {
+            // The live log (2026-11-05): "SessionState: recorded login session ... character=''" at the hot
+            // reload, then "switched to the PC-wide default layout" and nothing later; that client saved
+            // its places into the shared files all session.
+            Case("hot reload, recorded with no name: waits for the player's name, never the default first");
+            var s = new PanelLayoutSession();
+            const long login = 70_000;
+            Check(s.Tick(login, true, true, login, identityRecorded: true, null) == null, "recorded without a name: no switch yet (the player's name is on its way)");
+            Check(!s.ReadyToDraw(login + 16, true, login), "...and the panels wait");
+            Check(s.Tick(login + 500, true, true, login, true, null) == null, "still waiting half a second in");
+            LayoutSwitch? sw = s.Tick(login + 800, true, true, login, true, WhoA);
+            Check(sw is { } a && Equals(a.To, WhoA) && !a.FlushFrom, "the player's name read: straight to the character's layout, nothing written out");
+            s.MarkApplied(sw!.Value.Gen);
+            Check(s.ReadyToDraw(login + 816, true, login), "applied: the panels draw, in the character's places");
+
+            Case("hot reload, the name later than the wait: the default only read, then the character's");
+            var late = new PanelLayoutSession();
+            Check(late.Tick(login, true, true, login, true, null) == null, "recorded without a name: waiting");
+            sw = late.Tick(login + PanelLayoutPolicy.IdentityWaitMs, true, true, login, true, null);
+            Check(sw is { } d && d.To == null && !d.FlushFrom, "the wait over, no name: the default, so the panels can draw");
+            Check(!PanelLayoutPolicy.MaySaveLayoutInUse(characterLayout: sw!.Value.To != null, perCharacter: true),
+                "...but nothing auto-saves into it (no default auto-save from a client in the world)");
+            late.MarkApplied(sw.Value.Gen);
+            Check(late.ReadyToDraw(login + PanelLayoutPolicy.IdentityWaitMs + 1, true, login), "the panels draw with it meanwhile");
+            Check(late.Tick(login + PanelLayoutPolicy.IdentityWaitMs + 16, true, true, login, true, null) == null, "no name yet: nothing more");
+            sw = late.Tick(login + PanelLayoutPolicy.IdentityWaitMs + 2000, true, true, login, true, WhoA);
+            Check(sw is { } c && Equals(c.To, WhoA) && c.From == null && !c.FlushFrom,
+                "the name known later: the switch to the character's layout, the default not written out");
+            Check(late.ReadyToDraw(login + PanelLayoutPolicy.IdentityWaitMs + 2001, true, login), "the panels keep drawing while it loads");
+            late.MarkApplied(sw!.Value.Gen);
+            Eq(late.AppliedLayout, WhoA, "the character's layout is in use for the rest of the session");
+            Check(PanelLayoutPolicy.MaySaveLayoutInUse(late.AppliedLayout != null, true), "...and its saves go to the character's files");
+            Check(late.Tick(login + PanelLayoutPolicy.IdentityWaitMs + 3000, true, true, login, true, WhoA) == null, "no switch back");
+
+            Case("a relogin in the same client: the new login waits for its own name again");
+            sw = late.Tick(200_000, true, false, 0, true, null);
+            Check(sw is { } o && o.To == null && o.FlushFrom, "logout: the character's written out, the default (read only) at character select");
+            late.MarkApplied(sw!.Value.Gen);
+            const long relogin = 300_000;
+            Check(late.Tick(relogin, true, true, relogin, true, null) == null, "the new login, no name yet: waiting");
+            sw = late.Tick(relogin + 400, true, true, relogin, true, WhoB);
+            Check(sw is { } r && Equals(r.To, WhoB), "the other character's name: its layout");
+        }
+
+        private static void TheDefaultIsOnlyReadInUse()
+        {
+            Case("PanelStateStore: the PC-wide default is only read with the setting on");
+            string root = NewDir("readonly");
+            string def = Path.Combine(root, "panel_state.txt");
+            File.WriteAllText(def, "# default\r\nbar=1,2\r\npanel.Shortcuts=open,10,20,300,120,docked,0,0\r\n");
+            byte[] defBytes = File.ReadAllBytes(def);
+            string a = Path.Combine(root, "layouts", "s", "a", "panel_state.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(a)!);
+            File.WriteAllText(a, "# A\r\npanel.Shortcuts=open,900,700,300,120,docked,0,0\r\n");
+            PanelStateStore.ReadOnlyPath = def;
+            try
+            {
+                PanelStateStore.SwitchTo(def, flushCurrent: false);
+                PanelStateStore.SetPanel("Shortcuts", new PanelStateStore.PanelEntry(true, 55, 66, 300, 120));
+                PanelStateStore.SetBarPosition(3, 4);
+                Eq(File.ReadAllBytes(def), defBytes, "a moved window and the bar on the default: not written");
+                Check(PanelStateStore.TryGetPanel("Shortcuts", out var moved) && moved.Left == 55, "...kept in memory while it is in use");
+                PanelStateStore.Flush();
+                Eq(File.ReadAllBytes(def), defBytes, "Save Layout Now doesn't write it either");
+                PanelStateStore.SwitchTo(a, flushCurrent: true);
+                Eq(File.ReadAllBytes(def), defBytes, "switching away (even asked to write out what it leaves) doesn't write it");
+                Check(PanelStateStore.TryGetPanel("Shortcuts", out var mine) && mine.Left == 900, "the character's layout: its own place, not the moves made on the default");
+
+                Case("a plugin window registered after the switch gets its saved place, and its moves are saved");
+                // PluginWindows registers its windows seconds after the login (the manifests); the store
+                // holds every row of the file whether a window is registered or not.
+                Check(PanelStateStore.TryGetPanel("Late Window", out _) == false, "not in the file: nothing saved yet");
+                File.WriteAllText(a, "# A\r\npanel.Shortcuts=open,900,700,300,120,docked,0,0\r\npanel.Toolbar=open,400,10,500,40,docked,0,0\r\n");
+                PanelStateStore.SwitchTo(a, flushCurrent: false);
+                Check(PanelStateStore.TryGetPanel("Toolbar", out var tb) && tb.Open && tb.Left == 400 && tb.Top == 10,
+                    "a window registered after the switch reads its saved place and open state from the character's layout");
+                PanelStateStore.SetPanel("Toolbar", tb with { Left = 420, Top = 12 });
+                Check(File.ReadAllText(a).Contains("panel.Toolbar=open,420,12,", StringComparison.Ordinal), "its move is saved to the character's file");
+                Check(File.ReadAllText(a).Contains("panel.Shortcuts=open,900,700,", StringComparison.Ordinal), "...with the other windows' rows kept");
+                Eq(File.ReadAllBytes(def), defBytes, "...and the default untouched");
+
+                Case("a layout switch and plugin windows: they follow the new layout like engine panels");
+                const WindowKind plugin = WindowKind.PluginWindow, engine = WindowKind.EnginePanel, script = WindowKind.ScriptWindow;
+                Eq(PanelLayoutPolicy.StepAtSwitch(plugin, shown: false, remember: true, saved: true, savedOpen: true), SwitchStep.Open,
+                    "registered (on the old layout) but not open, the new layout has it open: it opens there");
+                Eq(PanelLayoutPolicy.StepAtSwitch(plugin, shown: true, remember: true, saved: true, savedOpen: false), SwitchStep.Close,
+                    "opened from the old layout, the new one has it closed: it closes (not saved over)");
+                Eq(PanelLayoutPolicy.StepAtSwitch(plugin, true, true, saved: true, savedOpen: true), SwitchStep.Place, "open in both: it moves to the new layout's place");
+                Eq(PanelLayoutPolicy.StepAtSwitch(plugin, true, true, saved: false, savedOpen: false), SwitchStep.PlaceAndSave,
+                    "new to the layout: placed, and saved there so it comes back there");
+                Eq(PanelLayoutPolicy.StepAtSwitch(plugin, false, true, saved: false, savedOpen: false), SwitchStep.Leave, "not open, not in the layout: left alone");
+                Eq(PanelLayoutPolicy.StepAtSwitch(plugin, false, remember: false, true, true), SwitchStep.Leave, "Remember Open Windows off: not opened");
+                Eq(PanelLayoutPolicy.StepAtSwitch(plugin, true, remember: false, true, false), SwitchStep.Place, "...nor closed");
+                Eq(PanelLayoutPolicy.StepAtSwitch(engine, false, true, true, true), SwitchStep.Open, "an engine panel: the same");
+                Eq(PanelLayoutPolicy.StepAtSwitch(engine, true, true, true, false), SwitchStep.Close, "...both ways");
+                Eq(PanelLayoutPolicy.StepAtSwitch(script, false, true, true, true), SwitchStep.Leave, "a script window opens when its script says, not from the layout");
+                Eq(PanelLayoutPolicy.StepAtSwitch(script, true, true, true, false), SwitchStep.Place, "...and stays open (it moves)");
+
+                Case("the setting off: the default is saved, as before");
+                PanelStateStore.ReadOnlyPath = null;
+                PanelStateStore.SwitchTo(def, flushCurrent: false);
+                PanelStateStore.SetBarPosition(5, 6);
+                Check(File.ReadAllText(def).Contains("bar=5,6", StringComparison.Ordinal), "no read-only mark: the shared file is written");
+            }
+            finally
+            {
+                PanelStateStore.ReadOnlyPath = null;
+            }
+            NoTempFiles(root);
         }
 
         private static void CommandReplies()

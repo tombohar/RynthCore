@@ -423,15 +423,19 @@ internal enum HotkeyGate
 internal static class HotkeyRules
 {
     /// <summary>
-    /// Whether a bound key may fire. Never while the player is typing: in a RynthCore text box or in
-    /// AC's own chat entry. When AC's focus can't be read, only keys that can't be typing fire.
+    /// Whether a bound key may fire. Not while the player is typing (in a RynthCore text box or in AC's
+    /// own chat entry), except an F key, with or without modifiers: it types nothing, so it fires there
+    /// too (owner, 2026-11-06: a stamina kit on an F key "rarely goes off" because the presses came
+    /// while AC's chat held the keyboard). Ctrl combos stay held while typing (copy, paste, select all).
+    /// When AC's focus can't be read, only keys that can't be typing fire.
     /// </summary>
     public static HotkeyGate Check(in TypingState s, KeyCombo combo)
     {
         if (!s.InWorld) return HotkeyGate.NotInWorld;
         if (!s.GameFocused) return HotkeyGate.NotFocused;
-        if (s.RynthTextFocus) return HotkeyGate.RynthTyping;
-        if (s.AcTextFocus == true) return HotkeyGate.AcTyping;
+        bool fKey = HotkeyKeys.IsFunctionKey(combo.Vk);
+        if (s.RynthTextFocus && !fKey) return HotkeyGate.RynthTyping;
+        if (s.AcTextFocus == true && !fKey) return HotkeyGate.AcTyping;
         if (s.AcTextFocus == null && !CantBeTyping(combo)) return HotkeyGate.AcUnknownTextKey;
         return HotkeyGate.Fire;
     }
@@ -445,8 +449,8 @@ internal static class HotkeyRules
         HotkeyGate.Fire => "hotkeys fire",
         HotkeyGate.NotInWorld => "not in the world",
         HotkeyGate.NotFocused => "the game window isn't focused",
-        HotkeyGate.RynthTyping => "typing in a RynthCore text box",
-        HotkeyGate.AcTyping => "typing in AC's chat (or another AC text box)",
+        HotkeyGate.RynthTyping => "typing in a RynthCore text box (F-key hotkeys still fire)",
+        HotkeyGate.AcTyping => "typing in AC's chat or another AC text box (F-key hotkeys still fire)",
         HotkeyGate.AcUnknownTextKey => "AC's typing state is unknown; only Ctrl/Alt/F-key hotkeys fire",
         _ => g.ToString(),
     };

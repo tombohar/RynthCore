@@ -94,6 +94,8 @@ internal static class Program
         ("panels", "panels open 0x1F", "panels open"),
         ("panels", "panels toggle 12", "panels open twelve"),
         ("panels", "panels", "panels open 1 2"),
+        ("title", "title 42", "title banana"),
+        ("title", "title 7", "title"),
         ("rl", "rl", "rl now"),
         ("rl", "reload", "reload now"),
         ("inventory", "inv", "inv now"),

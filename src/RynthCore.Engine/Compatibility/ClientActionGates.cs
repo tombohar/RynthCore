@@ -558,14 +558,16 @@ internal static class ClientActionGates
 
         // 5. Combat system.
         IntPtr combat = CombatModeHooks.ReadCombatSystemPtr();
-        if (combat != IntPtr.Zero && ClientObjectHooks.IsReadableSpan(combat, 0x48))
+        if (combat != IntPtr.Zero && ClientObjectHooks.IsReadableSpan(combat, 0x50))
         {
             int mode = Marshal.ReadInt32(combat + 0x1C);
             string modeName = mode switch { 1 => "NonCombat", 2 => "Melee", 4 => "Missile", 8 => "Magic", _ => mode.ToString() };
             byte busyHeld = Marshal.ReadByte(combat + 0x3C);
             byte inAttack = Marshal.ReadByte(combat + 0x3D);
             byte autoRepeat = Marshal.ReadByte(combat + 0x44);
-            lines.Add($"  Combat: mode {modeName}; attack holds busy {busyHeld}; attack in progress {inAttack}; auto-repeat {autoRepeat}");
+            byte queued = Marshal.ReadByte(combat + 0x47);
+            lines.Add($"  Combat: mode {modeName}; attack holds busy {busyHeld}; attack in progress {inAttack}; auto-repeat {autoRepeat}; queued attack {queued}");
+            lines.Add($"    {ClientCombatHooks.DescribeRearms()}");
         }
 
         lines.Add($"  World transition (portal/death): {(PlayerLifecycleLog.InWorldTransition ? "yes" : "no")}; logged in: {(LoginLifecycleHooks.HasObservedLoginComplete ? "yes" : "no")}");

@@ -200,7 +200,7 @@ internal static class PlayerPlate
             left = l.M.ClampLeft(left, f.Display.X);
             y = l.M.ClampTop(y, f.Display.Y);
         }
-        float top = Paint(f.Dl, ref l, MathF.Round(left), MathF.Round(y), f.Now);
+        float top = Paint(f.Dl, ref l, MathF.Round(left), MathF.Round(y), f.Now, f.UnderUi);
         // Gain text floats above the plate when it's over the head, else above the head itself.
         PlateTop = where == SelfPlatePosition.Above ? top : head.Y;
     }
@@ -265,7 +265,7 @@ internal static class PlayerPlate
             dl.AddRectFilled(r0, r1, MonsterHud.Mul(hot ? 0x40000000u : 0x28000000u, a), 3f);
             dl.AddRect(r0, r1, MonsterHud.Mul(hot ? FrameHot : FrameCol, a), 3f, ImDrawFlags.None, hot ? 1.5f : 1f);
         }
-        Paint(dl, ref l, left, y, f.Now);
+        Paint(dl, ref l, left, y, f.Now, underUi: false);
     }
 
     private static uint FrameCol => RynthTheme.WithAlpha(RynthTheme.Accent, 0xB0);
@@ -406,18 +406,21 @@ internal static class PlayerPlate
 
     /// <summary>
     /// Paints the three bars (and the name over them, the debuff row under them) with the bars' top-left
-    /// at (left, y); returns the plate's top. <paramref name="now"/> is Stopwatch ticks.
+    /// at (left, y); returns the plate's top. <paramref name="now"/> is Stopwatch ticks; <paramref name="underUi"/>:
+    /// <paramref name="dl"/> is the layer under AC's windows (the debuff tooltips then give way to them).
     /// </summary>
-    private static float Paint(ImDrawListPtr dl, ref Layout l, float left, float y, long now)
+    private static float Paint(ImDrawListPtr dl, ref Layout l, float left, float y, long now, bool underUi)
     {
         float a = Math.Clamp(_alpha, 0f, 1f);
         ref SelfPlateMetrics m = ref l.M;
         PaintOne(dl, ref _hp, ref l, left, y, a, HealthCol);
         PaintOne(dl, ref _st, ref l, left, y + m.BarH + m.Gap, a, StaminaCol);
         PaintOne(dl, ref _mn, ref l, left, y + 2 * (m.BarH + m.Gap), a, ManaCol);
+        // No tooltip mid-drag: the drag owns the cursor.
         if (_iconCount > 0)
             DebuffIconRow.Paint(dl, _icons, _iconCount, others: false, in m.Row, l.IconText, l.IconTextSize,
-                ref _overflowKey, ref _overflowText, left + m.BarW * 0.5f, y + m.RowTop, a, now);
+                ref _overflowKey, ref _overflowText, left + m.BarW * 0.5f, y + m.RowTop, a, now,
+                _dragging ? DebuffRowTips.Off : DebuffRowTips.Self, underUi);
         float top = y - 1f;
         if (MonsterHudSettings.SelfName)
         {

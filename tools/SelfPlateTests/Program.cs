@@ -42,6 +42,9 @@ namespace SelfPlateTests
             TicksAndDuration();
             CategoryZeroStandsAlone();
             ShortArraysAndHugeExpiry();
+            IconsCarryTheirSpells();
+            AddSpellLimits();
+            TooltipText();
 
             SelfIconSizeSetting();
             SelfPlateAt100IsTheOldPlate();
@@ -336,6 +339,61 @@ namespace SelfPlateTests
             Check(dst.Take(2).All(i => i.Expiry > Now), "both end after now");
             c = SelfDebuffs.Select(ids, exp, cats, 2, ServerNow, Now, Freq, Lookup, Array.Empty<DebuffIcon>());
             Check(c == 2, "an empty destination still counts");
+        }
+
+        // ── Hover tooltip (2026-11-07) ───────────────────────────────────────
+
+        private static uint[] Spells(DebuffIcon ic)
+        {
+            var s = new uint[ic.SpellCount];
+            for (int i = 0; i < s.Length; i++) s[i] = ic.SpellAt(i);
+            return s;
+        }
+
+        private static void IconsCarryTheirSpells()
+        {
+            Case("each icon carries the spell heading each category it merges (the tooltip names them)");
+            int c = Run(new[] { new E(3, 80, 2), new E(4, 25, 4), new E(2, 30, 110) }, out var ic);
+            Check(c == 2, $"two icons (got {c})");
+            Check(ic[0].Kind == DebuffKind.VulnFire && Spells(ic[0]).SequenceEqual(new uint[] { 2 }), "fire vuln: spell 2 (" + string.Join(",", Spells(ic[0])) + ")");
+            Check(ic[1].Kind == DebuffKind.Attributes && Spells(ic[1]).OrderBy(x => x).SequenceEqual(new uint[] { 3, 4 }),
+                "attributes: spells 3 and 4 (" + string.Join(",", Spells(ic[1])) + ")");
+            c = Run(new[] { new E(1, 20, 116), new E(10, 50, 116) }, out ic);
+            Check(c == 1 && Spells(ic[0]).SequenceEqual(new uint[] { 10 }), "one category: the spell that lasts longest (10)");
+            Run(new[] { new E(100, 600, 50), new E(0x8001, 30, 0) }, out ic);
+            Check(ic[0].SpellCount == 0, "no icon, no spells");
+        }
+
+        private static void AddSpellLimits()
+        {
+            Case("AddSpell: skips 0 and repeats, holds at most MaxSpells");
+            var ic = new DebuffIcon();
+            ic.AddSpell(0); ic.AddSpell(7); ic.AddSpell(7);
+            Check(ic.SpellCount == 1 && ic.SpellAt(0) == 7, "0 and the repeat skipped");
+            for (uint s = 20; s < 30; s++) ic.AddSpell(s);
+            Check(ic.SpellCount == DebuffIcon.MaxSpells, $"capped at {DebuffIcon.MaxSpells} (got {ic.SpellCount})");
+            Check(Spells(ic).SequenceEqual(new uint[] { 7, 20, 21, 22 }), "first ones kept: " + string.Join(",", Spells(ic)));
+            Check(ic.SpellAt(-1) == 0 && ic.SpellAt(9) == 0, "out of range reads 0");
+        }
+
+        private static void TooltipText()
+        {
+            Case("tooltip wording: kind, what it does, the spells, when the first ends");
+            string t = DebuffTip.Text(DebuffKind.VulnFire, new[] { "Fire Vulnerability Other VII" }, 1, 83, estimated: true, self: false);
+            Check(t == "Fire vulnerability\nTakes more fire damage.\n  Fire Vulnerability Other VII\nEnds in about 1:23", "monster fire vuln:\n" + t);
+            t = DebuffTip.Text(DebuffKind.VulnFire, new[] { "Fire Vulnerability Other VII" }, 1, 42, estimated: false, self: true);
+            Check(t.Contains("You take more fire damage.") && t.EndsWith("Ends in 42 s"), "yours: 'You take', exact time:\n" + t);
+            t = DebuffTip.Text(DebuffKind.Attributes, new[] { "Weakness Other VII", "Feeblemind Other VII" }, 6, 30, true, false);
+            Check(t.Contains("\n  Weakness Other VII\n  Feeblemind Other VII\n  and 4 more\n") && t.EndsWith("First one ends in about 30 s"),
+                "stack of 6, two names known:\n" + t);
+            t = DebuffTip.Text(DebuffKind.Imperil, Array.Empty<string>(), 1, 0, true, false);
+            Check(t == "Imperil\nArmor lowered: physical hits land harder.", "no names (spell table not loaded), no time:\n" + t);
+            foreach (DebuffKind k in Enum.GetValues<DebuffKind>())
+                Check(DebuffTip.Title(k).Length > 0 && DebuffTip.Effect(k, false).Length > 0 && DebuffTip.Effect(k, true).Length > 0, $"{k} has words");
+            Check(DebuffTip.Time(0.2) == "1 s" && DebuffTip.Time(58.5) == "59 s" && DebuffTip.Time(59.5) == "1:00" && DebuffTip.Time(3725) == "1:02:05",
+                $"times: {DebuffTip.Time(0.2)} {DebuffTip.Time(58.5)} {DebuffTip.Time(59.5)} {DebuffTip.Time(3725)}");
+            Check(DebuffTip.More(1) == "1 more debuff than fits in the row." && DebuffTip.More(3) == "3 more debuffs than fit in the row.", "+N wording");
+            Check(DebuffTip.Others.StartsWith("Debuffed by someone else\n"), "others marker wording");
         }
 
         // ── Your debuff icon size (2026-10-28) ──────────────────────────────

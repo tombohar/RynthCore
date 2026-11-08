@@ -191,12 +191,21 @@ internal static unsafe class ShortcutApi
     /// v90 GetIconTexture: kind 0 an icon (0x06) id, 1 an object (its icon with underlay and
     /// overlay), 2 a spell. An ImGui texture id for ImGui.Image, or 0 while it is being made (ask
     /// again next frame). AC's render thread, inside a docked window's draw.
+    /// Kind 3 (2026-11-07, no API bump: older engines answer 0 for it): a retail UI picture, any 0x06
+    /// texture up to 512 x 512 at its own size (window backgrounds, banners, frame pieces), kept for
+    /// the session in RetailSprites, the cache the Inventory's Classic view draws from. For plugins
+    /// that draw the retail look (RynthDreamWeave's Skills panel); icons stay kind 0.
+    /// Kind 4 (same date): a retail font's glyph sheet (its Font file's foreground or background
+    /// surface, A8, up to 2048 wide) as white with the sheet's level as alpha, so the plugin draws
+    /// the retail UI's own text from the Font file's glyph table, tinted.
     /// </summary>
     public static IntPtr GetIconTexture(int kind, uint id)
     {
         try
         {
-            if (kind is < 0 or > 2 || id == 0 || !MainThreadGuard.IsOnMainThread() || ImGuiPopOuts.InPopOutFrame) return IntPtr.Zero;
+            if (kind is < 0 or > 4 || id == 0 || !MainThreadGuard.IsOnMainThread() || ImGuiPopOuts.InPopOutFrame) return IntPtr.Zero;
+            if (kind == 3) return RetailSprites.TryGet(id, out IntPtr sprite) ? sprite : IntPtr.Zero;
+            if (kind == 4) return RetailSprites.TryGetFontSheet(id, out IntPtr sheet) ? sheet : IntPtr.Zero;
             return ScriptIcons.TryGet((ScriptIconKind)kind, id, out IntPtr texture) ? texture : IntPtr.Zero;
         }
         catch { return IntPtr.Zero; }

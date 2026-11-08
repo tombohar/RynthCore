@@ -8,6 +8,8 @@
 //
 //  A line's colour, first that applies:
 //    1. a rule's line colour (ChatRoute.LineArgb),
+//    1b. the colour the plugin that wrote the line asked for (ChatLine.OwnArgb,
+//       ChatOwnColors.cs, 2026-11-05: RynthAi's Info text colour),
 //    2. the colour the user set for the line's kind,
 //    3. the colour the user set for its tab,
 //    4. with Retail colours on (2026-10-28, the default), AC's own colour for
@@ -271,6 +273,11 @@ internal static class ChatLineColors
     /// ChatMessageType (-1 unknown: no retail colour).</summary>
     public static uint Resolve(uint? ruleArgb, string? kind, string channel, int chatType = -1) =>
         ruleArgb ?? Get(kind) ?? Get(TabPrefix + channel) ?? RetailFor(chatType, channel) ?? BuiltInTabArgb(channel);
+
+    /// <summary>A scrollback line's colour: <see cref="Resolve"/> with the plugin's own colour for
+    /// it (<paramref name="ownArgb"/>, null = none) just below the rule's.</summary>
+    public static uint ResolveLine(uint? ruleArgb, uint? ownArgb, string? kind, string channel, int chatType = -1) =>
+        Resolve(ruleArgb ?? ownArgb, kind, channel, chatType);
 
     /// <summary>A key worth keeping from the settings file: a listed kind, a base tab, or a sane channel tag.</summary>
     public static bool IsValidKey(string? key)

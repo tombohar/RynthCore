@@ -406,6 +406,7 @@ internal static class PlateDebuffs
                     {
                         if (dst[i].Kind != e.Kind) continue;
                         dst[i].Stack++;
+                        dst[i].AddSpell(e.SpellId);
                         if (e.Expiry < dst[i].Expiry) { dst[i].Expiry = e.Expiry; dst[i].Duration = e.Duration; }
                         break;
                     }
@@ -413,7 +414,10 @@ internal static class PlateDebuffs
                 }
                 seen |= 1UL << k;
                 if (n < dst.Length)
+                {
                     dst[n] = new DebuffIcon { Kind = e.Kind, Expiry = e.Expiry, Duration = e.Duration, Stack = 1 };
+                    dst[n].AddSpell(e.SpellId);
+                }
                 n++;
             }
             // Stable order on the plate: by kind.

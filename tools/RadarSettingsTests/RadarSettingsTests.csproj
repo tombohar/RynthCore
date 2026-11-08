@@ -1,14 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Offline checks for the radar's per-kind show boxes (RadarSettingsStore.ShowFlag / ShowKind)
+    Offline checks for the radar's range rings (RadarRangeRing.cs: their boxes, defaults, file keys,
+    and the ring's radius, range x zoom, and when it shows), and for the radar's per-kind show boxes (RadarSettingsStore.ShowFlag / ShowKind)
     the marker kinds (RadarKind) the RynthAi snapshot sends, and the per-kind marker size /
     name label settings (MarkerStyleSettings). src\RynthCore.Engine\UI\Panels\
     RadarSettingsStore.cs and UI\Data\RadarSnapshotJson.cs are compiled in, with a synchronous
     UiBackgroundWriter stub. Every kind must have its own box, Corpses off must hide your corpses
     too, unknown kinds stay hidden, a plugin-shaped snapshot filters per box, and every box must
     round-trip through the settings file. The selected-object highlight (RadarSelection.cs): which
-    marker is the selected one, when it clears, the edge arrow and label maths, and its settings. Uses RYNTHCORE_RADAR_SETTINGS (temp files); never
+    marker is the selected one, when it clears, the edge arrow and label maths, and its settings. Which
+    presses may move the radar (RadarDrag.cs: never a dot press under click-through without Ctrl). Uses RYNTHCORE_RADAR_SETTINGS (temp files); never
     touches %LOCALAPPDATA%\RynthCore.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->
@@ -25,9 +27,11 @@
     <Compile Include="..\..\src\RynthCore.Engine\UI\Panels\RadarSettingsStore.cs" Link="Engine\RadarSettingsStore.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\UI\Data\RadarSnapshotJson.cs" Link="Engine\RadarSnapshotJson.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\UI\Panels\MarkerStyleSettings.cs" Link="Engine\MarkerStyleSettings.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\Panels\RadarRangeRing.cs" Link="Engine\RadarRangeRing.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\Panels\CircleClip.cs" Link="Engine\CircleClip.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\Panels\RadarWheel.cs" Link="Engine\RadarWheel.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\Panels\RadarSelection.cs" Link="Engine\RadarSelection.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\Panels\RadarDrag.cs" Link="Engine\RadarDrag.cs" />
   </ItemGroup>
 
 </Project>

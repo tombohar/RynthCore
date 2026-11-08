@@ -64,6 +64,12 @@ internal static class RadarSettingsStore
     /// <summary>How strongly that picture shows (the radar's own Opacity applies on top).</summary>
     public static float WorldMapOpacity = 0.8f;
 
+    /// <summary>ImGui face: a ring round you at RynthAi's Monster Range, the distance the bot attacks
+    /// from (2026-11-06). On by default; nothing is drawn until RynthAi has sent its settings.</summary>
+    public static bool ShowMonsterRangeRing = true;
+    /// <summary>...and one at its Ring Range (ring spells). Off by default.</summary>
+    public static bool ShowRingRangeRing;
+
     // Text sizes of the compass letters and the coordinate strip (px at 100% UI scale).
     public const float DefaultCompassSize = 14f, DefaultCoordSize = 11f, MinText = 8f, MaxText = 28f;
     public static float CompassSize = DefaultCompassSize;
@@ -226,6 +232,8 @@ internal static class RadarSettingsStore
                                 SelectedColor = sc;
                             break;
                         case "worldMap":     ShowWorldMap     = val == "1"; break;
+                        case "monsterRangeRing": ShowMonsterRangeRing = val == "1"; break;
+                        case "ringRangeRing":    ShowRingRangeRing    = val == "1"; break;
                         case "worldMapOpacity":
                             if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float wo) && float.IsFinite(wo))
                                 WorldMapOpacity = Math.Clamp(wo, 0.1f, 1.0f);
@@ -295,6 +303,8 @@ internal static class RadarSettingsStore
                     sw.WriteLine(FormattableString.Invariant($"selectedColor={SelectedColor:X8}"));
                 sw.WriteLine($"worldMap={(ShowWorldMap ? "1" : "0")}");
                 sw.WriteLine(FormattableString.Invariant($"worldMapOpacity={WorldMapOpacity:0.##}"));
+                sw.WriteLine($"monsterRangeRing={(ShowMonsterRangeRing ? "1" : "0")}");
+                sw.WriteLine($"ringRangeRing={(ShowRingRangeRing ? "1" : "0")}");
                 sw.WriteLine(FormattableString.Invariant($"compassSize={CompassSize:0.##}"));
                 sw.WriteLine(FormattableString.Invariant($"coordSize={CoordSize:0.##}"));
                 var styleLines = new System.Collections.Generic.List<string>();

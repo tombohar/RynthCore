@@ -53,6 +53,8 @@ internal static partial class Program
         RunShutdownOrderTests();
         RunReloadStallTests();
 
+        RunNativeAttackRearmTests();
+
         Console.WriteLine($"{_checks} check(s), {_failed} failed.");
         return _failed == 0 ? 0 : 1;
     }

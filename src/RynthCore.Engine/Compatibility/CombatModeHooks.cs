@@ -49,6 +49,12 @@ internal static class CombatModeHooks
     public static bool IsInstalled { get; private set; }
     public static string StatusMessage => _statusMessage;
 
+    // Every combat mode change this engine saw (the detour, our own client-level request, a
+    // healed cache). ClientCombatHooks compares it with the count at its last native attack:
+    // an attack-in-progress flag left from another stance is cleared (NativeAttackRearm).
+    private static int _modeChanges;
+    public static int ModeChanges => Volatile.Read(ref _modeChanges);
+
     /// <summary>The ClientCombatSystem singleton, or Zero. Read-only (diagnostics).</summary>
     internal static IntPtr ReadCombatSystemPtr()
     {
@@ -183,6 +189,13 @@ internal static class CombatModeHooks
             }
 
             _originalSetCombatMode(combatSystem, combatMode, 1);
+            // The trampoline sets the client's field at once (unless the player isn't ready:
+            // UseTime applies it later, through the detour), without our detour seeing it.
+            if (*(int*)(combatSystem + CombatModeOffset) != cur)
+            {
+                Interlocked.Increment(ref _modeChanges);
+                ClientCombatHooks.DisarmOutOfAttackStance($"stance change {cur} -> {combatMode}");
+            }
 
             LogRequestPath(combatMode, cur, "sent via ClientCombatSystem::SetCombatMode(playerRequested=1)");
             return true;
@@ -298,6 +311,8 @@ internal static class CombatModeHooks
         if (currentCombatMode == previousCombatMode)
             return;
 
+        Interlocked.Increment(ref _modeChanges);
+        ClientCombatHooks.DisarmOutOfAttackStance($"stance change {previousCombatMode} -> {currentCombatMode}");
         PluginManager.QueueCombatModeChange(currentCombatMode, previousCombatMode);
     }
 
@@ -332,6 +347,7 @@ internal static class CombatModeHooks
                 return;   // not a mode (a singleton being torn down): leave the cache alone
             int previous = Interlocked.Exchange(ref _lastObservedCombatMode, raw);
             if (raw == previous) return;
+            Interlocked.Increment(ref _modeChanges);
             RynthLog.Compat($"CombatModeHooks: the cached combat mode was {previous} but the client reads {raw} " +
                             "(no SetCombatMode seen since this engine started, e.g. after a hot reload): cache healed, plugins told.");
             PluginManager.QueueCombatModeChange(raw, previous);

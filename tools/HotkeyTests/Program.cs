@@ -219,8 +219,15 @@ internal static class Program
         Check(HotkeyRules.Check(ok with { InWorld = false }, f1) == HotkeyGate.NotInWorld, "character select: no");
         Check(HotkeyRules.Check(ok with { GameFocused = false }, f1) == HotkeyGate.NotFocused, "another app in front: no");
         Check(HotkeyRules.Check(ok with { RynthTextFocus = true }, ctrlW) == HotkeyGate.RynthTyping, "RynthCore text box: no, even Ctrl combos");
-        Check(HotkeyRules.Check(ok with { AcTextFocus = true }, f1) == HotkeyGate.AcTyping, "AC chat typing: no, even F keys");
-        Check(HotkeyRules.Check(ok with { AcTextFocus = true, RynthTextFocus = true }, f1) == HotkeyGate.RynthTyping, "ours first");
+        // 2026-11-06 (owner): an F key types nothing, so it fires while a chat entry has the keys.
+        Check(HotkeyRules.Check(ok with { AcTextFocus = true }, f1) == HotkeyGate.Fire, "AC chat typing: an F key still fires");
+        Check(HotkeyRules.Check(ok with { AcTextFocus = true }, new KeyCombo(VK_F12, HotkeyMods.Shift | HotkeyMods.Ctrl)) == HotkeyGate.Fire,
+            "AC chat typing: an F key with modifiers still fires");
+        Check(HotkeyRules.Check(ok with { RynthTextFocus = true }, f1) == HotkeyGate.Fire, "RynthCore text box: an F key still fires");
+        Check(HotkeyRules.Check(ok with { AcTextFocus = true }, w) == HotkeyGate.AcTyping, "AC chat typing: a letter is held");
+        Check(HotkeyRules.Check(ok with { AcTextFocus = true }, ctrlW) == HotkeyGate.AcTyping, "AC chat typing: Ctrl combos are held (copy, paste)");
+        Check(HotkeyRules.Check(ok with { AcTextFocus = true }, altNum) == HotkeyGate.AcTyping, "AC chat typing: Alt combos are held");
+        Check(HotkeyRules.Check(ok with { AcTextFocus = true, RynthTextFocus = true }, w) == HotkeyGate.RynthTyping, "ours first");
 
         var unknown = ok with { AcTextFocus = null };
         Check(HotkeyRules.Check(unknown, w) == HotkeyGate.AcUnknownTextKey, "AC focus unknown: a letter could be typing");

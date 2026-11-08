@@ -9,6 +9,9 @@
       - the log tail: last N lines, the byte cap (keeps the end, starts at a line), a last line
         still being written, CRLF, an empty / missing file, the rotated .old topping up a short
         current log, and reading while another thread keeps appending (as the engine does);
+      - the per-client log's rotation chain (src\RynthCore.Engine\LogRotation.cs, compiled in): .old is
+        always the newest, older copies shift to .old.1 ... .old.N-1, the cap and a smaller cap, held
+        handles (share-delete readers vs an editor without it), and the 7-day pruner's rule;
       - hiding the account (login) name, the Windows user name (profile paths) and the PC name;
       - the cooldown arithmetic, the endpoint override rules, and reading the server's answers.
     Optional: (double dash) server http://127.0.0.1:18097/report posts real bodies to a local copy
@@ -27,6 +30,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\RynthCore.Engine\Report\ProblemReportCore.cs" Link="Engine\ProblemReportCore.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\LogRotation.cs" Link="Engine\LogRotation.cs" />
   </ItemGroup>
 
 </Project>

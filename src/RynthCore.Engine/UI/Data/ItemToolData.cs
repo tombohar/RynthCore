@@ -33,6 +33,12 @@ internal sealed class ChestToolState
     [JsonPropertyName("status")]  public string Status { get; set; } = string.Empty;
     [JsonPropertyName("running")] public bool Running { get; set; }
     [JsonPropertyName("looted")]  public int Looted { get; set; }
+    // "Chest re-lock wait (s)" (2026-11-05). 0 = a RynthAi that predates it: the panel hides the control.
+    [JsonPropertyName("relockSec")]   public int RelockSec { get; set; }
+    [JsonPropertyName("relockMin")]   public int RelockMin { get; set; } = 5;
+    [JsonPropertyName("relockMax")]   public int RelockMax { get; set; } = 600;
+    // False until the character's settings profile loaded (RynthAi refuses the change then).
+    [JsonPropertyName("relockReady")] public bool RelockReady { get; set; }
 }
 
 internal sealed class GiveToolState
@@ -89,8 +95,8 @@ internal static unsafe class ItemToolCommands
     }
 
     /// <summary>
-    /// Posts one Item Tool command ("chest set", "chest key", "chest start", "chest stop", "giveitem",
-    /// "givetarget", "give", "givestop"). Runs on the pump; RynthAi older than this build has no such
+    /// Posts one Item Tool command ("chest set", "chest key", "chest start", "chest stop", "relock N",
+    /// "giveitem", "givetarget", "give", "givestop"). Runs on the pump; RynthAi older than this build has no such
     /// export: the click is logged and dropped.
     /// </summary>
     public static void Send(string words) => UiDataHub.Post("Item Tool " + words, () =>

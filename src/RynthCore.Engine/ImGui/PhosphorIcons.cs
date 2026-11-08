@@ -104,6 +104,7 @@ internal static unsafe class PhosphorIcons
     public const string MapTrifold = "\uE31A";
     public const string Minus = "\uE32A";
     public const string Monitor = "\uE32E";
+    public const string Moon = "\uE330";   // baked for plugins: RynthDefective's Day/Night timer (2026-11-04)
     public const string NavigationArrow = "\uEADE";
     public const string Path = "\uE39C";
     public const string PencilSimple = "\uE3B4";
@@ -173,7 +174,8 @@ internal static unsafe class PhosphorIcons
         + CastleTurret + ClockCounterClockwise + GlobeHemisphereWest + Path + Star + Target + User
         + TextAa + Leaf + Keyboard
         + PushPin + SlidersHorizontal + Wrench
-        + Scroll;
+        + Scroll
+        + Moon;
 
     /// <summary>
     /// Draws <paramref name="glyph"/> (one icon) centred in the box at

@@ -169,6 +169,8 @@ internal sealed unsafe class ChatSource : UiSource<ChatLine[]>
                                     dto.Sender is { Length: > 0 } s ? StripAcLinks(s, out _) : linkedName, text)
             {
                 Seq = dto.Seq,
+                // A plugin's own colour for it (ChatOwnColors), matched by the text as AC printed it.
+                OwnArgb = ChatOwnColors.Lines.Take(dto.Text, dto.Type, Environment.TickCount64),
             };
             line.Route = router.Evaluate(line, null);
             if (line.Route.Mention) ChatModel.PumpMentionSound();
@@ -356,9 +358,10 @@ internal static class ChatModel
     /// settings), else the built-in one (ChatLineColors.BuiltInTabArgb).</summary>
     public static uint ChannelArgb(string chan) => ChatLineColors.TabArgb(chan);
 
-    /// <summary>The line's colour: a rule's line colour, else the colour set for its kind
-    /// (say, fellowship, [General]...), else its channel's. 0xAARRGGBB.</summary>
-    public static uint LineArgb(ChatLine line) => ChatLineColors.Resolve(line.Route.LineArgb, line.ColorKind, line.Channel, line.ChatType);
+    /// <summary>The line's colour: a rule's line colour, else the one its plugin asked for, else
+    /// the colour set for its kind (say, fellowship, [General]...), else its channel's. 0xAARRGGBB.</summary>
+    public static uint LineArgb(ChatLine line) =>
+        ChatLineColors.ResolveLine(line.Route.LineArgb, line.OwnArgb, line.ColorKind, line.Channel, line.ChatType);
 
     /// <summary>
     /// What a rule's "When" can be: (stored value, label). Channel tabs, then

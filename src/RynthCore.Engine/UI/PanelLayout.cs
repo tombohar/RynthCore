@@ -7,7 +7,9 @@
 //  Switching. Tick (EndScene, AC's render thread, every frame) works out the
 //  layout the client should use: the PC-wide default until a character is in
 //  the world, then that character's (SessionStateRegistry's server and name,
-//  known straight after LoginComplete, which a hot reload marks at engine init).
+//  known straight after LoginComplete, which a hot reload marks at engine init;
+//  a client launched with no character picked has no name there, so the
+//  player's own name from the object snapshot, 2026-11-05).
 //  A switch then runs in three steps:
 //    1. render thread: snapshot the ImGui windows of the layout being left;
 //    2. UI writer (UiBackgroundWriter, in order with every other UI save): write
@@ -28,10 +30,13 @@
 //  the render thread and atomically, always to the file of the layout the
 //  context holds.
 //
-//  The default pair is written by clients that use it in the world as before
-//  (setting off, no character name) and by /rc layout default; not by a switch,
-//  not at character select with the setting on, and never with the windows of a
-//  character that logged out (PanelLayoutPolicy.MayAutoSaveIni).
+//  The default pair is written by clients that use it with the setting off (as
+//  before) and by /rc layout default. With the setting on nothing else writes
+//  it (2026-11-05; PanelLayoutPolicy.MaySaveLayoutInUse, PanelStateStore
+//  .ReadOnlyPath): not a switch, not character select, not a client in the
+//  world that doesn't know its character yet, not Save Layout Now. Before, a
+//  client with no character name saved its places there all session, every
+//  such client overwrote the others', and a reload read back whoever won.
 // ============================================================================
 
 using System;
@@ -56,16 +61,24 @@ internal static class PanelLayout
     // and the ImGui windows' text for it.
     private static Loaded? _applied;
     private static string? _activeIniText;
-    private static bool _contextHeldCharacter;   // the ImGui context has had a character's windows in it
     private static LayoutOwner? _placedFor;      // the layout the open panels were last placed from
     private static bool _placedForSet;
 
     /// <summary>The character whose layout is applied; null = the default (or none yet).</summary>
     private static LayoutOwner? Active => Volatile.Read(ref _applied)?.Switch.To;
 
-    // The identity Tick last read (SessionStateRegistry's strings), so it isn't rebuilt every frame.
-    private static string? _idServer, _idCharacter;
+    // The identity Tick last read (SessionStateRegistry's strings and the player's own name), so it
+    // isn't rebuilt every frame.
+    private static string? _idServer, _idCharacter, _idLive;
     private static LayoutOwner? _idOwner;
+
+    // The player's own name for the login it was read in (render thread): the launch context has
+    // none when the client was launched to character select (2026-11-05).
+    private static string _liveName = string.Empty;
+    private static long _liveNameLogin = -1;
+
+    // The setting the default's read-only mark (PanelStateStore.ReadOnlyPath) was set for.
+    private static bool? _readOnlyFor;
 
     /// <summary>An /rc layout default or reset waiting for the render thread (one at a time).</summary>
     private sealed record PendingOp(LayoutCommand Kind, Action<string, bool> Reply);
@@ -88,7 +101,16 @@ internal static class PanelLayout
     {
         if (_initialized) return;
         _initialized = true;
+        MarkDefaultReadOnly(EngineSettings.PanelLayoutPerCharacter);
         RynthLog.UI($"PanelLayout: per character {(EngineSettings.PanelLayoutPerCharacter ? "on" : "off")}; layouts under {Path.Combine(LocalRoot, PanelLayoutPolicy.LayoutsFolder)}.");
+    }
+
+    /// <summary>With the setting on, no save writes the default's panel_state.txt (PanelLayoutPolicy.MaySaveLayoutInUse).</summary>
+    private static void MarkDefaultReadOnly(bool perCharacter)
+    {
+        if (_readOnlyFor == perCharacter) return;
+        _readOnlyFor = perCharacter;
+        PanelStateStore.ReadOnlyPath = perCharacter ? FilesFor(null).PanelState : null;
     }
 
     private static bool InWorld => LoginLifecycleHooks.HasObservedLoginComplete;
@@ -96,13 +118,38 @@ internal static class PanelLayout
     private static LayoutOwner? Identity()
     {
         string server = SessionStateRegistry.LastServerName, character = SessionStateRegistry.LastCharacterName;
-        if (!ReferenceEquals(server, _idServer) || !ReferenceEquals(character, _idCharacter))
+        string live = string.IsNullOrWhiteSpace(character) && InWorld ? LiveName() : string.Empty;
+        if (!ReferenceEquals(server, _idServer) || !ReferenceEquals(character, _idCharacter) || !ReferenceEquals(live, _idLive))
         {
             _idServer = server;
             _idCharacter = character;
-            _idOwner = PanelLayoutPolicy.Owner(server, character);
+            _idLive = live;
+            _idOwner = PanelLayoutPolicy.Identity(server, character, live);
         }
         return _idOwner;
+    }
+
+    /// <summary>
+    /// The name of the player in the world, read once per login from the object snapshot (no native
+    /// call: the main-thread walk fills it every half second; the live name lookup at LoginComplete
+    /// stays off in SessionStateRegistry). Empty until the snapshot has the player. Render thread.
+    /// </summary>
+    private static string LiveName()
+    {
+        long login = LoginLifecycleHooks.LoginCompleteAtMs;
+        if (login != _liveNameLogin)
+        {
+            _liveNameLogin = login;
+            _liveName = string.Empty;
+        }
+        if (_liveName.Length > 0 || login == 0) return _liveName;
+        uint me = ClientHelperHooks.CachedPlayerId;
+        if (me != 0 && ClientObjectHooks.TryGetSnapshotName(me, out string name) && !string.IsNullOrWhiteSpace(name))
+        {
+            _liveName = name.Trim();
+            RynthLog.UI($"PanelLayout: the launch context names no character; the player in the world is {_liveName}.");
+        }
+        return _liveName;
     }
 
     /// <summary>
@@ -129,6 +176,7 @@ internal static class PanelLayout
             if (!Session.InFlight && Volatile.Read(ref _pendingOp) != null && Interlocked.Exchange(ref _pendingOp, null) is { } op)
                 RunOp(op, imguiReady ? snapshotIni : null);
 
+            MarkDefaultReadOnly(EngineSettings.PanelLayoutPerCharacter);   // the setting can change in Settings > Display
             LayoutSwitch? sw = Session.Tick(Environment.TickCount64, EngineSettings.PanelLayoutPerCharacter, InWorld,
                 LoginLifecycleHooks.LoginCompleteAtMs, SessionStateRegistry.LoginRecorded, Identity());
             if (sw is { } s)
@@ -223,7 +271,6 @@ internal static class PanelLayout
         }
         Volatile.Write(ref _applied, l);
         _activeIniText = l.IniText;
-        if (l.Switch.To != null) _contextHeldCharacter = true;
         Session.MarkApplied(l.Switch.Gen);
 
         // A reset places the panels again even though the layout's owner is the same.
@@ -293,10 +340,27 @@ internal static class PanelLayout
         path = string.Empty;
         // Nothing applied yet: the context holds no file's windows, and saving it would empty one.
         if (Volatile.Read(ref _applied) is not { } applied) return false;
-        if (!explicitSave && !PanelLayoutPolicy.MayAutoSaveIni(applied.Switch.To != null, EngineSettings.PanelLayoutPerCharacter, InWorld, _contextHeldCharacter))
+        // The default with the setting on: only read, even by Save Layout Now (2026-11-05).
+        if (!PanelLayoutPolicy.MaySaveLayoutInUse(applied.Switch.To != null, EngineSettings.PanelLayoutPerCharacter))
+        {
+            if (explicitSave) RynthLog.UI($"PanelLayout: Save Layout Now didn't write {applied.Files.ImGuiIni}: {SaveBlockedReason()}.");
             return false;
+        }
         path = applied.Files.ImGuiIni;
         return true;
+    }
+
+    private static string SaveBlockedReason() => PanelLayoutPolicy.DefaultReadOnlyText(InWorld);
+
+    /// <summary>
+    /// Save Layout Now (Settings > Display): null when the window places go to the layout in use, else
+    /// why they don't (the PC-wide default with the setting on is only read). Any thread (racy read).
+    /// </summary>
+    public static string? SavePlacesProblem()
+    {
+        if (!_initialized || Volatile.Read(ref _applied) is not { } applied) return null;
+        return PanelLayoutPolicy.MaySaveLayoutInUse(applied.Switch.To != null, EngineSettings.PanelLayoutPerCharacter)
+            ? null : SaveBlockedReason();
     }
 
     // ── /rc layout and Settings ───────────────────────────────────────────

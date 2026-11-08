@@ -50,6 +50,12 @@ internal static class MonsterHudSettings
     /// <summary>A left-click on a monster plate selects that monster in game.</summary>
     public static bool ClickToSelect = true;
     /// <summary>
+    /// "Hide behind walls" (2026-11-04, report R-20261105-020337-67aa): no plate or label (and no click) for
+    /// an object the player can't see because of building or dungeon walls (PlateSight). Off: every object
+    /// in range gets one, as before.
+    /// </summary>
+    public static bool HideBehindWalls = true;
+    /// <summary>
     /// "Refresh others' health" (2026-10-31): the server streams health only for the selected / queried
     /// monster, so the HUD asks for the other plates' health itself, one monster per HealthRefreshSec
     /// (HealthProbe). Off: only the selected / queried monster's plate is live.
@@ -233,6 +239,7 @@ internal static class MonsterHudSettings
                 case "scale": if (TryF(val, out float s)) Scale = Math.Clamp(s, MinScale, MaxScale); break;
                 case "opacity": if (TryF(val, out float o)) Opacity = Math.Clamp(o, MinOpacity, MaxOpacity); break;
                 case "clickSelect": ClickToSelect = val == "1"; break;
+                case "hideBehindWalls": HideBehindWalls = val == "1"; break;
                 case "refreshOthersHealth": RefreshOthersHealth = val == "1"; break;
                 case "healthRefreshSec":
                     if (TryF(val, out float hr)) HealthRefreshSec = Math.Clamp(hr, HealthProbe.MinIntervalSec, HealthProbe.MaxIntervalSec);
@@ -357,6 +364,7 @@ internal static class MonsterHudSettings
         sw.WriteLine(FormattableString.Invariant($"opacity={Opacity:0.##}"));
         sw.WriteLine(FormattableString.Invariant($"heightLift={HeightLift:0.##}"));
         sw.WriteLine($"clickSelect={B(ClickToSelect)}");
+        sw.WriteLine($"hideBehindWalls={B(HideBehindWalls)}");
         sw.WriteLine($"refreshOthersHealth={B(RefreshOthersHealth)}");
         sw.WriteLine(FormattableString.Invariant($"healthRefreshSec={HealthRefreshSec:0.##}"));
         sw.WriteLine($"npcNames={B(NpcNames)}");
@@ -417,7 +425,7 @@ internal static class MonsterHudSettings
     {
         Enabled = true; MaxDistance = 35f; MaxPlates = 20; Filter = PlateFilter.All;
         ShowNames = true; ShowHpNumbers = true; ShowDistance = false; ShowLevel = true; ShowWeakness = true;
-        FadeWithDistance = true; Scale = 1.0f; Opacity = 0.9f; HeightLift = 0f; ClickToSelect = true;
+        FadeWithDistance = true; Scale = 1.0f; Opacity = 0.9f; HeightLift = 0f; ClickToSelect = true; HideBehindWalls = true;
         RefreshOthersHealth = true; HealthRefreshSec = HealthProbe.DefaultIntervalSec;
         ShowDebuffs = true; ShowOthersDebuff = true;
         NpcNames = true; NpcMaxDistance = 30f; MaxNpcLabels = 15; PlayerNames = false; PlayerBars = false;
@@ -484,7 +492,7 @@ internal static class MonsterHudSettings
         $"RynthVision nameplates: monsters {(Enabled ? "ON" : "OFF")} ({(Filter == PlateFilter.Engaged ? "engaged only" : "all monsters")}, " +
         $"{MaxDistance:0}yd, max {MaxPlates}, scale {Scale:0.##}, opacity {Opacity:0.##}, lift {HeightLift:0.#}m; " +
         $"names {OnOff(ShowNames)}, hp {OnOff(ShowHpNumbers)}, level {OnOff(ShowLevel)}, weak {OnOff(ShowWeakness)}, " +
-        $"distance {OnOff(ShowDistance)}, fade {OnOff(FadeWithDistance)}, click to select {OnOff(ClickToSelect)}, " +
+        $"distance {OnOff(ShowDistance)}, fade {OnOff(FadeWithDistance)}, click to select {OnOff(ClickToSelect)}, hide behind walls {OnOff(HideBehindWalls)}, " +
         $"refresh others' health {(RefreshOthersHealth ? $"every {HealthRefreshSec:0.0#} s" : "off")}), debuffs {OnOff(ShowDebuffs)} (others {OnOff(ShowOthersDebuff)}); " +
         $"NPC names {OnOff(NpcNames)} ({NpcMaxDistance:0}yd, max {MaxNpcLabels}), player names {OnOff(PlayerNames)} (bars {OnOff(PlayerBars)}), " +
         $"portal names {OnOff(PortalNames)} ({PortalMaxDistance:0}yd); " +

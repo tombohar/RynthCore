@@ -62,9 +62,11 @@ def _secs(line: str):
 
 def pid_log_groups():
     """Map pid -> [its log files sorted oldest-first], covering rotations
-    (RynthCore.<pid>.log plus .log.old / .log.N). The engine rotates at ~5 MB:
-    right after a rotation the live .log is a tiny fragment and the soak's
-    history is in .log.old, so scoring only .log would miss the whole run.
+    (RynthCore.<pid>.log plus .log.old and the older .log.old.1 ... .log.old.N,
+    LogRotation.cs). The engine rotates at ~5 MB: right after a rotation the
+    live .log is a tiny fragment and the soak's history is in the .old copies,
+    so scoring only .log would miss the whole run. Rotation keeps each copy's
+    last-write time, so sorting by mtime puts them in order.
     Each pid is analyzed over its concatenated files in chronological order."""
     groups = {}
     for f in glob.glob(os.path.join(LOG_DIR, "RynthCore.*.log*")):

@@ -68,6 +68,8 @@ internal static class HotkeyService
     private static string _captureNote = string.Empty;
 
     private static HotkeyGate _lastGate = HotkeyGate.Fire;
+    private const long HeldBackLogMs = 2000;
+    private static long _lastHeldLogAt;
     private static readonly uint OurPid = (uint)Environment.ProcessId;
 
     // The ILT section's panels are offered only where the bar shows its ILT button.
@@ -318,11 +320,18 @@ internal static class HotkeyService
         if (b == null) return false;
 
         HotkeyGate gate = HotkeyRules.Check(ReadTypingState(rynthTextFocus), combo);
-        if (gate != _lastGate)
+        // Every held-back press is logged (at most one line per HeldBackLogMs), not only a change
+        // of reason: a stamina kit on a hotkey "rarely goes off" and the log showed one held-back
+        // line, so the presses that followed for the same reason left no trace (report
+        // R-20261106-040904-bb4b, 2026-11-05). AC's focus element says which text box had the keys.
+        long now = Environment.TickCount64;
+        if (gate != HotkeyGate.Fire && (gate != _lastGate || now - _lastHeldLogAt >= HeldBackLogMs))
         {
-            _lastGate = gate;
-            if (gate != HotkeyGate.Fire) RynthLog.UI($"Hotkeys: {combo} held back - {HotkeyRules.Describe(gate)}.");
+            _lastHeldLogAt = now;
+            RynthLog.UI($"Hotkeys: {combo} held back - {HotkeyRules.Describe(gate)}."
+                + (gate == HotkeyGate.AcTyping ? " " + AcKeyboardFocus.Describe() : ""));
         }
+        _lastGate = gate;
         if (gate != HotkeyGate.Fire) return false;
 
         Tracker.Took(vk);

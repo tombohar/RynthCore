@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using RynthCore.Engine;
 using RynthCore.Engine.Report;
 
 namespace ProblemReportTests;
@@ -30,6 +31,10 @@ internal static class Program
             TailCrlfAndEdges();
             TailTopsUpFromOld();
             TailWhileWriting();
+            RotationShifts();
+            RotationCap();
+            RotationHeldHandles();
+            RotationPruneRule();
             AccountHidden();
             Cooldown();
             Endpoint();
@@ -290,6 +295,156 @@ internal static class Program
 
         LogTail full = ProblemReportCore.ReadTail(WriteLines("f.log", 2500), old, 2000, 10_000_000)!;
         Check(!full.IncludesOld, "a full current log doesn't touch .old");
+    }
+
+    // ── Log rotation chain (src\RynthCore.Engine\LogRotation.cs) ────────────
+
+    private static string RotDir(string name)
+    {
+        string dir = Path.Combine(_tmp, name);
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    private static string? ReadOrNull(string path) => File.Exists(path) ? File.ReadAllText(path) : null;
+
+    private static void RotationShifts()
+    {
+        Case("rotation: copies shift down, .old is always the newest");
+        string active = Path.Combine(RotDir("rot-shift"), "RynthCore.4242.log");
+        for (int gen = 1; gen <= 5; gen++)
+        {
+            File.WriteAllText(active, "gen " + gen);
+            Eq(LogRotation.Rotate(active, 8), LogRotation.Outcome.Moved, $"rotation {gen} moves the live file");
+            Check(!File.Exists(active), $"rotation {gen}: the live file is gone (the next line starts a new one)");
+            Eq(ReadOrNull(active + ".old"), "gen " + gen, $"rotation {gen}: .old is the newest");
+        }
+        Eq(ReadOrNull(active + ".old.1"), "gen 4", ".old.1 = the one before");
+        Eq(ReadOrNull(active + ".old.4"), "gen 1", ".old.4 = the oldest so far");
+        Check(!File.Exists(active + ".old.5"), "nothing past what was rotated");
+        Eq(LogRotation.CopyPath(active, 0), active + ".old", "copy 0 is .old");
+        Eq(LogRotation.CopyPath(active, 3), active + ".old.3", "copy 3 is .old.3");
+
+        Case("rotation: mtimes stay oldest-last (soak_scorecard sorts by them)");
+        DateTime prev = DateTime.MaxValue;
+        bool ordered = true;
+        for (int i = 0; i <= 4; i++)
+        {
+            string p = LogRotation.CopyPath(active, i);
+            File.SetLastWriteTime(p, DateTime.Now.AddMinutes(-10 * i));   // as a real run would leave them
+        }
+        File.WriteAllText(active, "gen 6");
+        LogRotation.Rotate(active, 8);
+        for (int i = 0; i <= 5; i++)
+        {
+            DateTime t = File.GetLastWriteTime(LogRotation.CopyPath(active, i));
+            if (t > prev) ordered = false;
+            prev = t;
+        }
+        Check(ordered, "each older copy keeps its older last-write time");
+    }
+
+    private static void RotationCap()
+    {
+        Case("rotation: the cap drops the oldest");
+        string active = Path.Combine(RotDir("rot-cap"), "RynthCore.77.log");
+        for (int gen = 1; gen <= 12; gen++)
+        {
+            File.WriteAllText(active, "gen " + gen);
+            LogRotation.Rotate(active, 8);
+        }
+        Eq(ReadOrNull(active + ".old"), "gen 12", ".old = newest");
+        Eq(ReadOrNull(active + ".old.7"), "gen 5", ".old.7 = oldest kept");
+        Check(!File.Exists(active + ".old.8"), "no .old.8 (8 copies: .old + .old.1-.old.7)");
+        Eq(Directory.GetFiles(Path.GetDirectoryName(active)!, "RynthCore.77.log.old*").Length, 8, "exactly 8 copies on disk");
+
+        Case("rotation: a smaller cap trims leftovers from a larger one");
+        LogRotation.Rotate(active, 8);   // no live file: nothing happens
+        File.WriteAllText(active, "gen 13");
+        Eq(LogRotation.Rotate(active, 3), LogRotation.Outcome.Moved, "rotates");
+        Eq(ReadOrNull(active + ".old"), "gen 13", ".old = newest");
+        Eq(ReadOrNull(active + ".old.1"), "gen 12", ".old.1");
+        Eq(ReadOrNull(active + ".old.2"), "gen 11", ".old.2 = oldest kept");
+        Check(!File.Exists(active + ".old.3") && !File.Exists(active + ".old.7"), "everything past .old.2 deleted");
+
+        Case("rotation: keep 1 is the old behaviour (only .old)");
+        File.WriteAllText(active, "gen 14");
+        LogRotation.Rotate(active, 1);
+        Eq(ReadOrNull(active + ".old"), "gen 14", ".old replaced by the newest");
+        Eq(Directory.GetFiles(Path.GetDirectoryName(active)!, "RynthCore.77.log.old*").Length, 1, "one copy");
+
+        Case("rotation: clamps and gaps");
+        Eq(LogRotation.ClampKeepCopies(0), 1, "0 -> 1");
+        Eq(LogRotation.ClampKeepCopies(-5), 1, "negative -> 1");
+        Eq(LogRotation.ClampKeepCopies(500), LogRotation.MaxKeepCopies, "huge -> max");
+        Eq(LogRotation.DefaultKeepCopies, 8, "default 8");
+        string g = Path.Combine(RotDir("rot-gap"), "RynthCore.5.log");
+        File.WriteAllText(g + ".old", "a");
+        File.WriteAllText(g + ".old.3", "c");   // .old.1 / .old.2 missing (deleted by hand)
+        File.WriteAllText(g + ".old.x", "keep me");   // not a numbered copy
+        File.WriteAllText(g, "live");
+        LogRotation.Rotate(g, 8);
+        Eq(ReadOrNull(g + ".old"), "live", "gap: .old newest");
+        Eq(ReadOrNull(g + ".old.1"), "a", "gap: .old -> .old.1");
+        Eq(ReadOrNull(g + ".old.4"), "c", "gap: .old.3 -> .old.4");
+        Eq(ReadOrNull(g + ".old.x"), "keep me", "a non-numbered name is left alone");
+        Eq(LogRotation.Rotate(Path.Combine(_tmp, "rot-gap", "nope.log"), 8), LogRotation.Outcome.Missing, "no live file: Missing");
+    }
+
+    private static void RotationHeldHandles()
+    {
+        Case("rotation: handles readers hold (share delete) don't stop it");
+        string active = Path.Combine(RotDir("rot-held"), "RynthCore.9.log");
+        File.WriteAllText(active + ".old", "previous");
+        File.WriteAllText(active, "current");
+        // The launcher's wedge check and the problem report hold the log open with ReadWrite | Delete.
+        using (var launcher = new FileStream(active, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        using (var report = new FileStream(active + ".old", FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        {
+            Eq(LogRotation.Rotate(active, 8), LogRotation.Outcome.Moved, "moved with both held");
+        }
+        Eq(ReadOrNull(active + ".old"), "current", ".old = newest");
+        Eq(ReadOrNull(active + ".old.1"), "previous", "the held .old shifted to .old.1");
+
+        Case("rotation: a .old held without delete sharing falls back like before");
+        File.WriteAllText(active, "next");
+        using (var editor = new FileStream(active + ".old", FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            LogRotation.Outcome o = LogRotation.Rotate(active, 8);
+            // .old can be neither moved nor deleted, so the live file can't take its name: it is emptied.
+            Eq(o, LogRotation.Outcome.Truncated, "live file emptied, as the old code did");
+            Eq(ReadOrNull(active), "", "live log is empty, not growing");
+        }
+        Eq(ReadOrNull(active + ".old"), "current", "the held .old is untouched");
+        Eq(ReadOrNull(active + ".old.2"), "previous", "older copies still shifted");
+    }
+
+    private static void RotationPruneRule()
+    {
+        Case("prune: names and pids");
+        Eq(LogRotation.PidOf("RynthCore.1234.log"), (int?)1234, "live log");
+        Eq(LogRotation.PidOf("RynthCore.1234.log.old"), (int?)1234, ".old");
+        Eq(LogRotation.PidOf("RynthCore.1234.log.old.7"), (int?)1234, ".old.7");
+        Eq(LogRotation.PidOf("RynthCore.log"), (int?)null, "shared log");
+        Eq(LogRotation.PidOf("RynthCore.1234.log.bak"), (int?)null, "other suffix");
+        Eq(LogRotation.PidOf("RynthCore.abc.log"), (int?)null, "not a pid");
+        Eq(LogRotation.PidOf("RynthCore.1234.log.old.x"), (int?)null, "non-numbered copy");
+
+        Case("prune: what the 7-day pruner deletes");
+        DateTime cutoff = new DateTime(2026, 11, 1);
+        DateTime old = cutoff.AddDays(-1), fresh = cutoff.AddDays(1);
+        Func<int, bool> live = pid => pid == 500;
+        const string self = "RynthCore.100.log", shared = "RynthCore.log";
+        Check(LogRotation.ShouldPrune("RynthCore.300.log.old.5", self, shared, old, cutoff, live), "a dead client's old .old.5 goes");
+        Check(LogRotation.ShouldPrune("RynthCore.300.log", self, shared, old, cutoff, live), "a dead client's old .log goes");
+        Check(!LogRotation.ShouldPrune("RynthCore.300.log.old.5", self, shared, fresh, cutoff, live), "a recent copy stays");
+        Check(!LogRotation.ShouldPrune("RynthCore.500.log.old.7", self, shared, old, cutoff, live), "a running client's old copy stays");
+        Check(!LogRotation.ShouldPrune("RynthCore.500.log", self, shared, old, cutoff, live), "a running client's live log stays");
+        Check(!LogRotation.ShouldPrune("RynthCore.100.log", self, shared, old, cutoff, live), "our own live log stays");
+        Check(!LogRotation.ShouldPrune("RynthCore.100.log.old.3", self, shared, old, cutoff, live), "our own copies stay");
+        Check(LogRotation.ShouldPrune("RynthCore.1000.log.old", self, shared, old, cutoff, live), "pid 1000 isn't pid 100's file");
+        Check(!LogRotation.ShouldPrune("RynthCore.log", self, shared, old, cutoff, live), "the shared log stays");
+        Check(LogRotation.ShouldPrune("RynthCore.300.log.bak", self, shared, old, cutoff, live), "other names: age alone, as before");
     }
 
     private static void TailWhileWriting()

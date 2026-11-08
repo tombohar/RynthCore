@@ -17,6 +17,8 @@
 //  The object selected in game is highlighted (RadarSettingsStore.HighlightSelected, RadarSelection):
 //  a ring in its own colour round its marker and the hover label beside it, or an arrow on the
 //  edge when it is off the picture.
+//  Range rings round you at RynthAi's Monster Range and Ring Range (RadarRangeRing; each has a box in
+//  the settings), read from RynthAi's settings while one is on.
 //
 //  Data: UiSources.Radar (RadarView, lookups precomputed). World geometry is
 //  drawn without anti-aliasing (crisp tiling like the Avalonia face's aliased
@@ -71,6 +73,7 @@ internal sealed class RadarFace : IImGuiPanel
     private bool _settingsSub;                       // subscribed to RynthAi's settings (the retail radar switch) while the window is open
     private bool? _hidePending;                      // the retail-radar switch as just set, until RynthAi's answer shows it
     private long _hidePendingAt;
+    private bool _rangeSub;                          // subscribed to RynthAi's settings while a range ring is on
 
     // The round radar (RadarSettingsStore.RoundRadar): this frame's circle, read by the drawing helpers.
     private static bool _round;
@@ -86,6 +89,8 @@ internal sealed class RadarFace : IImGuiPanel
     // dot can always be hovered and clicked. A press that began on a dot keeps the panel interactive
     // until the button is released.
     private bool _hot, _pressHot, _downPrev;
+    // Whether the current press on the surface may move the panel (off for a dot press under click-through).
+    private readonly RadarDrag _drag = new();
 
     public bool ClickThrough =>
         RadarSettingsStore.CtrlGatedClickThrough && !ImGuiNET.ImGui.GetIO().KeyCtrl && !_hot;
@@ -106,10 +111,19 @@ internal sealed class RadarFace : IImGuiPanel
     {
         UiSources.Radar.Unsubscribe();
         if (_settingsSub) { UiSources.Settings.Unsubscribe(); _settingsSub = false; }
+        if (_rangeSub) { UiSources.Settings.Unsubscribe(); _rangeSub = false; }
     }
 
     public void Draw()
     {
+        // The range rings need RynthAi's settings (Monster Range, Ring Range): polled only while one is on.
+        bool wantRange = RadarSettingsStore.ShowMonsterRangeRing || RadarSettingsStore.ShowRingRangeRing;
+        if (wantRange != _rangeSub)
+        {
+            if (wantRange) { UiSources.Settings.Subscribe(); UiSources.Settings.RequestRefresh(); }
+            else UiSources.Settings.Unsubscribe();
+            _rangeSub = wantRange;
+        }
         bool clickThroughNow = ClickThrough;   // what the host gave this frame's window (before UpdateHot moves _hot)
         _wheelHere = false;
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
@@ -216,7 +230,11 @@ internal sealed class RadarFace : IImGuiPanel
         // ── Surface: drag moves the panel, a click on a dot selects, wheel zooms, right-click menu ──
         ImGuiNET.ImGui.SetCursorScreenPos(origin);
         bool surfaceClicked = ImGuiNET.ImGui.InvisibleButton("##radar_surface", size);
-        ImGuiPanelHost.DragWindowWithLastItem();
+        // 2026-11-04: with docked click-through, a press on a dot only selects it; it never moves the
+        // radar unless Ctrl was held when it began (RadarDrag; holding on a dot used to drag the panel).
+        if (_drag.Update(ImGuiNET.ImGui.IsItemActivated(), RadarSettingsStore.CtrlGatedClickThrough,
+                ImGuiNET.ImGui.GetIO().KeyCtrl, ImGuiPopOuts.InPopOutFrame))
+            ImGuiPanelHost.DragWindowWithLastItem();
         UpdateHot(view, centre, worldMin, worldMax, gearPos, new Vector2(closePos.X + btn, closePos.Y + btn));
         if (view != null && RadarSettingsStore.ClickToSelect)
             MarkerInput(dl, view, centre, worldMin, worldMax, surfaceClicked);
@@ -310,6 +328,8 @@ internal sealed class RadarFace : IImGuiPanel
         if (cur + 1 < count && cur >= 0) DrawLayer(dl, view, cur + 1, 0.30f, false, proj, rotate, clipMin, clipMax);
         if (cur >= 0) DrawLayer(dl, view, cur, 1.00f, true, proj, rotate, clipMin, clipMax);
 
+        DrawRangeRings(dl, centre, clipMin, clipMax, MathF.Max(0.5f, RadarSettingsStore.Zoom));
+
         // Markers (shapes: RadarMarkerStyle). Corpses and items first, creatures on top.
         RadarMarkerStyle.FillColors(KindCols);
         MarkerStyleSettings markers = RadarSettingsStore.Markers;
@@ -348,6 +368,33 @@ internal sealed class RadarFace : IImGuiPanel
         dl.AddCircleFilled(centre, 3.5f * me, PlayerCol, 10);
         Vector2 tip = rotate ? centre + new Vector2(0, -10 * me) : centre + new Vector2(proj.Cos * 10 * me, -proj.Sin * 10 * me);
         dl.AddLine(centre, tip, PlayerCol, 2);
+    }
+
+    // ── Range rings ────────────────────────────────────────────────────────
+    // Thin circles round you at RynthAi's Monster Range (warm white) and Ring Range (pale blue), over
+    // the floors and under the markers, each on a faint dark line so it reads on the dark canvas and
+    // on the world map alike. Nothing until RynthAi has sent its settings (UiSources.Settings).
+    private static readonly uint MonsterRangeCol = C(0xB3FFE6B3), RingRangeCol = C(0xA680CCFF), RangeUnder = C(0x59000000);
+
+    private static void DrawRangeRings(ImDrawListPtr dl, Vector2 centre, Vector2 clipMin, Vector2 clipMax, float zoom)
+    {
+        bool monster = RadarSettingsStore.ShowMonsterRangeRing, ring = RadarSettingsStore.ShowRingRangeRing;
+        if (!monster && !ring) return;
+        RynthAiSettings? ra = UiSources.Settings.Current?.Value;
+        if (ra == null) return;
+        ImDrawListFlags saved = dl.Flags;
+        dl.Flags = saved | ImDrawListFlags.AntiAliasedLines;   // the world is drawn aliased; a circle looks ragged that way
+        RoundMask? round = _round ? _mask : null;
+        if (monster) RangeRing(dl, centre, clipMin, clipMax, round, RadarRangeRing.RadiusPx(ra.MonsterRange, zoom), MonsterRangeCol);
+        if (ring) RangeRing(dl, centre, clipMin, clipMax, round, RadarRangeRing.RadiusPx(ra.RingRange, zoom), RingRangeCol);
+        dl.Flags = saved;
+    }
+
+    private static void RangeRing(ImDrawListPtr dl, Vector2 centre, Vector2 clipMin, Vector2 clipMax, RoundMask? round, float r, uint col)
+    {
+        if (!RadarRangeRing.Shows(r, centre, clipMin, clipMax, round)) return;
+        dl.AddCircle(centre, r, RangeUnder, 0, 3f);   // 0 segments: ImGui picks enough for the radius
+        dl.AddCircle(centre, r, col, 0, 1.25f);
     }
 
     // ── The selected object ────────────────────────────────────────────────
@@ -521,7 +568,8 @@ internal sealed class RadarFace : IImGuiPanel
     // ── Click-to-select ─────────────────────────────────────────────────────
     // Left-click a dot: that object is selected in game, as a click on it in the
     // 3D world would. A press that moves more than a few pixels is a drag (the
-    // panel moves) and selects nothing. Hover shows the object's name and
+    // panel moves; with docked click-through and no Ctrl it stays put, RadarDrag)
+    // and selects nothing. Hover shows the object's name and
     // distance (and its last known health, when the engine has seen one).
     // RynthAi 2026-10-01 and later send each marker's object id, and the click
     // selects exactly that id. Older RynthAi builds send no id (Id = 0): then
@@ -864,6 +912,7 @@ internal sealed class RadarFace : IImGuiPanel
                 if (!WorldMapTiles.IsOpen && WorldMapTiles.Status.Length > 0)
                     SafeImGui.TextDisabled(WorldMapTiles.Status);
             }
+            changed |= RangeRingRows();
             RetailRadarRow();
             ImGuiNET.ImGui.Separator();
             changed |= KindRows();
@@ -878,6 +927,29 @@ internal sealed class RadarFace : IImGuiPanel
     }
 
     private static bool Check(string label, ref bool value) => ImGuiNET.ImGui.Checkbox(label, ref value);
+
+    /// <summary>
+    /// The range rings' boxes. Each label shows the range RynthAi has now (its Settings > Ranges set it);
+    /// the boxes are the radar's own and save with the radar's settings. True when one changed.
+    /// </summary>
+    private static bool RangeRingRows()
+    {
+        RynthAiSettings? ra = UiSources.Settings.Current?.Value;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        string Yards(int v) => ra == null ? "" : " (" + v.ToString(inv) + " yd)";
+        bool changed = Check("Monster Range ring" + Yards(ra?.MonsterRange ?? 0) + "###mrring", ref RadarSettingsStore.ShowMonsterRangeRing);
+        if (ImGuiNET.ImGui.IsItemHovered())
+            ImGuiNET.ImGui.SetTooltip("A ring round you at RynthAi's Monster Range: monsters inside it are ones the bot will attack.\nIt follows the setting (Settings > Ranges). Measured along the ground; RynthAi counts height too,\nso a monster a floor up or down can be inside the ring and still out of range.");
+        changed |= Check("Ring Range ring" + Yards(ra?.RingRange ?? 0) + "###rrring", ref RadarSettingsStore.ShowRingRangeRing);
+        if (ImGuiNET.ImGui.IsItemHovered())
+            ImGuiNET.ImGui.SetTooltip("A second, blue ring at RynthAi's Ring Range: how close monsters must be for its ring spells.");
+        if (ra == null && (RadarSettingsStore.ShowMonsterRangeRing || RadarSettingsStore.ShowRingRangeRing))
+        {
+            ImGuiNET.ImGui.SameLine();
+            ImGuiNET.ImGui.TextDisabled("(waiting for RynthAi)");
+        }
+        return changed;
+    }
 
     /// <summary>
     /// "Hide the retail radar": RynthAi's own SuppressRetailRadar setting (RynthAi pushes it to the engine every

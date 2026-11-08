@@ -597,6 +597,20 @@ internal static class RynthCoreChatCommands
         if (IsVerb(sub, "panels", out string acPanelArgs))
         {
             string[] pa = acPanelArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            // /rc panels replace <id> <command> | off: AC opening that panel runs the command instead
+            // (a plugin's own window in its place; AcPanels). Quiet when nothing changed: plugins re-send it.
+            if (pa.Length >= 3 && pa[0].Equals("replace", StringComparison.OrdinalIgnoreCase)
+                && ChatCommandReplies.TryPanelId(pa[1], out uint replaceId))
+            {
+                if (!AcPanels.CanReplace) { Fail("Can't replace AC's panels: " + AcPanels.Status); return; }
+                string command = pa.Length == 3 && pa[2].Equals("off", StringComparison.OrdinalIgnoreCase)
+                    ? string.Empty
+                    : string.Join(' ', pa, 2, pa.Length - 2);
+                bool changed = AcPanels.Replace(replaceId, command);
+                if (!changed) { _answered = true; return; }
+                Reply(command.Length == 0 ? $"AC panel {replaceId} opens as AC's again." : $"AC panel {replaceId} now runs '{command}'.");
+                return;
+            }
             if (pa.Length == 2 && ChatCommandReplies.TryPanelId(pa[1], out uint panelId))
             {
                 AcPanels.Op op = pa[0].ToLowerInvariant() switch { "open" => AcPanels.Op.Open, "close" => AcPanels.Op.Close, _ => AcPanels.Op.Toggle };
@@ -607,10 +621,25 @@ internal static class RynthCoreChatCommands
             var panels = AcPanels.List(names: true);
             Reply($"AC panels ({panels.Count}; {AcPanels.Status}):");
             foreach (var p in panels)
-                Reply($"  {p.Id,3} {p.Class}{(p.Open ? " - open" : "")}");
+                Reply($"  {p.Id,3} {p.Class}{(p.Open ? " - open" : "")}"
+                      + (AcPanels.Replaced.TryGetValue(p.Id, out string? by) ? $" - replaced: {by}" : ""));
             return;
         }
 
+        // /rc title <id>: show that character title (game action 0x2C, CharacterTitleAction; the
+        // Titles tab of RynthDreamWeave's Skills panel sends it, 2026-11-07).
+        if (IsVerb(sub, "title", out string titleArgs))
+        {
+            if (!uint.TryParse(titleArgs.Trim(), out uint titleId) || titleId == 0)
+            {
+                Fail("Usage: /rc title <title id>");
+                return;
+            }
+            string? why = CharacterTitleAction.SetTitle(titleId);
+            if (why == null) Reply($"Title {titleId} asked for.");
+            else Fail($"Couldn't set title {titleId}: {why}.");
+            return;
+        }
         if (IsVerb(sub, "settings", out string settingsArgs))
         {
             SettingsCommand(settingsArgs);
@@ -1488,6 +1517,10 @@ internal static class RynthCoreChatCommands
             case "onscreen":
             case "keeponscreen":
                 S.KeepOnScreen = Flag(value, S.KeepOnScreen); break;
+            case "walls":
+            case "behindwalls":
+                // "Hide behind walls" (2026-11-04, report R-20261105-020337-67aa).
+                S.HideBehindWalls = Flag(value, S.HideBehindWalls); break;
             case "debuffs":
             case "debuff":
                 if (sub == "size")

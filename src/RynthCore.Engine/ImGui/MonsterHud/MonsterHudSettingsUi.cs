@@ -212,6 +212,10 @@ internal static class MonsterHudSettingsUi
         changed |= SliderF("Scale", ref MonsterHudSettings.Scale, MonsterHudSettings.MinScale, MonsterHudSettings.MaxScale, "%.2f", w);
         changed |= Toggle("Keep on screen", ref MonsterHudSettings.KeepOnScreen,
             "When the camera closes in (walls), plates and numbers stay pinned to the screen edge instead of leaving it. Chat: /rv plates onscreen.");
+        changed |= Toggle("Hide behind walls", ref MonsterHudSettings.HideBehindWalls,
+            "No plate or name (and no click) for monsters, NPCs, players and portals you can't see because of building " +
+            "or dungeon walls: in another room, another building, or outdoors where no doorway shows them. " +
+            "Off: everything in range gets one. Chat: /rv plates walls.");
         changed |= SliderF("Opacity", ref MonsterHudSettings.Opacity, MonsterHudSettings.MinOpacity, MonsterHudSettings.MaxOpacity, "%.2f", w);
         changed |= SliderF("Height lift (m)", ref MonsterHudSettings.HeightLift, MonsterHudSettings.MinLift, MonsterHudSettings.MaxLift, "%.1f", w);
         changed |= Toggle("Fade and shrink with distance", ref MonsterHudSettings.FadeWithDistance, null);

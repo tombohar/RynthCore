@@ -34,6 +34,8 @@
     <Compile Include="..\..\src\RynthCore.Engine\UI\Panels\RynthChatPresets.cs" Link="Engine\RynthChatPresets.cs" />
     <!-- 2026-10-19: re-reading the shared rynthchat_settings.json when another client saved it. -->
     <Compile Include="..\..\src\RynthCore.Engine\UI\Data\SharedFileWatch.cs" Link="Engine\SharedFileWatch.cs" />
+    <!-- 2026-11-05: a plugin's own colour for a line it writes (RynthAi's Info text colour). -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatOwnColors.cs" Link="Engine\ChatOwnColors.cs" />
   </ItemGroup>
 
 </Project>

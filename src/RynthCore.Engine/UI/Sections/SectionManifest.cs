@@ -118,7 +118,10 @@ internal sealed record SectionWindowDecl(
     // v90: where it first opens with nothing saved: "", "topLeft", "topRight", "bottomLeft", "bottomRight" ("corner").
     string Corner = "",
     // v90: it draws its own content at any size, so Ctrl+wheel steps its draw size (PanelScale), not its text ("scale": "draw").
-    bool DrawScale = false)
+    bool DrawScale = false,
+    // 2026-11-07 (no version bump: older engines ignore the key): drawn under AC's own UI, like a native
+    // AC window ("layer": "underUi"; frameless windows only). AC's windows cover it and take the clicks there.
+    bool UnderUi = false)
 {
     /// <summary>For every world, not one server.</summary>
     public bool IsUniversal => Server.Length == 0;
@@ -240,7 +243,8 @@ internal static class SectionManifestParser
                     Frameless: Str(e, "chrome").Trim().Equals("none", StringComparison.OrdinalIgnoreCase),
                     FitHeight: Bool(e, "fitHeight", false),
                     Corner: Str(e, "corner").Trim() is "topLeft" or "topRight" or "bottomLeft" or "bottomRight" or "top" or "bottom" ? Str(e, "corner").Trim() : "",
-                    DrawScale: Str(e, "scale").Trim().Equals("draw", StringComparison.OrdinalIgnoreCase)));
+                    DrawScale: Str(e, "scale").Trim().Equals("draw", StringComparison.OrdinalIgnoreCase),
+                    UnderUi: Str(e, "layer").Trim().Equals("underUi", StringComparison.OrdinalIgnoreCase)));
             }
 
             return new SectionManifest(plugin, servers.ToArray(), sections.ToArray(), contributions.ToArray())

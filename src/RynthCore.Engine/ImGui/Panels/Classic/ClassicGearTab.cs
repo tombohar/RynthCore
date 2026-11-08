@@ -3,7 +3,8 @@
 //  The Classic look's Gear tab: RynthAi's Items lists (UiSources.Items, the
 //  Items panel's source) in the retail style. Weapons with their element (a
 //  drop-down; a weapon no longer carried shows "missing"), consumables with
-//  their kind, a remove mark on each row; add the item selected in game as a
+//  their kind, a remove mark on each row, a "No buff" gem on a shield row
+//  (when RynthAi sends noBuff); add the item selected in game as a
 //  weapon, a shield or a consumable; drop the missing ones; the shield and
 //  mana-tap settings that ride the same list. Saved like the Items panel: the
 //  whole payload (ItemsCommands.SetJson), older snapshots ignored after a save
@@ -175,6 +176,18 @@ internal sealed class ClassicGearTab : IClassicTab
                     });
                 }
                 SafeImGui.SetItemTooltip("The damage this weapon deals (picks it for monsters weak to it)");
+            }
+            else if (e.ShowsNoBuff)
+            {
+                // A shield has no element: its column is the "No buff" toggle (a RynthAi that sends noBuff).
+                bool nb = e.NoBuff == true;
+                if (Gem("##nobuff", "No buff", new Vector2(p.X + listW - xW - ddW - Px(2), p.Y), ddW, nb, 19))
+                {
+                    e.NoBuff = !nb;
+                    Save();
+                }
+                SafeImGui.SetItemTooltip("Never buff this shield - for a shield that already carries its buffs.\n"
+                    + "RynthAi then aims no armor spells at it, and its spells running low never start a rebuff.");
             }
             if (RemoveMark("##x", new Vector2(p.X + listW - xW, p.Y), rowH)) remove = i;
             SafeImGui.SetItemTooltip("Remove " + e.Name + " from the list");

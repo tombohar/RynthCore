@@ -25,6 +25,9 @@
                                report names the plugin call the pump is inside; PluginShutdownGate:
                                plugins are shut down only once the pump stopped (plus source scans
                                of EngineLifecycle's step order and ShutdownAll's gate)
+      NativeAttackRearm.cs     the native attack clears a stuck attack-in-progress flag (after a stance
+                               change, or 2 s with no swing) and only goes out in Melee/Missile (plus
+                               a source scan of ClientCombatHooks / CombatModeHooks using it)
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->
   <PropertyGroup>
@@ -56,6 +59,7 @@
     <Compile Include="..\..\src\RynthCore.Engine\ImGui\FontPixels.cs" Link="Engine\FontPixels.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Net\IdRequester.cs" Link="Engine\IdRequester.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Plugins\PumpGuards.cs" Link="Engine\PumpGuards.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\NativeAttackRearm.cs" Link="Engine\NativeAttackRearm.cs" />
   </ItemGroup>
 
 </Project>

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for src\RynthCore.Engine\ImGui\MonsterHud\PlateSightRules.cs (2026-11-04, problem
+    report R-20261105-020337-67aa: nameplates and NPC labels drew, and took clicks, through walls):
+    given the camera's cell, the player's cell, the visible-cell list, "sees outside", AC's draw
+    stamp on the object's room and the doorways, does a plate or label show? Anything unknown shows
+    (today's behaviour). The AC-side facts (offsets, the stamp, the pattern) are checked against
+    acclient.exe by tools\plate_sight_check.py.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>PlateSightTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\ImGui\MonsterHud\PlateSightRules.cs" Link="Engine\PlateSightRules.cs" />
+  </ItemGroup>
+
+</Project>

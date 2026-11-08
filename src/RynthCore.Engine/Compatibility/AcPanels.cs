@@ -22,12 +22,24 @@
 //  before each use.
 //
 //  Opening and closing is queued and done on AC's game thread after its tick.
+//
+//  Replacing a panel (2026-11-07, Tom: AC's Character window "still popping up
+//  here and there" when RynthDreamWeave's Character panel opens in its place):
+//  the notice is hooked, and a panel a plugin claims ("/rc panels replace <id>
+//  <command>") never opens: the open notice is dropped before AC draws
+//  anything and the plugin's command runs on the next game tick instead
+//  (AC's toolbar button and key both send it). A command no plugin takes
+//  (the plugin unloaded) drops the claim and opens AC's panel after all.
 // ============================================================================
 
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Runtime.InteropServices;
+using RynthCore.Engine.Hooking;
+using RynthCore.Engine.Plugins;
 
 namespace RynthCore.Engine.Compatibility;
 
@@ -60,6 +72,99 @@ internal static unsafe class AcPanels
         _notice = r.Success && r.Source == HookResolver.ResolveSource.PatternScan ? r.Address : IntPtr.Zero;
         _status = CanToggle ? "ready." : "the panel notice wasn't found.";
         RynthLog.Compat("AcPanels: " + _status);
+        if (CanToggle) HookNotice();
+    }
+
+    // ── Replacing a panel (a plugin's window opens instead) ─────────────────
+
+    private static readonly ConcurrentDictionary<uint, string> Replacements = new();
+    private static readonly ConcurrentQueue<(uint Id, string Command)> Pressed = new();
+    private static IntPtr _noticeOriginal;
+    private static bool _hooked, _bypass;
+    private static int _noticeLogged, _claimedLogged;
+
+    /// <summary>Whether AC's open notice can be held back (the hook is in).</summary>
+    public static bool CanReplace => _hooked;
+
+    private static unsafe void HookNotice()
+    {
+        try
+        {
+            delegate* unmanaged[Cdecl]<uint, int, byte> detour = &NoticeDetour;
+            MinHook.Hook(_notice, (IntPtr)detour, out _noticeOriginal);
+            _hooked = true;
+            RynthLog.Compat($"AcPanels: hooked SendNotice_SetPanelVisibility @ 0x{_notice.ToInt32():X8} (panels can be replaced).");
+        }
+        catch (Exception ex)
+        {
+            _noticeOriginal = IntPtr.Zero;
+            RynthLog.Compat($"AcPanels: the notice hook failed - {ex.Message}; panels open as AC's.");
+        }
+    }
+
+    /// <summary>
+    /// Claims AC's panel <paramref name="id"/>: AC asked to open it, <paramref name="command"/> runs instead
+    /// (null or empty drops the claim). True when it changed. Any thread.
+    /// </summary>
+    public static bool Replace(uint id, string? command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return Replacements.TryRemove(id, out _);
+        command = command.Trim();
+        if (Replacements.TryGetValue(id, out string? now) && now == command) return false;
+        Replacements[id] = command;
+        return true;
+    }
+
+    public static IReadOnlyDictionary<uint, string> Replaced => Replacements;
+
+    /// <summary>AC's own show/hide of a panel: an open of a claimed one is held back (AC's main thread).</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static unsafe byte NoticeDetour(uint id, int visible)
+    {
+        try
+        {
+            // visible is a bool in the low byte: AC leaves junk above it (0x3001 / 0x3000, read 2026-11-07).
+            bool open = (visible & 0xFF) != 0;
+            bool claimed = Replacements.TryGetValue(id, out string? command);
+            // Every notice for a claimed panel (to see AC's button and key reach it), a few of the rest: the
+            // loot window alone sends two a second.
+            if (claimed ? Interlocked.Increment(ref _claimedLogged) <= 200 : Interlocked.Increment(ref _noticeLogged) <= 10)
+                RynthLog.Compat($"AcPanels: notice panel {id} {(open ? "open" : "close")}{(_bypass ? " (ours)" : claimed && open ? " - held back, runs " + command : "")}.");
+            if (open && claimed && !_bypass)
+            {
+                if (Pressed.Count < 8) Pressed.Enqueue((id, command!));
+                return 1;
+            }
+        }
+        catch { /* never in AC's way */ }
+        return ((delegate* unmanaged[Cdecl]<uint, int, byte>)_noticeOriginal)(id, visible);
+    }
+
+    /// <summary>Game thread: the claimed panels AC asked to open run their plugin's command.</summary>
+    private static void RunPressed()
+    {
+        while (Pressed.TryDequeue(out var p)) RunClaim(p.Id, p.Command);
+    }
+
+    /// <summary>Game thread: a claimed panel's command in place of opening it.</summary>
+    private static void RunClaim(uint id, string command)
+    {
+        bool taken = false;
+        try { taken = PluginManager.DispatchChatBarEnter(command); }
+        catch (Exception ex) { RynthLog.Compat($"AcPanels: '{command}' threw {ex.GetType().Name}: {ex.Message}"); }
+        if (taken) return;
+        // No plugin took it (unloaded): AC's own panel after all, and no more claim.
+        Replacements.TryRemove(id, out _);
+        RynthLog.Compat($"AcPanels: no plugin took '{command}' - panel {id} is AC's again.");
+        Send(id, open: true);
+    }
+
+    private static unsafe void Send(uint id, bool open)
+    {
+        _bypass = true;
+        try { ((delegate* unmanaged[Cdecl]<uint, int, byte>)_notice)(id, open ? 1 : 0); }
+        finally { _bypass = false; }
+        _cachedMs = long.MinValue / 2;
     }
 
     /// <summary>One of AC's panels: its id (the notice's), the class AC gives it, open or not.</summary>
@@ -216,6 +321,7 @@ internal static unsafe class AcPanels
     /// <summary>Game thread, after AC's tick.</summary>
     public static void Drain()
     {
+        if (!Pressed.IsEmpty) RunPressed();
         if (Requests.IsEmpty) return;
         long now = Environment.TickCount64;
         // Not held between worlds: a panel opens and closes in portal space as with AC's own keys
@@ -233,8 +339,15 @@ internal static unsafe class AcPanels
                     if (at < 0) { RynthLog.Compat($"AcPanels: no panel {r.Id}."); continue; }
                     open = !all[at].Open;
                 }
-                ((delegate* unmanaged[Cdecl]<uint, int, byte>)_notice)(r.Id, open ? 1 : 0);
-                _cachedMs = long.MinValue / 2;
+                // RynthCore's own buttons and keys for a claimed panel (the corner strip's Character button)
+                // do what AC's do: the plugin's window, never AC's (Tom 2026-11-07: AC's "flashes when clicked").
+                if (open && Replacements.TryGetValue(r.Id, out string? command))
+                {
+                    RynthLog.Compat($"AcPanels: panel {r.Id} asked open by RynthCore - runs {command}.");
+                    RunClaim(r.Id, command);
+                    continue;
+                }
+                Send(r.Id, open);
             }
             catch (Exception ex)
             {
@@ -246,6 +359,7 @@ internal static unsafe class AcPanels
     public static void Reset()
     {
         while (Requests.TryDequeue(out _)) { }
+        while (Pressed.TryDequeue(out _)) { }
         Array.Clear(_found);
     }
 }

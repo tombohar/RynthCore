@@ -289,7 +289,12 @@ internal static class AcWindowChrome
 
         try
         {
-            AcMainThreadQueue.EnqueueWriteToChat("[RynthCore] Saved open windows and HUD positions.", 1);
+            // The PC-wide default with Panel Layout Per Character on is only read (2026-11-05): say so.
+            string? problem = PanelLayout.SavePlacesProblem();
+            if (problem == null)
+                AcMainThreadQueue.EnqueueWriteToChat("[RynthCore] Saved open windows and HUD positions.", 1);
+            else
+                AcMainThreadQueue.EnqueueWriteToChat("[RynthCore] Saved HUD positions. Open windows and their places weren't saved: " + problem + ".", 0x1A);
         }
         catch { /* chat may not be ready */ }
     }

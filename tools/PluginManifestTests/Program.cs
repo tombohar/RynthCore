@@ -603,11 +603,11 @@ internal static class Program
         Eq(RynthCore.PluginSdk.TrainingInfoFlags.Busy, RynthCore.Engine.Plugins.TrainingInfoFlags.Busy, "info flag bits");
         Eq(RynthCore.PluginSdk.TrainingEntryFlags.Trainable, RynthCore.Engine.Plugins.TrainingEntryFlags.Trainable, "entry flag bits");
         // The three v79 slots follow v78's, then v80's two and v81's GetMergeStackResultFn (v82-v91 follow:
-        // eleven slots to v89, then v90's thirteen and v91's two).
-        var names = typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).SkipLast(26).TakeLast(6).ToArray();
+        // eleven slots to v89, then v90's thirteen, v91's two and v93's one).
+        var names = typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).SkipLast(27).TakeLast(6).ToArray();
         Check(names.SequenceEqual(new[] { "GetTrainingInfoFn", "RaiseFn", "TrainSkillFn", "GetContainerOrderFn", "PutItemInContainerFn", "GetMergeStackResultFn" }),
             "v79, v80 then v81 slots last: " + string.Join(",", names));
-        var sdkNames = typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).SkipLast(26).TakeLast(6).ToArray();
+        var sdkNames = typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).SkipLast(27).TakeLast(6).ToArray();
         Check(sdkNames.SequenceEqual(names), "SDK v79, v80 and v81 slots in the same order");
     }
 
@@ -618,6 +618,15 @@ internal static class Program
     {
         var all = typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).ToArray();
         var sdkAll = typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).ToArray();
+        // v93: the monster plates' health readings end the table (2026-11-07), right after v91's two.
+        Check(all.Last() == "GetMonsterHealthFn", "v93 slot last: " + all.Last());
+        Check(sdkAll.Last() == "GetMonsterHealthFn", "SDK v93 slot last: " + sdkAll.Last());
+        Eq((int)Marshal.OffsetOf<RynthCore.PluginSdk.RynthCoreApiNative>("GetMonsterHealthFn"),
+           (int)Marshal.OffsetOf<RynthCore.Engine.Plugins.RynthCoreAPI>("GetMonsterHealthFn"), "GetMonsterHealthFn offset");
+        Eq((int)Marshal.OffsetOf<RynthCore.Engine.Plugins.RynthCoreAPI>("GetMonsterHealthFn"),
+           (int)Marshal.OffsetOf<RynthCore.Engine.Plugins.RynthCoreAPI>("GetAmbientLightFn") + IntPtr.Size, "GetMonsterHealthFn right after GetAmbientLightFn");
+        all = all.SkipLast(1).ToArray();
+        sdkAll = sdkAll.SkipLast(1).ToArray();
         // v91: the ambient light floor's two slots end the table (2026-10-27); the checks after these are
         // on the table before them.
         string[] v91 = { "SetAmbientLightFloorFn", "GetAmbientLightFn" };

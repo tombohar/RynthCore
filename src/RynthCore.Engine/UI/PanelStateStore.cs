@@ -22,6 +22,11 @@
 //  PC-wide default; in the world a client uses its character's own copy,
 //  layouts\<server>\<character>\panel_state.txt (PanelLayout switches the file
 //  with SwitchTo). Saves are atomic: a temp file, then a replace.
+//
+//  ReadOnlyPath (2026-11-05): with Panel Layout Per Character on, PanelLayout
+//  names the PC-wide default here and no save writes it (a change stays in
+//  memory): a client on the default is at character select or doesn't know its
+//  character yet, and such clients saving there overwrote each other.
 // ============================================================================
 
 using System;
@@ -66,6 +71,23 @@ internal static class PanelStateStore
 
     private static string FilePath => _path ?? DefaultPath;
 
+    private static volatile string? _readOnlyPath;
+    private static bool _readOnlyLogged;   // under Sync: the skipped save is logged once per file switch
+
+    /// <summary>
+    /// A file no save writes (PanelLayout: the PC-wide default while Panel Layout Per Character is
+    /// on); null = none. Changes made while it is in use stay in memory. Any thread.
+    /// </summary>
+    internal static string? ReadOnlyPath
+    {
+        get => _readOnlyPath;
+        set => _readOnlyPath = value;
+    }
+
+    /// <summary>The file in use is <see cref="ReadOnlyPath"/> (under Sync).</summary>
+    private static bool InUseIsReadOnly =>
+        _readOnlyPath is { } p && string.Equals(Path.GetFullPath(p), Path.GetFullPath(FilePath), StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The file in use now (the default, or the character's). Any thread.</summary>
     internal static string CurrentPath
     {
@@ -92,6 +114,7 @@ internal static class PanelStateStore
             _barMaxPerRow = BarLayout.NoLimit;
             _path = path;
             _loaded = false;
+            _readOnlyLogged = false;
             Load();
         }
     }
@@ -316,6 +339,17 @@ internal static class PanelStateStore
         // file; do not overwrite it while the user is rearranging.
         if (!force && !EngineSettings.RememberWindowLayout)
             return;
+        // The PC-wide default with the setting on: not even Save Layout Now writes it (/rc layout
+        // default does, PanelLayoutFiles.MakeDefault).
+        if (InUseIsReadOnly)
+        {
+            if (!_readOnlyLogged)
+            {
+                _readOnlyLogged = true;
+                try { RynthLog.UI($"PanelStateStore: not saving {FilePath} - with Panel Layout Per Character on, the PC-wide default is only read (at character select, or until this client knows its character); changes stay in memory."); } catch { }
+            }
+            return;
+        }
 
         try
         {

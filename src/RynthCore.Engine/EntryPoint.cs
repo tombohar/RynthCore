@@ -948,6 +948,9 @@ public static class EntryPoint
             // plugin can set (API v91; RynthVision's dungeon light). No floor until one is set.
             // Kill switch: engine.json DisabledUiHooks ["AmbientLight"].
             Step("ambient light hook", AmbientLight.Initialize);
+            // CEnvCell::GetDrawnThisFrame: where AC keeps its draw stamps, so the nameplates can hide what is
+            // behind walls (2026-11-04, report R-20261105-020337-67aa). A read, not a hook; no match = cell lists only.
+            Step("cell sight (nameplates)", AcCellSight.Initialize);
             Step("vendor hooks", VendorHooks.Initialize);
             Step("chat callback hooks", ChatCallbackHooks.Initialize);
             // Flight recorder (Net/FlightRecorder.cs): before the packet hooks that feed it.

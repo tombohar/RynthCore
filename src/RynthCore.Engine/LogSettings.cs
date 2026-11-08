@@ -37,6 +37,7 @@ internal enum LogCategory
 ///         The emit level is the level a category's lines are written AT, so a line shows when
 ///         its emit level is within the global threshold. Setting a Trace/Debug category to
 ///         Info puts it in the normal (Info) log; Off silences the category entirely.</item>
+///   <item><c>"LogKeepCopies"</c> — rotated copies of the per-client log to keep (<see cref="KeepCopies"/>).</item>
 /// </list>
 /// A background thread polls the file's timestamp once a second, so launcher edits apply to a
 /// running client without a restart. Errors are always written, even when the level is Off.
@@ -64,6 +65,18 @@ internal static class LogSettings
     // Replaced wholesale on reload (never mutated after publish) so hot-path readers on any
     // thread can index it without a lock.
     private static EntryPoint.EngineLogLevel[] _levels = (EntryPoint.EngineLogLevel[])Defaults.Clone();
+
+    /// <summary>engine.json property: rotated copies of the per-client log to keep (LogRotation).</summary>
+    internal const string KeepCopiesProperty = "LogKeepCopies";
+
+    private static int _keepCopies = LogRotation.DefaultKeepCopies;
+
+    /// <summary>
+    /// engine.json "LogKeepCopies" (default 8, valid 1-50, clamped): how many rotated copies of
+    /// RynthCore.&lt;pid&gt;.log a client keeps (.old, then .old.1 ...; 5 MB each). 1 = only .old, as
+    /// before 2026-11-08. Hand-set in the file; read at init and whenever the file changes.
+    /// </summary>
+    internal static int KeepCopies => Volatile.Read(ref _keepCopies);
 
     private static readonly object WatcherLock = new();
     private static Thread? _watcherThread;
@@ -103,6 +116,7 @@ internal static class LogSettings
     {
         string? globalText = null;
         var levels = (EntryPoint.EngineLogLevel[])Defaults.Clone();
+        int keepCopies = LogRotation.DefaultKeepCopies;
 
         try
         {
@@ -127,16 +141,22 @@ internal static class LogSettings
                             levels[(int)cat] = lvl;
                     }
                 }
+
+                if (root.TryGetProperty(KeepCopiesProperty, out JsonElement keepEl) && keepEl.ValueKind == JsonValueKind.Number
+                    && keepEl.TryGetInt32(out int keep))
+                    keepCopies = LogRotation.ClampKeepCopies(keep);
             }
         }
         catch
         {
             // Half-written / corrupt file: keep defaults for this pass; the next timestamp change retries.
             globalText ??= EngineSettings.LoggingLevel;
+            keepCopies = Volatile.Read(ref _keepCopies);   // never drop copies over a half-written file
         }
 
         EntryPoint.LoggingLevel = EntryPoint.ParseLoggingLevel(globalText);
         Volatile.Write(ref _levels, levels);
+        Volatile.Write(ref _keepCopies, keepCopies);
         EntryPoint.VerboseLogging = IsEnabled(LogCategory.Verbose);
         return Describe();
     }

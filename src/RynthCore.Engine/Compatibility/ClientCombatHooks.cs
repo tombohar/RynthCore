@@ -190,12 +190,25 @@ internal static class ClientCombatHooks
                 cs = globalPtr;
             }
             if (!ClientObjectHooks.IsReadablePointer(cs)) return false;
+            if (!ClientObjectHooks.IsReadableSpan(cs, AttackStateSpan)) return false;
+
+            // Only in Melee or Missile. Elsewhere ExecuteAttack sends nothing but still sets the
+            // attack-in-progress flag, which then holds every later native attack (NativeAttackRearm).
+            // A queued NativeAttack can run after a stance change the plugin hadn't seen yet.
+            int mode = Marshal.ReadInt32(cs + ModeOffset);
+            if (!NativeAttackRearm.AttackMode(mode))
+            {
+                LogRefusedMode(mode);
+                return false;
+            }
+            RearmIfStuck(cs);
 
             // Notify client of height change via CM_Combat (same path as keyboard Del/End/PgDn)
             _sendAttackHeightChanged?.Invoke(attackHeight);
             _setAttackHeight!(cs, attackHeight);
             _startAttackRequest(cs);
             _endAttackRequest(cs, attackHeight, power);
+            _modeChangesAtLastSend = CombatModeHooks.ModeChanges;
             return true;
         }
         catch (Exception ex)
@@ -204,6 +217,124 @@ internal static class ClientCombatHooks
             return false;
         }
     }
+
+    // ── The client's attack state (ClientCombatSystem fields) ────────────
+    // From the decompile of StartAttackRequest / EndAttackRequest / ExecuteAttack / UseTime /
+    // HandleCommenceAttackEvent / HandleAttackDoneEvent (0x0056CD90, 0x0056CE30, 0x0056C8C0,
+    // 0x0056CF40, 0x0056BA60, 0x0056D250); +0x3C/+0x3D are also in ClientActionGates' AttackDone
+    // pattern and +0x3E in EndAttackRequest's. See NativeAttackRearm for how they wedge.
+    private const int ModeOffset         = 0x1C;   // combat mode
+    private const int BarStartOffset     = 0x28;   // power bar start time (a double, +0x28..+0x2F)
+    private const int BarBuildingOffset  = 0x30;   // power bar filling: UseTime attacks when it is full
+    private const int InProgressOffset   = 0x3D;   // attack in progress: set by ExecuteAttack, cleared by AttackDone
+    private const int RequestOffset      = 0x3E;   // between StartAttackRequest and EndAttackRequest
+    private const int AutoRepeatOffset   = 0x44;   // the client's auto-repeat: AttackDone attacks again
+    private const int BarNoAttackOffset  = 0x45;   // 1 = the filling bar only shows, it doesn't attack
+    private const int QueuedOffset       = 0x47;   // EndAttackRequest while in progress: AttackDone replays it
+    private const int QueuedPowerOffset  = 0x48;   // its power (float)
+    private const int AttackStateSpan    = 0x50;
+
+    private static int _modeChangesAtLastSend = -1;   // CombatModeHooks.ModeChanges at the last native attack
+    private static long _stuckSinceMs;
+    private static long _rearms, _disarms;
+    private static long _lastRefusedLogMs = long.MinValue / 2;
+
+    public static long RearmCount => Interlocked.Read(ref _rearms);
+    public static long DisarmCount => Interlocked.Read(ref _disarms);
+
+    // MAIN THREAD ONLY (NativeAttack's direct part). Clears a stuck attack-in-progress flag
+    // (NativeAttackRearm) so this attack goes out instead of being queued behind it.
+    private static void RearmIfStuck(IntPtr cs)
+    {
+        bool inProgress = Marshal.ReadByte(cs + InProgressOffset) != 0;
+        bool? swinging = ClientActionGates.TryReadAttacking(out bool attacking) ? attacking : null;
+        bool stanceChanged = CombatModeHooks.ModeChanges != _modeChangesAtLastSend;
+        NativeAttackRearm.Verdict v = NativeAttackRearm.Judge(inProgress, swinging, stanceChanged,
+            Environment.TickCount64, ref _stuckSinceMs);
+        if (v == NativeAttackRearm.Verdict.Leave)
+            return;
+
+        byte queued = Marshal.ReadByte(cs + QueuedOffset);
+        ClearAttackState(cs, inProgressToo: true);
+        long n = Interlocked.Increment(ref _rearms);
+        string why = v == NativeAttackRearm.Verdict.AfterStanceChange
+            ? "left from before the last stance change"
+            : $"for {NativeAttackRearm.StuckMs / 1000}s with no swing";
+        RynthLog.Compat($"ClientCombat: the client's attack-in-progress flag was set {why} (queued request {queued}, " +
+                        $"server swinging {(swinging == null ? "unknown" : "no")}): cleared, so this native attack goes out " +
+                        $"instead of waiting for an AttackDone that never comes (re-arm #{n}).");
+    }
+
+    /// <summary>
+    /// AC's main thread, after the client's combat mode changed (CombatModeHooks). Out of Melee
+    /// and Missile no attack can go out, so a queued request, a filling power bar or the
+    /// auto-repeat left from the last stance is cleared: fired in Peace or Magic it would set the
+    /// attack-in-progress flag with nothing sent (NativeAttackRearm). The flag itself is left
+    /// to the server's AttackDone (a swing may still be finishing); a stuck one is cleared at the
+    /// next native attack.
+    /// </summary>
+    internal static void DisarmOutOfAttackStance(string why)
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        try
+        {
+            IntPtr cs = CombatModeHooks.ReadCombatSystemPtr();
+            if (cs == IntPtr.Zero || !ClientObjectHooks.IsReadableSpan(cs, AttackStateSpan))
+                return;
+            int mode = Marshal.ReadInt32(cs + ModeOffset);
+            if (!NativeAttackRearm.DisarmFor(mode))
+                return;
+            byte queued = Marshal.ReadByte(cs + QueuedOffset);
+            byte bar = Marshal.ReadByte(cs + BarBuildingOffset);
+            byte barAttacks = (byte)(bar != 0 && Marshal.ReadByte(cs + BarNoAttackOffset) == 0 ? 1 : 0);
+            byte request = Marshal.ReadByte(cs + RequestOffset);
+            byte repeat = Marshal.ReadByte(cs + AutoRepeatOffset);
+            if (queued == 0 && bar == 0 && request == 0 && repeat == 0)
+                return;
+            ClearAttackState(cs, inProgressToo: false);
+            long n = Interlocked.Increment(ref _disarms);
+            // Only an attack that could have fired is worth a line (the auto-repeat and a show-only
+            // bar are left after every fight with AC's auto-repeat on).
+            if (queued != 0 || barAttacks != 0 || request != 0)
+                RynthLog.Compat($"ClientCombat: {why}: mode {mode} with an attack still armed (queued request {queued}, " +
+                                $"power bar attacking {barAttacks}, request held {request}): disarmed, so it can't fire with nothing sent (disarm #{n}).");
+        }
+        catch { }
+    }
+
+    // MAIN THREAD ONLY. The stores ExecuteAttack and HandleAttackDoneEvent make, all at once.
+    private static void ClearAttackState(IntPtr cs, bool inProgressToo)
+    {
+        if (!MainThreadGuard.IsOnMainThread())
+            return;
+        Marshal.WriteByte(cs + QueuedOffset, 0);
+        Marshal.WriteInt32(cs + QueuedPowerOffset, 0);
+        Marshal.WriteByte(cs + RequestOffset, 0);
+        if (Marshal.ReadByte(cs + BarBuildingOffset) != 0)
+        {
+            Marshal.WriteByte(cs + BarBuildingOffset, 0);
+            Marshal.WriteInt32(cs + BarStartOffset, 0);
+            Marshal.WriteInt32(cs + BarStartOffset + 4, 0);
+        }
+        Marshal.WriteByte(cs + AutoRepeatOffset, 0);
+        if (inProgressToo)
+            Marshal.WriteByte(cs + InProgressOffset, 0);
+    }
+
+    private static void LogRefusedMode(int mode)
+    {
+        long now = Environment.TickCount64;
+        if (now - _lastRefusedLogMs < 10_000)
+            return;
+        _lastRefusedLogMs = now;
+        RynthLog.Compat($"ClientCombat: NativeAttack refused: the client's combat mode is {mode}, not Melee or Missile " +
+                        "(the attack would send nothing and leave the client's attack-in-progress flag set).");
+    }
+
+    /// <summary>One line for /rc actionstate: the native attack's re-arms and disarms this session.</summary>
+    public static string DescribeRearms() =>
+        $"native attack: re-arms {RearmCount} (a stuck attack-in-progress flag cleared), disarms {DisarmCount} (an armed attack cleared out of Melee/Missile)";
 
     /// <summary>
     /// Check if the player is in a ready position to begin an attack.

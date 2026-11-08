@@ -53,6 +53,9 @@ internal sealed class ChatLine
     /// <summary>Which line colour setting applies ("say", "chan:General", ...), or null:
     /// its tab's colour (ChatLineColors.KindOf, worked out once here).</summary>
     public string? ColorKind { get; }
+    /// <summary>The colour the plugin that wrote the line asked for (RynthAi's Info text colour;
+    /// ChatOwnColors), or null. Below a rule's line colour, above the kind / tab / retail ones.</summary>
+    public uint? OwnArgb { get; init; }
     /// <summary>"HH:mm:ss text": copy, log and the Avalonia face.</summary>
     public string FormattedText { get; }
 
@@ -213,16 +216,28 @@ internal sealed class ChatFilterRule
     public volatile bool Invalid;
     /// <summary>Why it doesn't compile; null when it does or is just empty.</summary>
     public volatile string? Error;
-    /// <summary>A match timed out: skipped until the pattern is edited.</summary>
+    /// <summary>Too slow SlowStrikesToSkip times within SlowStrikeWindowMs: skipped until the pattern is edited.</summary>
     public volatile bool Slow;
+    /// <summary>Compiled non-backtracking (ChatRuleMatching.CompileForRouter): linear time, never Slow.</summary>
+    public volatile bool Linear;
+
+    /// <summary>One slow reading (a timeout, or a re-route over budget) is a strike, not a verdict: a
+    /// busy PC slows every rule now and then. This many within the window mark the rule Slow.</summary>
+    public const int SlowStrikesToSkip = 3;
+    public const long SlowStrikeWindowMs = 10 * 60_000;
+    internal int SlowStrikes;
+    internal long FirstStrikeMs;
 
     /// <summary>Compiles the pattern once (after every pattern edit). Any thread.</summary>
     public void Recompile()
     {
         Slow = false;
-        // A Regex rule compiles exactly as before; plain text is escaped (ChatRuleMatching).
-        Regex? rx = ChatRuleMatching.Compile(Mode, Pattern, TimeoutMs, out string? error);
+        SlowStrikes = 0;
+        // Non-backtracking when the pattern allows it (linear, no timeout); otherwise a Regex rule
+        // compiles exactly as before and plain text is escaped (ChatRuleMatching).
+        Regex? rx = ChatRuleMatching.CompileForRouter(Mode, Pattern, TimeoutMs, out string? error, out bool linear);
         Compiled = rx;
+        Linear = linear;
         Error = error;
         Invalid = rx == null;
     }
@@ -329,11 +344,11 @@ internal sealed class ChatRouter
     /// <summary>Adds a rule's matching time during a pass; marks it Slow past the budget. False once it's Slow.</summary>
     private bool Charge(int i, long ticks, List<Step>? trace)
     {
-        if (!_inPass) return true;
+        if (!_inPass || _rules[i].Linear) return true;   // linear time: the clock only measures the PC
         _passTicks[i] += Math.Min(ticks, MaxChargeTicks);
         if (_passTicks[i] <= _passBudgetTicks) return true;
-        MarkSlow(_rules[i], trace, i, $"over {PassBudgetMs:0} ms per {PassBudgetLines} lines to re-route the kept lines");
-        return false;
+        _passTicks[i] = 0;   // one strike per budget's worth, not one per line after it
+        return !MarkSlow(_rules[i], trace, i, $"over {PassBudgetMs:0} ms per {PassBudgetLines} lines to re-route the kept lines");
     }
 
     /// <summary>Before routing every kept line again.</summary>
@@ -499,16 +514,33 @@ internal sealed class ChatRouter
         tabs.Add(tab);
     }
 
-    private static void MarkSlow(ChatFilterRule rule, List<Step>? trace, int index, string why)
+    /// <summary>A slow reading for <paramref name="rule"/>: a strike, and on the
+    /// SlowStrikesToSkip-th within the window the rule is skipped until edited. True when it is.</summary>
+    private static bool MarkSlow(ChatFilterRule rule, List<Step>? trace, int index, string why)
     {
-        if (!rule.Slow)
+        if (!rule.Slow && !rule.Linear)
         {
-            rule.Slow = true;
-            RynthLog.UI($"ChatModel: rule \"{rule.Pattern}\" is too slow ({why}) and is skipped until edited.");
-            // Lines already routed with it are routed again without it.
-            ChatModel.BumpFiltersVersion();
+            long now = Environment.TickCount64;
+            if (rule.SlowStrikes == 0 || now - rule.FirstStrikeMs > ChatFilterRule.SlowStrikeWindowMs)
+            {
+                rule.SlowStrikes = 0;
+                rule.FirstStrikeMs = now;
+            }
+            rule.SlowStrikes++;
+            if (rule.SlowStrikes >= ChatFilterRule.SlowStrikesToSkip)
+            {
+                rule.Slow = true;
+                RynthLog.Info($"ChatModel: rule \"{rule.Pattern}\" is too slow ({why}, {rule.SlowStrikes} times in " +
+                              $"{(now - rule.FirstStrikeMs) / 1000} s) and is skipped until edited.");
+                // Lines already routed with it are routed again without it.
+                ChatModel.BumpFiltersVersion();
+            }
+            else
+                RynthLog.Info($"ChatModel: rule \"{rule.Pattern}\" was slow ({why}), {rule.SlowStrikes} of " +
+                              $"{ChatFilterRule.SlowStrikesToSkip} before it is skipped; still used.");
         }
-        trace?.Add(new Step(index, "too slow - now skipped until edited"));
+        trace?.Add(new Step(index, rule.Slow ? "too slow - now skipped until edited" : "slow this once - still used"));
+        return rule.Slow;
     }
 
     /// <summary>Overlapping spans: the earlier one (a higher rule) keeps its characters.</summary>

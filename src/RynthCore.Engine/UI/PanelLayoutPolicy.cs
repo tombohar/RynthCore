@@ -20,6 +20,17 @@
 //  time. The key is the one the engine's other per-character files use: the
 //  server and character of the launch context (SessionStateRegistry).
 //
+//  A client launched with no character picked (2026-11-05: the owner's client
+//  that stops at character select) has no name in its launch context, so it
+//  sat on the PC-wide default for the whole session, at every login and after
+//  every hot reload, and saved its window places into the shared files that
+//  seed new characters. The name is now the launch context's or, when that has
+//  none, the player's own name read in the world (Identity). While no name is
+//  known the default is only read: nothing writes it automatically, and Save
+//  Layout Now doesn't either, with the setting on (MaySaveLayoutInUse); only
+//  /rc layout default does. The client switches to its character's layout as
+//  soon as the name is known, however late.
+//
 //  Here: who owns a layout and its file names, which layout a client uses,
 //  what a new character's layout is seeded from, the session bookkeeping that
 //  decides when to switch and when panels may draw (PanelLayoutSession), and
@@ -55,6 +66,13 @@ internal readonly record struct LayoutFiles(string PanelState, string ImGuiIni)
 /// <summary>What /rc layout asks for.</summary>
 internal enum LayoutCommand { Invalid, Status, MakeDefault, ResetAsk, ResetConfirm }
 
+/// <summary>The kinds of windows the engine hosts (ImGuiPanelHost): its own panels, plugins' manifest windows, script windows.</summary>
+internal enum WindowKind { EnginePanel, PluginWindow, ScriptWindow }
+
+/// <summary>What a layout switch does to one window: nothing, open it, close it (not saved), place it
+/// from the layout, or place it and save it there (new to that layout).</summary>
+internal enum SwitchStep { Leave, Open, Close, Place, PlaceAndSave }
+
 /// <summary>Why a client in the world uses the PC-wide default (the status line says it).</summary>
 internal enum DefaultReason { None, SettingOff, NotInWorld, NoCharacterName, WaitingForName, NotRunning }
 
@@ -79,6 +97,15 @@ internal static class PanelLayoutPolicy
         if (c.Length == 0) return null;
         return new LayoutOwner((server ?? string.Empty).Trim(), c);
     }
+
+    /// <summary>
+    /// The layout's owner from what the client knows (2026-11-05): the launch context's character, or
+    /// when it has none (a client launched to character select) the name of the player in the world.
+    /// The launch context comes first: it is the key the other per-character files use. Null while
+    /// neither is known.
+    /// </summary>
+    public static LayoutOwner? Identity(string? server, string? launchCharacter, string? liveCharacter) =>
+        Owner(server, string.IsNullOrWhiteSpace(launchCharacter) ? liveCharacter : launchCharacter);
 
     /// <summary>"Name on Server" (just the name when the server isn't known), for replies and the log.</summary>
     public static string Describe(LayoutOwner who) =>
@@ -147,16 +174,40 @@ internal static class PanelLayoutPolicy
         (!characterPanelState && defaultPanelState, !characterIni && defaultIni);
 
     /// <summary>
-    /// Whether an automatic save of the ImGui windows (the dirty timer, shutdown) may write the file in
-    /// use. Always for a character's layout. The default: with the setting off (the shared file, as
-    /// before), or in the world by a client whose context never held a character's windows (one with
-    /// no character name, which uses the default as before). Not at character select: the default
-    /// there is this client's copy from when it loaded it, and writing it back could undo another
-    /// client's /rc layout default; nor with the windows of a character that just logged out. An
-    /// explicit save (Save Layout Now) writes whatever is in use.
+    /// Whether a save (imgui.ini or panel_state.txt; Dear ImGui's dirty timer, a moved window, shutdown,
+    /// a hot reload, Save Layout Now) may write the layout in use. Always a character's layout. The
+    /// PC-wide default only with the setting off (the shared files, as before). With the setting on
+    /// the default is only read (2026-11-05): a client on it is at character select or doesn't know
+    /// its character yet, and every such client saving its places there made them overwrite each
+    /// other and seeded new characters with them. /rc layout default writes it (PanelLayoutFiles).
     /// </summary>
-    public static bool MayAutoSaveIni(bool characterLayout, bool perCharacter, bool inWorld, bool contextHeldCharacter) =>
-        characterLayout || !perCharacter || (inWorld && !contextHeldCharacter);
+    public static bool MaySaveLayoutInUse(bool characterLayout, bool perCharacter) =>
+        characterLayout || !perCharacter;
+
+    /// <summary>Engine panels and plugin windows open and close with the layout; script windows when their owner says (2026-11-05).</summary>
+    public static bool FollowsSavedOpenState(WindowKind kind) => kind != WindowKind.ScriptWindow;
+
+    /// <summary>
+    /// What a layout switch does to one window (ImGuiPanelHost.ApplyLayoutSwitch): <paramref name="shown"/>
+    /// now; <paramref name="saved"/> the new layout has a row for it, <paramref name="savedOpen"/> saved
+    /// open; <paramref name="remember"/> Remember Open Windows. A plugin window follows the layout like an
+    /// engine panel (2026-11-05): it registers from its plugin's manifest seconds after a login, so one
+    /// registered while another layout was in use (a name that came late, a relogin) had that layout's
+    /// open state and kept it.
+    /// </summary>
+    public static SwitchStep StepAtSwitch(WindowKind kind, bool shown, bool remember, bool saved, bool savedOpen)
+    {
+        bool follows = FollowsSavedOpenState(kind) && remember && saved;
+        if (!shown) return follows && savedOpen ? SwitchStep.Open : SwitchStep.Leave;
+        if (follows && !savedOpen) return SwitchStep.Close;
+        return saved ? SwitchStep.Place : SwitchStep.PlaceAndSave;
+    }
+
+    /// <summary>Why the window places weren't saved (the default with the setting on): Save Layout Now's reply and the log.</summary>
+    public static string DefaultReadOnlyText(bool inWorld) =>
+        "with Panel Layout Per Character on, the PC-wide default layout is only read ("
+        + ReasonText(inWorld ? DefaultReason.NoCharacterName : DefaultReason.NotInWorld)
+        + "); /rc layout default makes a character's layout the default";
 
     // ── /rc layout ───────────────────────────────────────────────────────
 
@@ -180,7 +231,7 @@ internal static class PanelLayoutPolicy
     {
         DefaultReason.SettingOff => "Panel layout per character is off (Settings > Display)",
         DefaultReason.NotInWorld => "no character is in the world",
-        DefaultReason.NoCharacterName => "no character name is known for this client (it wasn't started by the RynthCore launcher)",
+        DefaultReason.NoCharacterName => "this client doesn't know its character's name yet, so window places aren't saved until it does",
         DefaultReason.WaitingForName => "still waiting for the character's name",
         DefaultReason.NotRunning => "panel layouts aren't running in this client",
         _ => "the layout is still switching",
@@ -291,7 +342,8 @@ internal sealed class PanelLayoutSession
 
     /// <summary>
     /// Once a frame. <paramref name="identityRecorded"/>: the login's identity is recorded
-    /// (SessionStateRegistry); <paramref name="identity"/> is it (null: no character name).
+    /// (SessionStateRegistry); <paramref name="identity"/> is who the client is now (PanelLayoutPolicy.Identity:
+    /// the recorded name, else the player's own; null: no character name yet).
     /// Returns a switch to start, or null.
     /// </summary>
     public LayoutSwitch? Tick(long nowMs, bool perCharacter, bool inWorld, long loginAtMs, bool identityRecorded, LayoutOwner? identity)
@@ -302,7 +354,10 @@ internal sealed class PanelLayoutSession
             Wanted = null;
         }
         // (A login time of 0 in the world: the flag is set, its time not yet; wait for it.)
-        else if (loginAtMs != 0 && (identityRecorded || nowMs - loginAtMs >= PanelLayoutPolicy.IdentityWaitMs))
+        // Recorded without a name (a client launched to character select, 2026-11-05): the player's
+        // own name is on its way too, so that waits as long as an unrecorded one. After the wait the
+        // default is used (read only) and the next Tick that has a name switches to its layout.
+        else if (loginAtMs != 0 && ((identityRecorded && identity is not null) || nowMs - loginAtMs >= PanelLayoutPolicy.IdentityWaitMs))
         {
             Decided = true;
             Wanted = PanelLayoutPolicy.Choose(perCharacter, inWorld, identity);

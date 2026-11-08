@@ -8,6 +8,8 @@
 //                  current loot profile until it's out of keys."
 //                  Select the chest in the world, press Use selected as chest;
 //                  select the key in your pack, press Use selected as key; Start.
+//                  Chest re-lock wait (s): how long after the open the next key
+//                  goes on (RynthAi's setting, "/ra itemtool relock N").
 //    Quick give    Select an item in your pack (Use selected as item) and a player
 //                  or NPC in the world (Use selected as target), press Give: every
 //                  such item in your packs is handed over, one give at a time.
@@ -76,11 +78,51 @@ internal sealed class ItemToolFace : IImGuiPanel
         if (hit == 0) ItemToolCommands.Send("chest set");
         else if (hit == 1) ItemToolCommands.Send("chest key");
 
+        DrawRelockWait(c, w);
+
         hit = StartStop("##chest_run", "Start", "Stop", ready && !c.Running, c.Running, w);
         if (hit == 0) ItemToolCommands.Send("chest start");
         else if (hit == 1) ItemToolCommands.Send("chest stop");
 
         Wrapped(c.Status, c.Running ? Amber : Text, w);
+    }
+
+    // The slider's value while it is dragged, and after the release until RynthAi reports it back
+    // (the snapshot is 250 ms behind; without this the slider jumps back for a moment).
+    private static int _relockEdit;
+    private static bool _relockPending;
+    private static long _relockSentAt;
+    private const long RelockPendingMs = 2000;
+
+    /// <summary>
+    /// "Chest re-lock wait (s)" (2026-11-05): how long after the chest was opened the next key goes on
+    /// it. Sent on release as "relock N" (RynthAi clamps, saves it in the profile and answers in chat).
+    /// Hidden for a RynthAi that predates it (no relockSec); greyed until the profile has loaded.
+    /// </summary>
+    private static void DrawRelockWait(ChestToolState c, float w)
+    {
+        if (c.RelockSec <= 0) return;
+        int min = Math.Max(1, c.RelockMin), max = Math.Max(min, c.RelockMax);
+        long now = Environment.TickCount64;
+        if (_relockPending && (c.RelockSec == _relockEdit || now - _relockSentAt >= RelockPendingMs)) _relockPending = false;
+
+        Label("Chest re-lock wait (s)", Mute);
+        int v = _relockPending ? _relockEdit : c.RelockSec;
+        ImGuiNET.ImGui.BeginDisabled(!c.RelockReady);
+        ImGuiNET.ImGui.SetNextItemWidth(Math.Max(80, w - 4));
+        ImGuiNET.ImGui.SliderInt("##chest_relock", ref v, min, max, "%d s", ImGuiSliderFlags.AlwaysClamp);
+        if (ImGuiNET.ImGui.IsItemActive()) { _relockEdit = v; _relockPending = true; _relockSentAt = now; }
+        if (ImGuiNET.ImGui.IsItemDeactivatedAfterEdit())
+        {
+            _relockEdit = v;
+            _relockPending = true;
+            _relockSentAt = now;
+            ItemToolCommands.Send("relock " + v.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        SafeImGui.SetItemTooltip(c.RelockReady
+            ? "How long after the chest was opened the next key goes on it (sooner when it reads locked again).\n125 s fits the usual 2-minute chest reset; a chest that resets sooner can use less.\nToo short costs nothing: the key is only tried again, never spent. Ctrl+click to type a value."
+            : "Waiting for this character's settings profile to load.");
+        ImGuiNET.ImGui.EndDisabled();
     }
 
     // ── Quick give ──────────────────────────────────────────────────────

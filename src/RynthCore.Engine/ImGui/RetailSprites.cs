@@ -18,7 +18,9 @@
 //    The two meet only in two small queues under one lock.
 //
 //  Bounded: at most 192 pictures, each at most 512 x 512 (the biggest the
-//  inventory uses is its 300 x 362 background, ~0.4 MB). A picture that isn't
+//  inventory uses is its 300 x 362 background, ~0.4 MB). A retail font's glyph
+//  sheet (TryGetFontSheet, 2026-11-07) may be 2048 wide (Palatino 24's is 2048 x
+//  279, ~2.3 MB); only a plugin drawing retail text asks for them, a few at most. A picture that isn't
 //  in the dat or doesn't decode is tried again after 30 s; until then the caller
 //  draws its own stand-in (TryGet returns false).
 // ============================================================================
@@ -80,7 +82,30 @@ internal static class RetailSprites
     public static bool TryGet(uint textureId, out IntPtr texture)
     {
         texture = IntPtr.Zero;
-        if (!AcIconDecoder.IsTextureId(textureId)) return false;
+        return AcIconDecoder.IsTextureId(textureId) && TryGetKey(textureId, out texture);
+    }
+
+    // A font's glyph sheet is keyed with this bit set, so it never shares a slot with the same
+    // texture drawn as a picture (a sheet decodes white, its level as alpha).
+    private const uint FontSheetBit = 0x80000000u;
+
+    /// <summary>
+    /// A retail font's glyph sheet (its Font file's foreground or background surface, an A8
+    /// 0x06 texture up to <see cref="AcIconDecoder.MaxFontSheetSide"/> wide) as a texture:
+    /// white, the sheet's level as alpha, so ImGui's tint colours the text (2026-11-07, for
+    /// plugins that draw the retail look with its own fonts). Otherwise as <see cref="TryGet"/>.
+    /// AC's render thread.
+    /// </summary>
+    public static bool TryGetFontSheet(uint textureId, out IntPtr texture)
+    {
+        texture = IntPtr.Zero;
+        return AcIconDecoder.IsTextureId(textureId) && TryGetKey(textureId | FontSheetBit, out texture);
+    }
+
+    private static bool TryGetKey(uint key, out IntPtr texture)
+    {
+        texture = IntPtr.Zero;
+        uint textureId = key;
         if (!Sprites.TryGetValue(textureId, out Sprite? sprite))
         {
             if (Sprites.Count >= MaxSprites) return false;
@@ -219,7 +244,12 @@ internal static class RetailSprites
                 }
 
                 AcIconImage? image = null;
-                try { image = dat == null ? null : AcIconDecoder.Decode(dat, r.Id, AcIconDecoder.MaxUiSide); }
+                try
+                {
+                    image = dat == null ? null
+                        : (r.Id & FontSheetBit) != 0 ? AcIconDecoder.DecodeFontSheet(dat, r.Id & ~FontSheetBit)
+                        : AcIconDecoder.Decode(dat, r.Id, AcIconDecoder.MaxUiSide);
+                }
                 catch { image = null; }
                 lock (Sync)
                 {

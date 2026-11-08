@@ -14,19 +14,84 @@
 //  the plate's scale x its own "Debuff icon size" setting (monster plates and
 //  your plate apart, neither tied to a text size); the stack digit and "+N"
 //  scale the plate's small text by it. At 100 % the row is exactly as before.
+//  Hover tooltips (2026-11-07): a row painted with tips on notes the icon
+//  under the cursor (the last row painted wins: it is on top); after every
+//  plate is painted, MonsterHud.Draw calls ShowHoverTip, which names the
+//  kind, what it does, its spells and when the first ends (DebuffTip), the
+//  "+N" count, or what the "debuffed by others" marker means. No tip while an
+//  ImGui panel has the mouse, the Insert UI toggle is off, the plate is
+//  fading, or (rows drawn under AC's windows) one of AC's windows covers it.
 //  Render thread only. Engine-owned statics.
 // ============================================================================
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
 using ImGuiNET;
+using RynthCore.Engine.Compatibility;
 
 namespace RynthCore.Engine.ImGuiBackend.Hud;
 
+/// <summary>Whose row it is, for the hover tooltip (Off: no tooltip).</summary>
+internal enum DebuffRowTips : byte { Off, Monster, Self }
+
 internal static class DebuffIconRow
 {
+    private enum Hit : byte { None, Icon, More, Others }
+
+    private readonly record struct TipKey(Hit Hit, DebuffKind Kind, uint S0, uint S1, uint S2, uint S3, int Stack, int Secs, DebuffRowTips Row, int More);
+
+    // The icon under the cursor this frame (BeginHover clears it; the topmost row painted wins).
+    private static Hit _hit;
+    private static DebuffIcon _hitIcon;
+    private static int _hitMore;
+    private static DebuffRowTips _hitRow;
+    private static bool _hitUnderUi;
+    // The last tooltip built, kept while the cursor stays on the same icon and second.
+    private static TipKey _tipKey;
+    private static string _tipText = "";
+    private static readonly List<string> TipNames = new(DebuffIcon.MaxSpells);
+
+    /// <summary>Start of a HUD frame: nothing hovered yet.</summary>
+    internal static void BeginHover() => _hit = Hit.None;
+
+    /// <summary>
+    /// End of a HUD frame (inside the ImGui frame): the tooltip of the icon the cursor is on, if any.
+    /// A row drawn under AC's windows gets none where one of AC's windows covers the cursor.
+    /// </summary>
+    internal static void ShowHoverTip(long now)
+    {
+        if (_hit == Hit.None) return;
+        if (_hitUnderUi && MonsterHud.AcWindowCoversCursor()) return;
+        int secs = _hit == Hit.Icon ? (int)Math.Ceiling((_hitIcon.Expiry - now) / (double)Stopwatch.Frequency) : 0;
+        var key = new TipKey(_hit, _hitIcon.Kind, _hitIcon.Spell0, _hitIcon.Spell1, _hitIcon.Spell2, _hitIcon.Spell3,
+            _hitIcon.Stack, secs, _hitRow, _hitMore);
+        if (key != _tipKey || _tipText.Length == 0)
+        {
+            _tipKey = key;
+            _tipText = _hit switch
+            {
+                Hit.Others => DebuffTip.Others,
+                Hit.More => DebuffTip.More(_hitMore),
+                _ => IconTip(in _hitIcon, secs, _hitRow),
+            };
+        }
+        SafeImGui.SetTooltip(_tipText);
+    }
+
+    private static string IconTip(in DebuffIcon ic, int secs, DebuffRowTips row)
+    {
+        TipNames.Clear();
+        for (int i = 0; i < ic.SpellCount; i++)
+            if (PortalSpellTable.TryGetById(ic.SpellAt(i), out DebuffSpell s) && s.Name.Length > 0)
+                TipNames.Add(s.Name);
+        return DebuffTip.Text(ic.Kind, TipNames, ic.Stack, secs, estimated: row == DebuffRowTips.Monster, self: row == DebuffRowTips.Self);
+    }
+
+    private static bool Inside(Vector2 m, Vector2 p0, Vector2 p1) => m.X >= p0.X && m.X <= p1.X && m.Y >= p0.Y && m.Y <= p1.Y;
+
     /// <summary>Icons per row; more shows "+N" (the last slot makes room for it).</summary>
     internal const int MaxIcons = 5;
     /// <summary>Icons blink in their last seconds.</summary>
@@ -66,12 +131,23 @@ internal static class DebuffIconRow
     /// <paramref name="row"/> holds every length (the plate's scale x its icon size setting);
     /// <paramref name="smallFont"/>/<paramref name="smallSize"/> are the plate's small text, which the
     /// stack digit and "+N" scale by the icon size; <paramref name="overflowKey"/>/<paramref name="overflowText"/>
-    /// cache the "+N" string per row. <paramref name="now"/> is Stopwatch ticks.
+    /// cache the "+N" string per row. <paramref name="now"/> is Stopwatch ticks. <paramref name="tips"/>:
+    /// whose row, for the hover tooltip (Off: none); <paramref name="underUi"/>: drawn under AC's windows.
     /// </summary>
     internal static void Paint(ImDrawListPtr dl, DebuffIcon[] icons, int count, bool others, in DebuffRowMetrics row,
         ImFontPtr smallFont, float smallSize, ref int overflowKey, ref string overflowText,
-        float cx, float top, float a, long now)
+        float cx, float top, float a, long now, DebuffRowTips tips = DebuffRowTips.Off, bool underUi = false)
     {
+        // Hover: only a settled plate, with the UI toggle on and no ImGui panel holding the mouse.
+        Vector2 mouse = default;
+        bool hover = false;
+        if (tips != DebuffRowTips.Off && a >= 0.25f && Win32Backend.IsUiCaptureEnabled())
+        {
+            ImGuiIOPtr io = ImGuiNET.ImGui.GetIO();
+            hover = !io.WantCaptureMouse;
+            mouse = io.MousePos;
+        }
+
         float sz = row.Icon, gap = row.Gap;
         int shown = Prepare(icons.Length, count, in row, ref smallFont, ref smallSize, ref overflowKey, ref overflowText,
             out int overflow, out string more, out float moreTextW);
@@ -110,6 +186,9 @@ internal static class DebuffIconRow
             dl.AddRectFilled(new Vector2(i0.X, ly), new Vector2(i1.X, ly + lineH), MonsterHud.Mul(MonsterHud.Outline, a * 0.8f));
             if (frac > 0f)
                 dl.AddRectFilled(new Vector2(i0.X, ly), new Vector2(i0.X + MathF.Max(1f, sz * frac), ly + lineH), MonsterHud.Mul(tint, a * blink));
+            // The icon and its countdown line, with the gap to the next icon split between them (no dead spots).
+            if (hover && Inside(mouse, i0 - new Vector2(gap * 0.5f, 0f), new Vector2(i1.X + gap * 0.5f, ly + lineH)))
+                Note(Hit.Icon, in ic, 0, tips, underUi);
             x += sz + gap;
         }
 
@@ -118,6 +197,8 @@ internal static class DebuffIconRow
             var mp = new Vector2(x, MathF.Round(top + (sz - smallSize) * 0.5f));
             MonsterHud.OutlinedText(dl, smallFont, smallSize, mp, a, more);
             dl.AddText(smallFont, smallSize, mp, MonsterHud.Mul(MonsterHud.DimText, a), more);
+            if (hover && Inside(mouse, new Vector2(x, top), new Vector2(x + moreW, top + sz)))
+                Note(Hit.More, default, overflow, tips, underUi);
             x += moreW + gap;
         }
 
@@ -126,7 +207,18 @@ internal static class DebuffIconRow
             var i0 = new Vector2(x, top);
             dl.AddRectFilled(i0, i0 + new Vector2(sz, sz), MonsterHud.Mul(IconBack, a * 0.8f), row.Round);
             PhosphorIcons.DrawCentered(dl, iconFont, glyphPx, PhosphorIcons.UsersThree, i0, new Vector2(sz, sz), MonsterHud.Mul(OthersTint, a * 0.8f));
+            if (hover && Inside(mouse, i0, i0 + new Vector2(sz, sz)))
+                Note(Hit.Others, default, 0, tips, underUi);
         }
+    }
+
+    private static void Note(Hit hit, in DebuffIcon icon, int more, DebuffRowTips row, bool underUi)
+    {
+        _hit = hit;
+        _hitIcon = icon;
+        _hitMore = more;
+        _hitRow = row;
+        _hitUnderUi = underUi;
     }
 
     /// <summary>

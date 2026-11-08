@@ -59,6 +59,8 @@ namespace PlateSizingTests
             HealthRefreshDefaultsOn();
             HealthRefreshRoundTripAndClamp();
 
+            HideBehindWallsDefaultsOnAndRoundTrips();
+
             Console.WriteLine();
             Console.WriteLine($"{_checks - _failed}/{_checks} checks passed.");
             Console.WriteLine(_failed == 0 ? "ALL PLATE SIZING TESTS PASSED." : $"{_failed} FAILED.");
@@ -587,6 +589,35 @@ namespace PlateSizingTests
         // ── harness ─────────────────────────────────────────────────────────
 
         // ── refresh others' health (HealthProbe) ────────────────────────────
+
+        // ── hide behind walls (2026-11-04, report R-20261105-020337-67aa) ─────
+
+        private static void HideBehindWallsDefaultsOnAndRoundTrips()
+        {
+            Case("hide behind walls: on by default and from a file before it; off round-trips; Reset all restores it");
+            S.ResetToDefaults();
+            Check(S.HideBehindWalls, "on by default (the fixed behaviour)");
+            string[] lines = Written();
+            Check(lines.Contains("hideBehindWalls=1"), "hideBehindWalls=1 written");
+            Check(S.Describe().Contains("hide behind walls on"), "the status line names it");
+            string[] old = lines.Where(l => !l.StartsWith("hideBehindWalls=", StringComparison.Ordinal)).ToArray();
+            Check(old.Length == lines.Length - 1, "the old file lacks exactly the one key");
+            S.HideBehindWalls = false;
+            S.ResetToDefaults();   // the loader starts from the defaults
+            S.ApplyLines(old);
+            Check(S.HideBehindWalls, "on after loading the old file");
+
+            S.HideBehindWalls = false;
+            string[] off = Written();
+            Check(off.Contains("hideBehindWalls=0"), "hideBehindWalls=0 written");
+            S.ResetToDefaults();
+            S.ApplyLines(off);
+            Check(!S.HideBehindWalls, "off after reload");
+            Check(off.SequenceEqual(Written()), "identical text after a reload");
+            Check(S.Describe().Contains("hide behind walls off"), "the status line says off");
+            S.ResetToDefaults();
+            Check(S.HideBehindWalls, "Reset all: on");
+        }
 
         private static void HealthRefreshDefaultsOn()
         {

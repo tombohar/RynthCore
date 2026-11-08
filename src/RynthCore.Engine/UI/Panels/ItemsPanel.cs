@@ -82,8 +82,18 @@ internal static class ItemsPanel
         // Melee, Missile, "War Magic", "Void Magic", Shield, Ammo, or "" (not known). Set by RynthAi for
         // display (the Items face groups by it); sent back untouched and ignored there.
         [JsonPropertyName("kind")]    public string Kind    { get; set; } = string.Empty;
+        // True = "No buff" (RynthAi ItemRule.KeepBuffed off), sent for every entry by RynthAi and
+        // applied back by it for shield entries only. Null = the plugin predates it: no toggle is
+        // drawn, and none is written back (RynthAi keeps its saved value).
+        [JsonPropertyName("noBuff")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? NoBuff { get; set; }
 
         public bool IsShield => string.Equals(Action, ItemsCommands.ShieldAction, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>The faces draw their "No buff" toggle: a shield entry (Action "Shield", the only
+        /// kind RynthAi applies it to) from a plugin that sends the field.</summary>
+        [JsonIgnore] public bool ShowsNoBuff => IsShield && NoBuff.HasValue;
     }
 
     internal sealed class ConsumableEntry
@@ -874,7 +884,8 @@ internal static class ItemsPanel
         if (a.Count != b.Count) return true;
         for (int i = 0; i < a.Count; i++)
             if (a[i].Id != b[i].Id || a[i].Name != b[i].Name || a[i].Element != b[i].Element
-                || !string.Equals(a[i].Action, b[i].Action, StringComparison.OrdinalIgnoreCase)) return true;
+                || !string.Equals(a[i].Action, b[i].Action, StringComparison.OrdinalIgnoreCase)
+                || a[i].NoBuff != b[i].NoBuff) return true;   // so this panel never saves back a stale noBuff
         return false;
     }
 

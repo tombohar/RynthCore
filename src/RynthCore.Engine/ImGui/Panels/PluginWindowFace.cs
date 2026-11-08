@@ -119,7 +119,7 @@ internal sealed class PluginWindowFace : IImGuiPanel
         }
         if (result == PluginManager.EmbedDrawn)
         {
-            if (_fitHeight) Fit(want.Y, avail.X);
+            if (_fitHeight) Fit(want.Y, avail.X, want.X);
             return;
         }
 
@@ -137,12 +137,23 @@ internal sealed class PluginWindowFace : IImGuiPanel
     /// client px) and scales its width with a text size change. Docked only (popped out, the OS window
     /// is the player's to size); never while the mouse is down, so a drag or a resize isn't fought.
     /// </summary>
-    private void Fit(float wantPx, float widthPx)
+    private void Fit(float wantPx, float widthPx, float wantWidthPx = 0f)
     {
         if (wantPx <= 0f || ImGuiPopOuts.InPopOutFrame) return;
         float place = Math.Max(0.01f, ImGuiPanelHost.PlacementScale());
         float height = MathF.Ceiling(wantPx / place);
         float width = widthPx / place;
+        // A plugin that sizes its own width too (2026-11-07: RynthDreamWeave's retail Character panel, a
+        // fixed design width at its text size) reports a width other than the one it was given: the window
+        // takes it, as it takes the height. Every other plugin hands back the width it got: no change.
+        if (wantWidthPx > 0f && MathF.Abs(wantWidthPx - widthPx) > 1f && ImGuiNET.ImGui.IsMouseDown(ImGuiNET.ImGuiMouseButton.Left) == false)
+        {
+            _contentHeight = height;
+            _fitWidth = MathF.Ceiling(wantWidthPx / place);
+            _fitK = PanelTextScale.Factor(ImGuiFonts.CurrentStep);
+            ImGuiPanelHost.RequestSize(_title, new Vector2(_fitWidth, height));
+            return;
+        }
         float k = PanelTextScale.Factor(ImGuiFonts.CurrentStep);
         float shownHeight = ImGuiNET.ImGui.GetWindowHeight() / place;
         bool mouseUp = !ImGuiNET.ImGui.IsMouseDown(ImGuiNET.ImGuiMouseButton.Left);

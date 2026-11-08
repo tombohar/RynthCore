@@ -3764,6 +3764,40 @@ internal static class ClientObjectHooks
         return ReadPhysicsFromWeenie(objectId, weeniePtr, out objCellId, out x, out y, out z, out _, out _, out _, out _);
     }
 
+    // CPhysicsObj.cell: CPhysicsObj::enter_cell (0x005119A0) stores the CObjCell* here and the cell's
+    // id at +0x4C (m_position.objcell_id); leave_cell (0x00511A20) and change_cell clear it.
+    private const int PhysicsCellOffset = 0x90;
+    private const int PhysicsCellIdOffset = PhysicsPositionOffset + PositionObjCellIdOffset;   // 0x4C
+
+    /// <summary>
+    /// The CObjCell* an object's CPhysicsObj is in, and that cell's id (2026-11-04: the nameplates
+    /// ask whether AC drew the object's cell, report R-20261105-020337-67aa). The pointer is only
+    /// returned when the cell holds the same id (AcCellSight.IsCell). MAIN THREAD ONLY: false off it.
+    /// </summary>
+    internal static bool TryGetObjectCell(uint objectId, out IntPtr cell, out uint cellId)
+    {
+        cell = IntPtr.Zero;
+        cellId = 0;
+        if (!MainThreadGuard.IsOnMainThread() || _weeniePhysicsObjOffset < 0) return false;
+        if (!TryGetWeenieObjectPtr(objectId, out IntPtr weeniePtr)) return false;
+        try
+        {
+            if (!IsReadableSpan(weeniePtr + _weeniePhysicsObjOffset, 4)) return false;
+            IntPtr physicsObj = Marshal.ReadIntPtr(weeniePtr + _weeniePhysicsObjOffset);
+            if (physicsObj == IntPtr.Zero || !IsReadableSpan(physicsObj, PhysicsCellOffset + 4)) return false;
+            if (!SmartBoxLocator.IsPointerInModule(Marshal.ReadIntPtr(physicsObj))) return false;
+            cellId = unchecked((uint)Marshal.ReadInt32(physicsObj + PhysicsCellIdOffset));
+            IntPtr c = Marshal.ReadIntPtr(physicsObj + PhysicsCellOffset);
+            if ((cellId >> 16) == 0) return false;
+            if (AcCellSight.IsCell(c, cellId)) cell = c;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>
     /// Reads cell/origin plus the heading quaternion's qw/qz and CPhysicsObj m_state
     /// from a weenie pointer resolved on the main thread. MAIN THREAD ONLY (callers:

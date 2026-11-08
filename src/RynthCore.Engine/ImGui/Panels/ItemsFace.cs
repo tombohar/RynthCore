@@ -5,6 +5,9 @@
 //  and mana stone tapping (on/off, keep count, min max-mana to tap). A listed
 //  weapon the character no longer carries (RynthAi's missingIds) shows in amber
 //  with a warning icon and "(missing)", and says what to do in its tooltip.
+//  A shield row (Action "Shield") from a RynthAi that sends noBuff shows a
+//  "No buff" toggle in place of its element column: on = RynthAi never buffs
+//  that shield. Weapon rows are unchanged.
 //
 //  Edits change a private copy and save the whole payload (ItemsCommands,
 //  pump thread). A newer snapshot replaces the copy; snapshots from before
@@ -91,8 +94,15 @@ internal sealed class ItemsFace : IImGuiPanel
                     int i = idx[k];
                     ItemsPanel.WeaponEntry wpn = _data.Weapons[i];
                     ImGuiNET.ImGui.PushID("w" + i);
-                    int r = Row(wpn.Name, wpn.Element, shown++, bw, _data.MissingIds.Contains(wpn.Id), k > 0, k < idx.Count - 1);
+                    int r = Row(wpn.Name, wpn.Element, shown++, bw, _data.MissingIds.Contains(wpn.Id), k > 0, k < idx.Count - 1,
+                        wpn.ShowsNoBuff ? wpn.NoBuff : null);
                     ImGuiNET.ImGui.PopID();
+                    if (r == 5)
+                    {
+                        wpn.NoBuff = !(wpn.NoBuff ?? false);
+                        Save();
+                        continue;
+                    }
                     // Up / down inside its group: the order is RynthAi's preference (the buff wand, the
                     // first weapon of a kind), and it couldn't be changed but by removing and re-adding.
                     if (r == 3 || r == 4)
@@ -273,13 +283,19 @@ internal sealed class ItemsFace : IImGuiPanel
     // The up / down buttons' width in a row (two 20 px buttons and their gaps).
     private const float MoveW = 46;
 
+    private const string NoBuffTip = "Never buff this shield - for a shield that already carries its buffs.\n"
+        + "RynthAi then aims no armor spells at it, and its spells running low never start a rebuff.";
+
     /// <summary>
     /// Name | up | down | [value picker] | Del. Returns 1 when the picker was clicked, 2 for Del,
-    /// 3 for up, 4 for down, else 0. Up / down are drawn dim and do nothing at the ends.
-    /// <paramref name="missing"/>: the item isn't carried any more (amber, a warning icon,
-    /// "(missing)" and a tooltip saying what to do).
+    /// 3 for up, 4 for down, 5 for the "No buff" toggle, else 0. Up / down are drawn dim and do
+    /// nothing at the ends. <paramref name="missing"/>: the item isn't carried any more (amber, a
+    /// warning icon, "(missing)" and a tooltip saying what to do). <paramref name="noBuff"/>
+    /// non-null (a shield row, RynthAi sending noBuff): the value column is the "No buff" toggle
+    /// instead of the picker (a shield has no element; its column only said "Shield").
     /// </summary>
-    private static int Row(string name, string value, int index, float w, bool missing, bool canUp = false, bool canDown = false)
+    private static int Row(string name, string value, int index, float w, bool missing, bool canUp = false, bool canDown = false,
+        bool? noBuff = null)
     {
         Vector2 p = ImGuiNET.ImGui.GetCursorScreenPos();
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
@@ -311,7 +327,14 @@ internal sealed class ItemsFace : IImGuiPanel
         if (IconButton("##down", PhosphorIcons.CaretDown, new Vector2(bx + 22, p.Y + 2), new Vector2(20, 20), canDown ? Teal : Mute, BtnFill) && canDown) result = 4;
         ImGuiNET.ImGui.SetItemTooltip("Move down");
         bx += MoveW;
-        if (Button("##pick", value, new Vector2(bx, p.Y + 2), new Vector2(96, 20), Text, BtnFill)) result = 1;
+        if (noBuff is bool nb)
+        {
+            // The tapping toggle's look: lit while the shield is left out of buffing.
+            if (Button("##nobuff", (nb ? PhosphorIcons.CheckSquare : PhosphorIcons.Square) + " No buff", new Vector2(bx, p.Y + 2), new Vector2(96, 20),
+                    nb ? OnText : Mute, nb ? OnBg : BtnFill)) result = 5;
+            ImGuiNET.ImGui.SetItemTooltip(NoBuffTip);
+        }
+        else if (Button("##pick", value, new Vector2(bx, p.Y + 2), new Vector2(96, 20), Text, BtnFill)) result = 1;
         if (IconButton("##del", PhosphorIcons.Trash, new Vector2(bx + 100, p.Y + 2), new Vector2(42, 20), Red, BtnFill)) result = 2;
         ImGuiNET.ImGui.SetItemTooltip("Remove");
         NextLine(p, 24);

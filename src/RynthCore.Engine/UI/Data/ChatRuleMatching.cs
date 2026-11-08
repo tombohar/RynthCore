@@ -71,6 +71,36 @@ internal static class ChatRuleMatching
         catch (ArgumentException ex) { error = ex.Message; return null; }
     }
 
+    /// <summary>
+    /// The router's compile (2026-11-07): the rule first as a non-backtracking regex, which runs in
+    /// time linear in the line's length whatever the pattern, so it gets no match timeout and can
+    /// never be "too slow" (<paramref name="linear"/> true). Every plain-text rule and most regex
+    /// rules compile this way. A pattern that needs backtracking (lookarounds, backreferences,
+    /// atomic groups, conditionals) compiles as <see cref="Compile"/> does, with the timeout.
+    ///
+    /// Why: the rules were timed by the clock. On a PC running several game clients a plain-text
+    /// rule's first match after a compile, a GC pause or a descheduled pump thread ran past the 15 ms
+    /// timeout, and the rule was skipped until edited - "too slow and skipped all the time" (the
+    /// owner, 2026-11-07, with eight plain-text rules). Rules recompile whenever the shared chat
+    /// settings file is saved by any client.
+    /// </summary>
+    public static Regex? CompileForRouter(ChatMatchMode mode, string? pattern, int timeoutMs, out string? error, out bool linear)
+    {
+        error = null;
+        linear = false;
+        string? expr = ToRegex(mode, pattern);
+        if (expr == null) return null;
+        try
+        {
+            var rx = new Regex(expr, Options | RegexOptions.NonBacktracking, Regex.InfiniteMatchTimeout);
+            linear = true;
+            return rx;
+        }
+        catch (NotSupportedException) { }   // needs backtracking: the timed compile below
+        catch (ArgumentException) { }       // a bad pattern: the compile below reports it as before
+        return Compile(mode, pattern, timeoutMs, out error);
+    }
+
     /// <summary>The "mode" a rule's JSON carries: absent (an older file or a Regex rule) is Regex.</summary>
     public static ChatMatchMode Parse(string? json) => (json ?? "").Trim().ToLowerInvariant() switch
     {

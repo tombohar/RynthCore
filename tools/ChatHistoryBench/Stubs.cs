@@ -8,6 +8,7 @@ namespace RynthCore.Engine.Compatibility
     {
         public static int Lines;
         public static void UI(string message) { Lines++; }
+        public static void Info(string message) { Lines++; }
     }
 }
 

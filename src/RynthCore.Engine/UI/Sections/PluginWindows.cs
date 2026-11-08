@@ -19,7 +19,12 @@
 //  the plugin shipping first and the engine face deleted a release later.
 //  A window seen for the first time this session opens if it was open when the
 //  game last closed (Remember Open Windows); one that went with a plugin reload
-//  opens again when the plugin comes back.
+//  opens again when the plugin comes back. Both read the panel layout in use
+//  when the window registers; when the layout changes later (UI/PanelLayout: a
+//  hot reload that registered windows before the character's layout was in,
+//  a character name that came late, a relogin) ImGuiPanelHost's layout switch
+//  opens, closes and places the hosted windows from the new layout, like the
+//  engine's panels (2026-11-05).
 //
 //  WindowPlan.cs is the pure part (which windows, which are refused and why,
 //  which take over an engine panel).
@@ -152,7 +157,9 @@ internal static class PluginWindows
     // only while the mouse is near it: that corner is the plugin's own content.
     private static PanelSpec Spec(SectionWindowDecl w) => w.Frameless
         ? new(new Vector2(w.Width, w.Height), new Vector2(w.MinWidth, w.MinHeight), PanelChrome.None,
-            Background: 0, Rounding: 0f, EdgeToEdge: true, GripOnHover: true, OpenCorner: Corner(w.Corner), DrawScale: w.DrawScale)
+            Background: 0, Rounding: 0f, EdgeToEdge: true, GripOnHover: true, OpenCorner: Corner(w.Corner), DrawScale: w.DrawScale,
+            // A frameless window that sizes itself (fitHeight) needs no grip of the host's: its own edges resize it.
+            NoResize: w.FitHeight && w.UnderUi, UnderUi: w.UnderUi)
         : new(new Vector2(w.Width, w.Height), new Vector2(w.MinWidth, w.MinHeight),
             EdgeToEdge: w.EdgeToEdge, GripInBody: w.EdgeToEdge, OpenCorner: Corner(w.Corner), DrawScale: w.DrawScale);
 

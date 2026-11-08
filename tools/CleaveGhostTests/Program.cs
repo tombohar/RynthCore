@@ -20,6 +20,9 @@ internal static class Program
         Run("health probe: the stalest fight plate first, never-read plates nearest first", ProbeStalestAndNearest);
         Run("health probe: nothing due (fresh, dead, no id) sends nothing", ProbeNothingDue);
         Run("health probe: a probe's replies are the HUD's; the owner's and plugins' are theirs", ProbeReplies);
+        Run("plugin reading (v93): the server's last ratio and its age; never an estimate", PluginReadingServerOnly);
+        Run("plugin reading (v93): a probe reply is recorded for plugins to read, while it still isn't theirs as an event", PluginReadingProbeReply);
+        Run("plugin reading (v93): safe to read from another thread while the game thread records", PluginReadingThreads);
         Console.WriteLine($"{_checks} check(s), {_failed} failed.");
         return _failed == 0 ? 0 : 1;
     }
@@ -208,5 +211,94 @@ internal static class Program
         Check(HealthProbe.ProbeCount == before + 1, "probes are counted");
         HealthProbe.Reset();
         Check(!HealthProbe.IsProbeReply(0x114, 5100) && !HealthProbe.TryGetOwner(out _), "reset (logout) forgets everything");
+    }
+
+    // ── Plugin API v93 GetMonsterHealth (MonsterHudData.TryGetServerHealth) ──
+
+    private static long Ms(double ms) => (long)(ms * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+
+    private static void PluginReadingServerOnly()
+    {
+        MonsterHudData.Clear();
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        Check(!MonsterHudData.TryGetServerHealth(0x40, t0, out float r, out uint age) && r == -1f && age == uint.MaxValue,
+            "never read: false, -1, max age");
+        Check(!MonsterHudData.TryGetServerHealth(0, t0, out _, out _), "id 0: false");
+
+        MonsterHudData.RecordHealth(0x40, 0.6f, 0, 0);
+        long recorded = System.Diagnostics.Stopwatch.GetTimestamp();
+        Check(MonsterHudData.TryGetServerHealth(0x40, recorded + Ms(2500), out r, out age) && Near(r, 0.6f),
+            $"the server's 60% (got {r:0.000})");
+        Check(age >= 2500 && age < 2600, $"2.5 s old (got {age} ms)");
+
+        // The plates' estimate from the player's own hit shows on the plate, not in the plugin reading.
+        MonsterHudData.RecordHealth(0x40, 0.3f, 0, 0, estimated: true);
+        Check(MonsterHudData.TryGetHealth(0x40, out HealthObservation h) && Near(h.Ratio, 0.3f) && h.Estimated, "the plate shows the estimate");
+        Check(MonsterHudData.TryGetServerHealth(0x40, recorded + Ms(3000), out r, out age) && Near(r, 0.6f) && age >= 3000,
+            $"the reading stays the server's 60% and keeps its age (got {r:0.000}, {age} ms)");
+
+        // An estimate on a plate the server never read: nothing for plugins.
+        MonsterHudData.RecordHealth(0x41, 0.8f, 0, 0, estimated: true);
+        Check(!MonsterHudData.TryGetServerHealth(0x41, recorded, out _, out _), "estimate only: false");
+
+        // The next server reading replaces it.
+        MonsterHudData.RecordHealth(0x41, 0.45f, 450, 1000);
+        Check(MonsterHudData.TryGetServerHealth(0x41, System.Diagnostics.Stopwatch.GetTimestamp(), out r, out age) && Near(r, 0.45f) && age < 100,
+            $"server 45%, fresh (got {r:0.000}, {age} ms)");
+
+        // A dead monster reads 0 (the plugin decides what that means for it).
+        MonsterHudData.RecordHealth(0x42, 0f, 0, 0);
+        Check(MonsterHudData.TryGetServerHealth(0x42, System.Diagnostics.Stopwatch.GetTimestamp(), out r, out _) && r == 0f, "dead: 0");
+
+        // A clock behind the reading never gives a negative or wrapped age; a very old one saturates.
+        Check(MonsterHudData.TryGetServerHealth(0x41, 0, out _, out age) && age == 0, $"now before the reading: 0 ms (got {age})");
+        Check(MonsterHudData.TryGetServerHealth(0x41, recorded + Ms(60.0 * 24 * 3600 * 1000), out _, out age) && age == uint.MaxValue,
+            $"60 days: saturates (got {age})");
+
+        MonsterHudData.Clear();
+        Check(!MonsterHudData.TryGetServerHealth(0x41, recorded, out _, out _), "logout clears it");
+    }
+
+    private static void PluginReadingProbeReply()
+    {
+        // PluginManager.QueueUpdateHealth records every 0x01C0 in MonsterHudData first, then drops a probe's
+        // reply from the plugins' UpdateHealth queue: the reading is there, the event is not.
+        MonsterHudData.Clear();
+        HealthProbe.Reset();
+        HealthProbe.NoteQuery(0x10);           // the fight target owns the stream
+        HealthProbe.NoteProbe(0x20, 1000);     // the plates probe a monster someone else is fighting
+        MonsterHudData.RecordHealth(0x20, 0.25f, 0, 0);
+        Check(HealthProbe.IsProbeReply(0x20, 1100), "the reply is the probe's (kept from plugins as an event)");
+        Check(MonsterHudData.TryGetServerHealth(0x20, System.Diagnostics.Stopwatch.GetTimestamp(), out float r, out _) && Near(r, 0.25f),
+            $"... and its 25% is readable by id (got {r:0.000})");
+        HealthProbe.Reset();
+        MonsterHudData.Clear();
+    }
+
+    private static void PluginReadingThreads()
+    {
+        MonsterHudData.Clear();
+        int bad = 0;
+        long reads = 0;
+        using var stop = new CancellationTokenSource();
+        var reader = Task.Run(() =>
+        {
+            while (!stop.IsCancellationRequested)
+                for (uint id = 1; id <= 64; id++)
+                {
+                    if (MonsterHudData.TryGetServerHealth(id, out float r, out _) && (r < 0f || r > 1f || float.IsNaN(r)))
+                        Interlocked.Increment(ref bad);
+                    Interlocked.Increment(ref reads);
+                }
+        });
+        // The game thread's side, including a full table's wholesale clear (2048 entries).
+        for (int round = 0; round < 40; round++)
+            for (uint id = 1; id <= 2100; id++)
+                MonsterHudData.RecordHealth(id, (id % 100) / 100f, 0, 0, estimated: (id & 3) == 0);
+        stop.Cancel();
+        reader.Wait();
+        Check(bad == 0, $"every reading in range ({bad} bad)");
+        Check(Interlocked.Read(ref reads) > 0, "the reader ran");
+        MonsterHudData.Clear();
     }
 }

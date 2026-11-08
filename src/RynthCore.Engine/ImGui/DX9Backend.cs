@@ -540,8 +540,20 @@ internal static unsafe class DX9Backend
         if (!_initialized) return;
         ImDrawData* dd = drawData.NativePtr;
         if (dd == null) return;
-        RenderLists((ImDrawList**)dd->CmdLists.Data, dd->CmdListsCount, dd->TotalVtxCount, dd->DisplayPos, dd->DisplaySize,
-            pDevice, midFrame: false);
+        ImDrawList** lists = (ImDrawList**)dd->CmdLists.Data;
+        int count = dd->CmdListsCount;
+        // Windows drawn under AC's UI (UnderUiLayer, a plugin window's "layer": "underUi") were presented
+        // at AC's UI pass: left out here, the rest keep their order.
+        if (UnderUiLayer.HasWindowLists && count > 0 && count <= 512)
+        {
+            ImDrawList** kept = stackalloc ImDrawList*[count];
+            int n = 0;
+            for (int i = 0; i < count; i++)
+                if (!UnderUiLayer.IsWindowList(lists[i])) kept[n++] = lists[i];
+            RenderLists(kept, n, dd->TotalVtxCount, dd->DisplayPos, dd->DisplaySize, pDevice, midFrame: false);
+            return;
+        }
+        RenderLists(lists, count, dd->TotalVtxCount, dd->DisplayPos, dd->DisplaySize, pDevice, midFrame: false);
     }
 
     /// <summary>

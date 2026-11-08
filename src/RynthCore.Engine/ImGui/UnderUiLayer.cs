@@ -26,6 +26,16 @@
 //            the ImGui panels - the same place RenderNav3D's fallback draws.
 //            A list is presented at most once: no double draw.
 //
+//  Windows under AC's UI (2026-11-07, PanelSpec.UnderUi: a plugin window's
+//  "layer": "underUi", RynthDreamWeave's Skills panel): the panel host builds
+//  the window as usual in the main frame and hands its draw lists (the window's
+//  and its body child's) here. EndScene's draw leaves them out
+//  (DX9Backend.RenderDrawData asks IsWindowList), and they are presented with
+//  the plates, after them, at the next frame's UI pass. ImGui keeps a window's
+//  draw list until the window's next Begin (the next EndScene, after that UI
+//  pass), so no copy is needed. At the EndScene fallback the lists already hold
+//  that frame's content: drawn without the lag, still under the panels.
+//
 //  The plates are therefore one frame behind the frame they were built in -
 //  the same lag the Nav3D markers have, since both project with the camera
 //  GameMatrixCapture took at the previous EndScene - on both paths, so a frame
@@ -54,6 +64,33 @@ internal static unsafe class UnderUiLayer
     private static bool _presented;         // _ready already drawn this frame
     private static int _presenting;         // a present is in flight (Shutdown waits for it)
     private static volatile bool _shutDown;
+
+    // Under-UI windows' draw lists (ImGui's own, owned by their windows): those of the frame being
+    // built, and those to present this frame (built last frame). AC's render thread only.
+    private static System.Collections.Generic.List<IntPtr> _winBuilding = new(), _winReady = new();
+    private static Vector2 _winBuildingSize, _winReadySize;
+
+    /// <summary>
+    /// Panel host, inside the main ImGui frame: a draw list of a window drawn under AC's UI. It is left
+    /// out of EndScene's draw and presented at the next UI pass with the world overlays. AC's render thread.
+    /// </summary>
+    public static void AddWindowList(ImDrawListPtr list)
+    {
+        if (_shutDown || list.NativePtr == null) return;
+        IntPtr p = (IntPtr)list.NativePtr;
+        if (!_winBuilding.Contains(p)) _winBuilding.Add(p);
+        _winBuildingSize = ImGuiNET.ImGui.GetIO().DisplaySize;
+    }
+
+    /// <summary>True when any window draws under AC's UI (DX9Backend filters EndScene's lists then).</summary>
+    public static bool HasWindowLists => _winBuilding.Count > 0 || _winReady.Count > 0;
+
+    /// <summary>
+    /// DX9Backend.RenderDrawData: a list EndScene must leave out (an under-UI window's, this frame's or
+    /// last frame's: a window's list pointer is the same every frame). AC's render thread.
+    /// </summary>
+    public static bool IsWindowList(ImDrawList* list)
+        => list != null && (_winBuilding.Contains((IntPtr)list) || _winReady.Contains((IntPtr)list));
 
     /// <summary>True after <see cref="BeginBuild"/> returned a list this frame. AC's render thread.</summary>
     public static bool IsBuilding => _building != null;
@@ -124,12 +161,31 @@ internal static unsafe class UnderUiLayer
         Interlocked.Exchange(ref _presenting, 1);
         try
         {
+            if (_shutDown) return false;
             ImDrawList* list = _ready;
-            if (list == null || _shutDown) return false;
-            _presented = true;
-            if (list->VtxBuffer.Size == 0) return false;
-            DX9Backend.RenderDrawList(list, _readySize, device);
-            return true;
+            bool drew = false;
+            if (list != null)
+            {
+                _presented = true;
+                if (list->VtxBuffer.Size > 0)
+                {
+                    DX9Backend.RenderDrawList(list, _readySize, device);
+                    drew = true;
+                }
+            }
+            // The under-UI windows, over the plates (they are windows, the plates are the world's).
+            if (_winReady.Count > 0)
+            {
+                _presented = true;
+                foreach (IntPtr p in _winReady)
+                {
+                    var w = (ImDrawList*)p;
+                    if (w->VtxBuffer.Size == 0) continue;
+                    DX9Backend.RenderDrawList(w, _winReadySize, device);
+                    drew = true;
+                }
+            }
+            return drew;
         }
         finally
         {
@@ -147,6 +203,10 @@ internal static unsafe class UnderUiLayer
         _readySize = _buildingSize;
         _building = null;
         _presented = false;
+        (_winReady, _winBuilding) = (_winBuilding, _winReady);
+        _winBuilding.Clear();
+        if (_shutDown) _winReady.Clear();
+        _winReadySize = _winBuildingSize;
     }
 
     /// <summary>One line for /rc imgui diag.</summary>
@@ -164,6 +224,8 @@ internal static unsafe class UnderUiLayer
         _ready = null;
         _building = null;
         _listA = _listB = null;
+        _winReady.Clear();
+        _winBuilding.Clear();
         Thread.MemoryBarrier();
         var spin = new SpinWait();
         long deadline = Environment.TickCount64 + 200;

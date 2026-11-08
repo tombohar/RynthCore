@@ -88,7 +88,11 @@ internal sealed record PanelSpec(
     PanelCorner OpenCorner = PanelCorner.None,
     // The panel draws its own content at any size (a plugin window's "scale": "draw", v90): Ctrl+wheel
     // steps its draw size (PanelDrawScale, 30-250%) instead of its text size.
-    bool DrawScale = false);
+    bool DrawScale = false,
+    // Drawn under AC's own UI, like a native AC window (a plugin window's "layer": "underUi",
+    // 2026-11-07): built in the normal frame, presented at AC's UI pass (UnderUiLayer), and
+    // click-through wherever an AC window covers the cursor (AcMouseOver). Docked only.
+    bool UnderUi = false);
 
 /// <summary>An ImGui panel face. One instance per open; dropped on close.</summary>
 internal interface IImGuiPanel
@@ -594,6 +598,12 @@ internal static class ImGuiPanelHost
     /// </summary>
     public static bool WheelWanted { get; private set; }
 
+    /// <summary>
+    /// The last DrawAll: an under-UI panel (PanelSpec.UnderUi) is only hovered (no button held), so the
+    /// mouse moves still go to AC and its own mouse-over stays current (EngineFrameController). AC thread.
+    /// </summary>
+    public static bool UnderUiHovered { get; private set; }
+
     // ── Frame (AC thread) ──────────────────────────────────────────────
 
     /// <summary>
@@ -608,6 +618,7 @@ internal static class ImGuiPanelHost
         int drawn = 0;
         _frameScale = uiScale;
         WheelWanted = false;
+        UnderUiHovered = false;
         float placeScale = PlacementScale();
         ApplyFaceChanges(placeScale);   // plugin windows taking over (or giving back) engine panels
         ApplyLayoutSwitch(placeScale);  // another character's panel layout (UI/PanelLayout)
@@ -725,24 +736,42 @@ internal static class ImGuiPanelHost
         OpenSavedOpen();
     }
 
-    /// <summary>Opens the engine panels the panel store has saved open (ImGui or Both docked face). AC thread.</summary>
+    /// <summary>
+    /// Opens the engine panels and plugin windows the panel store has saved open (ImGui or Both docked
+    /// face). AC thread.
+    /// </summary>
     private static void OpenSavedOpen()
     {
         List<string> titles = new();
-        // Script windows (dynamic) open when their owner says so, not from the saved state.
+        // Script windows (dynamic) open when their owner says so, not from the saved state. Plugin
+        // windows (dynamic too) follow it like engine panels (2026-11-05): one registered before the
+        // character's layout was in use (a hot reload, a name that came late, a relogin) decided its
+        // open state from the layout before, and opened here it comes back as this layout left it.
         lock (Sync)
             foreach (Entry e in Entries.Values)
-                if (!e.Dynamic) titles.Add(e.Title);
+                if (PanelLayoutPolicy.FollowsSavedOpenState(KindOf(e))) titles.Add(e.Title);
         foreach (string title in titles)
         {
             if (!PanelStateStore.TryGetPanel(title, out PanelStateStore.PanelEntry saved)) continue;
             if (!saved.Open) continue;
-            PanelFace face = PanelRouter.ResolveDockedFace(title);
-            if (face is not (PanelFace.ImGui or PanelFace.Both)) continue;
-            // Saved popped out: it reopens popped out (Apply reads the saved entry).
-            Open(title);
+            OpenSaved(title);
         }
     }
+
+    /// <summary>Opens a panel saved open, when its docked face is ImGui (or Both). AC thread.</summary>
+    private static void OpenSaved(string title)
+    {
+        PanelFace face = PanelRouter.ResolveDockedFace(title);
+        if (face is not (PanelFace.ImGui or PanelFace.Both)) return;
+        // Saved popped out: it reopens popped out (Apply reads the saved entry).
+        Open(title);
+    }
+
+    /// <summary>An engine panel, a plugin's window (UI/Sections/PluginWindows) or a script window. AC thread.</summary>
+    private static WindowKind KindOf(Entry e) =>
+        !e.Dynamic ? WindowKind.EnginePanel
+        : !e.PendingRemoval && UI.Sections.PluginWindows.IsHosted(e.Title) ? WindowKind.PluginWindow
+        : WindowKind.ScriptWindow;
 
     // ── Panel layout per character (UI/PanelLayout) ───────────────────────
 
@@ -756,9 +785,12 @@ internal static class ImGuiPanelHost
 
     /// <summary>
     /// After a layout switch: each shown panel is placed from the new layout (docked spot and size, popped
-    /// out or not, and where); an engine panel the layout has saved closed closes, without saving over
-    /// it; engine panels it has saved open open. Plugin and script windows stay open (their owners
+    /// out or not, and where); an engine panel or plugin window the layout has saved closed closes,
+    /// without saving over it; the ones it has saved open open. Script windows stay open (their owners
     /// decide that) and move. Nothing shown (a hot reload, the first login): only the opening. AC thread.
+    /// (Plugin windows follow the layout's open state since 2026-11-05: they register from the plugins'
+    /// manifests seconds after a login, and one registered while the store held another layout kept
+    /// that layout's open state for the whole session.)
     /// </summary>
     private static void ApplyLayoutSwitch(float placeScale)
     {
@@ -769,12 +801,17 @@ internal static class ImGuiPanelHost
         lock (Sync) order = DrawOrder;
         foreach (Entry e in order)
         {
-            if (!e.Shown) continue;
             bool has = PanelStateStore.TryGetPanel(e.Title, out PanelStateStore.PanelEntry saved);
-            if (!e.Dynamic && remember && has && !saved.Open)
+            switch (PanelLayoutPolicy.StepAtSwitch(KindOf(e), e.Shown, remember, has, saved.Open))
             {
-                CloseQuietly(e);
-                continue;
+                case SwitchStep.Leave:
+                    continue;
+                case SwitchStep.Open:
+                    OpenSaved(e.Title);   // queued; applied by this DrawAll, placed from the new layout
+                    continue;
+                case SwitchStep.Close:
+                    CloseQuietly(e);
+                    continue;
             }
             if (e.Popped)
             {
@@ -787,7 +824,6 @@ internal static class ImGuiPanelHost
             else if (!has)
                 Persist(e, open: true, placeScale);   // new to this layout: saved here, so it reopens here
         }
-        if (remember) OpenSavedOpen();   // queued; applied by this DrawAll (an open one is skipped)
         RynthLog.UI("ImGuiPanelHost: the open panels took their places from the panel layout now in use.");
     }
 
@@ -1183,10 +1219,25 @@ internal static class ImGuiPanelHost
         bool clickThrough = false;
         // Popped out, a panel is always interactive (like the Avalonia pop-out was).
         if (!popped) try { clickThrough = entry.Instance?.ClickThrough ?? false; } catch { }
+        // Under AC's UI: where an AC window covers the cursor the click is AC's (unless a press that
+        // began on this panel is still held, so a drag over an AC window isn't dropped).
+        bool underUi = spec.UnderUi && !popped;
+        if (underUi && !clickThrough && !ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left)
+            && Compatibility.AcMouseOver.Current() == Compatibility.AcMouseTarget.AcWindow)
+            clickThrough = true;
         if (clickThrough) flags |= ImGuiWindowFlags.NoInputs;
 
         bool childOpen = false;
         ImGuiNET.ImGui.Begin(entry.WindowId, flags);
+        if (underUi)
+        {
+            UnderUiLayer.AddWindowList(ImGuiNET.ImGui.GetWindowDrawList());
+            // Only hovered: the mouse moves still reach AC, so its own mouse-over follows the cursor
+            // onto an AC window covering this one (as the nameplates do, MonsterHud.MouseMovesToGame).
+            if (!clickThrough && !ImGuiNET.ImGui.IsAnyMouseDown()
+                && ImGuiNET.ImGui.IsWindowHovered(ImGuiHoveredFlags.ChildWindows))
+                UnderUiHovered = true;
+        }
         try
         {
             ImGuiNET.ImGui.PopStyleVar(3);  // the frame's own vars; the body gets normal padding
@@ -1263,6 +1314,7 @@ internal static class ImGuiPanelHost
             if (clickThrough) bodyFlags |= ImGuiWindowFlags.NoInputs;
             childOpen = ImGuiNET.ImGui.BeginChild("##body", bodySize, ImGuiChildFlags.AlwaysUseWindowPadding, bodyFlags);
             ImGuiNET.ImGui.PopStyleVar();
+            if (underUi && childOpen) UnderUiLayer.AddWindowList(ImGuiNET.ImGui.GetWindowDrawList());
 
             if (childOpen)
             {

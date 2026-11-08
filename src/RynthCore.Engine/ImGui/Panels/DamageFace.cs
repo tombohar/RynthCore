@@ -18,7 +18,11 @@
 //  automatic.
 //  Under a monster's row, when the plugin sends them (the row's "mstats",
 //  UI/Data/DamageRowStats.cs, 2026-10-30): how often it evades and resists you
-//  and you it since login, the full numbers on hover.
+//  and you it since login, the full numbers on hover; "XP/kill" first when the
+//  plugin counts XP ("xp"/"xk", 2026-11-08), then "corpse 2.1 s" when it times
+//  the death animation ("cd"/"cn"), then "Hits taken: shield 11 avg (front 95%),
+//  no shield 54 avg" when the plugin has learned its hits by shield and facing
+//  ("h/d/m" + sf..nu, 2026-11-08; kept across logins, not since login).
 //  Where the server plugin reports difficulty tiers: a tier chip after Reset stats
 //  (DamageView.Tier) - which tier the numbers are for, and a picker; "~" marks an
 //  HP estimated from tier 0's. Hidden elsewhere.

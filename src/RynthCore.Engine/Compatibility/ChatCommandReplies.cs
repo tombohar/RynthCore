@@ -122,7 +122,7 @@ internal static class ChatCommandReplies
         "debuffs [on|off] | debuffs size <50-200%> | others [on|off] | numbers [dealt|taken|heals|kills] [on|off] | " +
         "gains [xp|lum|radiance] [on|off] | npcs [on|off] | npcs dist <yd>|max <n> | players [on|off] | portals [on|off] | portals dist <yd> | " +
         "all|engaged |dist <yd>|max <n>|scale <x>|opacity <x>|lift <m> | " +
-        "names|hp|level|weak|distance|fade|click [on|off] | refresh [on|off] | refresh <seconds> | reset | status | test";
+        "names|hp|level|weak|distance|fade|click|walls [on|off] | refresh [on|off] | refresh <seconds> | reset | status | test";
 
     public const string ServerUsage =
         "Usage: /rc server [<server> auto|on|off] | pick <server>|auto | [aelrynth|other|auto] | names ilt [add|remove <pattern>]";
@@ -185,7 +185,8 @@ internal static class ChatCommandReplies
         V("settings", "Usage: /rc settings [tab]", null),
         V("shortcuts", "Usage: /rc shortcuts [use <1-18> | set <1-18> [id] | clear <1-18>]", ShortcutsArgs),
         V("keymap", "Usage: /rc keymap check|bind|unbind <action> <key> | dump, e.g. /rc keymap bind UseQuickSlot_10 F11", KeymapArgs),
-        V("panels", "Usage: /rc panels [open|close|toggle <id>]", PanelsArgs),
+        V("panels", "Usage: /rc panels [open|close|toggle <id>] | replace <id> <command|off>", PanelsArgs),
+        V("title", "Usage: /rc title <title id>", a => uint.TryParse(a.Trim(), out uint t) && t != 0),
         V("hotkey", HotkeyUsage, null),
         V("rl", "Usage: /rc rl (reloads RynthCore, as the bar's RL button)", NoArgs, "reload"),
         V("inventory", "Usage: /rc inventory (opens or closes the Inventory panel)", NoArgs, "inv"),
@@ -332,11 +333,12 @@ internal static class ChatCommandReplies
         return verb == "dump" || (verb is "check" or "bind" or "unbind" && ka.Length == 3);
     }
 
-    /// <summary>"&lt;op&gt; &lt;id&gt;" (open, close, anything else toggles, as before), or nothing (the list).</summary>
+    /// <summary>"&lt;op&gt; &lt;id&gt;" (open, close, anything else toggles, as before), "replace &lt;id&gt; &lt;command|off&gt;", or nothing (the list).</summary>
     private static bool PanelsArgs(string a)
     {
         string[] pa = a.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        return pa.Length == 0 || (pa.Length == 2 && TryPanelId(pa[1], out _));
+        return pa.Length == 0 || (pa.Length == 2 && TryPanelId(pa[1], out _))
+            || (pa.Length >= 3 && pa[0].Equals("replace", StringComparison.OrdinalIgnoreCase) && TryPanelId(pa[1], out _));
     }
 
     /// <summary>An AC panel id: decimal, or hex with 0x.</summary>

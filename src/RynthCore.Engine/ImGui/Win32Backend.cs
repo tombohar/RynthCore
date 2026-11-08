@@ -134,6 +134,9 @@ internal static unsafe class Win32Backend
     private static bool IsExtendedKey(IntPtr lParam) => ((int)(long)lParam & 0x01000000) != 0;
 
     // ─── Win32 P/Invoke ───────────────────────────────────────────────
+    [DllImport("user32.dll", EntryPoint = "SetCursor")]
+    private static extern IntPtr SetCursorNative(IntPtr hCursor);
+
     // On x86, SetWindowLongPtr doesn't exist — use SetWindowLong
     [DllImport("user32.dll", EntryPoint = "SetWindowLongA", SetLastError = true)]
     private static extern IntPtr SetWindowLong32(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
@@ -880,6 +883,14 @@ internal static unsafe class Win32Backend
             // phone's tap still fed ImGui a fake cursor. Hand it straight to AC instead.
             if (IsRemoteClientMouse(hWnd, msg, lParam))
                 return CallWindowProcA(_originalWndProc, hWnd, msg, wParam, lParam);
+
+            // A RynthCore window's move or resize spot under the mouse: retail's window-control cursor
+            // (RetailCursors), in the client area only; AC's own cursor everywhere else.
+            if (msg == WM_SETCURSOR && ((long)lParam & 0xFFFF) == 1 /* HTCLIENT */ && RetailCursors.Current != IntPtr.Zero)
+            {
+                SetCursorNative(RetailCursors.Current);
+                return (IntPtr)1;
+            }
 
             // ── Chat capture: consume all key input for the chat TextBox ────
             // Game HWND keeps Win32 focus throughout; callbacks dispatch Text

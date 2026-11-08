@@ -203,6 +203,8 @@ internal static class AcIconDecoder
     public const int MaxSide = 128;
     /// <summary>The largest side a retail UI picture (a window background, a title bar) may have.</summary>
     public const int MaxUiSide = 512;
+    /// <summary>The widest retail font glyph sheet (Palatino_Linotype_24's is 2048 x 279).</summary>
+    public const int MaxFontSheetSide = 2048;
     private const int MaxTextureFile = 1024 * 1024;
     private const int MaxPaletteFile = 256 * 1024;
 
@@ -381,6 +383,43 @@ internal static class AcIconDecoder
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// A retail font's glyph sheet (the Font file's foreground or background surface: an A8 texture,
+    /// one coverage byte a pixel, sides up to <see cref="MaxFontSheetSide"/>) as RGBA white with the
+    /// coverage as alpha, so a tint colours the glyphs. Null for anything else (2026-11-07).
+    /// </summary>
+    public static AcIconImage? DecodeFontSheet(AcDatFile dat, uint textureId)
+    {
+        if (!IsTextureId(textureId)) return null;
+        try
+        {
+            byte[]? data = dat.Read(textureId, MaxTextureFile);
+            return data == null ? null : DecodeFontSheetFile(data);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The pure half of <see cref="DecodeFontSheet"/>: a Texture file's bytes.</summary>
+    internal static AcIconImage? DecodeFontSheetFile(byte[] data)
+    {
+        if (data.Length < 24) return null;
+        var file = new ReadOnlySpan<byte>(data);
+        int w = BinaryPrimitives.ReadInt32LittleEndian(file.Slice(8));
+        int h = BinaryPrimitives.ReadInt32LittleEndian(file.Slice(12));
+        uint format = BinaryPrimitives.ReadUInt32LittleEndian(file.Slice(16));
+        int length = BinaryPrimitives.ReadInt32LittleEndian(file.Slice(20));
+        if (format != FmtA8 || w <= 0 || h <= 0 || w > MaxFontSheetSide || h > MaxFontSheetSide) return null;
+        int n = w * h;
+        if (length < n || 24L + length > data.Length) return null;
+        var src = file.Slice(24, n);
+        var px = new byte[n * 4];
+        for (int i = 0; i < n; i++) Set(px, i, 255, 255, 255, src[i]);
+        return new AcIconImage { Width = w, Height = h, Pixels = px };
     }
 
     private const uint FmtR8G8B8 = 0x14, FmtA8R8G8B8 = 0x15, FmtR5G6B5 = 0x17, FmtA4R4G4B4 = 0x1A, FmtA8 = 0x1C,

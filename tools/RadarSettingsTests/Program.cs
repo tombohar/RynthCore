@@ -46,12 +46,14 @@ namespace RadarSettingsTests
                 Run("NameAndSizeFileRoundTrip", () => NameAndSizeFileRoundTrip(root));
                 Run("StyleKeysClampAndIgnore", StyleKeysClampAndIgnore);
                 Run("WorldMapBackdropSettings", () => WorldMapBackdropSettings(root));
+                Run("RangeRings", () => RangeRings(root));   // after FileRoundTrip: a file from before keeps the defaults
                 Run("RoundRadarAndClipping", () => RoundRadarAndClipping(root));
                 Run("ClickThroughWheelZoom", () => ClickThroughWheelZoom(root));
                 Run("SelectionSettingsSave", () => SelectionSettingsSave(root));
                 Run("WhichMarkerIsSelected", WhichMarkerIsSelected);
                 Run("SelectionEdgeArrow", SelectionEdgeArrow);
                 Run("SelectionLabelPlacement", SelectionLabelPlacement);
+                Run("ClickThroughDotPressNeverMoves", ClickThroughDotPressNeverMoves);
             }
             finally
             {
@@ -248,6 +250,47 @@ namespace RadarSettingsTests
             Check(!st.TryLoad("color.monster", "FFFF0000"), "colour keys are not ours");
             Check(!st.TryLoad("zoom", "2"), "plain keys are not ours");
         }
+        // The range rings (2026-11-06): Monster Range on and Ring Range off by default, a settings file
+        // from before (FileRoundTrip's, no ring lines) leaves them so, both save under their keys, and
+        // the ring is range x zoom pixels round you, drawn only while some of it is on the picture.
+        private static void RangeRings(string root)
+        {
+            Check(RadarSettingsStore.ShowMonsterRangeRing, "Monster Range ring on by default (and after loading an older file)");
+            Check(!RadarSettingsStore.ShowRingRangeRing, "Ring Range ring off by default");
+            string saved = Path.Combine(root, "rings.txt");
+            Environment.SetEnvironmentVariable("RYNTHCORE_RADAR_SETTINGS", saved);
+            RadarSettingsStore.ShowMonsterRangeRing = false;
+            RadarSettingsStore.ShowRingRangeRing = true;
+            RadarSettingsStore.Save();
+            string text = File.ReadAllText(saved).Replace("\r\n", "\n");
+            Check(text.Contains("monsterRangeRing=0\n"), "saved monsterRangeRing=0");
+            Check(text.Contains("ringRangeRing=1\n"), "saved ringRangeRing=1");
+            RadarSettingsStore.ShowMonsterRangeRing = true;
+            RadarSettingsStore.ShowRingRangeRing = false;
+            RadarSettingsStore.Save();
+            text = File.ReadAllText(saved).Replace("\r\n", "\n");
+            Check(text.Contains("monsterRangeRing=1\n") && text.Contains("ringRangeRing=0\n"), "saved the defaults back");
+
+            Check(RadarRangeRing.RadiusPx(50, 1.5f) == 75f, "50 yd at 1.5 px/yd: 75 px");
+            Check(RadarRangeRing.RadiusPx(5, 6f) == 30f, "5 yd at the closest zoom: 30 px");
+            Check(RadarRangeRing.RadiusPx(50, 0.1f) == 25f, "zoom under 0.5 counts as 0.5, as the projection");
+            Check(RadarRangeRing.RadiusPx(50, float.NaN) == 25f, "a NaN zoom counts as 0.5");
+            Check(RadarRangeRing.RadiusPx(0, 2f) == 0f && RadarRangeRing.RadiusPx(-3, 2f) == 0f, "no range: no ring");
+            Check(RadarRangeRing.RadiusPx(double.NaN, 2f) == 0f, "a NaN range: no ring");
+
+            var min = new System.Numerics.Vector2(100, 100);
+            var max = new System.Numerics.Vector2(300, 300);
+            var mid = new System.Numerics.Vector2(200, 200);
+            Check(RadarRangeRing.Shows(75f, mid, min, max, null), "inside the square");
+            Check(RadarRangeRing.Shows(120f, mid, min, max, null), "past the sides, the corners still cross it");
+            Check(!RadarRangeRing.Shows(142f, mid, min, max, null), "past the corners (141.4 px): nothing to draw");
+            Check(!RadarRangeRing.Shows(3f, mid, min, max, null), "too small to draw");
+            Check(!RadarRangeRing.Shows(float.NaN, mid, min, max, null), "NaN radius: nothing");
+            var circle = new RoundMask(mid, 100);
+            Check(RadarRangeRing.Shows(100f, mid, min, max, circle), "round: on the edge");
+            Check(!RadarRangeRing.Shows(101f, mid, min, max, circle), "round: past the circle, nothing to draw");
+        }
+
         // The world map backdrop: off by default, and its switch and strength save under their keys.
         private static void WorldMapBackdropSettings(string root)
         {
@@ -270,6 +313,25 @@ namespace RadarSettingsTests
         // The round radar: the setting saves, and the geometry cuts shapes to the circle.
         // Docked click-through with "Mouse wheel still zooms" (2026-10-29): the wheel over the radar is
         // the radar's, everywhere else and in every other case it stays the game's.
+        // 2026-11-04 (Discord): with click-through on, holding on a dot moved the radar. A press may move
+        // it only with click-through off, Ctrl held when it began, or popped out; decided at the press.
+        private static void ClickThroughDotPressNeverMoves()
+        {
+            Check(RadarDrag.PressMoves(false, false, false), "click-through off: a press drags");
+            Check(!RadarDrag.PressMoves(true, false, false), "click-through on, no Ctrl (a dot press): stays put");
+            Check(RadarDrag.PressMoves(true, true, false), "click-through on, Ctrl held: drags");
+            Check(RadarDrag.PressMoves(true, false, true), "popped out: always interactive, drags");
+
+            var d = new RadarDrag();
+            Check(d.Update(false, true, false, false), "no press yet: nothing to stop (the item isn't active)");
+            Check(!d.Update(true, true, false, false), "dot press under click-through: no move");
+            Check(!d.Update(false, true, true, false), "Ctrl pressed mid-hold: still no move");
+            Check(!d.Update(false, false, false, false), "click-through switched off mid-hold: still no move");
+            Check(d.Update(true, true, true, false), "next press with Ctrl: moves");
+            Check(d.Update(false, true, false, false), "Ctrl let go mid-drag: keeps moving");
+            Check(d.Update(true, false, false, false), "click-through off: moves");
+        }
+
         private static void ClickThroughWheelZoom(string root)
         {
             Check(!RadarSettingsStore.ClickThroughWheelZoom, "off by default");

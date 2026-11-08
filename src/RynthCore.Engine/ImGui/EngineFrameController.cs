@@ -998,9 +998,14 @@ internal static class EngineFrameController
             // A docked click-through panel under the cursor that zooms with the wheel (the radar's
             // "Mouse wheel still zooms"): the wheel is its own, clicks and moves still the game's.
             Win32Backend.UpdateCaptureFlags(io.WantCaptureMouse || Hud.MonsterHud.WantsMouse, typing,
-                mouseMovesToGame: !io.WantCaptureMouse && Hud.MonsterHud.MouseMovesToGame,
+                // An under-UI panel only hovered: the same (ImGuiPanelHost.UnderUiHovered).
+                mouseMovesToGame: (!io.WantCaptureMouse && Hud.MonsterHud.MouseMovesToGame)
+                    || (PanelsLive && ImGuiPanelHost.UnderUiHovered),
                 wheelToUi: !io.WantCaptureMouse && PanelsLive && ImGuiPanelHost.WheelWanted);
             Compatibility.AcMouseOver.Tick();   // /rc acmouse watch, when on
+            // A RynthCore window's move or resize spot: retail's window-control cursor (RetailCursors).
+            RetailCursors.Update(ImGuiNET.ImGui.GetMouseCursor(),
+                Win32Backend.UiCaptureEnabled && (io.WantCaptureMouse || (PanelsLive && ImGuiPanelHost.UnderUiHovered)));
             // The UI is released (Insert): no text box keeps the keyboard. Keys are not
             // gated by the toggle any more (Win32Backend.UpdateCaptureFlags), so the edit
             // ends instead and the next keys go to the game.

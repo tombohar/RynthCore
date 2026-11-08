@@ -7,6 +7,8 @@ namespace RynthCore.Engine.Compatibility
     {
         public static int Lines;
         public static void UI(string message) { Lines++; }
+        public static readonly System.Collections.Generic.List<string> InfoLines = new();
+        public static void Info(string message) { Lines++; InfoLines.Add(message); }
     }
 }
 

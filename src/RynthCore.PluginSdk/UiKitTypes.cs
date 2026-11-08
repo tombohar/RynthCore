@@ -75,6 +75,18 @@ public enum RynthIconKind
     Object = 1,
     /// <summary>A spell id: the spell's icon.</summary>
     Spell = 2,
+    /// <summary>
+    /// A retail UI picture (any 0x06 texture up to 512 x 512: window backgrounds, banners, frame
+    /// pieces), at its own size. Engines from 2026-11-07; older ones answer IntPtr.Zero for it, so
+    /// draw a stand-in while it stays zero.
+    /// </summary>
+    UiSprite = 3,
+    /// <summary>
+    /// A retail font's glyph sheet (the Font file's foreground or background surface, an A8 0x06
+    /// texture up to 2048 wide) as white with the sheet's level as alpha: draw glyphs from it with a
+    /// tint, from the Font file's glyph table. Engines from 2026-11-07; older ones answer IntPtr.Zero.
+    /// </summary>
+    FontSheet = 4,
 }
 
 /// <summary>Where RynthCoreHost.PollKeyCapture is (v90).</summary>

@@ -18,7 +18,8 @@
 //    - one icon per kind (DebuffKind); a kind merging several categories shows
 //      their count and the soonest end, like the monster row;
 //    - icons in kind order (the monster row's), as many as fit in dst; the
-//      count returned includes the rest (the "+N").
+//      count returned includes the rest (the "+N");
+//    - each icon carries its categories' spell ids (the hover tooltip names them).
 //  No engine dependencies beyond DebuffIcon.cs (the offline tests compile it).
 // ============================================================================
 
@@ -58,6 +59,7 @@ internal static class SelfDebuffs
         Span<double> catEnd = stackalloc double[MaxEntries];
         Span<float> catDur = stackalloc float[MaxEntries];
         Span<byte> catKind = stackalloc byte[MaxEntries];
+        Span<uint> catSpell = stackalloc uint[MaxEntries];
         int cats = 0;
         for (int i = 0; i < n; i++)
         {
@@ -82,6 +84,7 @@ internal static class SelfDebuffs
             catEnd[c] = end;
             catDur[c] = dur;
             catKind[c] = (byte)Math.Min((int)kind, KindCount - 1);
+            catSpell[c] = id;
         }
         if (cats == 0) return 0;
 
@@ -114,6 +117,12 @@ internal static class SelfDebuffs
                 dst[count] = new DebuffIcon { Kind = (DebuffKind)k, Expiry = kindEnd[k], Duration = kindDur[k], Stack = kindStack[k] };
             count++;
         }
+
+        // 4. The hover tooltip's spell names: each category's spell on its kind's icon.
+        int shown = Math.Min(count, dst.Length);
+        for (int c = 0; c < cats; c++)
+            for (int i = 0; i < shown; i++)
+                if ((int)dst[i].Kind == catKind[c]) { dst[i].AddSpell(catSpell[c]); break; }
         return count;
     }
 }

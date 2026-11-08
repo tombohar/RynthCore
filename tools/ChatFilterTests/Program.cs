@@ -65,6 +65,10 @@ internal static class Program
         HighlightBand();
         HighlightJson();
         HighlightOldReader();
+        OwnColorPrecedence();
+        OwnColorQueue();
+        OwnColorCommand();
+        SlowRulesNeedStrikes();
 
         Console.WriteLine();
         Console.WriteLine($"{_checks - _failed}/{_checks} checks passed.");
@@ -84,6 +88,47 @@ internal static class Program
         if (ok) return;
         _failed++;
         Console.WriteLine($"  FAIL [{_case}] {what}");
+    }
+
+    // The owner, 2026-11-07: "chat filter too slow and getting skipped all the time", with eight
+    // plain-text rules. The clock timed them, so a busy PC (several game clients) made any rule
+    // "too slow". Now rules that can run non-backtracking (linear time) have no timeout and are
+    // never skipped; the rest need SlowStrikesToSkip slow readings within the window.
+    private static void SlowRulesNeedStrikes()
+    {
+        Case("plain text and simple regex rules run linear and are never too slow; others need 3 strikes");
+        foreach (var (mode, pattern) in new[] { (ChatMatchMode.Regex, "In portal Space"), (ChatMatchMode.Regex, "You've earned"),
+                                               (ChatMatchMode.Contains, "Keep (really)"), (ChatMatchMode.Regex, "^You (evade|evaded) .*!$") })
+        {
+            var r = new ChatFilterRule { Pattern = pattern, Mode = mode };
+            r.Recompile();
+            Check(r.Compiled != null && r.Linear, $"'{pattern}' ({mode}) compiles linear");
+            Check(r.Compiled?.MatchTimeout == Regex.InfiniteMatchTimeout, $"'{pattern}': no match timeout to trip");
+        }
+        var plain = new ChatFilterRule { Pattern = "In portal Space", Tab = "Junk" };
+        plain.Recompile();
+        var router = new ChatRouter(new[] { plain }, null, "", countHits: false);
+        Check(router.Evaluate("In portal Space", "Chat", 0, null).InHome == false, "the linear rule still routes the line");
+
+        // A backreference needs backtracking: the timed compile, exactly as before.
+        var back = new ChatFilterRule { Pattern = @"^(\w)(a+)+\1$", Action = ChatRuleAction.Hide };
+        back.Recompile();
+        Check(back.Compiled != null && !back.Linear, "a backreference compiles with backtracking");
+        Check(back.Compiled?.MatchTimeout == TimeSpan.FromMilliseconds(ChatFilterRule.TimeoutMs), "...with the 15 ms timeout");
+
+        string evil = "b" + new string('a', 40) + "!";   // (a+)+ backtracks exponentially before failing
+        var r2 = new ChatRouter(new[] { back }, null, "", countHits: false);
+        int bumps = ChatModel.FilterBumps;
+        r2.Evaluate(evil, "Chat", 0, null);
+        Check(!back.Slow, "one timeout: a strike, still used");
+        r2.Evaluate(evil, "Chat", 0, null);
+        Check(!back.Slow, "two: still used");
+        Check(RynthCore.Engine.Compatibility.RynthLog.InfoLines.Any(l => l.Contains("2 of 3 before it is skipped")), "each strike is logged");
+        r2.Evaluate(evil, "Chat", 0, null);
+        Check(back.Slow, "three within the window: skipped until edited");
+        Check(ChatModel.FilterBumps == bumps + 1, "the kept lines are re-routed once, when it is skipped");
+        back.Recompile();
+        Check(!back.Slow && back.SlowStrikes == 0, "an edit (recompile) clears it and its strikes");
     }
 
     /// <summary>What a rule compiled to before match modes (ChatFilterRule.Recompile, 2026-09-29).</summary>
@@ -433,6 +478,95 @@ internal static class Program
         Check(ChatLineColors.Get("fellowship") == 0xFF112233, "keys any case; colours made opaque");
         ChatLineColors.ResetAll();
         Check(!ChatLineColors.AnySet && ChatLineColors.Resolve(null, "fellowship", "Chat") == OldChannelArgb("Chat"), "reset all: as before");
+    }
+
+    // 2026-11-05: a plugin's own colour for a line (RynthAi's Info text colour, ChatOwnColors.cs):
+    // the line keeps its chat type and tab; only its colour changes.
+    private const string ItemLine = "[RynthAi Item] Blunt Crossbow (Pierce Crossbow), Gold, Craft 6";
+    private const uint Orange = 0xFFEE921E;
+
+    private static void OwnColorPrecedence()
+    {
+        Case("own colour: below a rule's, above kind, tab, retail and built-in");
+        ChatLineColors.ResetAll();
+        bool retail = ChatLineColors.RetailColors;
+        ChatLineColors.RetailColors = true;
+        const uint Rule = 0xFFABCDEF, Mine = 0xFF102030;
+        Check(ChatLineColors.ResolveLine(null, null, null, "Items", 0x12) == OldChannelArgb("Items"), "none: an Items line keeps its teal (as before)");
+        Check(ChatLineColors.ResolveLine(null, null, "tell", "Chat", 0x03) == ChatLineColors.Resolve(null, "tell", "Chat", 0x03), "none: exactly Resolve");
+        Check(ChatLineColors.ResolveLine(null, Orange, null, "Items", 0x01) == Orange, "own colour beats the Items tab's built-in");
+        Check(ChatLineColors.ResolveLine(null, Orange, null, "System", 0x05) == Orange, "and AC's own colour for the type");
+        ChatLineColors.Set("tab:Items", Mine);
+        ChatLineColors.Set("allegiance", Mine);
+        Check(ChatLineColors.ResolveLine(null, Orange, null, "Items", 0x01) == Orange, "and a tab colour the user set");
+        Check(ChatLineColors.ResolveLine(null, Orange, "allegiance", "Chat", 0x12) == Orange, "and a kind colour the user set");
+        Check(ChatLineColors.ResolveLine(Rule, Orange, null, "Items", 0x01) == Rule, "a rule's line colour still wins");
+        ChatLineColors.ResetAll();
+        ChatLineColors.RetailColors = retail;
+    }
+
+    private static void OwnColorQueue()
+    {
+        Case("own colour: matched by text and type, once, oldest first; refused and stale lines forgotten");
+        var q = new ChatOwnColorQueue();
+        Check(q.Take(ItemLine, 0x12, 0) == null, "nothing waiting: null");
+        q.Expect(ItemLine + "\r\n", 0x12, 0x00EE921E, 1000);
+        Check(q.Count == 1, "one waiting");
+        Check(q.Take(ItemLine, 0x01, 1100) == null, "another chat type: not it");
+        Check(q.Take(ItemLine + " more", 0x12, 1100) == null, "other text: not it");
+        Check(q.Take(ItemLine, 0x12, 1100) == Orange, "CR/LF trimmed like WriteToChat; made opaque");
+        Check(q.Take(ItemLine, 0x12, 1200) == null, "used up: the same text again is drawn as usual");
+
+        q.Expect(ItemLine, 0x12, 0xFF111111, 2000);
+        q.Expect(ItemLine, 0x12, 0xFF222222, 2001);
+        Check(q.Take(ItemLine, 0x12, 2100) == 0xFF111111 && q.Take(ItemLine, 0x12, 2100) == 0xFF222222, "two of the same line: in order");
+
+        q.Expect(ItemLine, 0x12, Orange, 3000);
+        q.Forget(ItemLine, 0x12);
+        Check(q.Count == 0 && q.Take(ItemLine, 0x12, 3100) == null, "a line WriteToChat refused colours nothing");
+
+        q.Expect(ItemLine, 0x12, Orange, 4000);
+        Check(q.Take(ItemLine, -1, 4100) == Orange, "a RynthChat without chat types (-1) matches by text");
+
+        q.Expect(ItemLine, 0x12, Orange, 5000);
+        Check(q.Take(ItemLine, 0x12, 5000 + ChatOwnColorQueue.LineTtlMs + 1) == null && q.Count == 0, "a line nobody picked up in time is forgotten");
+
+        for (int i = 0; i < ChatOwnColorQueue.MaxLines + 10; i++) q.Expect("line " + i, 0x01, Orange, 6000);
+        Check(q.Count == ChatOwnColorQueue.MaxLines, $"at most {ChatOwnColorQueue.MaxLines} wait");
+        Check(q.Take("line 0", 0x01, 6001) == null && q.Take("line 10", 0x01, 6001) == Orange, "the oldest went first");
+
+        var q2 = new ChatOwnColorQueue();
+        string longLine = new string('x', 1500);
+        q2.Expect(longLine, 0x01, Orange, 0);
+        Check(q2.Take(longLine[..ChatOwnColorQueue.MaxArrivingChars], 0x01, 1) == Orange, "a line AC cut at 1,024 characters matches by its start");
+        q2.Expect(ItemLine, 0x01, Orange, 0);
+        Check(q2.Take(ItemLine[..20], 0x01, 1) == null, "a short line never matches by its start");
+        var q3 = new ChatOwnColorQueue();
+        q3.Expect("\r\n", 0x01, Orange, 0);
+        q3.Expect("", 0x01, Orange, 0);
+        Check(q3.Count == 0, "an empty line is never noted");
+    }
+
+    private static void OwnColorCommand()
+    {
+        Case("own colour: SendPluginCommand(\"RynthCore.Chat\", \"nextcolor\", ...) arms the next WriteToChat");
+        Check(ChatOwnColors.CommandTarget == "RynthCore.Chat" && ChatOwnColors.NextColorAction == "nextcolor", "the names RynthAi sends");
+        Check(ChatOwnColors.TakeArmed(0) == null, "nothing armed: null");
+        Check(ChatOwnColors.HandlePluginCommand("nextcolor", "#EE921E", 100), "understood");
+        Check(ChatOwnColors.TakeArmed(150) == Orange, "the next WriteToChat takes it");
+        Check(ChatOwnColors.TakeArmed(160) == null, "only the next one");
+        Check(ChatOwnColors.HandlePluginCommand("NEXTCOLOR", " ee921e ", 200) && ChatOwnColors.TakeArmed(200) == Orange, "any case, no #, spaces");
+        Check(ChatOwnColors.HandlePluginCommand("nextcolor", "#EE921E", 300) && ChatOwnColors.TakeArmed(300 + ChatOwnColors.ArmWindowMs + 1) == null,
+            "armed too long ago: dropped");
+        Check(ChatOwnColors.HandlePluginCommand("nextcolor", "#EE921E", 400) && ChatOwnColors.HandlePluginCommand("nextcolor", "none", 401)
+              && ChatOwnColors.TakeArmed(402) == null, "\"none\" disarms");
+        Check(!ChatOwnColors.HandlePluginCommand("nextcolor", "orange", 500) && ChatOwnColors.TakeArmed(500) == null, "a bad colour: refused, nothing armed");
+        Check(!ChatOwnColors.HandlePluginCommand("colour", "#EE921E", 600), "an unknown action: refused");
+        ChatOwnColors.HandlePluginCommand("nextcolor", "#EE921E", 700);
+        uint? other = null;
+        var t = new Thread(() => other = ChatOwnColors.TakeArmed(700));
+        t.Start(); t.Join();
+        Check(other == null && ChatOwnColors.TakeArmed(700) == Orange, "armed per thread: another plugin thread's line isn't coloured");
     }
 
     private static void LineColorJson()
