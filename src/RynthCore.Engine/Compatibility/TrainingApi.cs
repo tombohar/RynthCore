@@ -24,8 +24,9 @@
 //  Guards: in the world only (login complete, the world screen, no logout, no
 //  teardown, the snapshot is this character's); numbers at most 3 s old (else
 //  a read is asked for and Stale comes back: try again a moment later); one
-//  raise at a time (Busy until the unassigned XP or the credits change, or 5 s).
-//  Any thread.
+//  raise at a time (Busy until the unassigned XP or the credits change, or 5 s;
+//  while Busy each GetTrainingInfo asks for a read at the next tick, so the
+//  answer is seen as soon as it lands). Any thread.
 // ============================================================================
 
 using System;
@@ -89,7 +90,14 @@ internal static unsafe class TrainingApi
             if (PlayerTraining.TrainAvailable) flags |= TrainingInfoFlags.TrainBound;
             if (s != null) flags |= TrainingInfoFlags.HaveNumbers;
             if (dat != null) flags |= TrainingInfoFlags.HaveTables;
-            if (IsBusy(s, now)) flags |= TrainingInfoFlags.Busy;
+            if (IsBusy(s, now))
+            {
+                flags |= TrainingInfoFlags.Busy;
+                // A raise is in flight: read again at the next tick instead of in 2 s, so its answer (and
+                // the end of Busy) shows within a frame or two of landing and the next press can go
+                // (Tom 2026-11-08: "+10" couldn't be pressed again for up to 2 s).
+                PlayerProgressHooks.RefreshSoon();
+            }
             o.Flags = flags;
             o.SnapshotVersion = s != null ? (uint)s.Version : 0;
             o.AgeMs = s != null && readAt > 0 ? (uint)Math.Clamp(now - readAt, 0, uint.MaxValue - 1) : uint.MaxValue;
