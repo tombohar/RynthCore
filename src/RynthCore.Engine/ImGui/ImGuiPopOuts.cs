@@ -109,6 +109,23 @@ internal static unsafe class ImGuiPopOuts
     /// <summary>True while a pop-out's ImGui frame is being built (inside a face's Draw). AC thread.</summary>
     public static bool InPopOutFrame => _current != null;
 
+    private static int _mainFrame;
+
+    /// <summary>
+    /// The main context's ImGui frame number, the same inside a pop-out's frame (whose own
+    /// context counts its frames from 0): for frame-numbered state shared across contexts
+    /// (a script window's local values and its replay budget, ScriptWindowReplay). AC thread.
+    /// </summary>
+    public static int FrameNumber =>
+        _current != null || ImGuiNET.ImGui.GetCurrentContext() == IntPtr.Zero ? _mainFrame : ImGuiNET.ImGui.GetFrameCount();
+
+    /// <summary>
+    /// Records the main context's frame number for <see cref="FrameNumber"/>. Call right after
+    /// the main context's NewFrame, with it current (EngineFrameController.BuildImGuiFrame):
+    /// the main context is not current when the pop-outs render. AC thread.
+    /// </summary>
+    public static void NoteMainFrame() => _mainFrame = ImGuiNET.ImGui.GetFrameCount();
+
     /// <summary>
     /// Where a popped-out face puts its window (its top-left in the pop-out's ImGui
     /// coordinates): the panel's place on the work area. (0,0) outside a pop-out frame.
@@ -422,6 +439,10 @@ internal static unsafe class ImGuiPopOuts
             return;
         }
 
+        // No ImGui call before a pop-out's own context is current: the main context is NOT current
+        // here (EngineFrameController restores the previous one, normally none, after each frame), and
+        // igGetFrameCount with no context is an access violation that ends the client (11-10). The main
+        // frame number comes from NoteMainFrame instead.
         IntPtr previous = ImGuiNET.ImGui.GetCurrentContext();
         long now = Stopwatch.GetTimestamp();
         try
@@ -720,7 +741,10 @@ internal static unsafe class ImGuiPopOuts
     public static string? RequestSnapshot(string title)
     {
         if (!Pops.TryGetValue(title, out PopOut? pop)) return null;
-        string path = System.IO.Path.Combine(LogPaths.LogDirectory, $"popout_{title.Replace(' ', '_')}.bmp");
+        // A script window's key ("script:RynthLua/loot-inbox/Loot") isn't a file name as it is.
+        var name = new System.Text.StringBuilder(title.Length);
+        foreach (char c in title) name.Append(c == ' ' || Array.IndexOf(System.IO.Path.GetInvalidFileNameChars(), c) >= 0 ? '_' : c);
+        string path = System.IO.Path.Combine(LogPaths.LogDirectory, $"popout_{name}.bmp");
         pop.Surface.SnapshotPath = path;
         pop.HotFrames = Math.Max(pop.HotFrames, 2);
         return path;

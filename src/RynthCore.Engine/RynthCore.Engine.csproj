@@ -43,7 +43,36 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
     <DebugType>portable</DebugType>
+    <!-- The web panel (WebPanel\WebPanelHost.cs) uses only the WebView2 Core wrapper: no WinRT projection. -->
+    <WebView2UseWinRT>false</WebView2UseWinRT>
+    <WebView2LoaderPreference>Dynamic</WebView2LoaderPreference>
   </PropertyGroup>
+
+  <!--
+    v94 web panel: WebView2 on the CoreCLR engine only. NativeAOT cannot host the Core wrapper's COM
+    interop, so that build drops the host and its Win32/WebView2 glue (WebPanelApi.cs answers Unavailable
+    there and PluginManager leaves the table slots zero).
+  -->
+  <ItemGroup Condition="'$(EngineHost)' == 'coreclr'">
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(EngineHost)' != 'coreclr'">
+    <Compile Remove="WebPanel\WebPanelHost.cs;WebPanel\WebPanelNative.cs;WebPanel\EngineWebPanelEnvironment.cs;WebPanel\IWebPanelEnvironment.cs" />
+  </ItemGroup>
+  <!-- The package references its WinForms and WPF controls unconditionally; the engine uses neither. Dropped
+       before reference resolution, so they are neither compiled against nor copied to the output. -->
+  <Target Name="DropWebView2UiAssemblies" BeforeTargets="ResolveAssemblyReferences" Condition="'$(EngineHost)' == 'coreclr'">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.WinForms' Or '%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
+  <Target Name="DropWebView2UiCopies" AfterTargets="ResolveAssemblyReferences" Condition="'$(EngineHost)' == 'coreclr'">
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.WinForms' Or '%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+      <!-- The Core wrapper's XML doc file is not needed at run time. -->
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="'%(Filename)%(Extension)' == 'Microsoft.Web.WebView2.Core.xml'" />
+    </ItemGroup>
+  </Target>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
     <StackTraceSupport>true</StackTraceSupport>

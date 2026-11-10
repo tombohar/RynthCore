@@ -256,11 +256,14 @@ internal static class ImGuiPanelHost
         }
     }
 
-    /// <summary>Changes a dynamic face's header text. Any thread.</summary>
+    /// <summary>
+    /// Changes a face's header text: a dynamic face's, or an engine panel's that names what it
+    /// shows (an extra chat window's tab). Not while a plugin window has the panel's place. Any thread.
+    /// </summary>
     public static void SetDisplayTitle(string key, string displayTitle)
     {
         lock (Sync)
-            if (Entries.TryGetValue(key, out Entry? e) && e.Dynamic) e.DisplayTitle = displayTitle;
+            if (Entries.TryGetValue(key, out Entry? e) && !e.TakenOver) e.DisplayTitle = displayTitle;
     }
 
     /// <summary>

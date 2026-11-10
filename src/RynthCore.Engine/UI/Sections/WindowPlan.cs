@@ -67,4 +67,11 @@ internal static class WindowPlan
     public static string Signature(SectionWindowDecl w) =>
         string.Join("|", w.Plugin, w.Surface, w.Icon, w.Width, w.Height, w.MinWidth, w.MinHeight, w.Bar, w.EdgeToEdge, w.TakeOver,
             w.Frameless, w.FitHeight);
+
+    /// <summary>
+    /// What the bar's dropdown shows for a window (its "barMenu"): kept apart from <see cref="Signature"/> because
+    /// a menu change must reach the bar without re-registering the panel (that would reset the window's state).
+    /// </summary>
+    public static string MenuSignature(SectionWindowDecl w) =>
+        string.Join("\n", System.Linq.Enumerable.Select(w.Menu, i => string.Join("\t", i.Id, i.Tooltip, i.Icon, i.Command)));
 }

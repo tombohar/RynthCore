@@ -108,6 +108,9 @@ namespace RynthCore.Engine.Compatibility;
 ///   <item><c>/rc uicost [on|off|&lt;ms&gt;|now|status]</c> - the UI frame cost breakdown
 ///         (<see cref="ImGuiBackend.UiCost"/>): timing on or off, the slow-frame threshold, and (now, or
 ///         alone) which parts of the UI frame took the time over the last seconds. Also Settings &gt; Diagnostics.</item>
+///   <item><c>/rc webpanel [status|close]</c> - the in-game web panel (<see cref="WebPanel.WebPanelApi"/>):
+///         status is one redacted line (state, handle, visible/focused, browser pid, free address space);
+///         close closes the panel. It never opens a URL.</item>
 /// </list>
 /// </summary>
 internal static class RynthCoreChatCommands
@@ -650,10 +653,24 @@ internal static class RynthCoreChatCommands
             SenseLayoutCommand(senseArgs);   // alone, /rc sense opens or closes the panel (the switch below)
             return;
         }
+        // /rc webpanel [status|close]: diagnostics for the in-game web panel. It never opens a URL
+        // (an arbitrary-URL command would be a phishing vector); every URL in the line is redacted.
+        if (IsVerb(sub, "webpanel", out string webPanelArgs))
+        {
+            HandleWebPanelCommand(webPanelArgs);
+            return;
+        }
         // /rc layout [status] | default | reset [confirm]: this client's panel layout (UI/PanelLayout).
         if (IsVerb(sub, "layout", out string layoutArgs))
         {
             HandleLayoutCommand(layoutArgs);
+            return;
+        }
+        // /rc chatwindow [list] | open [tab] | close <n|all> | tab <n> <tab>: the extra chat windows.
+        if (IsVerb(sub, "chatwindow", out string chatWinArgs) || IsVerb(sub, "chatwin", out chatWinArgs)
+            || IsVerb(sub, "chatwindows", out chatWinArgs))
+        {
+            HandleChatWindowCommand(chatWinArgs);
             return;
         }
         if (IsVerb(sub, "hotkey", out hotkeyArgs) || IsVerb(sub, "hotkeys", out hotkeyArgs))
@@ -1217,6 +1234,32 @@ internal static class RynthCoreChatCommands
     }
 
     /// <summary>
+    /// /rc chatwindow: the extra chat windows (ImGui/Panels/ChatWindowFace). Alone or list: which
+    /// are open and what they show; open [tab] (alone: the main chat's tab); close &lt;n|all&gt;;
+    /// tab &lt;n&gt; &lt;tab&gt;. Every form answers with what happened, or why not and the usage.
+    /// </summary>
+    private static void HandleChatWindowCommand(string args)
+    {
+        UI.Data.ChatWindowCommand c = UI.Data.ChatWindows.Parse(args);
+        (bool Ok, string Message) r;
+        switch (c.Verb)
+        {
+            case UI.Data.ChatWindowVerb.List:
+                ReplyLines(ImGuiBackend.Panels.ChatWindowFace.Describe(),
+                    ImGuiBackend.Panels.ChatWindowFace.Available ? ChatReplyKind.Ok : ChatReplyKind.Fail);
+                return;
+            case UI.Data.ChatWindowVerb.Open: r = ImGuiBackend.Panels.ChatWindowFace.OpenNew(c.Tab); break;
+            case UI.Data.ChatWindowVerb.Close: r = ImGuiBackend.Panels.ChatWindowFace.Close(c.Number); break;
+            case UI.Data.ChatWindowVerb.CloseAll: r = ImGuiBackend.Panels.ChatWindowFace.CloseAll(); break;
+            case UI.Data.ChatWindowVerb.Tab: r = ImGuiBackend.Panels.ChatWindowFace.ShowTab(c.Number, c.Tab); break;
+            default:
+                Fail(c.Error);
+                return;
+        }
+        Answer(r.Ok, r.Message, r.Message);
+    }
+
+    /// <summary>
     /// "/rc sense compact on|off | collapse on|off | view full|compact|collapsed": the Sense panel's
     /// look (saved in sense.txt), and the look now; alone, compact / collapse / view say the look now.
     /// </summary>
@@ -1714,6 +1757,27 @@ internal static class RynthCoreChatCommands
             return;
         }
         ReplyLines(UI.Data.Discord.ChatDiscord.HandleCommand(verb));
+    }
+
+    /// <summary>
+    /// /rc webpanel [status|close]. Status: one redacted line (WebPanelApi.Describe plus the address
+    /// space). Close: closes the live panel (WebPanelApi.Close does not block). Nothing here opens a URL.
+    /// </summary>
+    private static void HandleWebPanelCommand(string args)
+    {
+        string a = args.Trim().ToLowerInvariant();
+        if (a == "close")
+        {
+            int handle = WebPanel.WebPanelApi.LiveHandle;
+            if (handle <= 0) { Reply("web panel: nothing to close."); return; }
+            int rc = WebPanel.WebPanelApi.Close(handle);
+            // 1 = closing, 0 = already closed (the WebPanelCode values); anything else is a refusal or error.
+            if (rc == 1) Reply("web panel: closing.");
+            else if (rc == 0) Reply("web panel: already closed.");
+            else Fail($"web panel: could not close (code {rc}).");
+            return;
+        }
+        Reply(WebPanel.WebPanelApi.Describe() + "; address space " + AddressSpace.Describe());
     }
 
     /// <summary>

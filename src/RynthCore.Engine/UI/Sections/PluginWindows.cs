@@ -104,7 +104,17 @@ internal static class PluginWindows
         foreach ((string title, SectionWindowDecl w) in want)
         {
             string sig = WindowPlan.Signature(w);
-            if (Live.TryGetValue(title, out Hosted? h) && h.Signature == sig) continue;
+            if (Live.TryGetValue(title, out Hosted? h) && h.Signature == sig)
+            {
+                // Same panel, but the bar's dropdown may differ (a plugin reload with a new "barMenu"):
+                // refresh the declaration without re-registering the panel, and let the bar rebuild.
+                if (WindowPlan.MenuSignature(h.Decl) != WindowPlan.MenuSignature(w))
+                {
+                    Live[title] = h with { Decl = w };
+                    changed = true;
+                }
+                continue;
+            }
             SectionWindowDecl decl = w;
             Func<IImGuiPanel> face = () => new PluginWindowFace(decl.Plugin, decl.Surface, decl.Title, decl.FitHeight, decl.MinWidth, decl.DrawScale);
             if (takeOvers.Contains(title))

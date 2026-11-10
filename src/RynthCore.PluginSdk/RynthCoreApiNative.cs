@@ -204,6 +204,11 @@ public struct RynthCoreApiNative
     public IntPtr GetAmbientLightFn;         // int GetAmbientLight(uint* client, uint* applied) -> 1 hook live, 0 not
     // v93: the monster plates' last server health reading per object
     public IntPtr GetMonsterHealthFn;        // int GetMonsterHealth(uint id, float* ratio, uint* ageMs) -> 1 reading, 0 none
+    // v94: a WebView2 web panel over the game window (APPEND-AT-END (ABI); number provisional)
+    public IntPtr WebPanelOpenFn;            // int WebPanelOpen(WebPanelOpenNative*) -> handle > 0, or BadArgs/UrlNotAllowed/NoGameWindow/Unavailable/ShuttingDown
+    public IntPtr WebPanelNavigateFn;        // int WebPanelNavigate(int handle, byte* url) -> 1 queued; -2 off-list; -6 stale
+    public IntPtr WebPanelCloseFn;           // int WebPanelClose(int handle) -> 1 queued, 0 already closed, -6 stale
+    public IntPtr WebPanelGetStateFn;        // int WebPanelGetState(int handle, WebPanelStateNative*) -> Status (non-live handle -> 6 Superseded), -1 bad args
 }
 
 /// <summary>

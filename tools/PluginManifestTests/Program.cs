@@ -59,6 +59,10 @@ internal static class Program
             Run(nameof(SdkApiVersionCannotDrift), SdkApiVersionCannotDrift);
             Run(nameof(TrainingStructsMirror), TrainingStructsMirror);
             Run(nameof(ContainerOrderSlots), ContainerOrderSlots);
+            Run(nameof(WebPanelFieldsAppended), WebPanelFieldsAppended);
+            Run(nameof(WebPanelStructsMatch), WebPanelStructsMatch);
+            Run(nameof(WebPanelCodesMatch), WebPanelCodesMatch);
+            Run(nameof(HasWebPanel_FalseOnOldOrPartialTable), HasWebPanel_FalseOnOldOrPartialTable);
             Run(nameof(ManifestAttributeDrivesRuntimeMinimum), ManifestAttributeDrivesRuntimeMinimum);
             Run(nameof(DedupeSamePathTwice), DedupeSamePathTwice);
             Run(nameof(DedupeCaseAndSlashes), DedupeCaseAndSlashes);
@@ -565,6 +569,7 @@ internal static class Program
     {
         Eq(RynthCoreHost.CurrentApiVersion, PluginContractVersion.Current, "RynthCoreHost.CurrentApiVersion");
         Check(RynthCoreHost.BaselineApiVersion <= RynthCoreHost.CurrentApiVersion, "baseline at or below current");
+        Check(PluginContractVersion.BarMenu <= PluginContractVersion.Current, "BarMenu (the barMenu manifest key's version) is at or below current");
 
         // The SDK's copy of the table must reach as far as the engine's (same field count, same size).
         int sdkFields = typeof(RynthCoreApiNative).GetFields().Length;
@@ -589,6 +594,102 @@ internal static class Program
             "targets: the manifest and the runtime attribute both use the derived minimum");
     }
 
+    // v94: the web panel's four slots are appended right after GetMonsterHealthFn, in order, on both sides.
+    private static void WebPanelFieldsAppended()
+    {
+        string[] slots = { "WebPanelOpenFn", "WebPanelNavigateFn", "WebPanelCloseFn", "WebPanelGetStateFn" };
+        string prev = "GetMonsterHealthFn";
+        foreach (string slot in slots)
+        {
+            Eq((int)Marshal.OffsetOf<RynthCore.Engine.Plugins.RynthCoreAPI>(slot),
+               (int)Marshal.OffsetOf<RynthCore.Engine.Plugins.RynthCoreAPI>(prev) + IntPtr.Size, "engine " + slot + " right after " + prev);
+            Eq((int)Marshal.OffsetOf<RynthCore.PluginSdk.RynthCoreApiNative>(slot),
+               (int)Marshal.OffsetOf<RynthCore.PluginSdk.RynthCoreApiNative>(prev) + IntPtr.Size, "SDK " + slot + " right after " + prev);
+            prev = slot;
+        }
+        Eq(typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).SkipLast(4).Last(), "GetMonsterHealthFn", "engine table: GetMonsterHealthFn precedes the four");
+        Eq(typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).SkipLast(4).Last(), "GetMonsterHealthFn", "SDK table: GetMonsterHealthFn precedes the four");
+    }
+
+    private static void StructMirror(Type engine, Type sdk, int size)
+    {
+        Eq(Marshal.SizeOf(engine), size, "engine " + engine.Name + " size");
+        Eq(Marshal.SizeOf(sdk), size, "SDK " + sdk.Name + " size");
+        var ef = engine.GetFields().Select(f => f.Name).ToArray();
+        var sf = sdk.GetFields().Select(f => f.Name).ToArray();
+        Check(ef.SequenceEqual(sf), engine.Name + " field names/order match: " + string.Join(",", ef) + " vs " + string.Join(",", sf));
+        foreach (string f in ef)
+            Eq((int)Marshal.OffsetOf(sdk, f), (int)Marshal.OffsetOf(engine, f), engine.Name + "." + f + " offset");
+    }
+
+    // v94: the SDK's WebPanelOpenNative/WebPanelStateNative are the engine's, byte for byte.
+    private static void WebPanelStructsMatch()
+    {
+        int p = IntPtr.Size;
+        StructMirror(typeof(RynthCore.Engine.Plugins.WebPanelOpenNative), typeof(RynthCore.PluginSdk.WebPanelOpenNative), 8 + 4 * p + 8 + 16);
+        StructMirror(typeof(RynthCore.Engine.Plugins.WebPanelStateNative), typeof(RynthCore.PluginSdk.WebPanelStateNative), 48);
+        Eq((int)Marshal.OffsetOf<RynthCore.Engine.Plugins.WebPanelOpenNative>("Reserved"), 8 + 4 * p + 8, "engine WebPanelOpenNative.Reserved offset (32 on x86)");
+        // The 32-bit AC client's contract: 48 bytes, Reserved at 32 (only checked when this run is x86).
+        if (IntPtr.Size == 4)
+        {
+            Eq(Marshal.SizeOf<RynthCore.Engine.Plugins.WebPanelOpenNative>(), 48, "x86 engine WebPanelOpenNative size");
+            Eq(Marshal.SizeOf<RynthCore.PluginSdk.WebPanelOpenNative>(), 48, "x86 SDK WebPanelOpenNative size");
+            Eq((int)Marshal.OffsetOf<RynthCore.Engine.Plugins.WebPanelOpenNative>("Reserved"), 32, "x86 engine WebPanelOpenNative.Reserved offset");
+            Eq((int)Marshal.OffsetOf<RynthCore.PluginSdk.WebPanelOpenNative>("Reserved"), 32, "x86 SDK WebPanelOpenNative.Reserved offset");
+            Eq(Marshal.SizeOf<RynthCore.Engine.Plugins.WebPanelStateNative>(), 48, "x86 engine WebPanelStateNative size");
+            Eq(Marshal.SizeOf<RynthCore.PluginSdk.WebPanelStateNative>(), 48, "x86 SDK WebPanelStateNative size");
+        }
+        Console.WriteLine($"  (WebPanelStructsMatch ran with IntPtr.Size={IntPtr.Size})");
+    }
+
+    // v94: every code value agrees between the engine's enums and the SDK's.
+    private static void WebPanelCodesMatch()
+    {
+        Dictionary<string, long> Vals(Type t) => Enum.GetNames(t).ToDictionary(n => n, n => Convert.ToInt64(Enum.Parse(t, n)));
+        var engine = Vals(typeof(RynthCore.Engine.Plugins.WebPanelCode));
+        var sdk = Vals(typeof(RynthCore.PluginSdk.WebPanelResult));
+        Eq(sdk.Count, engine.Count, "WebPanelCode vs WebPanelResult member count");
+        foreach (var kv in engine)
+            Check(sdk.TryGetValue(kv.Key, out long v) && v == kv.Value, "WebPanelResult." + kv.Key + " = " + kv.Value);
+        var es = Vals(typeof(RynthCore.Engine.Plugins.WebPanelStatusCode));
+        var ss = Vals(typeof(RynthCore.PluginSdk.WebPanelStatus));
+        Eq(ss.Count, es.Count, "WebPanelStatusCode vs WebPanelStatus member count");
+        foreach (var kv in es)
+            Check(ss.TryGetValue(kv.Key, out long v) && v == kv.Value, "WebPanelStatus." + kv.Key + " = " + kv.Value);
+        Eq((uint)RynthCore.PluginSdk.WebPanelStateFlags.Visible, 1u, "state flag Visible");
+        Eq((uint)RynthCore.PluginSdk.WebPanelStateFlags.Focused, 2u, "state flag Focused");
+        Eq((uint)RynthCore.PluginSdk.WebPanelStateFlags.OpenedInBrowser, 4u, "state flag OpenedInBrowser");
+        Eq((uint)RynthCore.PluginSdk.WebPanelFlags.FallbackToBrowser, 1u, "open flag FallbackToBrowser");
+        Eq((uint)RynthCore.PluginSdk.WebPanelFlags.PageKeepsEscape, 2u, "open flag PageKeepsEscape");
+    }
+
+    // v94: HasWebPanel needs Version >= 94 AND all four slots (an old engine's table is shorter and the
+    // runtime copies the full new-size struct, so slots past its end are garbage, not zero).
+    private static void HasWebPanel_FalseOnOldOrPartialTable()
+    {
+        IntPtr x = (IntPtr)0xDEAD;
+        RynthCoreHost Host(uint version, IntPtr a, IntPtr b, IntPtr c, IntPtr d)
+            => new RynthCoreHost(new RynthCoreApiNative { Version = version, WebPanelOpenFn = a, WebPanelNavigateFn = b, WebPanelCloseFn = c, WebPanelGetStateFn = d });
+        Check(!Host(93, x, x, x, x).HasWebPanel, "Version 93 with garbage slots: false");
+        Check(!Host(94, IntPtr.Zero, x, x, x).HasWebPanel, "Open zero: false");
+        Check(!Host(94, x, IntPtr.Zero, x, x).HasWebPanel, "Navigate zero: false");
+        Check(!Host(94, x, x, IntPtr.Zero, x).HasWebPanel, "Close zero: false");
+        Check(!Host(94, x, x, x, IntPtr.Zero).HasWebPanel, "GetState zero: false");
+        Check(Host(94, x, x, x, x).HasWebPanel, "Version 94, all four: true");
+        var old = Host(93, x, x, x, x);
+        Eq(old.OpenWebPanel(new WebPanelOptions { Url = "https://a.example/", Allowlist = new[] { "a.example" } }), (int)WebPanelResult.Unavailable, "Open without the API: Unavailable");
+        Eq(old.NavigateWebPanel(1, "https://a.example/"), (int)WebPanelResult.Unavailable, "Navigate without the API: Unavailable");
+        Eq(old.CloseWebPanel(1), (int)WebPanelResult.Unavailable, "Close without the API: Unavailable");
+        Eq(old.GetWebPanelState(1, out var st), WebPanelStatus.None, "GetState without the API: None");
+        Eq(st.Handle, 0, "GetState without the API: default state");
+        // Bad arguments are refused before the engine is called (the slots hold garbage, so a call would crash).
+        var live = Host(94, x, x, x, x);
+        Eq(live.OpenWebPanel(new WebPanelOptions { Url = "", Allowlist = new[] { "a" } }), (int)WebPanelResult.BadArgs, "empty URL: BadArgs");
+        Eq(live.OpenWebPanel(new WebPanelOptions { Url = "https://a/", Allowlist = Array.Empty<string>() }), (int)WebPanelResult.BadArgs, "empty allowlist: BadArgs");
+        Eq(live.OpenWebPanel(new WebPanelOptions { Url = "https://a/", Allowlist = new[] { "a\nb" } }), (int)WebPanelResult.BadArgs, "newline in an entry: BadArgs");
+        Eq(live.NavigateWebPanel(1, ""), (int)WebPanelResult.BadArgs, "navigate empty URL: BadArgs");
+    }
+
     // v79: the SDK's copies of the training structs must be the engine's, byte for byte.
     private static void TrainingStructsMirror()
     {
@@ -603,11 +704,11 @@ internal static class Program
         Eq(RynthCore.PluginSdk.TrainingInfoFlags.Busy, RynthCore.Engine.Plugins.TrainingInfoFlags.Busy, "info flag bits");
         Eq(RynthCore.PluginSdk.TrainingEntryFlags.Trainable, RynthCore.Engine.Plugins.TrainingEntryFlags.Trainable, "entry flag bits");
         // The three v79 slots follow v78's, then v80's two and v81's GetMergeStackResultFn (v82-v91 follow:
-        // eleven slots to v89, then v90's thirteen, v91's two and v93's one).
-        var names = typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).SkipLast(27).TakeLast(6).ToArray();
+        // eleven slots to v89, then v90's thirteen, v91's two, v93's one and v94's four).
+        var names = typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).SkipLast(31).TakeLast(6).ToArray();
         Check(names.SequenceEqual(new[] { "GetTrainingInfoFn", "RaiseFn", "TrainSkillFn", "GetContainerOrderFn", "PutItemInContainerFn", "GetMergeStackResultFn" }),
             "v79, v80 then v81 slots last: " + string.Join(",", names));
-        var sdkNames = typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).SkipLast(27).TakeLast(6).ToArray();
+        var sdkNames = typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).SkipLast(31).TakeLast(6).ToArray();
         Check(sdkNames.SequenceEqual(names), "SDK v79, v80 and v81 slots in the same order");
     }
 
@@ -618,6 +719,12 @@ internal static class Program
     {
         var all = typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).ToArray();
         var sdkAll = typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).ToArray();
+        // v94: the web panel's four slots end the table; the checks after these are on the table before them.
+        string[] v94 = { "WebPanelOpenFn", "WebPanelNavigateFn", "WebPanelCloseFn", "WebPanelGetStateFn" };
+        Check(all.TakeLast(v94.Length).SequenceEqual(v94), "v94 slots last: " + string.Join(",", all.TakeLast(v94.Length)));
+        Check(sdkAll.TakeLast(v94.Length).SequenceEqual(v94), "SDK v94 slots last: " + string.Join(",", sdkAll.TakeLast(v94.Length)));
+        all = all.SkipLast(v94.Length).ToArray();
+        sdkAll = sdkAll.SkipLast(v94.Length).ToArray();
         // v93: the monster plates' health readings end the table (2026-11-07), right after v91's two.
         Check(all.Last() == "GetMonsterHealthFn", "v93 slot last: " + all.Last());
         Check(sdkAll.Last() == "GetMonsterHealthFn", "SDK v93 slot last: " + sdkAll.Last());

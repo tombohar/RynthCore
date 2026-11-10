@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the extra chat windows (2026-11-09): src\RynthCore.Engine\UI\Data\ChatWindows.cs
+    (window keys and numbers, the first free window, which tab a window shows when its own is gone, a
+    rename followed, /rc chatwindow's parsing) and UI\PanelStateStore.cs's values (where a window's tab
+    is saved: per layout, switched with it, written only when set, kept by an unknown reader), with
+    BarLayout.cs and EngineSettingsFile.cs, compiled in with a stub RynthLog and EngineSettings. Also
+    reads ChatCommandReplies.cs and ChatView.cs / ChatFace.cs as text (the catalog's usage line is
+    ChatWindows.Usage; no face's code saves a tab on its own). Writes only to a temp folder (deleted
+    at the end); never touches %LOCALAPPDATA% or C:\Games.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ChatWindowTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatWindows.cs" Link="Engine\ChatWindows.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\PanelStateStore.cs" Link="Engine\PanelStateStore.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\BarLayout.cs" Link="Engine\BarLayout.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\EngineSettingsFile.cs" Link="Engine\EngineSettingsFile.cs" />
+  </ItemGroup>
+
+</Project>

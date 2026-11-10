@@ -304,6 +304,12 @@ internal static partial class PluginManager
     private static SetAmbientLightFloorCallbackDelegate? _setAmbientLightFloorCallback;   // v91
     private static GetAmbientLightCallbackDelegate? _getAmbientLightCallback;             // v91
     private static GetMonsterHealthCallbackDelegate? _getMonsterHealthCallback;           // v93
+#if ENGINE_CORECLR
+    private static WebPanelOpenCallbackDelegate? _webPanelOpenCallback;                   // v94
+    private static WebPanelNavigateCallbackDelegate? _webPanelNavigateCallback;           // v94
+    private static WebPanelCloseCallbackDelegate? _webPanelCloseCallback;                 // v94
+    private static WebPanelGetStateCallbackDelegate? _webPanelGetStateCallback;           // v94
+#endif
     private static ForceResetBusyCountCallbackDelegate? _forceResetBusyCountCallback;
     private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
     private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
@@ -3254,6 +3260,13 @@ internal static partial class PluginManager
         _setAmbientLightFloorCallback ??= AmbientLight.SetFloor;      // v91
         unsafe { _getAmbientLightCallback ??= AmbientLight.Get; }
         unsafe { _getMonsterHealthCallback ??= GetMonsterHealthAction; }   // v93
+#if ENGINE_CORECLR
+        // v94: the AOT engine leaves these slots zero, so HasWebPanel is false there.
+        unsafe { _webPanelOpenCallback ??= WebPanel.WebPanelApi.Open; }
+        unsafe { _webPanelNavigateCallback ??= WebPanel.WebPanelApi.Navigate; }
+        _webPanelCloseCallback ??= WebPanel.WebPanelApi.Close;
+        unsafe { _webPanelGetStateCallback ??= WebPanel.WebPanelApi.GetState; }
+#endif
 
         _api.Version = PluginContractVersion.Current;
         _api.LogFn = Marshal.GetFunctionPointerForDelegate(_logCallback);
@@ -3427,6 +3440,12 @@ internal static partial class PluginManager
         _api.SetAmbientLightFloorFn = Marshal.GetFunctionPointerForDelegate(_setAmbientLightFloorCallback);
         _api.GetAmbientLightFn = Marshal.GetFunctionPointerForDelegate(_getAmbientLightCallback);
         _api.GetMonsterHealthFn = Marshal.GetFunctionPointerForDelegate(_getMonsterHealthCallback);
+#if ENGINE_CORECLR
+        _api.WebPanelOpenFn = Marshal.GetFunctionPointerForDelegate(_webPanelOpenCallback!);
+        _api.WebPanelNavigateFn = Marshal.GetFunctionPointerForDelegate(_webPanelNavigateCallback!);
+        _api.WebPanelCloseFn = Marshal.GetFunctionPointerForDelegate(_webPanelCloseCallback!);
+        _api.WebPanelGetStateFn = Marshal.GetFunctionPointerForDelegate(_webPanelGetStateCallback!);
+#endif
         RouteApiThroughLoader();
     }
 

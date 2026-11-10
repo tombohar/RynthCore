@@ -172,6 +172,11 @@ internal static class EngineLifecycle
         // we tear down anything else.
         Thread.Sleep(80);
 
+        // The web panel after the plugins' own Shutdowns (EndSceneHook.Uninstall above runs them, and they
+        // may still Close it): its STA thread, window class, WinEvent hook and WebView2 objects go before
+        // the collectible engine context unloads.
+        Step("WebPanelApi.Shutdown", () => WebPanel.WebPanelApi.Shutdown());
+
         Step("AvaloniaOverlay.Stop", () => AvaloniaOverlay.Stop());
 
         // Restore AC's original window WndProc. EngineFrameController.Shutdown

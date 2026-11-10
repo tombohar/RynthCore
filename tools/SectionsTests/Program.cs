@@ -33,6 +33,9 @@ internal static class Program
         WindowPlanChoices();
         WindowTakeOver();
         WindowFrameless();
+        ManifestBarMenu();
+        BarMenuHoverTiming();
+        BarMenuReload();
         StackCheckAfterPluginDraw();
 
         Console.WriteLine();
@@ -585,6 +588,167 @@ internal static class Program
             "chrome and fitHeight are in the signature (a change re-registers)");
     }
 
+    // -- Bar icon dropdown (v95) --
+
+    private static string BarMenuManifest(string windowExtra) =>
+        "{ \"version\": 1, \"windows\": [ { \"id\": \"server\", \"title\": \"DreamWeave\", \"surface\": \"window:server\", \"bar\": true"
+        + windowExtra + " } ] }";
+
+    private static void ManifestBarMenu()
+    {
+        Case("plugin windows: barMenu (v95)");
+        string storefront = ((char)0xE470).ToString(), shield = ((char)0xE40A).ToString(), sparkle = ((char)0xE6A2).ToString();
+        string longTip = new string('T', 60);
+        string longCommand = "/" + new string('c', 250);
+        string items = """
+            [
+              { "id": "market", "tooltip": "Market", "icon": "@STORE@", "command": "/rserver market" },
+              { "id": "nocmdslash", "tooltip": "No slash", "icon": "@STORE@", "command": "rserver x" },
+              { "id": "multiline", "tooltip": "Two lines", "icon": "@STORE@", "command": "/rserver a\n/rserver b" },
+              { "id": "toolong", "tooltip": "Too long", "icon": "@STORE@", "command": "@LONGCMD@" },
+              { "id": "", "tooltip": "No id", "icon": "@STORE@", "command": "/rserver x" },
+              { "id": "market", "tooltip": "Duplicate", "icon": "@STORE@", "command": "/rserver market" },
+              { "id": "notip", "tooltip": "", "icon": "@STORE@", "command": "/rserver x" },
+              { "id": "suit", "tooltip": "Suit Builder", "icon": "@SHIELD@", "command": "/rserver suit" },
+              { "id": "noicon", "tooltip": "No icon", "icon": "", "command": "/rserver x" },
+              { "id": "abilities", "tooltip": "Ability Planner", "icon": "@SPARKLE@", "command": "/rserver abilities" },
+              { "id": "longtip", "tooltip": "@LONGTIP@", "icon": "@STORE@", "command": "/rserver x" }
+            ]
+            """
+            .Replace("@STORE@", storefront).Replace("@SHIELD@", shield).Replace("@SPARKLE@", sparkle)
+            .Replace("@LONGCMD@", longCommand).Replace("@LONGTIP@", longTip);
+
+        SectionManifest m = SectionManifestParser.Parse("DW", BarMenuManifest(", \"barMenu\": " + items), out string err);
+        Check(err.Length == 0 && m.Windows.Length == 1, "parses and the window is kept: " + err);
+        SectionBarMenuItem[] menu = m.Windows[0].Menu;
+        string[] ids = menu.Select(i => i.Id).ToArray();
+        Check(ids.SequenceEqual(new[] { "market", "suit", "noicon", "abilities", "longtip" }),
+            "bad items dropped, order kept: " + string.Join(",", ids));
+        Check(menu[0] == new SectionBarMenuItem("market", "Market", storefront, "/rserver market"), "market: fields exactly equal");
+        Check(menu[1] == new SectionBarMenuItem("suit", "Suit Builder", shield, "/rserver suit"), "suit: fields exactly equal");
+        Check(menu[3] == new SectionBarMenuItem("abilities", "Ability Planner", sparkle, "/rserver abilities"), "abilities: fields exactly equal");
+        Check(menu[2].Icon == "" && menu[2].Tooltip == "No icon", "an empty icon is kept as \"\"");
+        Check(menu[4].Tooltip.Length == SectionManifestParser.MaxLabelLength && menu[4].Tooltip == longTip[..48],
+            "an over-long tooltip is cut to 48: " + menu[4].Tooltip.Length);
+        Check(SectionManifestParser.Command("/rserver a\n/rserver b").Length == 0 && SectionManifestParser.Command("rserver x").Length == 0
+              && SectionManifestParser.Command(longCommand).Length == 0, "(the rejected commands are ones Command() rejects)");
+
+        var many = new System.Text.StringBuilder("[");
+        for (int i = 0; i < 20; i++)
+            many.Append(i > 0 ? "," : "").Append($"{{ \"id\": \"item{i}\", \"tooltip\": \"Item {i}\", \"icon\": \"\", \"command\": \"/rserver x{i}\" }}");
+        many.Append(']');
+        m = SectionManifestParser.Parse("DW", BarMenuManifest(", \"barMenu\": " + many), out err);
+        Check(SectionManifestParser.MaxBarMenuItems == 6 && m.Windows[0].Menu.Length == SectionManifestParser.MaxBarMenuItems,
+            "twenty valid items give exactly MaxBarMenuItems: " + m.Windows[0].Menu.Length);
+        Check(m.Windows[0].Menu[0].Id == "item0" && m.Windows[0].Menu[5].Id == "item5", "the first six are the ones kept");
+
+        m = SectionManifestParser.Parse("DW", BarMenuManifest(", \"barMenu\": \"nope\""), out err);
+        Check(err.Length == 0 && m.Windows.Length == 1 && m.Windows[0].Menu.Length == 0, "barMenu not an array: window kept, no menu");
+        m = SectionManifestParser.Parse("DW", BarMenuManifest(""), out err);
+        Check(err.Length == 0 && m.Windows.Length == 1 && m.Windows[0].Menu.Length == 0, "no barMenu key: no menu");
+        m = SectionManifestParser.Parse("DW", BarMenuManifest(", \"barMenu\": [ { \"id\": \"x\", \"tooltip\": \"X\", \"icon\": \"x\", \"command\": \"/rserver x\" } ]"), out err);
+        Check(err.Length == 0 && m.Windows[0].Menu.Length == 1 && m.Windows[0].Menu[0].Icon == "" && m.Windows[0].Menu[0].Command == "/rserver x",
+            "a non-glyph icon keeps the item with Icon \"\"");
+    }
+
+    private static void BarMenuHoverTiming()
+    {
+        Case("bar dropdown: hover timer");
+        var h = new BarMenuHover();
+        h.Update("a", false, 0.0);
+        h.Update("a", false, 0.10);
+        Check(h.OpenFor == null, "hovering for 0.10 s: not open yet");
+        h.Update("a", false, 0.16);
+        Check(h.OpenFor == "a", "hovering for 0.16 s: open");
+
+        h = new BarMenuHover();
+        h.Update("a", false, 0.0);
+        h.Update("a", false, 0.10);
+        h.Update(null, false, 0.11);
+        h.Update(null, false, 0.20);
+        h.Update(null, false, 0.30);
+        Check(h.OpenFor == null, "a sweep across the icon (0.10 s) never opens it");
+
+        h = new BarMenuHover();
+        h.Update("a", false, 0.0);
+        h.Update("a", false, 0.20);
+        Check(h.OpenFor == "a", "(setup) open on a");
+        Feed(h, "a", 0.30, 0.90);
+        h.Update(null, false, 1.0);
+        h.Update(null, false, 1.10);
+        h.Update(null, true, 1.20);
+        h.Update(null, true, 1.25);
+        Check(h.OpenFor == "a", "leaving the icon and reaching the dropdown 0.20 s later: still open (the gap is covered)");
+
+        h = new BarMenuHover();
+        h.Update("a", false, 0.0);
+        h.Update("a", false, 0.20);
+        Feed(h, "a", 0.30, 0.90);
+        h.Update(null, false, 1.0);
+        h.Update(null, false, 1.29);
+        Check(h.OpenFor == "a", "gone for 0.29 s: still open");
+        h.Update(null, false, 1.31);
+        Check(h.OpenFor == null, "gone for 0.31 s: closed");
+
+        h = new BarMenuHover();
+        h.Update("a", false, 0.0);
+        h.Update("a", false, 0.20);
+        Feed(h, "a", 0.30, 1.90);
+        h.Update("b", false, 2.0);
+        Check(h.OpenFor == "b", "an open dropdown switches to another icon at once");
+
+        h = new BarMenuHover();
+        h.Update("a", false, 0.0);
+        h.Update("a", false, 0.20);
+        h.Close();
+        Check(h.OpenFor == null, "Close() closes");
+        Feed(h, "a", 0.30, 4.90);
+        h.Update("a", false, 5.0);
+        Check(h.OpenFor == null, "still hovering the same icon: not reopened");
+        h.Update(null, false, 5.10);
+        Feed(h, null, 5.20, 5.90);
+        h.Update("a", false, 6.0);
+        Check(h.OpenFor == null, "hovered again but not for OpenDelay yet");
+        h.Update("a", false, 6.16);
+        Check(h.OpenFor == "a", "left and hovered again for OpenDelay: reopens");
+        Check(BarMenuHover.OpenDelay == 0.15 && BarMenuHover.CloseDelay == 0.30, "delays are 0.15 s and 0.30 s");
+
+        // The popped-out bar draws in another ImGui context whose clock starts near 0.
+        h = new BarMenuHover();
+        h.Update("a", false, 0.0);
+        h.Update("a", false, 0.20);
+        h.Update(null, false, 1000.0);
+        h.Update(null, false, 0.05);
+        Check(h.OpenFor == null, "the clock jumping back (a pop-out's own context): reset, closed");
+
+        // A bar that wasn't drawn for a while sends no frames.
+        h = new BarMenuHover();
+        h.Update("a", false, 0.0);
+        h.Update("a", false, 0.20);
+        h.Update("a", false, 0.20 + BarMenuHover.ResetGap + 0.01);
+        Check(h.OpenFor == null, "a forward gap of more than 0.5 s: reset, closed");
+    }
+
+    // Frames from..to every 0.1 s (a real run draws every frame; the timer resets on a gap over 0.5 s).
+    private static void Feed(BarMenuHover h, string? hovered, double from, double to)
+    {
+        for (double t = from; t <= to + 1e-9; t += 0.1) h.Update(hovered, false, t);
+    }
+
+    private static void BarMenuReload()
+    {
+        Case("bar dropdown: a barMenu-only change is seen by the host");
+        string one = BarMenuManifest(", \"barMenu\": [ { \"id\": \"a\", \"tooltip\": \"A\", \"icon\": \"\", \"command\": \"/rserver a\" } ]");
+        SectionWindowDecl w1 = SectionManifestParser.Parse("DW", one, out _).Windows[0];
+        SectionWindowDecl w1Again = SectionManifestParser.Parse("DW", one, out _).Windows[0];
+        SectionWindowDecl w2 = SectionManifestParser.Parse("DW", one.Replace("/rserver a", "/rserver b"), out _).Windows[0];
+        SectionWindowDecl w3 = SectionManifestParser.Parse("DW", BarMenuManifest(""), out _).Windows[0];
+        Check(WindowPlan.Signature(w1) == WindowPlan.Signature(w2), "(the panel signature ignores the menu: no re-registration)");
+        Check(WindowPlan.MenuSignature(w1) == WindowPlan.MenuSignature(w1Again), "the same menu parsed twice: same menu signature");
+        Check(WindowPlan.MenuSignature(w1) != WindowPlan.MenuSignature(w2), "a changed command: new menu signature");
+        Check(WindowPlan.MenuSignature(w1) != WindowPlan.MenuSignature(w3), "menu removed: new menu signature");
+        Check(WindowPlan.MenuSignature(w3) == WindowPlan.MenuSignature(w3 with { BarMenu = null }), "no menu is always the same signature");
+    }
     // ImGui 1.91.6's ImGuiErrorRecoveryState, in field order: windows, IDs, tree nodes, colours,
     // style vars, fonts, focus scopes, groups, item flags, popups, disabled. The base values are
     // the ones a 32-bit probe of our cimgui.dll read inside a panel's body child (2026-10-21).

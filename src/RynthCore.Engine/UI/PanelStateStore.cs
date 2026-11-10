@@ -10,6 +10,9 @@
 //    barlayout=<rows>,<maxIconsPerRow>        (BarLayout; only when not 1,0)
 //    panel.<title>=<open|closed>,<left>,<top>,<width>,<height>
 //                  [,<docked|floating>,<screenLeft>,<screenTop>]
+//    value.<key>=<text>                       (SetValue: a window's own choice
+//                                              that belongs to the layout, e.g.
+//                                              an extra chat window's tab)
 //
 //  The trailing three columns on each row were added when panels (and later
 //  the bar itself) gained the ability to detach into their own top-level
@@ -52,6 +55,8 @@ internal static class PanelStateStore
 
     private static readonly object Sync = new();
     private static readonly Dictionary<string, PanelEntry> Panels = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, string> Values = new(StringComparer.OrdinalIgnoreCase);
+    private static int _generation;
     private static (double Left, double Top)? _barPosition;
     private static bool _barFloating;
     private static (double Left, double Top)? _barFloatingPosition;
@@ -107,6 +112,8 @@ internal static class PanelStateStore
         {
             if (flushCurrent && _loaded) Save();
             Panels.Clear();
+            Values.Clear();
+            System.Threading.Interlocked.Increment(ref _generation);
             _barPosition = null;
             _barFloating = false;
             _barFloatingPosition = null;
@@ -229,6 +236,50 @@ internal static class PanelStateStore
         }
     }
 
+    /// <summary>
+    /// Goes up each time the store switches to another file (<see cref="SwitchTo"/>): a window that
+    /// read a <see cref="TryGetValue"/> value reads it again when this changes. Any thread.
+    /// </summary>
+    public static int Generation => System.Threading.Volatile.Read(ref _generation);
+
+    /// <summary>A value saved with <see cref="SetValue"/> in the layout in use. Any thread.</summary>
+    public static bool TryGetValue(string key, out string value)
+    {
+        lock (Sync)
+        {
+            Load();
+            if (Values.TryGetValue(key, out string? v)) { value = v; return true; }
+            value = string.Empty;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Saves a one-line value in the layout in use (null or empty removes it): a window's own
+    /// choice that belongs with its place, such as which tab an extra chat window shows. Only
+    /// what the player does may call this. Line breaks are dropped. Any thread.
+    /// </summary>
+    public static void SetValue(string key, string? value)
+    {
+        key = key.Replace('\r', ' ').Replace('\n', ' ').Replace('=', ' ').Trim();
+        if (key.Length == 0) return;
+        value = value?.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        lock (Sync)
+        {
+            Load();
+            if (string.IsNullOrEmpty(value))
+            {
+                if (!Values.Remove(key)) return;
+            }
+            else
+            {
+                if (Values.TryGetValue(key, out string? had) && string.Equals(had, value, StringComparison.Ordinal)) return;
+                Values[key] = value;
+            }
+            Save();
+        }
+    }
+
     public static void MarkPanelClosed(string title)
     {
         lock (Sync)
@@ -297,6 +348,11 @@ internal static class PanelStateStore
                 {
                     // An unreadable row leaves the defaults (TryParse sets them).
                     BarLayout.TryParse(value, out _barRows, out _barMaxPerRow);
+                }
+                else if (key.StartsWith("value.", StringComparison.OrdinalIgnoreCase))
+                {
+                    string name = key["value.".Length..].Trim();
+                    if (name.Length > 0 && value.Length > 0) Values[name] = value;
                 }
                 else if (key.StartsWith("panel.", StringComparison.OrdinalIgnoreCase))
                 {
@@ -398,6 +454,9 @@ internal static class PanelStateStore
             sw.AppendLine(FormattableString.Invariant(
                 $"panel.{kv.Key}={(e.Open ? "open" : "closed")},{e.Left:0.##},{e.Top:0.##},{e.Width:0.##},{e.Height:0.##},{(e.Floating ? "floating" : "docked")},{e.FloatingLeft:0.##},{e.FloatingTop:0.##}"));
         }
+        // Only rows that were set: a file without values reads back the same.
+        foreach (var kv in Values)
+            sw.AppendLine("value." + kv.Key + "=" + kv.Value);
         return sw.ToString();
     }
 

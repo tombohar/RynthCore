@@ -70,7 +70,9 @@ internal static unsafe class ScriptWindowReplay
     /// <summary>Draws <paramref name="w"/>'s latest list into the current window. AC thread.</summary>
     public static void Draw(ScriptWindow w)
     {
-        int frame = ImGuiNative.igGetFrameCount();
+        // The main context's frame number, also in a pop-out (whose context counts from 0):
+        // the locals' ages, the budget and the latency stay in one count when a window moves.
+        int frame = ImGuiPopOuts.FrameNumber;
         if (frame != _frame)
         {
             _frame = frame;
@@ -466,6 +468,10 @@ internal static unsafe class ScriptWindowReplay
                         }
                         case ScriptOp.TreeNode:
                         {
+                            // Open state lives in the ImGui context: a window drawn in a new one (popped
+                            // out, or back in) starts as the script recorded it, not closed. Once = only
+                            // where this context has no state for the node; elsewhere the player's wins.
+                            ImGuiNative.igSetNextItemOpen(op.Flag != 0 ? (byte)1 : (byte)0, ImGuiCond.Once);
                             byte live = ImGuiNative.igTreeNodeEx_Str(str, (ImGuiTreeNodeFlags)op.Flags);
                             ReportOpen(w, ref op, live, frame);
                             if (live != 0 && op.Flag != 0 && open < Scopes.Length)
@@ -480,6 +486,7 @@ internal static unsafe class ScriptWindowReplay
                         }
                         case ScriptOp.CollapsingHeader:
                         {
+                            ImGuiNative.igSetNextItemOpen(op.Flag != 0 ? (byte)1 : (byte)0, ImGuiCond.Once);   // as TreeNode
                             byte live = ImGuiNative.igCollapsingHeader_TreeNodeFlags(str, (ImGuiTreeNodeFlags)op.Flags);
                             ReportOpen(w, ref op, live, frame);
                             // Just closed by the player: the recorded contents follow; hide them until the

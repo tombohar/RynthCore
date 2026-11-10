@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the web panel's pure policies (URL allowlist and redaction, window
+    visibility and layout, profile folder): src\RynthCore.Engine\WebPanel\*.cs, compiled in.
+    No AC, no Win32, no WebView2, no files.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>WebPanelTests</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CS0649;CS0169</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\WebPanel\WebPanelUrlPolicy.cs" Link="Engine\WebPanelUrlPolicy.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\WebPanel\WebPanelBrowserGate.cs" Link="Engine\WebPanelBrowserGate.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\WebPanel\WebPanelWindowPolicy.cs" Link="Engine\WebPanelWindowPolicy.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\WebPanel\WebPanelProfile.cs" Link="Engine\WebPanelProfile.cs" />
+    <!-- The ABI glue's pure parts (WebPanelApi.cs itself needs the engine): argument copy-out and refusals. -->
+    <Compile Include="..\..\src\RynthCore.Engine\Plugins\PluginContract.cs" Link="Engine\PluginContract.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\WebPanel\WebPanelNativeArgs.cs" Link="Engine\WebPanelNativeArgs.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\WebPanel\WebPanelApiRules.cs" Link="Engine\WebPanelApiRules.cs" />
+  </ItemGroup>
+
+</Project>

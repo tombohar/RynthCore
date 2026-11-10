@@ -1069,6 +1069,74 @@ internal struct RynthCoreAPI
     /// reading, 0 without (never read; *ratio = -1, *ageMs = 0xFFFFFFFF). Either pointer may be null.
     /// Read-only, any thread, no game calls. Requires API v93+.</summary>
     public IntPtr GetMonsterHealthFn;
+
+    // ── v94: a WebView2 web panel over the game window (WebPanel\WebPanelApi.cs) ──
+    // No call blocks its caller (AC's main thread, the plugin pump and ImGui draws all call these).
+
+    /// <summary>v94: <c>int WebPanelOpen(WebPanelOpenNative* open)</c>: opens (or replaces) the web panel.
+    /// Returns a handle &gt; 0, or BadArgs / UrlNotAllowed / NoGameWindow / Unavailable / ShuttingDown
+    /// (WebPanelCode). Requires API v94+ (provisional number).</summary>
+    public IntPtr WebPanelOpenFn;
+    /// <summary>v94: <c>int WebPanelNavigate(int handle, byte* url)</c>: 1 queued; -2 off the allowlist
+    /// (opened in the system browser when it is browser-safe); -6 stale handle.</summary>
+    public IntPtr WebPanelNavigateFn;
+    /// <summary>v94: <c>int WebPanelClose(int handle)</c>: 1 queued, 0 already closed, -6 stale handle.</summary>
+    public IntPtr WebPanelCloseFn;
+    /// <summary>v94: <c>int WebPanelGetState(int handle, WebPanelStateNative* state)</c>: the WebPanelStatusCode
+    /// (a handle that is not the live one reads 6 Superseded), -1 bad args.</summary>
+    public IntPtr WebPanelGetStateFn;
+}
+
+/// <summary>v94 WebPanelOpen argument (Pack 4; 48 bytes on x86). Mirrors RynthCore.PluginSdk/WebPanelTypes.cs.</summary>
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+internal unsafe struct WebPanelOpenNative
+{
+    /// <summary>sizeof the caller's struct; the engine accepts Size &gt;= OffsetOf(Reserved) (32 on x86).</summary>
+    public uint Size;
+    /// <summary>WebPanelFlags; unknown bits ignored.</summary>
+    public uint Flags;
+    /// <summary>UTF-8 NUL-terminated, at most 4096 bytes, must pass the URL policy's IsAllowed.</summary>
+    public byte* Url;
+    /// <summary>UTF-8, '\n'-separated allowlist (WebPanelUrlPolicy.TryParseAllowlist).</summary>
+    public byte* Allowlist;
+    /// <summary>UTF-8, may be null; at most 256 bytes.</summary>
+    public byte* ProfileKey;
+    /// <summary>UTF-8, may be null; at most 128 bytes.</summary>
+    public byte* Title;
+    /// <summary>0 = 88, else 30..100 (only when no remembered layout).</summary>
+    public int WidthPercent;
+    public int HeightPercent;
+    public fixed uint Reserved[4];
+}
+
+/// <summary>v94 WebPanelGetState result (Pack 4; 48 bytes). Mirrors RynthCore.PluginSdk/WebPanelTypes.cs.</summary>
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+internal unsafe struct WebPanelStateNative
+{
+    public uint Size;
+    public int Handle;
+    /// <summary>WebPanelStatusCode.</summary>
+    public int Status;
+    /// <summary>1 Visible, 2 Focused, 4 OpenedInBrowser.</summary>
+    public uint Flags;
+    /// <summary>0 or a negative WebPanelCode (RuntimeMissing / CreateFailed / ProcessFailed).</summary>
+    public int Error;
+    public int LastHttpStatus;
+    public uint NavigationCount;
+    public fixed uint Reserved[5];
+}
+
+/// <summary>v94 return codes of the web panel calls. Append only.</summary>
+internal enum WebPanelCode
+{
+    Queued = 1, AlreadyClosed = 0, BadArgs = -1, UrlNotAllowed = -2, NoGameWindow = -3,
+    Unavailable = -4, ShuttingDown = -5, StaleHandle = -6, RuntimeMissing = -7, CreateFailed = -8, ProcessFailed = -9,
+}
+
+/// <summary>v94 WebPanelStateNative.Status values. Append only.</summary>
+internal enum WebPanelStatusCode
+{
+    None = 0, Starting = 1, Loading = 2, Ready = 3, Closed = 4, Failed = 5, Superseded = 6,
 }
 
 /// <summary>v89 GetUiColor tokens. Append only: plugins compiled against these numbers keep them.</summary>
@@ -1929,6 +1997,18 @@ internal unsafe delegate int GetAmbientLightCallbackDelegate(uint* client, uint*
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int GetMonsterHealthCallbackDelegate(uint id, float* ratio, uint* ageMs);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int WebPanelOpenCallbackDelegate(WebPanelOpenNative* open);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int WebPanelNavigateCallbackDelegate(int handle, byte* url);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int WebPanelCloseCallbackDelegate(int handle);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal unsafe delegate int WebPanelGetStateCallbackDelegate(int handle, WebPanelStateNative* state);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate uint VendorBuyCallbackDelegate(uint vendorId, VendorTradeEntryNative* entries, int count);

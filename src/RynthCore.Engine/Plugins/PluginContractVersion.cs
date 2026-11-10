@@ -47,5 +47,16 @@ internal static class PluginContractVersion
     //      any thread (feature/hud-health-for-plugins, 2026-11-07). Note: feature/reload-state,
     //      feature/engine-events and the branches built on them (unmerged) also use 93 and 94; whichever
     //      merges second renumbers.
-    public const uint Current = 93;
+    // v94: WebPanelOpen, WebPanelNavigate, WebPanelClose and WebPanelGetState: a WebView2 web panel over the
+    //      game window (WebPanel\WebPanelApi.cs; DreamWeave's in-game market and tools), appended after v93's
+    //      GetMonsterHealth (was v93 on up/web-panel; renumbered after upstream's v93). The number is
+    //      PROVISIONAL: the unmerged branches named under v93 also use 94; whichever merges second renumbers.
+    // v95: no table change. SectionManifest.cs reads a plugin window's "barMenu" (a hover dropdown on its
+    //      bar icon: up to 6 items of id, tooltip, icon and a /command the engine runs on click). Engines
+    //      before v95 ignore the key (was v94 on up/bar-menu; renumbered after upstream's v93). The number
+    //      is PROVISIONAL, as 94 is: whichever merges second renumbers.
+    /// <summary>The API version that added the "barMenu" manifest key; a plugin declaring it pins its own copy against this.</summary>
+    public const uint BarMenu = 95;
+
+    public const uint Current = 95;
 }

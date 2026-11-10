@@ -115,6 +115,9 @@ internal static class Program
         ("layout", "layout", "layout frob"),
         ("layout", "layout reset confirm", "layout reset now"),
         ("layout", "layout default", "layout default now"),
+        ("webpanel", "webpanel status", "webpanel open"),
+        ("webpanel", "webpanel", "webpanel frob"),
+        ("webpanel", "webpanel close", "webpanel close now"),
     };
 
     private static void EveryVerbValidAndInvalid()
@@ -167,6 +170,8 @@ internal static class Program
         ("flight", "flight mark here", "flight frob", "FlightRecorder.HandleCommand: its usage"),
         ("autoid", "autoid limited", "autoid frob", "AutoIdService.HandleCommand: its usage"),
         ("uicost", "uicost 80", "uicost frob", "UiCost.HandleCommand: its usage"),
+        ("chatwindow", "chatwindow open Combat", "chatwindow frob", "ChatWindows.Parse: unknown verb + usage"),
+        ("chatwindow", "chatwin close all", "chatwin close 9", "ChatWindows.Parse: no such window + usage"),
         ("netmsg", "netmsg log on", "netmsg frob", "ServerMessageStream.HandleCommand: its usage"),
         ("hotkeys", "hotkeys", "hotkeys frob", "HotkeyCommandParser: unknown verb + usage"),
         ("settings", "settings Hotkeys", "settings frob", "SettingsCommand: no tab called 'frob' (tabs: ...)"),
@@ -341,6 +346,19 @@ internal static class Program
         Check(!Regex.IsMatch(src, @"\bReply\(\$?""[Uu]sage"), "no usage line is written as a success (they go through Fail)");
         Check(!Regex.IsMatch(src, @"\bReply\((usage|ServerUsage)\)"), "nor the usage constants");
         Check(!Regex.IsMatch(src, @"catch \(Exception ex\) \{ RynthLog\.Compat"), "no command's exception is only logged");
+
+        Case("RynthCoreChatCommands.cs: /rc webpanel never opens or navigates (an arbitrary-URL command would be a phishing vector)");
+        int wpStart = src.IndexOf("private static void HandleWebPanelCommand", StringComparison.Ordinal);
+        int wpEnd = src.IndexOf("private static void HandleLayoutCommand", StringComparison.Ordinal);
+        Check(wpStart > 0 && wpEnd > wpStart, "found HandleWebPanelCommand");
+        if (wpStart > 0 && wpEnd > wpStart)
+        {
+            string wp = src.Substring(wpStart, wpEnd - wpStart);
+            Check(!Regex.IsMatch(wp, @"\bOpen\("), "HandleWebPanelCommand has no Open(");
+            Check(!Regex.IsMatch(wp, @"\bNavigate\("), "HandleWebPanelCommand has no Navigate(");
+            Check(!wp.Contains("ShellExecute", StringComparison.Ordinal), "HandleWebPanelCommand has no ShellExecute");
+            Check(wp.Contains("WebPanelApi.Close(", StringComparison.Ordinal), "the scan reads the real body (it calls WebPanelApi.Close)");
+        }
     }
 
     private static string? FindRepoFile(string relative)

@@ -199,7 +199,11 @@ internal static class ChatCommandReplies
         V("unlockactions", "Usage: /rc unlockactions (opens the client's item-action gates now)", NoArgs, "unlock"),
         V("vitals", "Usage: /rc vitals (the old vitals HUD is gone: /rv plates self)", NoArgs, "hud"),
         V("layout", "Usage: /rc layout [status] | default | reset [confirm]", LayoutArgs),
+        // The extra chat windows (ImGui/Panels/ChatWindowFace); its handler checks the arguments
+        // (UI/Data/ChatWindows.Parse, whose Usage is this same line).
+        V("chatwindow", "Usage: /rc chatwindow [list] | open [tab] | close <2-7|all> | tab <2-7> <tab>", null, "chatwin", "chatwindows"),
         V("uicost", UiCostUsage, null),
+        V("webpanel", "Usage: /rc webpanel [status|close]  (status is a redacted one-line report; it never opens a URL)", Words("", "status", "close")),
     };
 
     /// <summary>/rc uicost: the UI frame cost breakdown (ImGui/UiCost.cs).</summary>

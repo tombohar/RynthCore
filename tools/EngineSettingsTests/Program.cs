@@ -58,6 +58,7 @@ namespace EngineSettingsTests
                 Run(nameof(MaxHotReloadsReadAndKept), MaxHotReloadsReadAndKept);
                 Run(nameof(CloseOnServerDisconnectDefaultOnAndSaved), CloseOnServerDisconnectDefaultOnAndSaved);
                 Run(nameof(TransitionGateDefaultOnAndSaved), TransitionGateDefaultOnAndSaved);
+                Run(nameof(WebPanelDefaultOnAndSaved), WebPanelDefaultOnAndSaved);
                 Run(nameof(HoldReloadInWorldOptInAndSaved), HoldReloadInWorldOptInAndSaved);
                 Run(nameof(IltServerNamesEdit), IltServerNamesEdit);
                 Run(nameof(DisplaySettingsDefaultsAndSaved), DisplaySettingsDefaultsAndSaved);
@@ -118,6 +119,8 @@ namespace EngineSettingsTests
                     case "dcclose-on": EngineSettings.CloseOnServerDisconnect = true; break;
                     case "tgate-off": EngineSettings.TransitionGate = false; break;
                     case "tgate-on": EngineSettings.TransitionGate = true; break;
+                    case "webpanel-off": EngineSettings.WebPanel = false; break;
+                    case "webpanel-on": EngineSettings.WebPanel = true; break;
                     case "borderless-on": EngineSettings.BorderlessWindowed = true; break;
                     case "borderless-off": EngineSettings.BorderlessWindowed = false; break;
                     case "layout-on": EngineSettings.RememberWindowLayout = true; break;
@@ -148,6 +151,7 @@ namespace EngineSettingsTests
                         Console.WriteLine("MaxHotReloads=" + EngineSettings.MaxHotReloads);
                         Console.WriteLine("CloseOnServerDisconnect=" + EngineSettings.CloseOnServerDisconnect);
                         Console.WriteLine("TransitionGate=" + EngineSettings.TransitionGate);
+                        Console.WriteLine("WebPanel=" + EngineSettings.WebPanel);
                         Console.WriteLine("BorderlessWindowed=" + EngineSettings.BorderlessWindowed);
                         Console.WriteLine("RememberWindowLayout=" + EngineSettings.RememberWindowLayout);
                         Console.WriteLine("PanelLayoutPerCharacter=" + EngineSettings.PanelLayoutPerCharacter);
@@ -415,6 +419,7 @@ namespace EngineSettingsTests
                 (new[] { "ilt-add", "Frosthaven" },      "IltServerNames",              null),
                 (new[] { "autoid", "all" },              "AutoIdMode",                  "\"All\""),
                 (new[] { "tgate-off" },                  "TransitionGate",              "false"),
+                (new[] { "webpanel-off" },               "WebPanel",                    "false"),
                 (new[] { "add-plugin", plugin },         "PluginPaths",                 null),
                 (new[] { "remove-plugin", "0" },         "PluginPaths",                 null),
             };
@@ -619,6 +624,36 @@ namespace EngineSettingsTests
             {
                 File.WriteAllText(path, LauncherFile.Replace("\"LoggingLevel\"", $"\"TransitionGate\": {bad}, \"LoggingLevel\""));
                 Eq(DumpValue(RunChild(path, "dump").Out, "TransitionGate"), "True", $"{bad}: ignored, on");
+            }
+        }
+
+        // engine.json WebPanel (2026-11-07, the v94 web panel kill switch): default on, only a hand-set false is
+        // written, other saves keep it, a value that is not a boolean is ignored.
+        private static void WebPanelDefaultOnAndSaved()
+        {
+            string dir = NewDir("webpanel");
+            string path = Path.Combine(dir, "engine.json");
+
+            File.WriteAllText(path, LauncherFile);
+            Eq(DumpValue(RunChild(path, "dump").Out, "WebPanel"), "True", "missing: on");
+            Eq(RunChild(path, "hook-off", "StartTooltip").Exit, 0, "save with the default");
+            Check(!ReadJson(path).TryGetProperty("WebPanel", out _), "the default isn't written to the file");
+
+            var (exit, output) = RunChild(path, "webpanel-off");
+            Eq(exit, 0, "turn off (" + output.Trim() + ")");
+            Eq(ReadJson(path).GetProperty("WebPanel").GetRawText(), "false", "off is saved");
+            Check(ReadJson(path).TryGetProperty("LauncherWindow", out _), "launcher keys kept");
+            Eq(DumpValue(RunChild(path, "dump").Out, "WebPanel"), "False", "off read back at the next start");
+            Eq(RunChild(path, "hook-off", "CheckTooltip").Exit, 0, "another save");
+            Eq(ReadJson(path).GetProperty("WebPanel").GetRawText(), "false", "off survives other saves");
+
+            Eq(RunChild(path, "webpanel-on").Exit, 0, "turn on");
+            Check(!ReadJson(path).TryGetProperty("WebPanel", out _), "on again: dropped from the file");
+
+            foreach (string bad in new[] { "\"no\"", "0", "null" })
+            {
+                File.WriteAllText(path, LauncherFile.Replace("\"LoggingLevel\"", $"\"WebPanel\": {bad}, \"LoggingLevel\""));
+                Eq(DumpValue(RunChild(path, "dump").Out, "WebPanel"), "True", $"{bad}: ignored, on");
             }
         }
 

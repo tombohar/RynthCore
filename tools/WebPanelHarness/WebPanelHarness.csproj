@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline harness for the web panel host (src\RynthCore.Engine\WebPanel\WebPanelHost.cs): a 32-bit
+    stand-in for acclient plus the engine. A fake game thread owns a top-level window and runs a
+    PeekMessage loop; a fake 16 ms pump polls the panel state from another thread; the host (built into
+    tools\WebPanelHarness.Payload) loads into a collectible AssemblyLoadContext that mirrors the shim's
+    EngineLoadContext, and must unload after Shutdown. Pages come from local folders through WebView2
+    virtual host mappings (https://panel.test/, https://other.test/): no network. Input is posted to
+    specific windows; never SendInput (live game clients share this desktop).
+
+    Needs a desktop, the Evergreen WebView2 runtime and the x86 .NET 10 runtime; it opens windows.
+    The folder name has no "Test" in it on purpose: scripts\Run-AllTests.ps1 does not run it.
+    Run (foreground): dotnet run -c Release      (WEBPANEL_HARNESS_FOREGROUND=1 to opt in, see below)
+    The host's own Show calls SetForegroundWindow (pinned behaviour); with the opt-in the harness also asks for
+    it for the fake game, so the foreground-dependent checks (Escape hand-back, same-process visibility) can run.
+    Windows refuses either request while the user is active in another program: those checks then say UNVERIFIED.
+    Each check prints "ok <name>", "FAIL <name>: ..." or "UNVERIFIED <name>: ..." (could not be shown
+    offline; an owner in-game check). Exit 0 = every check ok, 1 = a FAIL, 2 = no FAIL but UNVERIFIED.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>WebPanelHarness</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Built first, never referenced: the payload must only ever load into the collectible context. -->
+    <ProjectReference Include="..\WebPanelHarness.Payload\WebPanelHarness.Payload.csproj" ReferenceOutputAssembly="false" Private="false" />
+  </ItemGroup>
+
+  <Target Name="CopyPayload" AfterTargets="Build">
+    <MSBuild Projects="..\WebPanelHarness.Payload\WebPanelHarness.Payload.csproj" Targets="GetTargetPath" Properties="Configuration=$(Configuration)">
+      <Output TaskParameter="TargetOutputs" ItemName="_PayloadTarget" />
+    </MSBuild>
+    <PropertyGroup>
+      <_PayloadDir>@(_PayloadTarget->'%(RootDir)%(Directory)')</_PayloadDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_PayloadFiles Include="$(_PayloadDir)**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PayloadFiles)" DestinationFiles="@(_PayloadFiles->'$(OutDir)payload\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

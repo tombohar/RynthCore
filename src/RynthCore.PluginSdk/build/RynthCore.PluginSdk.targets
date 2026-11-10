@@ -36,7 +36,7 @@
 
   <PropertyGroup>
     <!-- The engine API this SDK knows; tools\PluginManifestTests checks it equals PluginContractVersion.Current. -->
-    <RynthCoreSdkApiVersion>93</RynthCoreSdkApiVersion>
+    <RynthCoreSdkApiVersion>95</RynthCoreSdkApiVersion>
     <!-- The first engine API that loads managed plugins and gives them Runtime\PluginShared (2026.10.19.1). -->
     <RynthCoreManagedPluginApi>88</RynthCoreManagedPluginApi>
     <_RynthPluginManifestOn Condition="'$(RynthPluginMinEngineApi)' != '' and '$(RynthPluginManifest)' != 'false'">true</_RynthPluginManifestOn>

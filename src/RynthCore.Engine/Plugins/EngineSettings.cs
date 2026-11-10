@@ -70,6 +70,8 @@ internal static class EngineSettings
     private static Compatibility.AutoIdMode _autoIdMode = Compatibility.AutoIdPolicy.DefaultMode;
     // "TransitionGate": default true. False = queued game actions are never held for a death / portal.
     private static bool _transitionGate = true;
+    // "WebPanel": default true. False = the v94 web panel calls answer Unavailable (plugins open the system browser).
+    private static bool _webPanel = true;
     private static bool _loaded;
 
     public static IReadOnlyList<string> PluginPaths
@@ -714,6 +716,26 @@ internal static class EngineSettings
         }
     }
 
+    /// <summary>"WebPanel" in engine.json (default true): the v94 web panel (WebPanel\WebPanelHost.cs, a
+    /// WebView2 window over the game for DreamWeave's market and tools; CoreCLR engine only). False is the
+    /// kill switch: WebPanelOpen answers Unavailable and plugins open the page in the system browser
+    /// instead. A panel already open stays until it is closed.</summary>
+    public static bool WebPanel
+    {
+        get
+        {
+            EnsureLoaded();
+            return _webPanel;
+        }
+        set
+        {
+            EnsureLoaded();
+            if (_webPanel == value) return;
+            _webPanel = value;
+            Save("WebPanel");
+        }
+    }
+
     public static void AddPluginPath(string path)
     {
         EnsureLoaded();
@@ -919,6 +941,10 @@ internal static class EngineSettings
                 (tgEl.ValueKind == JsonValueKind.True || tgEl.ValueKind == JsonValueKind.False))
                 _transitionGate = tgEl.GetBoolean();
 
+            if (doc.RootElement.TryGetProperty("WebPanel", out var wpEl) &&
+                (wpEl.ValueKind == JsonValueKind.True || wpEl.ValueKind == JsonValueKind.False))
+                _webPanel = wpEl.GetBoolean();
+
             if (doc.RootElement.TryGetProperty("PreventIdleLogoff", out var pilEl) &&
                 (pilEl.ValueKind == JsonValueKind.True || pilEl.ValueKind == JsonValueKind.False))
             {
@@ -989,7 +1015,7 @@ internal static class EngineSettings
         "FlightRecorder", "InsertReleasesUi", "BorderlessWindowed", "RememberWindowLayout",
         "RememberAcWindowPosition", "IltServerNames", "IltHosts", "EnableLargeAddressAlignmentFix",
         "MaxHotReloads", "ReportEndpoint", "CloseOnServerDisconnect", "AutoIdMode", "EnablePluginOverlayWindows", "LoggingLevel",
-        "LoadAllServerPlugins", "TransitionGate",
+        "LoadAllServerPlugins", "TransitionGate", "WebPanel",
         "HoldReloadInWorld", "HoldReloadInWorldMaxMinutes",
         "PanelLayoutPerCharacter",
         "UiCostLog", "UiCostThresholdMs",
@@ -1070,6 +1096,8 @@ internal static class EngineSettings
                     w.WriteBoolean("CloseOnServerDisconnect", false);
                 if (!_transitionGate)      // default true: only a hand-set false is written
                     w.WriteBoolean("TransitionGate", false);
+                if (!_webPanel)            // default true: only a hand-set false is written
+                    w.WriteBoolean("WebPanel", false);
                 if (_loadAllServerPlugins) // default false: only a hand-set true is written
                     w.WriteBoolean("LoadAllServerPlugins", true);
                 if (_maxHotReloads != ReloadCapNotice.DefaultMaxHotReloads)   // only a hand-set value is written

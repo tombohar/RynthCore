@@ -570,7 +570,8 @@ internal static class ScriptWindowRegistry
         UiInfoNative full = default;
         full.Size = (uint)sizeof(UiInfoNative);
         bool imgui = EngineSettings.EnableImGuiBackend;
-        full.Flags = (imgui ? 1u : 0u) | (Compatibility.LoginLifecycleHooks.HasObservedLoginComplete ? 2u : 0u);
+        full.Flags = (imgui ? 1u : 0u) | (Compatibility.LoginLifecycleHooks.HasObservedLoginComplete ? 2u : 0u)
+            | (PanelRouter.CanPopOut ? 4u : 0u);
         full.MaxFormatVersion = DisplayListParser.FormatVersion;
         full.OpLevel = DisplayListParser.OpLevel;
         full.MaxOpsPerWindow = MaxOpsPerWindow;
@@ -691,7 +692,14 @@ internal static class ScriptWindowRegistry
 
     /// <summary>The flag bits that shape the panel spec (a change re-registers the entry).</summary>
     private const uint SpecFlags = WindowFlags.ChromeNone | WindowFlags.NoBackground
-        | WindowFlags.NoScrollbar | WindowFlags.NoScrollWithMouse;
+        | WindowFlags.NoScrollbar | WindowFlags.NoScrollWithMouse | WindowFlags.NoPopOut;
+
+    /// <summary>
+    /// Whether a window with these flags may pop out (↗, Phase 2): a framed window unless the hud
+    /// set NoPopOut. A bare window (ChromeNone) has no header for the ↗ and is drawn over the game
+    /// (an overlay, usually click-through), which an OS window of its own can't be: it stays docked.
+    /// </summary>
+    public static bool CanPopOut(uint flags) => (flags & (WindowFlags.ChromeNone | WindowFlags.NoPopOut)) == 0;
 
     private static void Apply(ScriptWindow w, ParsedWindow pw, uint ackSeq, bool isNew)
     {
@@ -714,7 +722,13 @@ internal static class ScriptWindowRegistry
 
         // DrawPanel reads the entry's spec every frame, so a new spec applies at once.
         if (specChanged)
+        {
             ImGuiPanelHost.RegisterDynamic(w.PanelKey, w.Title, SpecFor(w), () => new ScriptWindowFace(w));
+            // Popped out and no longer allowed to be (NoPopOut set, or the hud went bare): it
+            // comes back into the client, where it was docked. Saved as docked, so it stays there.
+            if (!isNew && !CanPopOut(w.Flags) && ImGuiPanelHost.IsPopped(w.PanelKey))
+                ImGuiPanelHost.Redock(w.PanelKey);
+        }
         else if (titleChanged)
             ImGuiPanelHost.SetDisplayTitle(w.PanelKey, w.Title);
 
@@ -870,11 +884,12 @@ internal static class ScriptWindowRegistry
         ImGuiNET.ImGuiWindowFlags body = ImGuiNET.ImGuiWindowFlags.None;
         if ((f & WindowFlags.NoScrollbar) != 0) body |= ImGuiNET.ImGuiWindowFlags.NoScrollbar;
         if ((f & WindowFlags.NoScrollWithMouse) != 0) body |= ImGuiNET.ImGuiWindowFlags.NoScrollWithMouse;
-        // ClickThrough stays on the face (IImGuiPanel.ClickThrough), read every frame.
-        // Pop-outs aren't in the MVP (decision 8): no ↗.
+        // ClickThrough stays on the face (IImGuiPanel.ClickThrough), read every frame; popped
+        // out, the host makes the window interactive like any panel.
+        // Pop-outs (Phase 2, decision 8): the ↗ like any panel, unless CanPopOut says no.
         return new PanelSpec(size, min, none ? PanelChrome.None : PanelChrome.Standard,
             Background: (f & WindowFlags.NoBackground) != 0 ? 0u : null,
-            NoPopOut: true,
+            NoPopOut: !CanPopOut(f),
             BodyFlags: body,
             DefaultPos: w.DefaultPos);
     }
@@ -974,6 +989,9 @@ internal static unsafe class ScriptWindowMetrics
     {
         long now = Stopwatch.GetTimestamp();
         if (_current != null && now - _takenAt < Stopwatch.Frequency) return;
+        // A popped-out window's context has the monitor's work area for its display, not AC's
+        // window: the snapshot is taken from a docked one (the font metrics are the same).
+        if (_current != null && ImGuiPopOuts.InPopOutFrame) return;
         _takenAt = now;
         var io = ImGuiNET.ImGui.GetIO();
         var style = ImGuiNET.ImGui.GetStyle();
@@ -988,7 +1006,7 @@ internal static unsafe class ScriptWindowMetrics
             SpacingY = style.ItemSpacing.Y,
             PadX = style.FramePadding.X,
             PadY = style.FramePadding.Y,
-            Frame = (uint)ImGuiNET.ImGui.GetFrameCount(),
+            Frame = (uint)ImGuiPopOuts.FrameNumber,   // the main frame number, also when popped out
         };
         byte* one = stackalloc byte[2];
         for (int i = 0; i < 95; i++)

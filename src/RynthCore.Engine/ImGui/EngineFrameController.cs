@@ -894,6 +894,7 @@ internal static class EngineFrameController
             ImGuiNET.ImGui.NewFrame();
             UiCost.Stop(UiCost.ImGuiNewFrame, cNew);
             frameStarted = true;
+            ImGuiPopOuts.NoteMainFrame();   // _context is current: the frame number pop-out frames share
             // Before any window: a drag from a popped-out Inventory or AC's inventory becomes
             // a payload the client's drop targets (Mini Remote slots) see this frame.
             ItemDragBridge.SubmitMainFrame(io);

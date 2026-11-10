@@ -51,6 +51,16 @@
 //                opens when nothing is saved for it (v90, 2026-10-22). "scale": "draw" =
 //                the window draws its content at any size (PanelScale): Ctrl+wheel over
 //                it steps that size, 30-250%, not its text size (v90, 2026-10-23).
+//                "barMenu" (v95, 2026-11-07): a hover dropdown on the window's bar icon, for a
+//                window with "bar": true. An array of { "id": "market", "tooltip": "Market",
+//                "icon": "<Phosphor glyph, may be empty>", "command": "/rserver market" }:
+//                "id" a short lower-case word (unique in the menu), "tooltip" the item's
+//                label (capped like any label), "icon" as the window's icon (one glyph or
+//                ""), "command" a single "/..." chat command the engine runs as a player
+//                chat command when the item is clicked. An item missing its id, tooltip or
+//                command, or with a duplicate id, is dropped; at most MaxBarMenuItems (6)
+//                are kept, and a "barMenu" that is not an array is ignored (the window is
+//                kept). Engines before v95 ignore the key.
 //
 //  Everything from a plugin is checked here: ids are short lower-case words,
 //  text is capped, a command must be a single "/..." chat command, and the lists
@@ -92,6 +102,9 @@ internal sealed record SectionContribution(
     public bool IsUniversal => Server.Length == 0;
 }
 
+/// <summary>One entry of a window's bar-icon dropdown ("barMenu", v95): a click runs <see cref="Command"/> as a player chat command.</summary>
+internal sealed record SectionBarMenuItem(string Id, string Tooltip, string Icon, string Command);
+
 /// <summary>
 /// A window a plugin draws, hosted by the engine (docs/PLUGIN_WINDOWS.md): its panel key and header
 /// are <see cref="Title"/>, its body the plugin's <see cref="Surface"/> through RynthPluginRenderEmbed.
@@ -121,10 +134,15 @@ internal sealed record SectionWindowDecl(
     bool DrawScale = false,
     // 2026-11-07 (no version bump: older engines ignore the key): drawn under AC's own UI, like a native
     // AC window ("layer": "underUi"; frameless windows only). AC's windows cover it and take the clicks there.
-    bool UnderUi = false)
+    bool UnderUi = false,
+    // v95: the bar icon's hover dropdown ("barMenu"); null when the window declares none.
+    SectionBarMenuItem[]? BarMenu = null)
 {
     /// <summary>For every world, not one server.</summary>
     public bool IsUniversal => Server.Length == 0;
+
+    /// <summary>The bar icon's dropdown items (empty when none).</summary>
+    public SectionBarMenuItem[] Menu => BarMenu ?? System.Array.Empty<SectionBarMenuItem>();
 }
 
 /// <summary>One plugin's parsed manifest.</summary>
@@ -158,6 +176,8 @@ internal static class SectionManifestParser
     public const int MaxJsonLength = 256 * 1024;
     public const int MaxWindows = 8;
     public const int MaxWindowTitleLength = 32;
+    /// <summary>Most items kept in one window's bar-icon dropdown (v95).</summary>
+    public const int MaxBarMenuItems = 6;
     public const float DefaultWindowWidth = 420f, DefaultWindowHeight = 300f, MinWindowSize = 120f, MaxWindowSize = 2000f;
 
     /// <summary>
@@ -237,6 +257,16 @@ internal static class SectionManifestParser
                 float height = WindowSize(Size(e, "height"), DefaultWindowHeight);
                 float minWidth = Math.Min(WindowSize(Size(e, "minWidth"), MinWindowSize), width);
                 float minHeight = Math.Min(WindowSize(Size(e, "minHeight"), MinWindowSize), height);
+                var barMenu = new List<SectionBarMenuItem>();
+                foreach (JsonElement item in Array(e, "barMenu"))
+                {
+                    if (barMenu.Count >= MaxBarMenuItems) break;
+                    string itemId = Id(Str(item, "id"));
+                    string tooltip = Text(Str(item, "tooltip"), MaxLabelLength);
+                    string itemCommand = Command(Str(item, "command"));
+                    if (itemId.Length == 0 || tooltip.Length == 0 || itemCommand.Length == 0 || barMenu.Exists(b => b.Id == itemId)) continue;
+                    barMenu.Add(new SectionBarMenuItem(itemId, tooltip, Icon(Str(item, "icon")), itemCommand));
+                }
                 windows.Add(new SectionWindowDecl(plugin, id, title, surface, Icon(Str(e, "icon")),
                     width, height, minWidth, minHeight, Bool(e, "bar", false), Bool(e, "edgeToEdge", false), server,
                     Bool(e, "takeOver", false),
@@ -244,7 +274,8 @@ internal static class SectionManifestParser
                     FitHeight: Bool(e, "fitHeight", false),
                     Corner: Str(e, "corner").Trim() is "topLeft" or "topRight" or "bottomLeft" or "bottomRight" or "top" or "bottom" ? Str(e, "corner").Trim() : "",
                     DrawScale: Str(e, "scale").Trim().Equals("draw", StringComparison.OrdinalIgnoreCase),
-                    UnderUi: Str(e, "layer").Trim().Equals("underUi", StringComparison.OrdinalIgnoreCase)));
+                    UnderUi: Str(e, "layer").Trim().Equals("underUi", StringComparison.OrdinalIgnoreCase),
+                    BarMenu: barMenu.Count > 0 ? barMenu.ToArray() : null));
             }
 
             return new SectionManifest(plugin, servers.ToArray(), sections.ToArray(), contributions.ToArray())
