@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Offline checks for the Settings > Navigation "Vaulted Dungeons" row (2026-10-18; the keeper is
+    Offline checks for the Settings > General "Vaulted Dungeons" row (2026-10-18, on Navigation until 2026-11-11; the keeper is
     Silentkelpie's, RynthSuite PR 12): the mirror of RynthAi's EnableVaultedDungeons master switch in
     UI\Data\SettingsData.cs. Nothing is claimed until RynthAi sends the value (an older RynthAi omits
     it: the row stays hidden and a save sends null, which RynthAi leaves alone); the row edits only

@@ -1,6 +1,6 @@
 // ============================================================================
 //  RynthCore.Engine - UI/AcWindowChrome.cs
-//  Settings > Display helpers for the Asheron's Call game HWND:
+//  Settings > Game Client helpers for the Asheron's Call game HWND:
 //    - Borderless windowed: strip caption / thick frame while leaving the client
 //      windowed (not exclusive fullscreen). Chrome is only given back to a window
 //      WE stripped: that is recorded as an HWND property (SetProp) holding the
@@ -99,7 +99,7 @@ internal static class AcWindowChrome
         }
     }
 
-    /// <summary>A Settings > Display toggle changed: apply it on the game thread soon (not inline).</summary>
+    /// <summary>A Settings > Game Client toggle changed: apply it on the game thread soon (not inline).</summary>
     public static void RequestApply()
     {
         try
@@ -256,7 +256,7 @@ internal static class AcWindowChrome
         }
     }
 
-    /// <summary>Settings > Display "Save Layout Now". Runs on the render thread (a button in a
+    /// <summary>Settings > Interface "Save Layout Now". Runs on the render thread (a button in a
     /// frame): everything that touches a file is queued to the background writer.</summary>
     public static void SaveLayoutNow()
     {

@@ -934,13 +934,19 @@ internal struct RynthCoreAPI
     /// without the client opening its dialog: Yes when the server's "N percent" is at least
     /// minPercent (or minPercent is 0), else No. One-shot. timeoutMs &lt;= 0 disarms.
     /// 1 armed/disarmed, 0 sender or game-event hook unavailable, -3 bad arguments
-    /// (type 0, minPercent outside 0-100, timeout over 120 s). Any thread. Requires API v85+.</summary>
+    /// (type 0, minPercent outside 0-100, timeout over 120 s). Any thread. Requires API v85+.
+    /// v97: minPercent | 0x100 (ConfirmationArmPolicy.ArmFlagLeaveBelow, minimum 1-100) arms a second,
+    /// sticky slot: a prompt below the minimum (or without a percent) is left to the client instead of
+    /// answered No, and the arm stays armed for later prompts until it times out or is disarmed (the
+    /// flag with timeoutMs &lt;= 0). The one-shot slot goes first; its arm and disarm never touch the
+    /// sticky one. Older engines return -3 for the flag.</summary>
     public IntPtr ArmConfirmationFn;
 
     /// <summary>v85: <c>int GetLastConfirmation(uint* type, uint* contextId, int* percent, int* outcome, int* ageMs)</c>:
     /// the last prompt the server sent: returns its sequence number (0 = none yet); percent -1
     /// when the text has none; outcome 1 shown to the player, 2 answered Yes, 3 answered No,
-    /// 4 the send failed (shown). Any out pointer may be null. Any thread. Requires API v85+.</summary>
+    /// 4 the send failed (shown), 5 (v97) answered Yes by the sticky arm. Any out pointer may be null.
+    /// Any thread. Requires API v85+.</summary>
     public IntPtr GetLastConfirmationFn;
 
     /// <summary>v86: <c>int GetServerStateJson(byte* buffer, int capacity)</c>: which server this is,
@@ -1037,7 +1043,7 @@ internal struct RynthCoreAPI
     public IntPtr AcPanelFn;
     /// <summary>v90: <c>int PanelScale(const char* key, int percent)</c>: how big a frameless window draws
     /// itself, 30-250% of normal (0 asks, -1 = follow the text size again); returns it, 0 = follows the
-    /// text size. Settings > UI > Toolbar sets it too. Any thread. Requires API v90+.</summary>
+    /// text size. Settings > Interface > In The Retail Toolbar's Place sets it too. Any thread. Requires API v90+.</summary>
     public IntPtr PanelScaleFn;
     /// <summary>v90: <c>uint DropTarget(const char* window, float x0, float y0, float x1, float y1, int flags,
     /// int* dragging)</c>: the plugin window takes items dragged out of AC's UI and let go over that rect

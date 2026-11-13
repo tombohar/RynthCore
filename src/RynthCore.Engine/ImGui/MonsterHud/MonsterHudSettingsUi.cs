@@ -174,7 +174,7 @@ internal static class MonsterHudSettingsUi
             bool locked = MonsterHudSettings.SelfLocked;
             if (Toggle("Lock position", ref locked,
                     "Locked, the plate can't be grabbed or clicked, so play never moves it. " +
-                    "Untick it, then drag the plate (it shows a frame) and tick it again. Also in Settings > UI > Vitals. " +
+                    "Untick it, then drag the plate (it shows a frame) and tick it again. Also in Settings > Interface > Your Vitals. " +
                     "Chat: /rv plates self lock on|off.", indent: 32))
             {
                 MonsterHudSettings.SetSelfLocked(locked);

@@ -165,7 +165,8 @@ internal sealed class PluginWindowFace : IImGuiPanel
             float screenW = ImGuiNET.ImGui.GetIO().DisplaySize.X / place;
             if (screenW > 1f) width = MathF.Min(width, screenW);
             ImGuiPanelHost.RequestSize(_title, new Vector2(width, height));
-            // Clamped to the screen at the new size: near the right or bottom edge it moves in.
+            // Near the right or bottom edge it moves in at the new size: the host pulls it onto the screen
+            // from its home (UI/PanelPlacement; this spot is where it draws, so it changes nothing there).
             ImGuiPanelHost.RequestPos(_title, ImGuiNET.ImGui.GetWindowPos() / place);
         }
         else if (mouseUp && MathF.Abs(shownHeight - height) > 0.5f)

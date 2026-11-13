@@ -429,7 +429,7 @@ internal sealed class DamageDetailFace : IImGuiPanel
                 ? "Pull-away for every monster without its own. Default = Off (fight in place).\n"
                 : "Pull-away for the monsters it covers. Default = the DEFAULT line's.\n") +
             "Off = kill where it stands. PullAway = tag, run until it has been dragged\n" +
-            "Kite Pull Distance metres from its lock spot (Settings > Melee Combat), then kill.");
+            "Kite Pull Distance metres from its lock spot (Settings > Combat), then kill.");
 
         // The DEFAULT line's own choice is the Prefer chip in the Damage panel's top bar.
         if (!isDefault)

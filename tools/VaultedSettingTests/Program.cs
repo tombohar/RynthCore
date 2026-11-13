@@ -47,8 +47,8 @@ namespace VaultedSettingTests
             // The schema row.
             object? nav = null;
             foreach (object t in (IEnumerable)schemaType.GetField("Tabs", All)!.GetValue(null)!)
-                if ((string)t.GetType().GetProperty("Name")!.GetValue(t)! == "Navigation") nav = t;
-            Check(nav != null, "a Navigation tab");
+                if ((string)t.GetType().GetProperty("Name")!.GetValue(t)! == "General") nav = t;
+            Check(nav != null, "a General tab (the row moved there from Navigation on 2026-11-11)");
             if (nav == null) return Finish();
 
             string label = (string)schemaType.GetField("VaultedDungeonsLabel", All)!.GetValue(null)!;
@@ -56,7 +56,7 @@ namespace VaultedSettingTests
             var matches = new List<object>();
             foreach (object r in (IEnumerable)nav.GetType().GetProperty("Rows")!.GetValue(nav)!)
                 if ((string?)r.GetType().GetProperty("Label")!.GetValue(r) == label) matches.Add(r);
-            Check(matches.Count == 1, "exactly one Vaulted Dungeons row, under Navigation");
+            Check(matches.Count == 1, "exactly one Vaulted Dungeons row, under General");
             if (matches.Count != 1) return Finish();
 
             object row = matches[0];

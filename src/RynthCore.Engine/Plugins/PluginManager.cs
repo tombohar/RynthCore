@@ -4281,12 +4281,30 @@ internal static partial class PluginManager
         // RynthCore's chat draws this line in it; the chat type still decides where it goes.
         long now = Environment.TickCount64;
         uint? own = UI.Data.ChatOwnColors.TakeArmed(now);
-        if (own != null && !string.IsNullOrEmpty(text))
-            UI.Data.ChatOwnColors.Lines.Expect(text, chatType, own.Value, now);
+        // And colour runs ("nextspans", 2026-11-11): every run must fit inside this text, or none is used.
+        UI.Data.ChatSpan[]? spans = UI.Data.ChatOwnColors.TakeArmedSpans(now);
+        if (spans != null && !string.IsNullOrEmpty(text))
+        {
+            spans = UI.Data.ChatOwnColors.FitSpans(spans, UI.Data.ChatOwnColorQueue.Key(text).Length, out string? why);
+            if (why != null) LogChatSpansRefused($"WriteToChat: colour runs dropped, {why}");
+        }
+        bool noted = (own != null || spans != null) && !string.IsNullOrEmpty(text);
+        if (noted)
+            UI.Data.ChatOwnColors.Lines.Expect(text!, chatType, own, spans, now);
         bool written = ClientHelperHooks.WriteToChat(text, chatType);
-        if (!written && own != null && !string.IsNullOrEmpty(text))
-            UI.Data.ChatOwnColors.Lines.Forget(text, chatType);
+        if (!written && noted)
+            UI.Data.ChatOwnColors.Lines.Forget(text!, chatType);
         return ToAbiBool(written);
+    }
+
+    private static int _chatSpansRefused;
+
+    /// <summary>A plugin's bad colour runs: the first few, then one in a hundred (a plugin bug could send one per line).</summary>
+    private static void LogChatSpansRefused(string why)
+    {
+        int n = Interlocked.Increment(ref _chatSpansRefused);
+        if (n <= 5 || n % 100 == 0)
+            RynthLog.Warn($"RynthCore.Chat nextspans: {why} (#{n}; the line keeps its own colour)");
     }
 
     private static int InvokeChatParser(IntPtr textUtf16)
@@ -4934,7 +4952,10 @@ internal static partial class PluginManager
             {
                 string? action = actionAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(actionAnsi) : null;
                 string? value = valueAnsi != IntPtr.Zero ? Marshal.PtrToStringAnsi(valueAnsi) : null;
-                return UI.Data.ChatOwnColors.HandlePluginCommand(action, value, Environment.TickCount64) ? 1 : 0;
+                bool ok = UI.Data.ChatOwnColors.HandlePluginCommand(action, value, Environment.TickCount64, out string? why);
+                if (!ok && why != null)
+                    LogChatSpansRefused($"refused '{(value is { Length: > 120 } ? value[..120] + "..." : value)}': {why}");
+                return ok ? 1 : 0;
             }
 
             IntPtr export = ResolvePluginExport(name, "RynthPluginApplyRemoteCommand");

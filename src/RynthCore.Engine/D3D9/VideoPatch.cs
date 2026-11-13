@@ -356,7 +356,7 @@ internal static unsafe class VideoPatch
     {
         VideoPatchMode.World => "Video patch: WORLD - AC's 3D world isn't drawn; AC's UI and the panels are. /rc video off to restore.",
         VideoPatchMode.Unfocused => "Video patch: UNFOCUSED - the 3D world isn't drawn while another window has the focus; it draws again the moment you switch back.",
-        VideoPatchMode.All => "Video patch: ALL - nothing of AC's is drawn; the panels and a banner are. Type /rc video off (or Settings > Misc) to restore.",
+        VideoPatchMode.All => "Video patch: ALL - nothing of AC's is drawn; the panels and a banner are. Type /rc video off (or Settings > Game Client) to restore.",
         _ => "Video patch: off - normal drawing.",
     };
 

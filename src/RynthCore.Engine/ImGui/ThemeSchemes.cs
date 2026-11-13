@@ -4,7 +4,7 @@
 //  save their color schemes"): named sets of the theme's eight colours, one
 //  file each in %AppData%\RynthCore\themes\ ("name=", then the eight colours
 //  as theme.txt writes them), for the PC, so every client lists the same ones.
-//  RynthTheme puts them in Settings > Display's Theme picker between the
+//  RynthTheme puts them in Settings > Interface's Theme picker between the
 //  presets and Custom; "Save colours as" adds one, Delete removes the one in
 //  use.
 //

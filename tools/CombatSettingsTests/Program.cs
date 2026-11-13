@@ -75,8 +75,8 @@ namespace CombatSettingsTests
                 string tabName = (string)t.GetType().GetProperty("Name")!.GetValue(t)!;
                 tabs[tabName] = ((IEnumerable)t.GetType().GetProperty("Rows")!.GetValue(t)!).Cast<object>().ToList();
             }
-            Check(tabs.ContainsKey("Melee Combat") && tabs.ContainsKey("Spell Combat"), "the Melee Combat and Spell Combat tabs exist");
-            if (!tabs.ContainsKey("Melee Combat") || !tabs.ContainsKey("Spell Combat")) return Finish();
+            Check(tabs.ContainsKey("Combat") && tabs.ContainsKey("Spell Combat"), "the Combat and Spell Combat tabs exist (Combat was Melee Combat until 2026-11-11)");
+            if (!tabs.ContainsKey("Combat") || !tabs.ContainsKey("Spell Combat")) return Finish();
 
             static string Label(object r) => (string?)r.GetType().GetProperty("Label")!.GetValue(r) ?? "";
             static string Kind(object r) => r.GetType().GetProperty("Kind")!.GetValue(r)!.ToString()!;
@@ -88,17 +88,17 @@ namespace CombatSettingsTests
             // (tab, label, kind, default shown, min, max)
             var rows = new (string Tab, string Label, string Kind, double Default, double Min, double Max)[]
             {
-                ("Melee Combat", "Variable Min %", "Int", 50, 0, 100),
-                ("Melee Combat", "Variable Max %", "Int", 100, 0, 100),
-                ("Melee Combat", "Missile Response", "Combo", 0, 0, 3),
-                ("Melee Combat", "Hits to trip", "Int", 2, 1, 10),
-                ("Melee Combat", "Window (s)", "Int", 20, 5, 120),
-                ("Melee Combat", "Move closer by (m)", "Int", 6, 1, 30),
-                ("Melee Combat", "Closest (m)", "Int", 3, 1, 30),
-                ("Melee Combat", "Skip target (s)", "Int", 30, 5, 300),
-                ("Melee Combat", "Pull Distance (m)", "Int", 20, 3, 100),
-                ("Melee Combat", "Tag Before Fleeing", "Bool", 1, 0, 1),
-                ("Spell Combat", "Magic Response", "Combo", 0, 0, 3),
+                ("Combat", "Variable Min %", "Int", 50, 0, 100),
+                ("Combat", "Variable Max %", "Int", 100, 0, 100),
+                ("Combat", "Missile Response", "Combo", 0, 0, 3),
+                ("Combat", "Hits to trip", "Int", 2, 1, 10),
+                ("Combat", "Window (s)", "Int", 20, 5, 120),
+                ("Combat", "Move closer by (m)", "Int", 6, 1, 30),
+                ("Combat", "Closest (m)", "Int", 3, 1, 30),
+                ("Combat", "Skip target (s)", "Int", 30, 5, 300),
+                ("Combat", "Pull Distance (m)", "Int", 20, 3, 100),
+                ("Combat", "Tag Before Fleeing", "Bool", 1, 0, 1),
+                ("Combat", "Magic Response", "Combo", 0, 0, 3),   // beside Missile Response since 2026-11-11
             };
             object older = Parse("{\"BoostNavPriority\":true}");            // what an older RynthAi sends
             object newer = Parse("{\"VariablePowerMin\":50,\"VariablePowerMax\":100,\"MissileEnvironmentResponse\":0,\"MagicEnvironmentResponse\":0," +
@@ -119,32 +119,34 @@ namespace CombatSettingsTests
 
             // Section headers and spacers of these groups follow the same gate (no empty headers on an older RynthAi).
             foreach (string sec in new[] { "Variable Power (monster rules)", "Hitting the Environment", "Pull Away (Kite)" })
-                foreach (string tab in new[] { "Melee Combat", "Spell Combat" })
+                foreach (string tab in new[] { "Combat" })
                 {
                     object? header = Row(tab, sec, "Section");
                     if (header == null) continue;
                     Check(!Visible(header, older), $"{tab} / {sec}: the header is hidden for an older RynthAi");
                     Check(Visible(header, newer), $"{tab} / {sec}: the header shows for a newer one");
                 }
-            Check(Row("Melee Combat", "Pull Away (Kite)", "Section") != null && Row("Melee Combat", "Hitting the Environment", "Section") != null
-                  && Row("Melee Combat", "Variable Power (monster rules)", "Section") != null && Row("Spell Combat", "Hitting the Environment", "Section") != null, "all four section headers exist");
+            Check(Row("Combat", "Pull Away (Kite)", "Section") != null && Row("Combat", "Hitting the Environment", "Section") != null
+                  && Row("Combat", "Variable Power (monster rules)", "Section") != null, "all three section headers exist");
+            Check(Row("Spell Combat", "Hitting the Environment", "Section") == null && Row("Spell Combat", "Magic Response", "Combo") == null,
+                "Spell Combat no longer has its own Hitting the Environment (Magic Response is on Combat, with the rest)");
 
             // The combos list RynthAi's EnvironmentResponse in its order.
-            object missile = Row("Melee Combat", "Missile Response", "Combo")!;
+            object missile = Row("Combat", "Missile Response", "Combo")!;
             var items = (string[])missile.GetType().GetProperty("Items")!.GetValue(missile)!;
             Check(items.SequenceEqual(new[] { "Off", "Move closer", "New target", "Move closer, then new target" }), "Missile Response: Off, Move closer, New target, Move closer then new target (RynthAi's order)");
 
             // A row edits only its own property; the rest rides along.
             object edit = Parse("{\"BoostNavPriority\":true," + sent.TrimStart('{'));
-            Set(Row("Melee Combat", "Pull Distance (m)", "Int")!, edit, 55);
-            Set(Row("Melee Combat", "Tag Before Fleeing", "Bool")!, edit, 1);
-            Set(Row("Spell Combat", "Magic Response", "Combo")!, edit, 1);
+            Set(Row("Combat", "Pull Distance (m)", "Int")!, edit, 55);
+            Set(Row("Combat", "Tag Before Fleeing", "Bool")!, edit, 1);
+            Set(Row("Combat", "Magic Response", "Combo")!, edit, 1);
             string after = JsonSerializer.Serialize(edit, info);
             Check(after.Contains("\"KitePullMeters\":55") && after.Contains("\"KiteTagFirst\":true") && after.Contains("\"MagicEnvironmentResponse\":1"), "the edits land on their own properties");
             Check(after.Contains("\"BoostNavPriority\":true") && after.Contains("\"EnvironmentSkipSec\":60") && after.Contains("\"MissileEnvironmentResponse\":2"), "the other settings ride along unchanged");
 
             // The rows an older RynthAi lacks don't change what a plain save sends.
-            Set(Row("Melee Combat", "Pull Distance (m)", "Int")!, older, 30);   // can't happen in the UI (hidden); must not throw
+            Set(Row("Combat", "Pull Distance (m)", "Int")!, older, 30);   // can't happen in the UI (hidden); must not throw
             Check(true, "setting a hidden row doesn't throw");
 
             // ── The monster rule: Power and Kite ────────────────────────────────────────

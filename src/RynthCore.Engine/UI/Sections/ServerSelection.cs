@@ -1,7 +1,7 @@
 // ============================================================================
 //  RynthCore.Engine - UI/Sections/ServerSelection.cs
 //  "Which server is this?" as one choice, on top of the per-server overrides
-//  (ServerForce): the Diagnostics page's server picker and "/rc server pick".
+//  (ServerForce): the Game Client page's server picker and "/rc server pick".
 //
 //    pick <id>   that server forced On, every other server forced Off, so
 //                exactly one server is active whatever detection says;

@@ -293,7 +293,7 @@ internal static class PanelStateStore
         }
     }
 
-    /// <summary>Rewrite panel_state.txt from the in-memory snapshot (Settings > Display "Save Layout
+    /// <summary>Rewrite panel_state.txt from the in-memory snapshot (Settings > Interface "Save Layout
     /// Now"). An explicit user action, so unlike the automatic saves it is NOT gated by
     /// RememberWindowLayout: it writes even when that is off.</summary>
     public static void Flush()
@@ -391,7 +391,7 @@ internal static class PanelStateStore
 
     private static void Save(bool force = false)
     {
-        // Settings > Display "Remember Open Windows and Positions" (default on). Off: keep the last
+        // Settings > Interface "Remember Open Windows and Positions" (default on). Off: keep the last
         // file; do not overwrite it while the user is rearranging.
         if (!force && !EngineSettings.RememberWindowLayout)
             return;

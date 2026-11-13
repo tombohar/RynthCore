@@ -712,7 +712,7 @@ internal static unsafe class Win32Backend
         // GetAsyncKeyState reads the physical key whatever window has focus: without
         // the focus test, Insert (or Shift/Ctrl+Insert paste/copy) pressed in another
         // client or app flipped this client's capture off unseen. Not while typing in
-        // RynthChat: there Shift/Ctrl+Insert are paste/copy. Opt-in (Settings > Display,
+        // RynthChat: there Shift/Ctrl+Insert are paste/copy. Opt-in (Settings > Hotkeys,
         // EngineSettings.InsertReleasesUi): off, Insert does nothing.
         if (insertDown && !_insertWasDown && _hasFocus && !ChatCaptureActive
             && Plugins.EngineSettings.InsertReleasesUi)

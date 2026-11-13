@@ -27,6 +27,12 @@
 //         (or the minimum is 0), else No, and the arm is spent. An unarmed or
 //         expired request is left to the client, as before. The last request is
 //         always recorded so the plugin can see what happened.
+//         v97 (ConfirmationArmPolicy.ArmFlagLeaveBelow in minPercent): a second, sticky
+//         slot. A request at its minimum is answered Yes, one below it is left to the
+//         client instead of answered No, and the arm stays armed for the next one until
+//         it times out (120 s at most) or is disarmed (the flag with timeoutMs <= 0). A
+//         one-shot arm goes first and its arm/disarm calls never touch the sticky one.
+//         The rules live in ConfirmationArmPolicy.cs (pure, tested).
 //
 //  Threading: the detour runs on AC's main thread and only takes a short lock;
 //         the sender is called there, outside the lock. Arm/Get run on any thread.
@@ -48,6 +54,7 @@ internal static unsafe class ConfirmationResponder
     public const int OutcomeAccepted = 2;  // answered Yes for the plugin
     public const int OutcomeDeclined = 3;  // answered No: the server's percent was below the minimum
     public const int OutcomeSendFailed = 4; // armed, but the sender failed; the client showed it
+    public const int OutcomeAcceptedSticky = 5; // v97: answered Yes by the sticky (leave-below) arm
 
     private const int EventConfirmationResponseVa = 0x006A2030;
 
@@ -58,11 +65,8 @@ internal static unsafe class ConfirmationResponder
     private static delegate* unmanaged[Cdecl]<uint, uint, int, byte> _eventConfirmationResponse;
 
     private static readonly object _lock = new();
-    // The armed answer (one-shot).
-    private static bool _armed;
-    private static uint _armedType;
-    private static int _armedMinPercent;
-    private static long _armedUntil;
+    // The armed answers: the v85 one-shot and the v97 sticky (leave-below) arm.
+    private static ConfirmationArm _oneShot, _sticky;
     // The last request seen.
     private static int _seq;
     private static uint _lastType, _lastContext;
@@ -86,28 +90,17 @@ internal static unsafe class ConfirmationResponder
 
     /// <summary>
     /// Arm one answer for the next request of <paramref name="type"/> within
-    /// <paramref name="timeoutMs"/>. timeoutMs &lt;= 0 disarms. 1 armed (or disarmed),
-    /// 0 the sender or the game-event hook isn't available, -3 bad arguments.
+    /// <paramref name="timeoutMs"/>. timeoutMs &lt;= 0 disarms. <paramref name="minPercent"/> with
+    /// <see cref="ConfirmationArmPolicy.ArmFlagLeaveBelow"/> (v97) arms or disarms the sticky slot,
+    /// without it the one-shot slot. 1 armed (or disarmed), 0 the sender or the game-event hook
+    /// isn't available, -3 bad arguments.
     /// </summary>
     public static int Arm(uint type, int minPercent, int timeoutMs)
     {
-        if (timeoutMs <= 0)
-        {
-            lock (_lock) _armed = false;
-            return 1;
-        }
-        if (type == 0 || minPercent < 0 || minPercent > 100 || timeoutMs > 120_000)
-            return -3;
-        if (!HasSender || !SmartBoxHooks.IsGameEventHookInstalled)
-            return 0;
+        bool available = HasSender && SmartBoxHooks.IsGameEventHookInstalled;
         lock (_lock)
-        {
-            _armed = true;
-            _armedType = type;
-            _armedMinPercent = minPercent;
-            _armedUntil = Environment.TickCount64 + timeoutMs;
-        }
-        return 1;
+            return ConfirmationArmPolicy.Apply(ref _oneShot, ref _sticky, type, minPercent, timeoutMs,
+                Environment.TickCount64, available);
     }
 
     /// <summary>The last request: its sequence number (0 = none yet), type, context, the
@@ -139,7 +132,7 @@ internal static unsafe class ConfirmationResponder
         uint context = unchecked((uint)Marshal.ReadInt32(data, 8));
         int percent = ParsePercent(data, size);
 
-        bool answer = false, accept = false;
+        bool answer = false, accept = false, viaSticky = false;
         lock (_lock)
         {
             _seq++;
@@ -148,12 +141,10 @@ internal static unsafe class ConfirmationResponder
             _lastPercent = percent;
             _lastAt = Environment.TickCount64;
             _lastOutcome = OutcomeShown;
-            if (_armed && _armedType == type && Environment.TickCount64 <= _armedUntil)
-            {
-                _armed = false;
-                answer = true;
-                accept = _armedMinPercent <= 0 || (percent >= 0 && percent >= _armedMinPercent);
-            }
+            ConfirmationArmPolicy.Verdict verdict = ConfirmationArmPolicy.Decide(ref _oneShot, ref _sticky, type, percent, _lastAt);
+            answer = verdict != ConfirmationArmPolicy.Verdict.LeaveToClient;
+            viaSticky = verdict == ConfirmationArmPolicy.Verdict.AcceptSticky;
+            accept = verdict == ConfirmationArmPolicy.Verdict.Accept || viaSticky;
         }
         if (!answer)
             return false;
@@ -166,17 +157,16 @@ internal static unsafe class ConfirmationResponder
         catch { sent = false; }
 
         lock (_lock)
-            _lastOutcome = !sent ? OutcomeSendFailed : accept ? OutcomeAccepted : OutcomeDeclined;
+            _lastOutcome = !sent ? OutcomeSendFailed : viaSticky ? OutcomeAcceptedSticky : accept ? OutcomeAccepted : OutcomeDeclined;
         if (_logCount < 40)
         {
             _logCount++;
-            RynthLog.Compat($"Confirmation type={type} ctx=0x{context:X8} percent={percent} -> {(sent ? (accept ? "yes" : "no") : "send failed, shown")}");
+            RynthLog.Compat($"Confirmation type={type} ctx=0x{context:X8} percent={percent} -> {(sent ? (accept ? (viaSticky ? "yes (sticky)" : "yes") : "no") : "send failed, shown")}");
         }
         return sent;
     }
 
-    // "You determine that you have a 38 percent chance to succeed." -> 38. The text is a
-    // string16 (u16 length, cp1252 bytes) at +12. -1 when there is no "N percent".
+    // The text is a string16 (u16 length, cp1252 bytes) at +12. -1 when there is no "N percent".
     private static int ParsePercent(IntPtr data, uint size)
     {
         const int textOff = 12;
@@ -185,19 +175,6 @@ internal static unsafe class ConfirmationResponder
         int len = (ushort)Marshal.ReadInt16(data, textOff);
         if (len <= 0 || len > 512 || textOff + 2 + len > size)
             return -1;
-        byte* p = (byte*)data + textOff + 2;
-        ReadOnlySpan<byte> text = new(p, len);
-        int at = text.IndexOf(" percent"u8);
-        if (at <= 0)
-            return -1;
-        int end = at, start = at;
-        while (start > 0 && text[start - 1] >= (byte)'0' && text[start - 1] <= (byte)'9')
-            start--;
-        if (start == end || end - start > 3)
-            return -1;
-        int value = 0;
-        for (int i = start; i < end; i++)
-            value = value * 10 + (text[i] - '0');
-        return value > 100 ? 100 : value;
+        return ConfirmationArmPolicy.ParsePercent(new ReadOnlySpan<byte>((byte*)data + textOff + 2, len));
     }
 }

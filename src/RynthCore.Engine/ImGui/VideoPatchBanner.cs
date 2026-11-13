@@ -14,7 +14,7 @@ namespace RynthCore.Engine.ImGuiBackend;
 internal static class VideoPatchBanner
 {
     private const string Line1 = "Rendering paused (video patch: all)";
-    private const string Line2 = "Type /rc video off, or Settings > Misc > Video patch";
+    private const string Line2 = "Type /rc video off, or Settings > Game Client > Video patch";
 
     private static readonly uint Back = RynthTheme.Argb(0xC0101820);
     private static uint Border => RynthTheme.Border;

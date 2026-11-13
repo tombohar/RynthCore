@@ -300,7 +300,7 @@ internal static class PlayerPlate
         _wantsMouse = _hover || _dragging;
     }
 
-    private const string DragTip = "Drag to move your plate.\nLock it again in Settings > UI > Vitals or Vision > Nameplates > Your plate (or /rv plates self lock).";
+    private const string DragTip = "Drag to move your plate.\nLock it again in Settings > Interface > Your Vitals or Vision > Nameplates > Your plate (or /rv plates self lock).";
 
     /// <summary>Fades the plate in / out and steps the bars; false when nothing should be painted.</summary>
     private static bool Advance(ref MonsterHud.Frame f, bool show)

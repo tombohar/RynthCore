@@ -23,6 +23,9 @@ internal static class Program
             CostsOnTheRealTable(t);
             AffordableMatchesALinearScan(t);
             RaiseChecks(t);
+            MaxAfterUntrainAndRetrain(t);
+            MaxAcrossTheSpecializedSwitch(t);
+            MaxNeverAsksPastTheTop(t);
         }
         TrainChecks();
         ParserRefusesJunk();
@@ -54,8 +57,7 @@ internal static class Program
         if (raw == null) return null;
         bool ok = TrainingCosts.TryParseXpTable(raw, out XpTableData t);
         Check(ok, "XpTable parses");
-        Console.WriteLine($"     ranks: attributes {t.AttributeXp.Length - 1}, vitals {t.VitalXp.Length - 1}, trained {t.TrainedXp.Length - 1}, specialized {t.SpecializedXp.Length - 1}, levels {t.LevelXp.Length - 1}");
-        return ok ? t : null;
+        Console.WriteLine($"     ranks: attributes {t.AttributeXp.Length - 1}, vitals {t.VitalXp.Length - 1}, trained {t.TrainedXp.Length - 1}, specialized {t.SpecializedXp.Length - 1}, levels {t.LevelXp.Length - 1}");        return ok ? t : null;
     }
 
     private static void TableShape(XpTableData t)
@@ -161,6 +163,154 @@ internal static class Program
         uint[] huge = { 0, uint.MaxValue };
         Check(TrainingCosts.CheckRaise(huge, 0, 0, long.MaxValue, 1, 0, out long hc) == RaiseStatus.Sent && hc == uint.MaxValue, "uint.MaxValue XP fits");
         Check(TrainingCosts.CheckRaise(a, 50, a[51], long.MaxValue, 1, 0, out _) == RaiseStatus.NotRaisable, "spent already covers the next rank (cost 0) -> NotRaisable, nothing sent");
+    }
+
+    // ── Max after untrain / train again, and across trained <-> specialized ──
+    //
+    // A model of ACE's own rules (Player_Skills.cs): UntrainSkill / UnspecializeSkill / ResetSkill
+    // refund ExperienceSpent and zero ranks and XP; TrainSkill (credits) starts at rank 0 with nothing
+    // spent; SpecializeSkill at the temple keeps the XP and re-ranks it on the specialized table
+    // (CalcSkillRank); HandleActionRaiseSkill / SpendSkillXp refuse, without a word, an amount over the
+    // unassigned XP or over ExperienceLeft (table[top] - spent, never below 0) and otherwise spend it all.
+
+    private sealed class AceSkill
+    {
+        public uint[]? Table;   // null = untrained
+        public uint Ranks, Spent;
+    }
+
+    private static uint AceRank(uint[] table, uint spent)
+    {
+        for (int i = table.Length - 1; i >= 0; i--) if (spent >= table[i]) return (uint)i;
+        return 0;
+    }
+
+    private static bool AceRaise(AceSkill k, ref long unassigned, long amount)
+    {
+        if (k.Table == null || amount <= 0 || amount > uint.MaxValue || amount > unassigned) return false;
+        if (k.Ranks >= k.Table.Length - 1) return false;                               // IsMaxRank
+        long left = Math.Max(0L, (long)k.Table[^1] - k.Spent);                         // ExperienceLeft
+        if (amount > left) return false;
+        unassigned -= amount;
+        k.Spent += (uint)amount;
+        k.Ranks = AceRank(k.Table, k.Spent);
+        return true;
+    }
+
+    private static void AceUntrain(AceSkill k, ref long unassigned)
+    {
+        unassigned += k.Spent;
+        k.Table = null; k.Ranks = 0; k.Spent = 0;
+    }
+
+    /// <summary>The panel's Max on the numbers the client shows, sent to the model server. True when it was taken.</summary>
+    private static bool PanelMax(AceSkill k, ref long unassigned, out MaxRaisePlan plan)
+    {
+        plan = TrainingCosts.PlanMax(k.Table!, k.Ranks, k.Spent, unassigned);
+        return plan.Ranks > 0 && AceRaise(k, ref unassigned, plan.Cost);
+    }
+
+    private static void MaxAfterUntrainAndRetrain(XpTableData t)
+    {
+        Section("Max after untrain -> train again (ACE: XP refunded, back at rank 0 with nothing spent)");
+        uint[] tr = t.TrainedXp;
+        int top = tr.Length - 1;
+
+        // A maxed trained skill, untrained and trained again: the refund buys every rank back in one Max.
+        var k = new AceSkill { Table = tr, Ranks = (uint)top, Spent = tr[top] };
+        long xp = 50_000_000;
+        Check(TrainingCosts.IsMax(tr, k.Ranks) && TrainingCosts.PlanMax(tr, k.Ranks, k.Spent, xp) is { Ranks: 0, RanksLeft: 0, Missing: 0 },
+            "before: at the top, Max has nothing to buy");
+        AceUntrain(k, ref xp);
+        k.Table = tr;                                    // trained again with credits
+        Check(k.Ranks == 0 && k.Spent == 0 && xp == 50_000_000 + tr[top], "untrain refunded the XP; trained again at rank 0, nothing spent");
+        bool sent = PanelMax(k, ref xp, out MaxRaisePlan p);
+        Check(p.ReachesTop && p.Ranks == top && p.Cost == tr[top] && p.Missing == 0,
+            $"Max from rank 0 offers all {top} ranks for {tr[top]:N0} XP (got +{p.Ranks}, {p.Cost:N0})");
+        Check(p.Cost <= uint.MaxValue, "rank 0 to the top fits one 32-bit raise");
+        Check(sent && k.Ranks == top && TrainingCosts.IsMax(tr, k.Ranks), "the server takes it: the skill is at the top again");
+        MaxRaisePlan after = TrainingCosts.PlanMax(tr, k.Ranks, k.Spent, xp);
+        Check(after.Ranks == 0 && after.RanksLeft == 0 && TrainingCosts.CostOf(tr, k.Ranks, k.Spent, 1) == -1,
+            "at the true top it still shows max (nothing left, +1 prices -1)");
+
+        // Partly raised (rank 150 and some way to 151), untrained, trained again: the refund alone buys rank 150 back and more.
+        uint part = tr[150] + (tr[151] - tr[150]) / 3;
+        k = new AceSkill { Table = tr, Ranks = 150, Spent = part };
+        xp = 0;
+        AceUntrain(k, ref xp);
+        k.Table = tr;
+        sent = PanelMax(k, ref xp, out p);
+        Check(sent && p.Ranks == 150 && k.Ranks == 150 && k.Spent == tr[150] && xp == part - tr[150],
+            $"refund only: Max buys the 150 ranks back exactly (+{p.Ranks}); the rest stays unassigned ({xp:N0})");
+        Check(!p.ReachesTop && p.Missing == tr[top] - (long)part && p.RanksLeft == top,
+            $"and says it stops short: {p.Missing:N0} more XP for the top");
+
+        // Specialized and maxed, untrained (temple: specialized -> trained -> untrained), trained again with
+        // credits: the trained top costs more than the specialized one, so the refund alone falls short.
+        uint[] sp = t.SpecializedXp;
+        k = new AceSkill { Table = sp, Ranks = (uint)(sp.Length - 1), Spent = sp[^1] };
+        xp = 0;
+        AceUntrain(k, ref xp);
+        k.Table = tr;
+        p = TrainingCosts.PlanMax(tr, 0, 0, xp);
+        Check(!p.ReachesTop && p.Ranks < top && p.Missing == (long)tr[top] - sp[^1],
+            $"specialized max refunded ({sp[^1]:N0}) and trained again: Max (+{p.Ranks} of {top}), {p.Missing:N0} XP short of the trained top");
+        sent = PanelMax(k, ref xp, out _);
+        Check(sent && k.Ranks == p.Ranks, "that partial Max is taken as offered");
+        xp += p.Missing;
+        sent = PanelMax(k, ref xp, out p);
+        Check(sent && p.ReachesTop && TrainingCosts.IsMax(tr, k.Ranks), "with the missing XP the next Max reaches the top");
+    }
+
+    private static void MaxAcrossTheSpecializedSwitch(XpTableData t)
+    {
+        Section("Max across trained <-> specialized (the table follows the skill's class)");
+        uint[] tr = t.TrainedXp, sp = t.SpecializedXp;
+        Check(TrainingCosts.TableFor(t, 3, 2) == tr && TrainingCosts.TableFor(t, 3, 3) == sp, "class 2 -> trained table, class 3 -> specialized");
+
+        // Temple specialize: the XP stays, the ranks are counted again on the specialized table.
+        uint spent = tr[150] + 12_345;
+        var k = new AceSkill { Table = sp, Ranks = AceRank(sp, spent), Spent = spent };
+        Check(k.Ranks > 150 && sp[k.Ranks] <= spent && (k.Ranks + 1 >= sp.Length || sp[k.Ranks + 1] > spent),
+            $"trained rank 150 specialized: rank {k.Ranks} on the specialized table, XP kept");
+        long xp = long.MaxValue / 4;
+        MaxRaisePlan p = TrainingCosts.PlanMax(sp, k.Ranks, k.Spent, xp);
+        Check(p.ReachesTop && p.Cost == sp[^1] - (long)spent, $"Max prices the rest on the specialized table ({p.Cost:N0} XP)");
+        Check(PanelMax(k, ref xp, out _) && TrainingCosts.IsMax(sp, k.Ranks), "the server takes it: specialized top");
+
+        // A trained skill raised past the specialized top, then specialized: already at the top (ACE's ExperienceLeft is 0).
+        spent = tr[^1];
+        k = new AceSkill { Table = sp, Ranks = AceRank(sp, spent), Spent = spent };
+        p = TrainingCosts.PlanMax(sp, k.Ranks, k.Spent, xp);
+        Check(TrainingCosts.IsMax(sp, k.Ranks) && p.Ranks == 0 && p.RanksLeft == 0, "trained XP over the specialized top: shows max, Max buys nothing");
+
+        // Unspecialize (refund, trained at rank 0): priced on the trained table from rank 0.
+        k = new AceSkill { Table = sp, Ranks = (uint)(sp.Length - 1), Spent = sp[^1] };
+        xp = tr[^1];
+        AceUntrain(k, ref xp);
+        k.Table = tr;
+        Check(PanelMax(k, ref xp, out p) && p.ReachesTop && p.Ranks == tr.Length - 1 && TrainingCosts.IsMax(tr, k.Ranks),
+            "unspecialized (XP refunded, trained at rank 0): Max from the trained table reaches the top");
+    }
+
+    private static void MaxNeverAsksPastTheTop(XpTableData t)
+    {
+        Section("Max never asks the server for more than it allows");
+        var rnd = new Random(1112);
+        bool allTaken = true, neverOver = true;
+        foreach (var (_, tab) in Tables(t))
+            for (int i = 0; i < 500; i++)
+            {
+                uint r = (uint)rnd.Next(0, tab.Length - 1);
+                uint spent = tab[r] + (uint)rnd.Next(0, (int)Math.Min(int.MaxValue, tab[r + 1] - tab[r]));
+                long xp = rnd.Next(3) switch { 0 => rnd.Next(), 1 => (long)rnd.Next() * 3, _ => long.MaxValue / 4 };
+                MaxRaisePlan p = TrainingCosts.PlanMax(tab, r, spent, xp);
+                if (p.Cost > Math.Max(0L, (long)tab[^1] - spent) || p.Cost > xp) neverOver = false;
+                var k = new AceSkill { Table = tab, Ranks = r, Spent = spent };
+                if (p.Ranks > 0 && !AceRaise(k, ref xp, p.Cost)) allTaken = false;
+            }
+        Check(neverOver, "2,000 states: Max's XP is within the unassigned XP and the XP left to the top");
+        Check(allTaken, "and the server model takes every one of them");
     }
 
     private static void TrainChecks()

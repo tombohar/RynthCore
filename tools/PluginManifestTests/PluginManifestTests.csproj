@@ -42,6 +42,8 @@
     <Compile Include="..\..\src\RynthCore.Engine\Plugins\PluginManifestGate.cs" Link="Engine\PluginManifestGate.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Plugins\PluginPathDedupe.cs" Link="Engine\PluginPathDedupe.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Plugins\PluginFilePrefetchList.cs" Link="Engine\PluginFilePrefetchList.cs" />
+    <!-- v97: the confirmation arm's flag and argument check (the SDK must use the engine's flag). -->
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ConfirmationArmPolicy.cs" Link="Engine\ConfirmationArmPolicy.cs" />
   </ItemGroup>
 
 </Project>

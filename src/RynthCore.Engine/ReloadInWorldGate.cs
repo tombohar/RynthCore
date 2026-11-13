@@ -9,7 +9,7 @@
 //  This gate waits with the old engine still mapped until the player is out of the world.
 //
 //  Differences from the PR, all the owner's decisions:
-//    - OFF by default: engine.json "HoldReloadInWorld" (Settings > Misc, "Hold reloads while in
+//    - OFF by default: engine.json "HoldReloadInWorld" (Settings > Game Client, "Hold reloads while in
 //      the world"). Off, nothing here runs and a reload behaves exactly as before.
 //    - A reload asked for by hand (ERl, the bar RL button, /rc rl, the hotkey) is never held;
 //      only automatic ones (the file watcher, an engine deploy) are.

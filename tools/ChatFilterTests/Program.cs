@@ -68,6 +68,10 @@ internal static class Program
         OwnColorPrecedence();
         OwnColorQueue();
         OwnColorCommand();
+        OwnSpansParse();
+        OwnSpansCommand();
+        OwnSpansQueue();
+        OwnSpansOverRules();
         SlowRulesNeedStrikes();
 
         Console.WriteLine();
@@ -567,6 +571,109 @@ internal static class Program
         var t = new Thread(() => other = ChatOwnColors.TakeArmed(700));
         t.Start(); t.Join();
         Check(other == null && ChatOwnColors.TakeArmed(700) == Orange, "armed per thread: another plugin thread's line isn't coloured");
+    }
+
+    // 2026-11-11: colour runs for parts of a line ("nextspans": RynthAi's per-part item info).
+    private static void OwnSpansParse()
+    {
+        Case("own runs: the nextspans payload is read strictly");
+        ChatSpan[]? s = ChatOwnColors.ParseSpans("0:15:E6B450;15:15:FFFFFF;40:6:#3fbfff", out string? err);
+        Check(err == null && s is { Length: 3 }, "three runs");
+        Check(s![0] == new ChatSpan(0, 15, 0xFFE6B450) && s[1] == new ChatSpan(15, 15, 0xFFFFFFFF) && s[2] == new ChatSpan(40, 6, 0xFF3FBFFF),
+            "offsets as given, colours opaque, '#' and lower case allowed");
+        Check(ChatOwnColors.ParseSpans(" 2:3:112233 ", out _) is { Length: 1 }, "spaces around the payload are fine");
+
+        string[] bad =
+        {
+            "", "0:5", "0:5:FFFFFF:1", "a:5:FFFFFF", "0:b:FFFFFF", "-1:5:FFFFFF", "0:-5:FFFFFF", "0:0:FFFFFF",
+            "0:5:FFFFF", "0:5:FFFFFFF", "0:5:GGGGGG", "0:5:orange", "0:5:0xFFFFFF", "+1:5:FFFFFF", "1.5:2:FFFFFF",
+            "0:5:FFFFFF;", ";0:5:FFFFFF", "0:5:FFFFFF;;6:1:FFFFFF", "10:5:FFFFFF;0:5:FFFFFF", "0:10:FFFFFF;5:5:FFFFFF",
+            "100001:1:FFFFFF", "0:9999999:FFFFFF", "0:5:FF FFFF",
+        };
+        foreach (string b in bad)
+            Check(ChatOwnColors.ParseSpans(b, out string? why) == null && why != null, $"refused with a reason: '{b}'");
+
+        var many = new System.Text.StringBuilder();
+        for (int i = 0; i < ChatOwnColors.MaxSpans + 1; i++) many.Append(many.Length > 0 ? ";" : "").Append($"{i}:1:FFFFFF");
+        Check(ChatOwnColors.ParseSpans(many.ToString(), out _) == null, $"more than {ChatOwnColors.MaxSpans} runs: refused");
+        Check(ChatOwnColors.ParseSpans(new string(' ', 2) + new string('1', ChatOwnColors.MaxPayloadChars + 1), out _) == null, "an over-long payload: refused");
+        Check(ChatOwnColors.ParseSpans("0:5:FFFFFF;5:5:000000", out _) is { Length: 2 }, "runs that touch are fine");
+
+        Check(ChatOwnColors.FitSpans(s, 46, out string? fit) == s && fit == null, "runs inside the line: kept");
+        Check(ChatOwnColors.FitSpans(s, 45, out fit) == null && fit != null, "one run past the end: none kept, and why");
+        Check(ChatOwnColors.FitSpans(null, 10, out fit) == null && fit == null, "no runs: nothing to say");
+    }
+
+    private static void OwnSpansCommand()
+    {
+        Case("own runs: SendPluginCommand(\"RynthCore.Chat\", \"nextspans\", ...) arms the next WriteToChat");
+        Check(ChatOwnColors.NextSpansAction == "nextspans", "the name RynthAi sends");
+        Check(ChatOwnColors.TakeArmedSpans(0) == null, "nothing armed: null");
+        Check(ChatOwnColors.HandlePluginCommand("nextspans", "0:4:EE921E", 100, out string? err) && err == null, "understood");
+        Check(ChatOwnColors.TakeArmed(100) == null, "it arms no whole-line colour");
+        Check(ChatOwnColors.TakeArmedSpans(150) is [{ Start: 0, Length: 4, Argb: Orange }], "the next WriteToChat takes it");
+        Check(ChatOwnColors.TakeArmedSpans(160) == null, "only the next one");
+        Check(ChatOwnColors.HandlePluginCommand("NextSpans", "0:4:EE921E", 200) && ChatOwnColors.TakeArmedSpans(200 + ChatOwnColors.ArmWindowMs + 1) == null,
+            "any case; armed too long ago: dropped");
+        Check(ChatOwnColors.HandlePluginCommand("nextspans", "0:4:EE921E", 300) && ChatOwnColors.HandlePluginCommand("nextspans", "none", 301)
+              && ChatOwnColors.TakeArmedSpans(302) == null, "\"none\" disarms (and answers yes: how a plugin asks)");
+        Check(ChatOwnColors.HandlePluginCommand("nextspans", "", 303), "\"\" answers yes too");
+        ChatOwnColors.HandlePluginCommand("nextspans", "0:4:EE921E", 400);
+        Check(!ChatOwnColors.HandlePluginCommand("nextspans", "0:4", 401, out err) && err != null && ChatOwnColors.TakeArmedSpans(402) == null,
+            "a bad payload: refused with a reason, and what was armed before is gone");
+        Check(ChatOwnColors.HandlePluginCommand("nextcolor", "#EE921E", 500) && ChatOwnColors.HandlePluginCommand("nextspans", "0:4:FFFFFF", 501)
+              && ChatOwnColors.TakeArmed(502) == Orange && ChatOwnColors.TakeArmedSpans(502) is { Length: 1 }, "nextcolor then nextspans: both for the same line");
+        ChatOwnColors.HandlePluginCommand("nextspans", "0:4:EE921E", 600);
+        ChatSpan[]? other = null;
+        var t = new Thread(() => other = ChatOwnColors.TakeArmedSpans(600));
+        t.Start(); t.Join();
+        Check(other == null && ChatOwnColors.TakeArmedSpans(600) != null, "armed per thread");
+    }
+
+    private static void OwnSpansQueue()
+    {
+        Case("own runs: noted with the line, handed over when it arrives");
+        var q = new ChatOwnColorQueue();
+        var runs = new[] { new ChatSpan(0, 15, 0xFFE6B450), new ChatSpan(15, 5, 0xFFFFFFFF) };
+        q.Expect(ItemLine + "\n", 0x12, null, runs, 1000);
+        Check(q.Count == 1, "runs alone are noted");
+        Check(q.Take(ItemLine, 0x12, 1100, out ChatSpan[]? got) == null && got == runs, "no whole-line colour; the runs come back");
+        q.Expect(ItemLine, 0x12, Orange, runs, 2000);
+        Check(q.Take(ItemLine, 0x12, 2100, out got) == Orange && got == runs, "both together");
+        q.Expect(ItemLine, 0x12, null, null, 3000);
+        Check(q.Count == 0, "neither: nothing noted");
+        q.Expect(ItemLine, 0x12, Orange, 4000);
+        Check(q.Take(ItemLine, 0x12, 4100, out got) == Orange && got == null, "nextcolor alone: no runs (as before)");
+
+        Check(ChatOwnColors.ArrivedSpans(runs, ItemLine + "\r\n", ItemLine) == runs, "arrived as written: the runs as they are");
+        Check(ChatOwnColors.ArrivedSpans(runs, "<Tell:IIDString:1:Bob>Bob<\\Tell> " + ItemLine, "Bob " + ItemLine) == null,
+            "AC's tell links taken out of it: the offsets don't hold, none");
+        Check(ChatOwnColors.ArrivedSpans(null, ItemLine, ItemLine) == null, "none written: none");
+        string cut = ItemLine[..18];
+        Check(ChatOwnColors.ArrivedSpans(runs, cut, cut) is [{ Start: 0, Length: 15 }, { Start: 15, Length: 3 }],
+            "a line cut short: the runs inside it, the last one cut");
+        Check(ChatOwnColors.ArrivedSpans(runs, ItemLine[..10], ItemLine[..10]) is [{ Start: 0, Length: 10 }], "runs past the cut are dropped");
+    }
+
+    private static void OwnSpansOverRules()
+    {
+        Case("own runs: drawn under the rules' colours");
+        var own = new[] { new ChatSpan(0, 10, 0xFF111111), new ChatSpan(10, 10, 0xFF222222), new ChatSpan(25, 5, 0xFF333333) };
+        Check(ChatOwnColors.EffectiveSpans(null, null, false) == null, "none: none");
+        Check(ChatOwnColors.EffectiveSpans(own, null, false) == own, "no rule: the plugin's runs");
+        var rule = new[] { new ChatSpan(5, 8, 0xFFAAAAAA) };
+        Check(ChatOwnColors.EffectiveSpans(null, rule, false) == rule, "no runs of its own: the rule's, as before");
+        Check(ChatOwnColors.EffectiveSpans(own, rule, true) == rule, "a rule's line colour wins over the runs (its match colours stay)");
+        Check(ChatOwnColors.EffectiveSpans(own, null, true) == null, "...and with no match colours the line is the rule's colour");
+        ChatSpan[] eff = ChatOwnColors.EffectiveSpans(own, rule, false)!;
+        Check(eff is [{ Start: 0, Length: 5, Argb: 0xFF111111 }, { Start: 5, Length: 8, Argb: 0xFFAAAAAA }, { Start: 13, Length: 7, Argb: 0xFF222222 },
+                      { Start: 25, Length: 5, Argb: 0xFF333333 }],
+            "a rule's match colour over the runs it overlaps, the runs cut around it");
+        var inside = new[] { new ChatSpan(26, 2, 0xFFBBBBBB) };
+        Check(ChatOwnColors.EffectiveSpans(own, inside, false) is [_, _, { Start: 25, Length: 1 }, { Start: 26, Length: 2, Argb: 0xFFBBBBBB }, { Start: 28, Length: 2 }],
+            "a match inside a run splits it");
+        for (int i = 1; i < eff.Length; i++)
+            Check(eff[i].Start >= eff[i - 1].Start + eff[i - 1].Length, "sorted, not overlapping");
     }
 
     private static void LineColorJson()

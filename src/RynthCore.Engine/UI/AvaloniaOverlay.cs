@@ -1513,7 +1513,7 @@ internal class RynthOverlayWindow : Window
     {
         try
         {
-            // Settings > Display "Remember Open Windows and Positions" (default on).
+            // Settings > Interface "Remember Open Windows and Positions" (default on).
             // Off: leave panels closed so a hand-arranged layout is not forced back.
             if (!Plugins.EngineSettings.RememberWindowLayout)
                 return;

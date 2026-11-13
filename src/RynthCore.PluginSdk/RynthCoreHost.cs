@@ -203,6 +203,8 @@ public readonly unsafe struct RynthCoreHost
     public bool HasGetMergeStackResult     => _api.Version >= 81 && _api.GetMergeStackResultFn     != IntPtr.Zero;
     /// <summary>v85: <see cref="ArmConfirmation"/> and <see cref="TryGetLastConfirmation"/>.</summary>
     public bool HasConfirmationAnswers     => _api.Version >= 85 && _api.ArmConfirmationFn != IntPtr.Zero && _api.GetLastConfirmationFn != IntPtr.Zero;
+    /// <summary>v97: <see cref="ArmConfirmationLeaveBelow"/> (a sticky arm that leaves prompts below its minimum to the client).</summary>
+    public bool HasConfirmationLeaveBelow  => HasConfirmationAnswers && _api.Version >= 97;
     public bool HasGetPluginInterface      => _api.Version >= 68 && _api.GetPluginInterfaceFn      != IntPtr.Zero;
     public bool HasGetLiveObjectIds        => _api.Version >= 69 && _api.GetLiveObjectIdsFn        != IntPtr.Zero;
     public bool HasGetLastUseDone          => _api.Version >= 70 && _api.GetLastUseDoneFn          != IntPtr.Zero;
@@ -652,6 +654,15 @@ public readonly unsafe struct RynthCoreHost
         public const uint YesNo = 7;
     }
 
+    /// <summary>Flags OR'ed into <see cref="ArmConfirmation"/>'s minPercent.</summary>
+    public static class ConfirmationArmFlags
+    {
+        /// <summary>v97: the sticky slot. A prompt below the minimum (or without a percent) is left to the client
+        /// instead of answered No, and the arm stays armed for later prompts until it times out or is disarmed.
+        /// Engines before v97 refuse it (-3).</summary>
+        public const int LeaveBelow = 0x100;
+    }
+
     /// <summary>What happened to the last prompt (<see cref="TryGetLastConfirmation"/>).</summary>
     public static class ConfirmationOutcome
     {
@@ -660,6 +671,7 @@ public readonly unsafe struct RynthCoreHost
         public const int Accepted = 2;   // answered Yes for the plugin
         public const int Declined = 3;   // answered No: the server's percent was below the minimum
         public const int SendFailed = 4; // armed, but the send failed: the client showed it
+        public const int AcceptedSticky = 5; // v97: answered Yes by the sticky arm (ArmConfirmationLeaveBelow)
     }
 
     /// <summary>
@@ -675,6 +687,34 @@ public readonly unsafe struct RynthCoreHost
         if (!HasConfirmationAnswers)
             return 0;
         return ((delegate* unmanaged[Cdecl]<uint, int, int, int>)_api.ArmConfirmationFn)(type, minPercent, timeoutMs);
+    }
+
+    /// <summary>
+    /// v97: a sticky arm for prompts of <paramref name="type"/>: every one that arrives within
+    /// <paramref name="timeoutMs"/> (1-120000) is answered Yes when the server's percent is at least
+    /// <paramref name="minPercent"/> (1-100), with outcome <see cref="ConfirmationOutcome.AcceptedSticky"/>;
+    /// one below it, or without a percent, is left to the client's own dialog (never answered No). The arm
+    /// stays until it times out, <see cref="DisarmConfirmationLeaveBelow"/>, or another sticky arm replaces
+    /// it (one sticky slot per client, shared by every plugin). A one-shot <see cref="ArmConfirmation"/>
+    /// goes first, and its arm or disarm never touches the sticky arm. 1 armed, 0 unavailable, -3 bad
+    /// arguments, and -3 from an engine before v97 (check <see cref="HasConfirmationLeaveBelow"/> first).
+    /// </summary>
+    public int ArmConfirmationLeaveBelow(uint type, int minPercent, int timeoutMs)
+    {
+        if (minPercent < 1 || minPercent > 100 || timeoutMs <= 0)
+            return -3;
+        return ArmConfirmation(type, minPercent | ConfirmationArmFlags.LeaveBelow, timeoutMs);
+    }
+
+    /// <summary>
+    /// v97: drops the sticky arm (<see cref="ArmConfirmationLeaveBelow"/>); a one-shot arm stays. Does
+    /// nothing (0) before v97, where a disarm would clear the one-shot arm instead.
+    /// </summary>
+    public int DisarmConfirmationLeaveBelow(uint type)
+    {
+        if (!HasConfirmationLeaveBelow)
+            return 0;
+        return ArmConfirmation(type, ConfirmationArmFlags.LeaveBelow, 0);
     }
 
     /// <summary>
@@ -1582,7 +1622,7 @@ public readonly unsafe struct RynthCoreHost
 
     /// <summary>
     /// v90: how big the frameless window <paramref name="key"/> draws itself, in percent of normal
-    /// (30-250; Settings > UI > Toolbar sets it too): <paramref name="percent"/> 0 asks, -1 goes back to
+    /// (30-250; Settings > Interface > In The Retail Toolbar's Place sets it too): <paramref name="percent"/> 0 asks, -1 goes back to
     /// following the text size, 30-250 sets it. Returns it now: 0 = follow the text size (draw at the
     /// fonts' size), -1 on an older engine. Any thread; cheap to ask every frame.
     /// </summary>

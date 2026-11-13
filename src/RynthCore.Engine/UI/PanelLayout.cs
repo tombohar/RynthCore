@@ -176,7 +176,7 @@ internal static class PanelLayout
             if (!Session.InFlight && Volatile.Read(ref _pendingOp) != null && Interlocked.Exchange(ref _pendingOp, null) is { } op)
                 RunOp(op, imguiReady ? snapshotIni : null);
 
-            MarkDefaultReadOnly(EngineSettings.PanelLayoutPerCharacter);   // the setting can change in Settings > Display
+            MarkDefaultReadOnly(EngineSettings.PanelLayoutPerCharacter);   // the setting can change in Settings > Interface
             LayoutSwitch? sw = Session.Tick(Environment.TickCount64, EngineSettings.PanelLayoutPerCharacter, InWorld,
                 LoginLifecycleHooks.LoginCompleteAtMs, SessionStateRegistry.LoginRecorded, Identity());
             if (sw is { } s)
@@ -353,7 +353,7 @@ internal static class PanelLayout
     private static string SaveBlockedReason() => PanelLayoutPolicy.DefaultReadOnlyText(InWorld);
 
     /// <summary>
-    /// Save Layout Now (Settings > Display): null when the window places go to the layout in use, else
+    /// Save Layout Now (Settings > Interface): null when the window places go to the layout in use, else
     /// why they don't (the PC-wide default with the setting on is only read). Any thread (racy read).
     /// </summary>
     public static string? SavePlacesProblem()
@@ -386,12 +386,12 @@ internal static class PanelLayout
         return PanelLayoutPolicy.StatusLines(active, files, why, defaults, perCharacter);
     }
 
-    // Settings > Display's line, built again only when what it shows changed (it draws every frame).
+    // Settings > Interface's line, built again only when what it shows changed (it draws every frame).
     private static Loaded? _lineFor;
     private static int _lineFlags = -1;
     private static string _line = string.Empty;
 
-    /// <summary>Settings > Display: whose layout this client uses and where its files are. Render thread.</summary>
+    /// <summary>Settings > Interface: whose layout this client uses and where its files are. Render thread.</summary>
     public static string SettingsLine()
     {
         bool perCharacter = EngineSettings.PanelLayoutPerCharacter;
@@ -415,13 +415,13 @@ internal static class PanelLayout
         return _line;
     }
 
-    /// <summary>Settings > Display's reset button: there is a character's own layout to reset.</summary>
+    /// <summary>Settings > Interface's reset button: there is a character's own layout to reset.</summary>
     public static bool CanResetFromSettings => _initialized && Active != null;
 
-    /// <summary>Settings > Display's reset confirmation text.</summary>
+    /// <summary>Settings > Interface's reset confirmation text.</summary>
     public static string ResetConfirmText() => PanelLayoutPolicy.ResetConfirmText(Active);
 
-    /// <summary>Settings > Display "Reset this character's layout" (confirmed): /rc layout reset confirm, answered in chat.</summary>
+    /// <summary>Settings > Interface "Reset this character's layout" (confirmed): /rc layout reset confirm, answered in chat.</summary>
     public static void ResetFromSettings()
     {
         static void Chat(string text, bool ok) =>
@@ -459,7 +459,7 @@ internal static class PanelLayout
         return null;
     }
 
-    /// <summary>Settings > Display "Layout for New Characters": /rc layout default, answered in chat.</summary>
+    /// <summary>Settings > Interface "Layout for New Characters": /rc layout default, answered in chat.</summary>
     public static void MakeDefaultFromSettings()
     {
         static void Chat(string text, bool ok) =>

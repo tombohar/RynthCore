@@ -1,6 +1,6 @@
 // ============================================================================
 //  RynthCore.Engine - ImGui/Panels/ServerPickSettingsUi.cs
-//  Settings > Diagnostics > Server: which server this character counts as.
+//  Settings > Game Client > Server: which server this character counts as.
 //
 //  A picker (Auto, or one of the servers the engine knows: the built-in ones
 //  and every server a loaded plugin declares), what is active and why, and the
@@ -8,7 +8,7 @@
 //  the other plugins ask for that server's settings. Picking a server forces it
 //  on and every other server off for this character (ServerSelectionStore);
 //  the menus, the "servermenu" push and plugin API v85 follow on the next frame.
-//  Drawn by SettingsFace for the Diagnostics tab's ServerPick row, in its look.
+//  Drawn by SettingsFace for the Game Client tab's ServerPick row, in its look.
 // ============================================================================
 
 using System;

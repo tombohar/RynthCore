@@ -137,7 +137,7 @@ internal static unsafe class RetailVitalsHooks
     /// The "Hide retail vitals" option. Stored for the whole PC in
     /// %LOCALAPPDATA%\RynthCore\retail_ui.txt ("HideRetailVitals=1"), beside the
     /// engine's other in-client UI settings (panel_text_size.txt,
-    /// nameplate_settings.txt). Set from Settings > UI or /rc ui retailvitals.
+    /// nameplate_settings.txt). Set from Settings > Interface or /rc ui retailvitals.
     /// Any thread: it only flips a flag and writes the file; TickHide applies it
     /// on AC's main thread.
     /// </summary>

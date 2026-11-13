@@ -170,12 +170,13 @@ internal static class ImGuiPanelHost
         public bool NeedsPlacement;
         public Vector2 Pos, Size;              // client pixels, as last drawn
         public Vector2 PersistedPos, PersistedSize;
-        // The saved spot when the client was too small for it at placement (AC's 800x600
-        // character select): re-applied as the display grows, dropped once it fits or the
-        // player moves the panel. Without this a panel saved near the right or bottom edge
-        // came back pulled inwards on every restart.
-        public Vector2? DesiredPos;
-        public Vector2 DesiredForDisplay;
+        // Docked: the panel's home (the saved spot, or where the player / a request put it) and
+        // where that draws, pulled onto the screen for its size and the display (UI/PanelPlacement).
+        // Worked out again whenever either changes, from the home, and the home is what is saved:
+        // a pull from a moment's smaller client (AC's 800x600 character select) or a taller first
+        // frame (a fit-height window at its saved height) is undone once it fits and never saved.
+        public readonly HomePlace Place = new();
+        public bool PullLogged;                // the first pull after this load's placement is logged
         public Vector2? RequestedSize;        // logical units, applied next frame (under Sync)
         public Vector2? RequestedPos;         // logical units, applied next frame (under Sync)
         public volatile bool HasRequest;      // RequestedSize or RequestedPos is set
@@ -514,7 +515,7 @@ internal static class ImGuiPanelHost
         foreach (Entry e in order)
         {
             if (!e.Shown && !IsOpen(e.Title)) continue;
-            lines.Add($"face {e.Title}: requested={IsOpen(e.Title)} shown={e.Shown} pos=({e.Pos.X:0},{e.Pos.Y:0}) size=({e.Size.X:0}x{e.Size.Y:0}) failures={e.Failures}{(e.Error != null ? " error=" + e.Error : "")}");
+            lines.Add($"face {e.Title}: requested={IsOpen(e.Title)} shown={e.Shown} pos=({e.Pos.X:0},{e.Pos.Y:0}){(e.Place.Pulled ? $" home=({e.Place.Home.X:0},{e.Place.Home.Y:0})" : "")} size=({e.Size.X:0}x{e.Size.Y:0}) failures={e.Failures}{(e.Error != null ? " error=" + e.Error : "")}");
         }
         if (lines.Count == 0) lines.Add("faces: none open");
         return lines;
@@ -734,7 +735,7 @@ internal static class ImGuiPanelHost
     {
         if (_restored) return;
         _restored = true;
-        // Settings > Display "Remember Open Windows and Positions" (default on).
+        // Settings > Interface "Remember Open Windows and Positions" (default on).
         if (!Plugins.EngineSettings.RememberWindowLayout) return;
         OpenSavedOpen();
     }
@@ -978,28 +979,34 @@ internal static class ImGuiPanelHost
     {
         Vector2 size = entry.Spec.DefaultSize;
         Vector2 pos;
+        string source;
         if (PanelStateStore.TryGetPanel(entry.Title, out PanelStateStore.PanelEntry saved) && (saved.Width > 0 || saved.Left != 0 || saved.Top != 0))
         {
             pos = new Vector2((float)saved.Left, (float)saved.Top);
             if (saved.Width > 0 && saved.Height > 0) size = new Vector2((float)saved.Width, (float)saved.Height);
+            source = "its saved place";
         }
         else if (entry.Spec.DefaultPos is Vector2 defaultPos)
         {
             pos = defaultPos; // the face's own first spot (a script window's FirstUseEver position)
+            source = "its first-open spot";
         }
         else if (entry.Spec.OpenCorner != PanelCorner.None && CornerLogicalPos(entry.Spec.OpenCorner, size, placeScale) is Vector2 corner)
         {
             pos = corner;
+            source = "its first-open corner";
         }
         else if (entry.Spec.OpenCentered && CenteredLogicalPos(size, placeScale) is Vector2 centered)
         {
             pos = centered;
+            source = "the centre";
         }
         else
         {
             int shown = 0;
             lock (Sync) foreach (Entry e in DrawOrder) if (e.Shown) shown++;
             pos = new Vector2(100 + shown * 20, 100 + shown * 20); // Avalonia's cascade
+            source = "the cascade";
         }
 
         size = Vector2.Max(size, entry.Spec.MinSize);
@@ -1007,25 +1014,43 @@ internal static class ImGuiPanelHost
         if (PanelRouter.ResolveDockedFace(entry.Title) == PanelFace.Both)
             pos += new Vector2(24, 24);
 
-        entry.Pos = ClampToDisplay(pos * placeScale, size * placeScale);
+        // Its home is the saved spot; where it draws is that pulled onto the screen (HomePlace), and
+        // DrawPanel lets go of the pull once the panel fits (a bigger display, its real height).
+        Vector2 display = ImGuiNET.ImGui.GetIO().DisplaySize;
         entry.Size = size * placeScale;
+        entry.Place.Set(pos * placeScale, entry.Size, display);
+        entry.Pos = entry.Place.Drawn;
         entry.PersistedPos = entry.Pos;
         entry.PersistedSize = entry.Size;
         entry.NeedsPlacement = true;
-        entry.DesiredPos = entry.Pos != pos * placeScale ? pos * placeScale : null;
-        entry.DesiredForDisplay = ImGuiNET.ImGui.GetIO().DisplaySize;
+        entry.PullLogged = false;
 
         // Popped-out windows sit above the game frame, so a docked panel opening under
-        // one would be invisible. The new spot is saved by the open's Persist, so the
-        // panel comes back where it could be seen.
+        // one would be invisible. The new spot is its home now and is saved by the open's
+        // Persist, so the panel comes back where it could be seen.
         if (ClearOfPopOuts(entry.Pos, entry.Size) is Vector2 clear)
         {
             RynthLog.UI($"ImGuiPanelHost: {entry.Title} would open under a popped-out window; " +
                         $"moved from ({entry.Pos.X:0},{entry.Pos.Y:0}) to ({clear.X:0},{clear.Y:0}).");
+            entry.Place.MoveTo(clear, entry.Size, display);
             entry.Pos = clear;
             entry.PersistedPos = clear;
-            entry.DesiredPos = null;   // don't pull it back under the pop-out as the display grows
+            source = "a spot clear of popped-out windows";
         }
+        LogPlacement(entry, source);
+    }
+
+    // Titles whose placement this engine load has logged (AC's render thread).
+    private static readonly HashSet<string> PlacementLogged = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// One line per panel per engine load (its first placement: the login's or the hot reload's), and every
+    /// placement that pulls it off its saved spot: where it draws, from what, and why. AC thread.
+    /// </summary>
+    private static void LogPlacement(Entry entry, string source)
+    {
+        if (!PlacementLogged.Add(entry.Title) && !entry.Place.Pulled) return;
+        RynthLog.UI("ImGuiPanelHost: " + entry.Place.Describe(entry.Title, source) + $" Layout {PanelStateStore.CurrentPath}.");
     }
 
     /// <summary>Above this share of a docked panel hidden by popped-out windows, it opens elsewhere.</summary>
@@ -1176,28 +1201,28 @@ internal static class ImGuiPanelHost
                     // A script's size request is its own, not the player's: not saved.
                     if (entry.Dynamic) entry.PersistedSize = entry.Size;
                 }
-                if (reqPos is Vector2 requestedPos)
+                // A face asking for the spot it is drawn at (PluginWindowFace / RynthAiFace after a text
+                // size change: "clamped to the screen at the new size") changes nothing here: the fit
+                // below pulls it onto the screen from its home. Any other spot is its new home.
+                if (reqPos is Vector2 requestedPos && !HomePlace.Near(requestedPos * placeScale, entry.Pos))
                 {
-                    entry.Pos = ClampToDisplay(requestedPos * placeScale, entry.Size);
-                    entry.PersistedPos = entry.Pos;   // not a move by the player: nothing to save
-                    entry.DesiredPos = null;
+                    entry.Place.MoveTo(requestedPos * placeScale, entry.Size, ImGuiNET.ImGui.GetIO().DisplaySize);
+                    entry.Pos = entry.Place.Drawn;
+                    entry.PersistedPos = entry.Pos;   // not a move by the player: nothing to save now
                     entry.NeedsPlacement = true;
                 }
             }
-            if (entry.DesiredPos is Vector2 want)
+            // Its size or the display changed: drawn from its home again, pulled onto the screen only
+            // as far as needed (UI/PanelPlacement). Not a move by the player: nothing is saved.
+            if (entry.Place.Fit(entry.Size, ImGuiNET.ImGui.GetIO().DisplaySize))
             {
-                Vector2 display = ImGuiNET.ImGui.GetIO().DisplaySize;
-                if (display != entry.DesiredForDisplay)
+                entry.Pos = entry.Place.Drawn;
+                entry.PersistedPos = entry.Pos;
+                entry.NeedsPlacement = true;
+                if (entry.Place.Pulled && !entry.PullLogged)
                 {
-                    entry.DesiredForDisplay = display;
-                    Vector2 p = ClampToDisplay(want, entry.Size);
-                    if (p != entry.Pos)
-                    {
-                        entry.Pos = p;
-                        entry.PersistedPos = p;   // not a move by the player: nothing to save
-                        entry.NeedsPlacement = true;
-                    }
-                    if (p == want) entry.DesiredPos = null;   // back where it was saved
+                    entry.PullLogged = true;
+                    RynthLog.UI("ImGuiPanelHost: " + entry.Place.DescribePull(entry.Title));
                 }
             }
             if (entry.NeedsPlacement)
@@ -1251,7 +1276,7 @@ internal static class ImGuiPanelHost
                 return; // closed, popped out or docked back this frame
 
             ImGuiNET.ImGui.SetCursorPos(new Vector2(0, header));
-            // Per-panel text size (Settings > Display): the face's fonts come from the
+            // Per-panel text size (Settings > Interface): the face's fonts come from the
             // set baked at that size (ImGuiFonts.Get); the header above keeps its size.
             // (Until a size change has been re-baked, the nearest size that is.)
             ImGuiFonts.CurrentStep = ImGuiFonts.BakedStepNear(PanelTextScale.Get(entry.Title));
@@ -1294,6 +1319,8 @@ internal static class ImGuiPanelHost
                     Vector2 maxSize = display.X > 1 ? display - outerPos : new Vector2(float.MaxValue, float.MaxValue);
                     Vector2 next = Vector2.Clamp(_resizeStartSize + (mouse - _resizeStartMouse), minSize, Vector2.Max(minSize, maxSize));
                     if (next != outerSize) ImGuiNET.ImGui.SetWindowSize(next);
+                    // Resized where it draws: that spot is the player's now (a pulled window doesn't jump back mid-drag).
+                    entry.Place.MoveTo(outerPos, next, display);
                 }
                 gHot = over || resizing;
                 if (gHot) ImGuiNET.ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeNWSE);
@@ -1366,7 +1393,9 @@ internal static class ImGuiPanelHost
             if (popped) _pendingDragDelta = Vector2.Zero;
             if (_pendingDragDelta != Vector2.Zero)
             {
-                ImGuiNET.ImGui.SetWindowPos(ClampToDisplay(ImGuiNET.ImGui.GetWindowPos() + _pendingDragDelta, ImGuiNET.ImGui.GetWindowSize()));
+                Vector2 next = ClampToDisplay(ImGuiNET.ImGui.GetWindowPos() + _pendingDragDelta, ImGuiNET.ImGui.GetWindowSize());
+                ImGuiNET.ImGui.SetWindowPos(next);
+                entry.Place.MoveTo(next, ImGuiNET.ImGui.GetWindowSize(), ImGuiNET.ImGui.GetIO().DisplaySize);   // the player's spot
                 _pendingDragDelta = Vector2.Zero;
             }
         }
@@ -1390,8 +1419,7 @@ internal static class ImGuiPanelHost
         {
             entry.PersistedPos = entry.Pos;
             entry.PersistedSize = entry.Size;
-            entry.DesiredPos = null;   // the player placed it: that is the spot now
-            Persist(entry, open: true, placeScale);
+            Persist(entry, open: true, placeScale);   // its home (a drag made that the new spot)
         }
     }
 
@@ -1594,6 +1622,7 @@ internal static class ImGuiPanelHost
         {
             Vector2 next = ClampToDisplay(winPos + ImGuiNET.ImGui.GetIO().MouseDelta, ImGuiNET.ImGui.GetWindowSize());
             ImGuiNET.ImGui.SetWindowPos(next);
+            entry.Place.MoveTo(next, ImGuiNET.ImGui.GetWindowSize(), ImGuiNET.ImGui.GetIO().DisplaySize);   // the player's spot
         }
 
         // Grip dots + DRAG (teal, 9) + title (10), vertically centred.
@@ -1641,7 +1670,7 @@ internal static class ImGuiPanelHost
             }
         }
 
-        // Text size (the same per-panel setting as Settings > Display).
+        // Text size (the same per-panel setting as Settings > Interface).
         float tsX = x - (canPopOut ? btn + 2 * s : 0) - 2 * s - btn;
         ImGuiNET.ImGui.SetCursorPos(new Vector2(tsX, y));
         int step = PanelTextScale.Get(entry.Title);
@@ -1755,11 +1784,11 @@ internal static class ImGuiPanelHost
         if (ImGuiNET.ImGui.Button(PhosphorIcons.ArrowCounterClockwise + " Reset"))
             PanelTextScale.ResetWindow(title);
         ImGuiNET.ImGui.EndDisabled();
-        SafeImGui.SetItemTooltip(all == 0 ? "Back to normal size" : "Back to the All Panels size (Settings > Display)");
+        SafeImGui.SetItemTooltip(all == 0 ? "Back to normal size" : "Back to the All Panels size (Settings > Interface)");
         ImGuiNET.ImGui.SameLine();
         if (ImGuiNET.ImGui.Button("Use for all windows"))
             PanelTextScale.UseForAll(step);
-        ImGuiNET.ImGui.SetItemTooltip("Every in-game window at this size (Settings > Display > All Panels)");
+        ImGuiNET.ImGui.SetItemTooltip("Every in-game window at this size (Settings > Interface > All Panels)");
     }
 
     private const string DragLabel = PhosphorIcons.DotsSixVertical + "DRAG";
@@ -1819,6 +1848,8 @@ internal static class ImGuiPanelHost
             Vector2 next = Vector2.Clamp(winSize + ImGuiNET.ImGui.GetIO().MouseDelta, minSize, Vector2.Max(minSize, maxSize));
             if (windowName != null) ImGuiNET.ImGui.SetWindowSize(windowName, next);
             else ImGuiNET.ImGui.SetWindowSize(next);
+            // Resized where it draws: that spot is the player's now (a pulled window doesn't jump back mid-drag).
+            entry.Place.MoveTo(winPos, next, display);
         }
         return hot;
     }
@@ -1848,7 +1879,7 @@ internal static class ImGuiPanelHost
     private static void PersistPopped(Entry entry, bool open, int left, int top, int width, int height, float placeScale, bool keepSize = false)
     {
         string title = entry.Title;
-        Vector2 docked = entry.Pos / placeScale;
+        Vector2 docked = DockedHome(entry) / placeScale;
         Vector2 size = new Vector2(width, height) / placeScale;
         UiBackgroundWriter.Enqueue($"persist {title}", () =>
         {
@@ -1860,10 +1891,16 @@ internal static class ImGuiPanelHost
         });
     }
 
+    /// <summary>
+    /// The docked spot to save (client px): the panel's home (HomePlace), not where it draws: a pull onto
+    /// a smaller screen or for a taller moment is never written over the saved spot.
+    /// </summary>
+    private static Vector2 DockedHome(Entry entry) => entry.Place.IsSet ? entry.Place.Home : entry.Pos;
+
     private static void Persist(Entry entry, bool open, float placeScale, bool floating = false)
     {
         string title = entry.Title;
-        Vector2 pos = entry.Pos / placeScale;
+        Vector2 pos = DockedHome(entry) / placeScale;
         Vector2 size = entry.Size / placeScale;
         if (PanelRouter.ResolveDockedFace(title) == PanelFace.Both)
             pos -= new Vector2(24, 24); // don't let the side-by-side offset drift the Avalonia face

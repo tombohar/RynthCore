@@ -58,5 +58,18 @@ internal static class PluginContractVersion
     /// <summary>The API version that added the "barMenu" manifest key; a plugin declaring it pins its own copy against this.</summary>
     public const uint BarMenu = 95;
 
-    public const uint Current = 95;
+    // v96: RESERVED for another contributor's request slot (jump-loot resend); not used here.
+    // v97: no table change. ArmConfirmation takes ConfirmationArmPolicy.ArmFlagLeaveBelow (0x100) OR'ed into
+    //      minPercent: a second, sticky slot. A prompt at or above its minimum is answered Yes, one below it (or
+    //      without a percent) is left to the client's dialog instead of answered No, and the arm stays armed for
+    //      the next prompt until it times out (120 s at most) or is disarmed (the flag with timeoutMs <= 0). The
+    //      v85 one-shot slot goes first, and a one-shot arm or disarm never touches the sticky one. Outcome 5
+    //      (AcceptedSticky): the sticky arm said Yes (RynthAi's "Auto-confirm crafting", 2026-11-11). Engines
+    //      before v97 refuse the flag as bad arguments (-3), so a plugin fails cleanly there. The SDK's
+    //      HasConfirmationLeaveBelow / ArmConfirmationLeaveBelow / DisarmConfirmationLeaveBelow. PROVISIONAL like
+    //      94 and 95 (feature/auto-confirm-craft): whichever merges second renumbers (never onto 96).
+    /// <summary>The API version whose ArmConfirmation takes the leave-below (sticky) flag.</summary>
+    public const uint ConfirmationLeaveBelow = 97;
+
+    public const uint Current = 97;
 }

@@ -38,7 +38,7 @@
 //  Chromeless (like the Avalonia face): the title row is the drag surface.
 //
 //  Size: the dashboard's panel text size (PanelTextScale.Get(Title): its own
-//  row in Settings > Display, else All Panels). The host draws the face with
+//  row in Settings > Interface, else All Panels). The host draws the face with
 //  the fonts baked for that step (ImGuiFonts.CurrentStep, the nearest baked
 //  one until a re-bake lands) and every box here is multiplied by that same
 //  step's factor (Px), so text, icons and boxes grow together; size 0 is the
@@ -176,7 +176,7 @@ internal sealed partial class RynthAiFace : IImGuiPanel
 
     /// <summary>
     /// Switches the dashboard between its Modern (compact) and Classic (retail) looks: the title bar
-    /// buttons of either look and Settings > Display. The window refits on the next frame. AC thread.
+    /// buttons of either look and Settings > Interface. The window refits on the next frame. AC thread.
     /// </summary>
     internal static void SwitchLook(bool classic) => RynthAiDashboardState.SetClassic(classic);
 
@@ -289,8 +289,9 @@ internal sealed partial class RynthAiFace : IImGuiPanel
             if (screenW > 1) width = MathF.Min(width, screenW);
             width = MathF.Max(width, MinWidth * _k);
             ImGuiPanelHost.RequestSize(Title, new Vector2(width, _contentHeight));
-            // Applied after the size, clamped to the screen at it: a bigger dashboard near the right or
-            // bottom edge moves in rather than running off (saved with the new size, like the bar's clamp).
+            // A bigger dashboard near the right or bottom edge moves in rather than running off: the host
+            // pulls it onto the screen from its home at the new size (UI/PanelPlacement; the spot asked for
+            // here is where it draws, so it changes nothing), and the home stays the saved spot.
             ImGuiPanelHost.RequestPos(Title, ImGuiNET.ImGui.GetWindowPos() / place);
         }
         else if (_fit)
@@ -422,7 +423,7 @@ internal sealed partial class RynthAiFace : IImGuiPanel
 
     /// <summary>
     /// The title row's right-click popup: the dashboard's size (its panel text size, the same
-    /// setting as Settings > Display > RynthAi Dashboard, or All Panels until it is set on its own).
+    /// setting as Settings > Interface > RynthAi Dashboard, or All Panels until it is set on its own).
     /// </summary>
     private static void SizePopup()
     {

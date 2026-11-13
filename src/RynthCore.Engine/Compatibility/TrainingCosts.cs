@@ -57,6 +57,17 @@ internal enum RaiseStatus
     SendFailed = -9,
 }
 
+/// <summary>
+/// What a Max raise buys (TrainingCosts.PlanMax): <see cref="Ranks"/> ranks for <see cref="Cost"/> XP,
+/// with <see cref="RanksLeft"/> ranks and <see cref="CostToTop"/> XP left to the top before it, and
+/// <see cref="Missing"/> more unassigned XP needed to reach the top in one go (0 when it does).
+/// </summary>
+internal readonly record struct MaxRaisePlan(int Ranks, long Cost, int RanksLeft, long CostToTop, long Missing)
+{
+    /// <summary>The raise takes the stat all the way to the top rank.</summary>
+    public bool ReachesTop => Ranks > 0 && Ranks == RanksLeft;
+}
+
 internal static class TrainingCosts
 {
     /// <summary>Most ranks one API raise may buy (the retail window offers 1 and 10).</summary>
@@ -149,6 +160,23 @@ internal static class TrainingCosts
             if (c >= 0 && c <= available) lo = mid; else hi = mid - 1;
         }
         return lo;
+    }
+
+    /// <summary>
+    /// The Skills panel's Max: the most ranks <paramref name="available"/> XP buys in one raise, what
+    /// that raise costs, and how far it is from the top. Worked out from the stat's numbers now, so a
+    /// skill that was untrained and trained again (rank 0, nothing spent, the refund in the unassigned
+    /// XP) is priced from rank 0 like any other. The XP sent never goes past the top
+    /// (<see cref="MaxRaisePlan.CostToTop"/> = table[top] - spent, which is ACE's ExperienceLeft).
+    /// </summary>
+    public static MaxRaisePlan PlanMax(uint[] table, uint ranks, uint spent, long available)
+    {
+        int left = RanksLeft(table, ranks);
+        long toTop = left > 0 ? CostOf(table, ranks, spent, left) : 0;
+        long have = Math.Max(0L, available);
+        int n = Affordable(table, ranks, spent, have);
+        long cost = n > 0 ? CostOf(table, ranks, spent, n) : 0;
+        return new MaxRaisePlan(n, cost, left, toTop, Math.Max(0L, toTop - have));
     }
 
     // ── the checks before a raise is sent ──────────────────────────────────

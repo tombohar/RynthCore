@@ -636,7 +636,8 @@ internal sealed class ChatView
     private void MeasureLine(ImFontPtr font, int i, float textW)
     {
         ChatLine line = _vis[i];
-        ChatSpan[]? spans = line.Route.Spans;
+        // The rules' match colours over the plugin's own colour runs (per-part item info).
+        ChatSpan[]? spans = ChatOwnColors.EffectiveSpans(line.OwnSpans, line.Route.Spans, line.Route.LineArgb != null);
         // Map coordinates ("82.3N, 34.2E") become links. Found here, when the line is measured,
         // never per frame; a line without any keeps the plain (or highlighted) path.
         List<ChatCoord> coords = ChatCoords.MayHaveCoords(line.Text) ? ChatCoords.Find(line.Text) : NoCoords;

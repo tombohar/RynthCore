@@ -98,8 +98,12 @@ internal static class ServerMenus
     /// <summary>The command that opens section <paramref name="sectionId"/> in the Mini Remote.</summary>
     public static string OpenSectionCommand(string sectionId) => "/rc miniremote section " + sectionId;
 
-    /// <summary>The command that forces <paramref name="serverId"/> on for this character.</summary>
-    public static string ForceCommand(string serverId) => "/rc server " + serverId + " on";
+    /// <summary>
+    /// The command that makes this character's world count as <paramref name="serverId"/>: the
+    /// Settings picker's own "pick" (that server on, every other off), so the picker then shows it
+    /// instead of "Mixed". "/rc server &lt;id&gt; on" left the others on Auto.
+    /// </summary>
+    public static string ForceCommand(string serverId) => "/rc server pick " + serverId;
 
     /// <summary>Every server that has items (active or not), with them. Any thread.</summary>
     public static List<MenuGroup> Groups(SectionRegistry.Snapshot snap)
@@ -262,7 +266,7 @@ internal static class ServerMenus
         {
             if (ImGuiNET.ImGui.MenuItem("Treat this world as " + g.Server.Name + "##srvforce_" + g.Server.Id))
                 Run(ForceCommand(g.Server.Id), showReply: true);
-            SafeImGui.SetItemTooltip("Saved for this character. Undo with /rc server " + g.Server.Id + " auto, or in the Mini Remote's Char section.");
+            SafeImGui.SetItemTooltip("Saved for this character. Undo: Settings > Game Client > Server > Auto (detect), or /rc server pick auto.");
         }
         return true;
     }

@@ -25,6 +25,8 @@
     <Compile Include="..\..\src\RynthCore.Engine\UI\PanelLayoutFiles.cs" Link="Engine\PanelLayoutFiles.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\UI\PanelStateStore.cs" Link="Engine\PanelStateStore.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\UI\BarLayout.cs" Link="Engine\BarLayout.cs" />
+    <!-- Where a docked window draws versus its home (the saved spot): 2026-11-12, panels moving on reload/login. -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\PanelPlacement.cs" Link="Engine\PanelPlacement.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Plugins\EngineSettingsFile.cs" Link="Engine\EngineSettingsFile.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ChatCommandReplies.cs" Link="Engine\ChatCommandReplies.cs" />
     <!-- ChatCommandReplies' /rc sense row names SenseLayout (the Sense views, feature/sense-compact). -->

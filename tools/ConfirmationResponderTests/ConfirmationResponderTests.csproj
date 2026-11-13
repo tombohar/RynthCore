@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the engine's answers to the server's yes/no prompts (plugin API v85, v97):
+    src\RynthCore.Engine\Compatibility\ConfirmationArmPolicy.cs, compiled in. The one-shot arm
+    (v85: Yes at the minimum, else No, then spent) must behave as before; the leave-below arm
+    (v97, minPercent | 0x100) answers Yes at the minimum, leaves a prompt below it to the client
+    and stays armed until it times out or is disarmed. Also the "N percent" parse.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>ConfirmationResponderTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ConfirmationArmPolicy.cs" Link="Engine\ConfirmationArmPolicy.cs" />
+  </ItemGroup>
+
+</Project>

@@ -3,7 +3,8 @@
   <!--
     Offline checks for the Tracker panel's settings file (src\RynthCore.Engine\UI\TrackerSettings.cs,
     compiled in with a synchronous UiBackgroundWriter stub): the defaults with no file, an old file
-    without "textOnly", and that background opacity and Text only both survive a save. Uses
+    without "textOnly", and that background opacity, Text only, click-through and the hidden stats
+    all survive a save; bad values are ignored (TrackerSettings.Parse). Uses
     RYNTHCORE_TRACKER_SETTINGS (a temp file); never touches %APPDATA%\RynthCore.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->

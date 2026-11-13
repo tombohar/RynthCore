@@ -195,7 +195,7 @@ internal static class MessageBoxHooks
             if (!Read(text, wide).StartsWith("Failed to establish connection to the server", StringComparison.OrdinalIgnoreCase))
                 return false;
             RynthLog.Warn("MessageBoxHooks: the connection failed - answering AC's box (OK) unseen so the client exits " +
-                          "and a launcher can relaunch it (Close on server disconnect, Settings > Misc).");
+                          "and a launcher can relaunch it (Close on server disconnect, Settings > Game Client).");
             if (Interlocked.Exchange(ref _connectionFailureAnswered, 1) == 0)
             {
                 var fallback = new Thread(() =>

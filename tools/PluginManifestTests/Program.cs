@@ -63,6 +63,7 @@ internal static class Program
             Run(nameof(WebPanelStructsMatch), WebPanelStructsMatch);
             Run(nameof(WebPanelCodesMatch), WebPanelCodesMatch);
             Run(nameof(HasWebPanel_FalseOnOldOrPartialTable), HasWebPanel_FalseOnOldOrPartialTable);
+            Run(nameof(ConfirmationLeaveBelow_SdkMatchesEngine), ConfirmationLeaveBelow_SdkMatchesEngine);
             Run(nameof(ManifestAttributeDrivesRuntimeMinimum), ManifestAttributeDrivesRuntimeMinimum);
             Run(nameof(DedupeSamePathTwice), DedupeSamePathTwice);
             Run(nameof(DedupeCaseAndSlashes), DedupeCaseAndSlashes);
@@ -688,6 +689,59 @@ internal static class Program
         Eq(live.OpenWebPanel(new WebPanelOptions { Url = "https://a/", Allowlist = Array.Empty<string>() }), (int)WebPanelResult.BadArgs, "empty allowlist: BadArgs");
         Eq(live.OpenWebPanel(new WebPanelOptions { Url = "https://a/", Allowlist = new[] { "a\nb" } }), (int)WebPanelResult.BadArgs, "newline in an entry: BadArgs");
         Eq(live.NavigateWebPanel(1, ""), (int)WebPanelResult.BadArgs, "navigate empty URL: BadArgs");
+    }
+
+    // v97: ArmConfirmation's leave-below flag (no table change). The SDK's flag is the engine's, the Has*
+    // needs Version >= 97 and both v85 slots, a bad minimum is refused before the engine is called, and an
+    // engine before v97 (v85's argument check) refuses the flag as bad arguments.
+    private static unsafe void ConfirmationLeaveBelow_SdkMatchesEngine()
+    {
+        Eq(RynthCoreHost.ConfirmationArmFlags.LeaveBelow, RynthCore.Engine.Compatibility.ConfirmationArmPolicy.ArmFlagLeaveBelow, "SDK flag = engine flag");
+        Eq(PluginContractVersion.ConfirmationLeaveBelow, 97u, "ConfirmationLeaveBelow is 97 (96 is reserved)");
+        Check(PluginContractVersion.ConfirmationLeaveBelow <= PluginContractVersion.Current, "ConfirmationLeaveBelow at or below current");
+
+        IntPtr x = (IntPtr)0xDEAD;
+        RynthCoreHost Host(uint version, IntPtr arm, IntPtr last)
+            => new RynthCoreHost(new RynthCoreApiNative { Version = version, ArmConfirmationFn = arm, GetLastConfirmationFn = last });
+        Check(Host(96, x, x).HasConfirmationAnswers, "v96: one-shot answers");
+        Check(!Host(96, x, x).HasConfirmationLeaveBelow, "v96: no leave-below");
+        Check(!Host(97, IntPtr.Zero, x).HasConfirmationLeaveBelow, "v97, Arm slot zero: false");
+        Check(!Host(97, x, IntPtr.Zero).HasConfirmationLeaveBelow, "v97, GetLast slot zero: false");
+        Check(Host(97, x, x).HasConfirmationLeaveBelow, "v97, both slots: true");
+        // Refused before the (garbage) slot is called.
+        Eq(Host(97, x, x).ArmConfirmationLeaveBelow(5, 0, 60_000), -3, "minimum 0: bad arguments");
+        Eq(Host(97, x, x).ArmConfirmationLeaveBelow(5, 101, 60_000), -3, "minimum 101: bad arguments");
+
+        IntPtr oldArm = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int, int, int>)&OldEngineArm;
+        IntPtr newArm = (IntPtr)(delegate* unmanaged[Cdecl]<uint, int, int, int>)&NewEngineArm;
+        _lastArmMin = 0;
+        Eq(Host(96, oldArm, x).ArmConfirmationLeaveBelow(5, 100, 60_000), -3, "an engine before v97 refuses the flag");
+        Eq(Host(97, newArm, x).ArmConfirmationLeaveBelow(5, 100, 60_000), 1, "a v97 engine arms it");
+        Eq(_lastArmMin, 100 | 0x100, "the minimum reaches the engine with the flag");
+        Eq(Host(97, newArm, x).ArmConfirmation(5, 100, 15_000), 1, "a one-shot arm on a v97 engine, as before");
+        Eq(RynthCoreHost.ConfirmationOutcome.AcceptedSticky, 5, "outcome 5: the sticky arm's Yes (ABI)");
+        // The sticky disarm: the flag with timeout 0 on a v97 engine; nothing on an older one (whose disarm
+        // would clear the one-shot arm instead; the garbage slot shows it is not called).
+        _lastArmMin = 0;
+        Eq(Host(97, newArm, x).DisarmConfirmationLeaveBelow(5), 1, "v97: sticky disarm");
+        Eq(_lastArmMin, 0x100, "sent as the flag alone");
+        Eq(Host(96, x, x).DisarmConfirmationLeaveBelow(5), 0, "v96: not called");
+        Eq(Host(97, x, x).ArmConfirmationLeaveBelow(5, 100, 0), -3, "a zero timeout is not a disarm here");
+    }
+
+    private static int _lastArmMin;
+
+    // ConfirmationResponder.Arm's checks before v97.
+    [System.Runtime.InteropServices.UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static int OldEngineArm(uint type, int minPercent, int timeoutMs)
+        => timeoutMs <= 0 ? 1 : type == 0 || minPercent < 0 || minPercent > 100 || timeoutMs > 120_000 ? -3 : 1;
+
+    // v97: the engine's own check.
+    [System.Runtime.InteropServices.UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+    private static int NewEngineArm(uint type, int minPercent, int timeoutMs)
+    {
+        _lastArmMin = minPercent;
+        return timeoutMs <= 0 ? 1 : RynthCore.Engine.Compatibility.ConfirmationArmPolicy.Validate(type, minPercent, timeoutMs, out _, out _);
     }
 
     // v79: the SDK's copies of the training structs must be the engine's, byte for byte.

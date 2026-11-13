@@ -99,7 +99,7 @@ namespace RynthCore.Engine.Compatibility;
 ///   <item><c>/rc hotkeys</c> - opens Settings &gt; Hotkeys. <c>/rc hotkey list | add &lt;combo&gt; &lt;action or
 ///         /command&gt; | remove &lt;combo&gt; | enable|disable &lt;combo&gt; | actions | status | on|off</c> - the user
 ///         hotkeys (<see cref="Hotkeys.HotkeyService"/>; saved for the PC in hotkeys.txt).</item>
-///   <item><c>/rc diagnostics</c> (or <c>/rc serverpick</c>) - opens Settings &gt; Diagnostics, the server
+///   <item><c>/rc diagnostics</c> (or <c>/rc serverpick</c>) - opens Settings &gt; Game Client, the server
 ///         picker: the one place a server is forced for this character (plugins' "Force a server" links).</item>
 ///   <item><c>/rc layout [status] | default | reset [confirm]</c> - the panel layout this client uses
 ///         (<see cref="UI.PanelLayout"/>: its character's own, or the PC-wide default and why) and its files;
@@ -119,8 +119,11 @@ internal static class RynthCoreChatCommands
     /// <summary>RynthNet's Characters window (a plugin window: its title is its panel key).</summary>
     private const string CharactersWindowTitle = "Characters";
 
-    /// <summary>The Settings tab with the server picker (UI/Data/SettingsData.cs "Diagnostics").</summary>
-    private const string DiagnosticsTabName = "Diagnostics";
+    /// <summary>
+    /// The Settings tab with the server picker (UI/Data/SettingsData.cs): Game Client since 2026-11-11, Diagnostics
+    /// before. /rc diagnostics still opens it, as plugins link there for the picker.
+    /// </summary>
+    private const string ServerPickTabName = "Game Client";
 
     // The line being handled on this thread: who sent it, and whether it has answered yet.
     [ThreadStatic] private static ChatCommandOrigin _origin;
@@ -409,7 +412,7 @@ internal static class RynthCoreChatCommands
         }
 
         // /rc dashboard [classic|modern|tab <name>] : the RynthAi dashboard's look (the title bar buttons and
-        // Settings > Display), and the Classic look's tab (main, monsters, gear, buffs, route, loot, meta,
+        // Settings > Interface), and the Classic look's tab (main, monsters, gear, buffs, route, loot, meta,
         // tuning); either opens the dashboard. No argument: says which look is on.
         if (IsVerb(sub, "dashboard", out string dashArgs))
         {
@@ -505,14 +508,15 @@ internal static class RynthCoreChatCommands
                 OpenSettingsTab(ImGuiBackend.Panels.HotkeysSettingsUi.TabName);
             return;
         }
-        // /rc diagnostics : Settings > Diagnostics, where a server is forced for this character (the
-        // server picker). The one place to force a server since 2026.10.5.54, so plugins link here.
+        // /rc diagnostics, /rc serverpick : Settings > Game Client, where a server is forced for this character
+        // (the server picker; on Diagnostics until 2026-11-11, hence the name). The one place to force a server
+        // since 2026.10.5.54, so plugins link here.
         if ((IsVerb(sub, "diagnostics", out string diagArgs) || IsVerb(sub, "serverpick", out diagArgs)) && diagArgs.Length == 0)
         {
             if (!ImGuiBackend.ImGuiPanelHost.HasFace(ImGuiBackend.Panels.SettingsFace.Title))
                 Fail("The Settings panel isn't available (the ImGui layer is off?). /rc server <id> auto|on|off works here in chat.");
             else
-                OpenSettingsTab(DiagnosticsTabName);
+                OpenSettingsTab(ServerPickTabName);
             return;
         }
         // /rc settings [tab] : the Settings panel (toggled), or opened on a tab ("/rc settings buffing").
@@ -1317,7 +1321,8 @@ internal static class RynthCoreChatCommands
             TogglePanel(title, "Settings", "The Settings panel isn't available (the ImGui layer is off?).");
             return;
         }
-        UI.Data.SettingsTab? tab = Array.Find(UI.Data.SettingsSchema.Tabs, t => t.Name.Equals(tabName, StringComparison.OrdinalIgnoreCase));
+        // FindTab also takes the names from before the 2026-11-11 regroup ("/rc settings misc" opens General).
+        UI.Data.SettingsTab? tab = UI.Data.SettingsSchema.FindTab(tabName);
         if (tab != null)
         {
             OpenSettingsTab(tab.Name);

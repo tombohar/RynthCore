@@ -229,7 +229,7 @@ internal static class PanelLayoutPolicy
 
     public static string ReasonText(DefaultReason why) => why switch
     {
-        DefaultReason.SettingOff => "Panel layout per character is off (Settings > Display)",
+        DefaultReason.SettingOff => "Panel layout per character is off (Settings > Interface)",
         DefaultReason.NotInWorld => "no character is in the world",
         DefaultReason.NoCharacterName => "this client doesn't know its character's name yet, so window places aren't saved until it does",
         DefaultReason.WaitingForName => "still waiting for the character's name",
@@ -255,7 +255,7 @@ internal static class PanelLayoutPolicy
     }
 
     /// <summary>
-    /// Settings > Display's line under "Panel Layout Per Character": whose layout is in use and the
+    /// Settings > Interface's line under "Panel Layout Per Character": whose layout is in use and the
     /// folder its files are in (a character's), or the PC-wide default and why.
     /// </summary>
     public static string SettingsLine(LayoutOwner? inUse, LayoutFiles files, DefaultReason why)
@@ -267,7 +267,7 @@ internal static class PanelLayoutPolicy
         return $"In use: the PC-wide default ({ReasonText(why)}): {files.PanelState}.";
     }
 
-    /// <summary>Settings > Display's reset confirmation: what "Reset this character's layout" will do.</summary>
+    /// <summary>Settings > Interface's reset confirmation: what "Reset this character's layout" will do.</summary>
     public static string ResetConfirmText(LayoutOwner? who) =>
         who is null
             ? "No character's own layout is in use, so there is nothing to reset."

@@ -25,7 +25,7 @@
 //
 //  The bar's size is its own text size step (PanelTextScale chrome row): the bar's
 //  fonts come from that baked set and its metrics scale by the step's factor. Set it
-//  from the grip's right-click menu, Ctrl+wheel over the bar, Settings > Display or
+//  from the grip's right-click menu, Ctrl+wheel over the bar, Settings > Interface or
 //  /rc ui barsize.
 //
 //  Rows (BarLayout): the player picks how many rows the bar has (1-6) and the most
@@ -182,18 +182,21 @@ internal static class ImGuiBar
     private static string[] _scriptKeys = Array.Empty<string>();
     private static string _tooltip = "";
     private static bool _placed;
-    private static Vector2 _pos, _persistedPos;
-    // What may write a new position to the bar= row: the user dragging the grip, or the bar being
-    // pulled back on screen by a size change (a few frames: the window grows a frame late). A clamp
-    // from a smaller AC window leaves the saved position alone.
-    private static bool _userMoved;
-    private static int _lastStep, _sizeWatch;
+    private static Vector2 _pos;
+    // The bar's home (the bar= row, or where the player dragged it) and where that draws: pulled onto
+    // the screen for the bar's size and the display, worked out again from the home whenever either
+    // changes (UI/PanelPlacement). Only the player's drag writes the bar= row (2026-11-12: a pull from
+    // a size change - a text size step, new rows, icons added as plugins load, a font re-bake - stayed
+    // for the session and was saved, so the bar came back moved after a reload or login).
+    private static readonly HomePlace Place = new();
+    private static Vector2 _savedHome;   // the home the bar= row holds (logical units)
+    private static bool _userMoved, _pullLogged;
 
     // The bar's rows and icons-per-row limit (BarLayout). Read from panel_state once, then kept
     // here so a change shows at once (the file is written in the background); one reference, so
     // a reader on another thread never sees half a change.
     private sealed record RowSettings(int Rows, int MaxPerRow);
-    private static RowSettings? _rowSettings, _lastRowSettings;
+    private static RowSettings? _rowSettings;
     // Icons per row as last drawn: where the icons-per-row "-" starts from when there is no limit.
     private static int _shownPerRow = 1;
 
@@ -385,17 +388,18 @@ internal static class ImGuiBar
         {
             var saved = PanelStateStore.BarPosition;
             Vector2 logical = saved.HasValue ? new Vector2((float)saved.Value.Left, (float)saved.Value.Top) : new Vector2(50, 5);
-            _pos = _persistedPos = logical * place;
+            _savedHome = logical;
+            // The size isn't known before its first frame: KeepOnScreen fits it once the window has one.
+            Place.Set(logical * place, Vector2.Zero, ImGuiNET.ImGui.GetIO().DisplaySize);
+            _pos = Place.Drawn;
             ImGuiNET.ImGui.SetNextWindowPos(_pos, ImGuiCond.Always);
             _placed = true;
-            _lastStep = step;   // the size the bar loads at is the baseline, not a change
-            _lastRowSettings = RowLayout;
+            _userMoved = false;
+            _pullLogged = false;
+            RynthLog.UI("ImGuiBar: " + Place.Describe("the bar", saved.HasValue ? "its saved bar row" : "the default spot (no bar row)")
+                + $" Layout {PanelStateStore.CurrentPath}.");
         }
 
-        if (step != _lastStep) { _lastStep = step; _sizeWatch = 4; }
-        // New rows reshape the bar (wider or taller): the same pull back on screen as a new size.
-        RowSettings rowsNow = RowLayout;
-        if (!ReferenceEquals(rowsNow, _lastRowSettings)) { _lastRowSettings = rowsNow; _sizeWatch = 4; }
         PushBarWindowStyle(s);
         ImGuiNET.ImGui.Begin("##rc_bar", BarFlags);
         try
@@ -414,29 +418,36 @@ internal static class ImGuiBar
             PopBarWindowStyle();
         }
 
-        if (!ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left) && _pos != _persistedPos)
+        // Only the player's drag moves the bar's home and writes the bar= row (once the mouse is up).
+        if (_userMoved && !ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left))
         {
-            _persistedPos = _pos;
-            if (_userMoved || _sizeWatch > 0)
+            _userMoved = false;
+            Vector2 logical = Place.Home / place;
+            if (logical != _savedHome)
             {
-                Vector2 logical = _pos / place;
+                _savedHome = logical;
                 double left = logical.X, top = logical.Y;
                 UiBackgroundWriter.Enqueue("persist bar", () => PanelStateStore.SetBarPosition(left, top));
                 AvaloniaOverlay.SyncDockedBarPosition(left, top);
             }
-            _userMoved = false;
         }
-        if (_sizeWatch > 0) _sizeWatch--;
     }
 
-    /// <summary>A bigger size or new rows can push the bar's right or bottom end off the screen: pull it back (not while it is being dragged).</summary>
+    /// <summary>
+    /// A bigger size, new rows, icons added as plugins load or a smaller display can push the bar's right or
+    /// bottom end off the screen: drawn from its home, pulled back only as far as needed, and back home once
+    /// it fits again (UI/PanelPlacement). Never saved. Not while it is being dragged.
+    /// </summary>
     private static void KeepOnScreen()
     {
-        Vector2 display = ImGuiNET.ImGui.GetIO().DisplaySize;
-        if (display.X <= 1 || ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left)) return;
-        Vector2 pos = ImGuiNET.ImGui.GetWindowPos();
-        Vector2 next = Vector2.Clamp(pos, Vector2.Zero, Vector2.Max(Vector2.Zero, display - ImGuiNET.ImGui.GetWindowSize()));
-        if (next != pos) ImGuiNET.ImGui.SetWindowPos(next);
+        if (ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left) && _userMoved) return;
+        if (!Place.Fit(ImGuiNET.ImGui.GetWindowSize(), ImGuiNET.ImGui.GetIO().DisplaySize)) return;
+        ImGuiNET.ImGui.SetWindowPos(Place.Drawn);
+        if (Place.Pulled && !_pullLogged)
+        {
+            _pullLogged = true;
+            RynthLog.UI("ImGuiBar: " + Place.DescribePull("the bar") + $" (bar row {HomePlace.Xy(_savedHome)}).");
+        }
     }
 
     private static void DrawContent(float s, bool popped)
@@ -468,6 +479,7 @@ internal static class ImGuiBar
             if (display.X > 1)
                 next = Vector2.Clamp(next, Vector2.Zero, Vector2.Max(Vector2.Zero, display - size));
             ImGuiNET.ImGui.SetWindowPos(next);
+            Place.MoveTo(next, size, display);   // the player's spot: the bar's home
             _userMoved = true;
         }
         SafeImGui.SetItemTooltip(_tooltip);

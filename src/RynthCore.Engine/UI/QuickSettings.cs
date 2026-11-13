@@ -8,7 +8,9 @@
 //  since labels repeat across tabs ("Level 1" in Buffing and Spell Combat).
 //  Only rows that edit or do something can be pinned (Pinnable); a pin whose
 //  row no longer exists (renamed in an update) is kept in the file but not
-//  drawn, so it comes back if the row does.
+//  drawn, so it comes back if the row does. A pin saved before a row moved to
+//  another tab or section (the 2026-11-11 regroup) is found again by its label
+//  (MigrateKey) and rewritten under the row's new key when the file loads.
 //
 //  Persisted to %AppData%\RynthCore\rynthai_quick_settings.txt, one key per
 //  line, written in the background (UiBackgroundWriter). The pins are the
@@ -50,6 +52,66 @@ internal static class QuickSettings
     {
         EnsureIndex();
         return _byKey!.TryGetValue(key, out SettingRow? row) ? row : null;
+    }
+
+    // Where each tab's rows went in the 2026-11-11 regroup (UI/Data/SettingsData.cs). A pin of the old layout
+    // ("Misc//Video patch") is the row with the same label on one of these tabs (Game Client > Performance).
+    private static readonly Dictionary<string, string[]> MovedTo = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Display"] = new[] { "Interface", "Game Client", "Hotkeys", "Inventory" },
+        ["UI"] = new[] { "Interface" },
+        ["Misc"] = new[] { "Game Client", "General", "Combat", "Inventory" },
+        ["Recharge"] = new[] { "Recharge", "General", "Buffing" },
+        ["Melee Combat"] = new[] { "Combat" },
+        ["Spell Combat"] = new[] { "Spell Combat", "General", "Buffing", "Combat" },
+        ["Ranges"] = new[] { "Ranges", "Combat" },
+        ["Navigation"] = new[] { "Navigation", "General" },
+        ["Crafting"] = new[] { "Combat" },
+        ["Looting"] = new[] { "Looting", "Inventory" },
+        ["Diagnostics"] = new[] { "Diagnostics", "Game Client" },
+    };
+
+    // A row taken out whose pin goes to the row left doing the same thing.
+    private static readonly Dictionary<string, string> Replaced = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Misc//Auto Cram"] = "Inventory/Packs/Enable Autocram",   // Misc's copy of Looting's Enable Autocram
+    };
+
+    /// <summary>
+    /// The key <paramref name="key"/> stands for now: itself while its row exists, else the key of the row it
+    /// moved to (same label, on a tab the old one's rows went to; the same section first), else null.
+    /// </summary>
+    public static string? MigrateKey(string key)
+    {
+        EnsureIndex();
+        if (_byKey!.TryGetValue(key, out SettingRow? row)) return _keyOf![row];
+        if (Replaced.TryGetValue(key, out string? replaced)) return RowOf(replaced) != null ? replaced : null;
+        // Tab names have no '/', but sections and labels can ("War/Void Casting Settings", "Day/Night timer"),
+        // so the key is matched against each row's label rather than split.
+        int first = key.IndexOf('/');
+        if (first <= 0) return null;
+        string tab = key[..first], rest = key[(first + 1)..];   // "Section/Label"
+        if (!MovedTo.TryGetValue(tab, out string[]? tabs)) tabs = new[] { tab };
+        string? best = null;
+        int bestLength = -1;
+        bool bestSameSection = false;
+        foreach (KeyValuePair<SettingRow, string> pair in _keyOf!)
+        {
+            string label = pair.Key.Label.Trim(), k = pair.Value;
+            if (label.Length == 0 || rest.Length <= label.Length || rest[^(label.Length + 1)] != '/' || !rest.EndsWith(label, StringComparison.Ordinal)) continue;
+            string newTab = k[..k.IndexOf('/')];
+            if (Array.FindIndex(tabs, t => t.Equals(newTab, StringComparison.OrdinalIgnoreCase)) < 0) continue;
+            string section = rest[..(rest.Length - label.Length - 1)];
+            bool sameSection = k[(newTab.Length + 1)..(k.Length - label.Length - 1)].Equals(section, StringComparison.OrdinalIgnoreCase);
+            // The longest label that fits wins ("Avoid Lava/Acid Floors" over a row called "Acid Floors"), then the same section.
+            if (label.Length > bestLength || (label.Length == bestLength && sameSection && !bestSameSection))
+            {
+                best = k;
+                bestLength = label.Length;
+                bestSameSection = sameSection;
+            }
+        }
+        return best;
     }
 
     /// <summary>The pinned keys, in order (a copy).</summary>
@@ -136,6 +198,7 @@ internal static class QuickSettings
     private static void EnsureLoaded()
     {
         if (_loaded) return;
+        bool migrated = false;
         lock (Sync)
         {
             if (_loaded) return;
@@ -145,12 +208,17 @@ internal static class QuickSettings
                     foreach (string line in File.ReadAllLines(FilePath))
                     {
                         string key = line.Trim();
-                        if (key.Length > 0 && !_pins.Contains(key)) _pins.Add(key);
+                        if (key.Length == 0) continue;
+                        // A pin of a row that moved is rewritten under its new key; one that leads nowhere is kept as it is.
+                        string now = MigrateKey(key) ?? key;
+                        migrated |= now != key;
+                        if (!_pins.Contains(now)) _pins.Add(now);
                     }
             }
             catch { /* unreadable: start with no pins */ }
             _loaded = true;
         }
+        if (migrated) UiBackgroundWriter.Enqueue("quick settings", Save);
     }
 
     private static void Save()

@@ -138,7 +138,7 @@ internal static unsafe class RetailToolbarHooks
     /// <summary>
     /// The "Hide retail toolbar" option. Stored for the whole PC in
     /// %LOCALAPPDATA%\RynthCore\retail_ui.txt ("HideRetailToolbar=1"), beside "Hide retail
-    /// vitals". Set from Settings > UI or /rc ui retailtoolbar. Any thread: it only flips a flag
+    /// vitals". Set from Settings > Interface or /rc ui retailtoolbar. Any thread: it only flips a flag
     /// and writes the file; TickHide applies it on AC's main thread.
     /// </summary>
     public static bool HideRetailToolbar

@@ -953,7 +953,7 @@ internal sealed class RadarFace : IImGuiPanel
 
     /// <summary>
     /// "Hide the retail radar": RynthAi's own SuppressRetailRadar setting (RynthAi pushes it to the engine every
-    /// tick), the same switch as Settings > UI > Hide retail radar. This reads it from RynthAi's settings payload
+    /// tick), the same switch as Settings > Interface > Hide retail radar. This reads it from RynthAi's settings payload
     /// and saves it back through the same command, so the two always agree whichever is changed; saved with the
     /// character's RynthAi settings. Greyed out until RynthAi has answered. The box shows the new value at once,
     /// until RynthAi's answer catches up.
@@ -976,7 +976,7 @@ internal sealed class RadarFace : IImGuiPanel
         }
         ImGuiNET.ImGui.EndDisabled();
         if (ImGuiNET.ImGui.IsItemHovered())
-            ImGuiNET.ImGui.SetTooltip("Hides the game's built-in radar (bezel, compass, coordinates, blips).\nThe same switch as RynthAi's Settings > UI > Hide retail radar: change it in either place.");
+            ImGuiNET.ImGui.SetTooltip("Hides the game's built-in radar (bezel, compass, coordinates, blips).\nThe same switch as Settings > Interface > Hide retail radar: change it in either place.");
         if (ra == null)
         {
             ImGuiNET.ImGui.SameLine();

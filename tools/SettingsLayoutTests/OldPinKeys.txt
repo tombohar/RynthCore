@@ -1,0 +1,301 @@
+Display//Show Target Stamina / Mana
+Display//RynthAi Dashboard Look
+Display//Insert Key Releases the UI
+Display//Borderless Windowed
+Display/Window and HUD Layout/Remember Open Windows and Positions
+Display/Window and HUD Layout/Panel Layout Per Character
+Display/Window and HUD Layout/Layout for New Characters
+Display/Window and HUD Layout/Reset This Character's Layout
+Display/Window and HUD Layout/Remember Game Window Position
+Display/Window and HUD Layout/Save Layout Now
+Display/Colour Theme/Theme
+Display/Colour Theme/Save colours as
+Display/Colour Theme/Saved scheme
+Display/Colour Theme/Accent
+Display/Colour Theme/Highlight
+Display/Colour Theme/Background
+Display/Colour Theme/Title bars
+Display/Colour Theme/Buttons
+Display/Colour Theme/Borders
+Display/Colour Theme/Text
+Display/Colour Theme/Muted text
+Display/Colour Theme/Reset Colours
+Display/Text Size (in-game panels)/All Panels
+Display/Text Size (in-game panels)/Toolbar
+Display/Text Size (in-game panels)/Toolbar Rows
+Display/Text Size (in-game panels)/Toolbar Icons Per Row
+Display/Text Size (in-game panels)/Size Each Panel Separately
+Display/Text Size (in-game panels)/RynthAi Dashboard
+Display/Text Size (in-game panels)/Meta
+Display/Text Size (in-game panels)/Damage
+Display/Text Size (in-game panels)/Settings
+Display/Text Size (in-game panels)/Monsters
+Display/Text Size (in-game panels)/Nav
+Display/Text Size (in-game panels)/Items
+Display/Text Size (in-game panels)/Lua
+Display/Text Size (in-game panels)/Radar
+Display/Text Size (in-game panels)/Chat Filters
+Display/Text Size (in-game panels)/RynthNav
+Display/Text Size (in-game panels)/Vision
+Display/Text Size (in-game panels)/Status
+Display/Text Size (in-game panels)/Log
+Display/Text Size (in-game panels)/Tracker
+Display/Item Info/Describe Items When Selected
+Display/Item Info/Item Info Options
+UI/Radar/Hide retail radar
+UI/Power Bar/Hide retail power bar
+UI/Vitals/Hide retail vitals bar
+UI/Vitals/Lock your vitals plate
+UI/Vitals/Grey out what debuffs take
+UI/Toolbar/Hide retail toolbar
+UI/Toolbar/Shortcut bar
+UI/Toolbar/Shortcut bar size
+UI/Toolbar/Game panel buttons
+UI/Toolbar/Game panel buttons size
+UI/Toolbar/Selection
+UI/Toolbar/Selection size
+UI/Toolbar/Day/Night timer
+UI/Toolbar/Day/Night timer size
+UI/Toolbar/Shortcut bar 2
+UI/Toolbar/Shortcut bar 2 size
+UI/Toolbar/Shortcut bar 3
+UI/Toolbar/Shortcut bar 3 size
+UI/Toolbar/Shortcut bar 4
+UI/Toolbar/Shortcut bar 4 size
+Misc//Enable FPS Limit
+Misc//Focused FPS
+Misc//Background FPS
+Misc//Video patch
+Misc//Frame cap while patched
+Misc//Close Client on Server Disconnect
+Misc//Background Identify
+Misc//Hold reloads while in the world
+Misc//Give up holding after (min)
+Misc//Auto Cram
+Misc//Peace Mode When Idle
+Misc//Weapons Back After Heals
+Misc//Start Macro On Login
+Misc//Patrol On Login
+Misc//Resume Meta After Reload
+Misc//Escape Acid and Lava
+Misc//Yield to VTank
+Misc//Enable Raycasting
+Misc/Missile Arc Velocities (m/s)/Use Arcs for Missile LoS
+Misc/Missile Arc Velocities (m/s)/Bow
+Misc/Missile Arc Velocities (m/s)/Crossbow
+Misc/Missile Arc Velocities (m/s)/Atlatl
+Misc/Missile Arc Velocities (m/s)/Magic Arc
+Misc/Missile Arc Velocities (m/s)/Arc Clearance (m)
+Misc/Missile Arc Velocities (m/s)/LoS Debug Log
+Misc/Monster Blacklist/Attempts Before Blacklist
+Misc/Monster Blacklist/Blacklist Timeout (sec)
+Misc/Monster Blacklist/No Progress Timeout (sec)
+Misc/Give Queue/Give Interval (ms)
+Recharge/In Combat — target within Monster Range (%)/Heal At
+Recharge/In Combat — target within Monster Range (%)/Re-stam At
+Recharge/In Combat — target within Monster Range (%)/Re-stam To
+Recharge/In Combat — target within Monster Range (%)/Get Mana At
+Recharge/Idle Top-Off — no targets in range (%)/Top HP
+Recharge/Idle Top-Off — no targets in range (%)/Top Stam
+Recharge/Idle Top-Off — no targets in range (%)/Top Mana
+Recharge/Kits & Potions/Use Potions
+Recharge/Kits & Potions/Use Buff Items
+Recharge/Kits & Potions/Make Field Rations Below
+Recharge/Kits & Potions/Use Kits In Magic Mode
+Recharge/Kits & Potions/Peace Mode For Kits
+Recharge/Kits & Potions/Emergency Heal At
+Recharge/Kits & Potions/Stamina To Health At
+Recharge/Kits & Potions/Stamina To Health Min Stamina
+Recharge/Kits & Potions/Kit Min Success %
+Recharge/Kits & Potions/Stamina Kit Min Success %
+Recharge/Safety Stops/Stop Macro On Death
+Recharge/Safety Stops/Stop Macro On No Components
+Recharge/Safety Stops/Recall When Low On Components
+Recharge/Safety Stops/Low Tapers At
+Recharge/Safety Stops/Low Scarabs At
+Recharge/Safety Stops/Stop Macro When Pack Full
+Recharge/On Death/Recall On Death
+Recharge/On Death/Recall Spell
+Recharge/On Death/Recall Item
+Recharge/Helper Settings (%) — NOT WIRED YET/Heal Others
+Recharge/Helper Settings (%) — NOT WIRED YET/Re-stam Others
+Recharge/Helper Settings (%) — NOT WIRED YET/Infuse Others
+Melee Combat/Attack Power & Height/Use Recklessness
+Melee Combat/Attack Power & Height/Melee Auto Power
+Melee Combat/Attack Power & Height/Melee Power %
+Melee Combat/Attack Power & Height/Melee Attack Height
+Melee Combat/Attack Power & Height/Missile Auto Power
+Melee Combat/Attack Power & Height/Missile Power %
+Melee Combat/Attack Power & Height/Missile Attack Height
+Melee Combat/Variable Power (monster rules)/Variable Min %
+Melee Combat/Variable Power (monster rules)/Variable Max %
+Melee Combat/Hitting the Environment/Missile Response
+Melee Combat/Hitting the Environment/Hits to trip
+Melee Combat/Hitting the Environment/Window (s)
+Melee Combat/Hitting the Environment/Move closer by (m)
+Melee Combat/Hitting the Environment/Closest (m)
+Melee Combat/Hitting the Environment/Skip target (s)
+Melee Combat/Pull Away (Kite)/Pull Distance (m)
+Melee Combat/Pull Away (Kite)/Tag Before Fleeing
+Melee Combat/Pull Away (Kite)/Use Native Attack
+Melee Combat/Pull Away (Kite)/Summon Pets
+Melee Combat/Pull Away (Kite)/Pet Min Monsters
+Melee Combat/Pull Away (Kite)/Pet Range
+Spell Combat/War/Void Casting Settings/Buff Spell Interval (ms)
+Spell Combat/War/Void Casting Settings/Attack Spell Delay (ms)
+Spell Combat/War/Void Casting Settings/Cast Dispel Self
+Spell Combat/War/Void Casting Settings/Use Dispel Items
+Spell Combat/War/Void Casting Settings/Auto Fellowship Management
+Spell Combat/War/Void Casting Settings/Open fellowship on create
+Spell Combat/War/Void Casting Settings/M. Charges When Off
+Spell Combat/Ring Spell Override/Min Ring Targets
+Spell Combat/Blast Spell Override/Blast Range (yd)
+Spell Combat/Blast Spell Override/Min Blast Targets
+Spell Combat/Wall Spell Override/Wall Range (yd)
+Spell Combat/Wall Spell Override/Min Wall Targets
+Spell Combat/Hitting the Environment/Magic Response
+Spell Combat/Spell Difficulty (Min Buffed Skill)/Level 1
+Spell Combat/Spell Difficulty (Min Buffed Skill)/Level 2
+Spell Combat/Spell Difficulty (Min Buffed Skill)/Level 3
+Spell Combat/Spell Difficulty (Min Buffed Skill)/Level 4
+Spell Combat/Spell Difficulty (Min Buffed Skill)/Level 5
+Spell Combat/Spell Difficulty (Min Buffed Skill)/Level 6
+Spell Combat/Spell Difficulty (Min Buffed Skill)/Level 7
+Spell Combat/Spell Difficulty (Min Buffed Skill)/Level 8
+Ranges/Standard Ranges (Yards)/Monster Range
+Ranges/Standard Ranges (Yards)/Ring Range
+Ranges/Standard Ranges (Yards)/Approach Range
+Ranges/Standard Ranges (Yards)/Disengage Range
+Ranges/Combat Targeting/Targeting
+Ranges/Combat Targeting/Target Lock
+Ranges/Combat Targeting/Fight the monster I select
+Ranges/Corpse Acquisition (Yards)/Corpse Max (yd)
+Ranges/Corpse Acquisition (Yards)/Corpse Min (yd)
+Navigation//Boost Nav Priority
+Navigation//Nav point reach (yd)
+Navigation/Infinite Leaftide/Vaulted Dungeons
+Navigation/Nav Marker Display/Breadcrumbs
+Navigation/Nav Marker Display/Route Overlay
+Navigation/Nav Marker Display/Ring Thickness
+Navigation/Nav Marker Display/Line Thickness
+Navigation/Nav Marker Display/Height Offset
+Navigation/Nav Marker Display/Slope Sink
+Navigation/Nav Marker Display/Show Terrain Passability
+Navigation/Nav Marker Display/Waypoint Labels
+Navigation/Nav Marker Display/Guide Line
+Navigation/Doors/Open Doors While Navigating
+Navigation/Doors/Door Detection Range (yd)
+Navigation/Doors/Only Doors On My Path
+Navigation/Doors/Auto-Unlock Doors
+Navigation/Getting Back On Route/Go To Closest Waypoint
+Navigation/Dungeon Patrol/Coverage
+Navigation/Dungeon Patrol/Sight Distance (yd)
+Navigation/Dungeon Patrol/Skip Dead Ends Up To (cells)
+Navigation/Dungeon Patrol/Avoid Lava/Acid Floors
+Navigation/Dungeon Patrol/Distance From Walls (yd)
+Navigation/Dungeon Patrol/Walk Into Rooms From (yd)
+Navigation/Outdoor Hunt/Hunt Range (yd)
+Navigation/Outdoor Hunt/Hunt Radius (yd)
+Navigation/Outdoor Hunt/Go for
+Navigation/Steering/Stop & Turn Angle
+Navigation/Steering/Resume Run Angle
+Navigation/Steering/Dead Zone
+Navigation/Steering/Sweep Detect Mult
+Navigation/Steering/Lookahead (yd)
+Navigation/Steering/Turn Rate (deg/s)
+Navigation/Steering/Post-Portal Delay (s)
+Navigation/Tier 2 Tuning/Speed
+Navigation/Tier 2 Tuning/Walk Within (yd)
+Navigation/Tier 2 Tuning/Stop Distance (yd)
+Navigation/Tier 2 Tuning/Reissue Timeout (ms)
+Navigation/Tier 2 Tuning/Max Range (yd)
+Navigation/Tier 2 Tuning/Max Landblock Dist
+Buffing//Enable Buffing
+Buffing//Buff Profiles
+Buffing//Rebuff When Idle
+Buffing//Rebuff With (seconds left)
+Buffing//Also Refresh Under (seconds left)
+Buffing//Cast buffs even when an item gives them
+Buffing//Buffs Left Out
+Buffing/Protections (untick to skip)/Armor
+Buffing/Protections (untick to skip)/Fire Protection
+Buffing/Protections (untick to skip)/Cold Protection
+Buffing/Protections (untick to skip)/Acid Protection
+Buffing/Protections (untick to skip)/Lightning Protection
+Buffing/Protections (untick to skip)/Blade Protection
+Buffing/Protections (untick to skip)/Piercing Protection
+Buffing/Protections (untick to skip)/Bludgeoning Protection
+Buffing/Banes (untick to skip)/Impenetrability
+Buffing/Banes (untick to skip)/Flame Bane
+Buffing/Banes (untick to skip)/Frost Bane
+Buffing/Banes (untick to skip)/Acid Bane
+Buffing/Banes (untick to skip)/Lightning Bane
+Buffing/Banes (untick to skip)/Blade Bane
+Buffing/Banes (untick to skip)/Piercing Bane
+Buffing/Banes (untick to skip)/Bludgeoning Bane
+Buffing/Buff Difficulty (Min Buffed Skill)/Level 1
+Buffing/Buff Difficulty (Min Buffed Skill)/Level 2
+Buffing/Buff Difficulty (Min Buffed Skill)/Level 3
+Buffing/Buff Difficulty (Min Buffed Skill)/Level 4
+Buffing/Buff Difficulty (Min Buffed Skill)/Level 5
+Buffing/Buff Difficulty (Min Buffed Skill)/Level 6
+Buffing/Buff Difficulty (Min Buffed Skill)/Level 7
+Buffing/Buff Difficulty (Min Buffed Skill)/Level 8
+Crafting/Missile Ammo Crafting/Enable Missile Crafting
+Looting//Enable Looting
+Looting//Boost Loot Priority
+Looting//Loot Only Rare Corpses
+Looting//Learn Unknown Spells
+Looting//Pickup with macro off
+Looting//Leave the chest open
+Looting//Stop Looting When Pack Full
+Looting//Jump When Looting
+Looting//Jump Height
+Looting//Loot Items On Ground
+Looting/Corpse Ownership/Loot From
+Looting/Corpse Ownership/Recover My Corpse
+Looting/Corpse Ownership/Travel Back To My Corpse
+Looting/Corpse Ownership/Where Is My Corpse
+Looting/Corpse Ownership/Go To My Corpse
+Looting/Corpse Ownership/Stop Going To My Corpse
+Looting/Inventory Management/Enable Autostack
+Looting/Inventory Management/Enable Autocram
+Looting/Inventory Management/Unbox Aetheria When Idle
+Looting/Inventory Management/Unbox Aetheria Now
+Looting/Inventory Management/Combine Salvage Bags
+Looting/Inventory Management/Combine Bags During Salvage
+Looting/Inventory Management/Tidy Packs Now
+Looting/Inventory Management/Floating HUDs
+Looting/Inventory Management/Salvage Without The Panel
+Looting/Loot Timers (ms)/Optimized defaults
+Looting/Loot Timers (ms)/Inter-Item Delay
+Looting/Loot Timers (ms)/Content Settle
+Looting/Loot Timers (ms)/Empty Corpse Wait
+Looting/Loot Timers (ms)/Closing Delay
+Looting/Loot Timers (ms)/Assess Window
+Looting/Loot Timers (ms)/Loot Retry Timeout
+Looting/Loot Timers (ms)/Corpse Open Retry
+Looting/Loot Timers (ms)/Corpse Timeout
+Looting/Salvage Timers (ms) - First / Fast/Open (First)
+Looting/Salvage Timers (ms) - First / Fast/Open (Fast)
+Looting/Salvage Timers (ms) - First / Fast/Add Item (First)
+Looting/Salvage Timers (ms) - First / Fast/Add Item (Fast)
+Looting/Salvage Timers (ms) - First / Fast/Salvage Click
+Looting/Salvage Timers (ms) - First / Fast/Result (First)
+Looting/Salvage Timers (ms) - First / Fast/Result (Fast)
+Vendoring/AutoVendor/Enabled
+Vendoring/AutoVendor/Test Mode (only print what it would do)
+Vendoring/AutoVendor/Buy
+Vendoring/AutoVendor/Sell
+Vendoring/AutoVendor/Only Sell From Main Pack
+Vendoring/AutoVendor/Show Merchant Info
+Vendoring/AutoVendor/Think When Finished
+Vendoring//ub vendor open/Tries
+Vendoring//ub vendor open/Time Between Tries (ms)
+Diagnostics/Logging & Debugging/Debug to chat
+Diagnostics/Logging & Debugging/Daily RynthAi log file
+Diagnostics/Logging & Debugging/Log Folder
+Diagnostics/Logging & Debugging/Old Log Files
+Diagnostics/UI Frame Cost/Time the UI frame's parts
+Diagnostics/UI Frame Cost/Slow frame (ms)
+Diagnostics/UI Frame Cost/Breakdown

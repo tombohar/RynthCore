@@ -22,7 +22,7 @@
 //      That runs the normal shutdown: Win32Backend stops the plugin pump and starts
 //      EngineLifecycle.Shutdown, AC's UseTime returns 0 and the client exits with 0;
 //    - still open 20 s later: posts WM_CLOSE once more; 60 s later: says so and stops.
-//  Off (engine.json CloseOnServerDisconnect false, Settings > Misc): only the log line.
+//  Off (engine.json CloseOnServerDisconnect false, Settings > Game Client): only the log line.
 //  Polled rather than evented, so a hot reload on the screen still closes the client.
 // ============================================================================
 using System;
@@ -85,8 +85,8 @@ internal static class ServerDisconnectClose
         _fromMode = UiFlowHooks.PreviousMode;
         string who = DescribeSession();
         string action = enabled
-            ? $"closing the client in {Policy.DelayMs / 1000}s so a launcher can relaunch it (Close on server disconnect, Settings > Misc)"
-            : "Close on server disconnect is off (Settings > Misc) - the client stays on this screen";
+            ? $"closing the client in {Policy.DelayMs / 1000}s so a launcher can relaunch it (Close on server disconnect, Settings > Game Client)"
+            : "Close on server disconnect is off (Settings > Game Client) - the client stays on this screen";
         RynthLog.Warn($"ServerDisconnect: AC lost the server and shows its 'server has disconnected' screen ({UiFlowHooks.ModeName(_fromMode)} -> Disconnected){who}; {action}.");
         try { Net.FlightRecorder.RequestAuto("server disconnect (the Disconnected screen)", "engine"); }
         catch { }

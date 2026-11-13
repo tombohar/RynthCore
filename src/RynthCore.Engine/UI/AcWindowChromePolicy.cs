@@ -1,6 +1,6 @@
 // ============================================================================
 //  RynthCore.Engine - UI/AcWindowChromePolicy.cs
-//  The decisions behind Settings > Display for the Asheron's Call window, as pure
+//  The decisions behind Settings > Game Client for the Asheron's Call window, as pure
 //  functions (no HWND, no engine state) so tools\EngineSettingsTests can run them:
 //    - Borderless windowed: what to do given the setting, the "we stripped it" marker
 //      and the window's current style bits.

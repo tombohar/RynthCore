@@ -75,7 +75,7 @@ internal static class PanelDrawScale
             {
                 string path = FilePath;
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                var lines = new List<string> { "# RynthCore: how big each self-drawn window is (percent; Settings > UI > Toolbar)." };
+                var lines = new List<string> { "# RynthCore: how big each self-drawn window is (percent; Settings > Interface > In The Retail Toolbar's Place)." };
                 foreach (var kv in Scales) lines.Add($"{kv.Key}={kv.Value.ToString(CultureInfo.InvariantCulture)}");
                 File.WriteAllLines(path, lines);
                 _fileTime = File.GetLastWriteTimeUtc(path);

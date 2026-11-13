@@ -175,7 +175,7 @@ public struct RynthCoreApiNative
     // v84: every property of an object (/ub propertydump), one record (ObjectProperties.TryParse)
     public IntPtr GetObjectPropertiesFn;     // int GetObjectProperties(uint id, byte* buf, int size) -> record size (copied if <= size), 0 unknown, -1 bad args
     // v85: answer the server's yes/no prompt (craft chance) without the client's dialog
-    public IntPtr ArmConfirmationFn;         // int ArmConfirmation(uint type, int minPercent, int timeoutMs) -> 1 armed, 0 unavailable, -3 bad args
+    public IntPtr ArmConfirmationFn;         // int ArmConfirmation(uint type, int minPercent, int timeoutMs) -> 1 armed, 0 unavailable, -3 bad args; v97: minPercent | 0x100 = the sticky slot (leave below to the client)
     public IntPtr GetLastConfirmationFn;     // int GetLastConfirmation(uint* type, uint* ctx, int* percent, int* outcome, int* ageMs) -> seq
     // v86: which server this is, for every plugin (servers, verdicts, overrides, owning plugins)
     public IntPtr GetServerStateJsonFn;      // int GetServerStateJson(byte* buffer, int capacity) -> UTF-8 byte length (>= capacity: too small)

@@ -165,12 +165,15 @@ internal sealed unsafe class ChatSource : UiSource<ChatLine[]>
             if (dto.Seq <= _sinceSeq) continue;
             _sinceSeq = dto.Seq;
             string text = StripAcLinks(dto.Text ?? "", out string? linkedName);
+            // A plugin's own colour for it (ChatOwnColors), matched by the text as AC printed it,
+            // and its own colour runs (offsets into that text: kept only while it's unchanged).
+            uint? ownArgb = ChatOwnColors.Lines.Take(dto.Text, dto.Type, Environment.TickCount64, out ChatSpan[]? ownSpans);
             var line = new ChatLine(_nextId++, dto.Ts ?? "", dto.Chan ?? "Other", dto.Type,
                                     dto.Sender is { Length: > 0 } s ? StripAcLinks(s, out _) : linkedName, text)
             {
                 Seq = dto.Seq,
-                // A plugin's own colour for it (ChatOwnColors), matched by the text as AC printed it.
-                OwnArgb = ChatOwnColors.Lines.Take(dto.Text, dto.Type, Environment.TickCount64),
+                OwnArgb = ownArgb,
+                OwnSpans = ChatOwnColors.ArrivedSpans(ownSpans, dto.Text, text),
             };
             line.Route = router.Evaluate(line, null);
             if (line.Route.Mention) ChatModel.PumpMentionSound();

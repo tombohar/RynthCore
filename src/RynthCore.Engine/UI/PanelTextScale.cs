@@ -3,11 +3,11 @@
 //  Per-panel text size for the in-client (ImGui) panels. Sizes 0-10; 0 is the
 //  normal size, each step is 10% bigger, and the last one ("yourjokin") is
 //  2.5x. Stored for the whole PC in %LOCALAPPDATA%\RynthCore\panel_text_size.txt
-//  as "Title=size" lines; set from Settings > Display or from a window's own
+//  as "Title=size" lines; set from Settings > Interface or from a window's own
 //  title bar (the text size button, Ctrl+wheel; ImGuiPanelHost). One size
 //  ("All Panels") applies to every panel unless "Size each panel separately"
 //  is on. The toolbar (the icon bar, ImGuiBar) has its own size, the "chrome"
-//  row (Settings > Display > Toolbar, the bar's right-click menu, Ctrl+wheel on
+//  row (Settings > Interface > Toolbar, the bar's right-click menu, Ctrl+wheel on
 //  the bar, /rc ui barsize); it is independent of All Panels and per-panel sizes.
 // ============================================================================
 

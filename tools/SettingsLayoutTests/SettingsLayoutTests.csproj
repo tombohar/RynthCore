@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the Settings panel's layout (2026-11-11 regroup: Display + UI became Interface, Misc
+    became General, Melee Combat became Combat, the Crafting tab folded into Combat, and Game Client and
+    Inventory were added). OldPinKeys.txt is every pin key ("Tab/Section/Label", UI/QuickSettings.cs) the
+    layout before the regroup had, dumped from that build with dotnet run -c Release -dump OldPinKeys.txt.
+    Each one must still lead to its row, so a player's My settings drawer keeps its pins, and the old tab
+    names must still open their tab (/rc settings misc).
+    The engine has no test seam for SettingsData.cs (it pulls in the whole ImGui layer), so this references
+    the built engine assembly and reaches the internal types by reflection. x86, like the engine: needs the
+    x86 .NET runtime (C:\Program Files (x86)\dotnet).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <Platforms>x86</Platforms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>SettingsLayoutTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RynthCore.Engine\RynthCore.Engine.csproj" />
+    <None Include="OldPinKeys.txt" CopyToOutputDirectory="PreserveNewest" Condition="Exists('OldPinKeys.txt')" />
+  </ItemGroup>
+
+</Project>

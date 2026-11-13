@@ -6,7 +6,7 @@
 //  (ImGui.GetColorU32 order) built from the Avalonia #AARRGGBB literals.
 //
 //  Colour themes (Tom 2026-10-14): the structural colours come from a palette
-//  the player can change in Settings > Display: a preset (RynthCore, Ember,
+//  the player can change in Settings > Interface: a preset (RynthCore, Ember,
 //  Verdant, Amethyst, Crimson, Slate, and since 2026-10-21 Brass, Volt and
 //  Ivory, the instrument dashboard's three) or their own eight colours (accent,
 //  highlight, background, title bars, buttons, borders, text, muted text).
@@ -277,7 +277,7 @@ internal static class RynthTheme
     public static readonly uint RadarGripIdle = Argb(0x400A121A);
     public static readonly uint RadarGripHover = Argb(0xA00A121A);
 
-    // ── Choosing a theme (Settings > Display) ───────────────────────────
+    // ── Choosing a theme (Settings > Interface) ───────────────────────────
     //
     // Three kinds of theme (Tom 2026-10-22: a new preset must never cost a player the colours they
     // made, and players can keep their own schemes):

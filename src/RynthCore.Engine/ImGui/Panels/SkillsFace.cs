@@ -14,9 +14,11 @@
 //      three vital maximums.
 //    - Raise: "+1" raises one rank at once; the caret beside it drops down +10,
 //      +100 and Max (each with its XP cost; Max asks first only when it spends
-//      over half the unassigned XP). PlayerTraining.Raise(defer) queues it for
-//      AC's main thread outside the ImGui frame; raise buttons stay locked until
-//      the new values arrive (or 5 s pass). Train (skill credits) always asks first.
+//      over half the unassigned XP, and says when it stops short of the top).
+//      PlayerTraining.Raise(defer) queues it for AC's main thread outside the
+//      ImGui frame; raise buttons stay locked until the new values arrive (or 5 s
+//      pass: then the panel says the server hasn't taken it). Train (skill
+//      credits) always asks first.
 //    - Aelrynth only (ServerInfo.IsAelrynth): skill mastery from the SkillMastery
 //      mod's /mastery-data reply (MasteryFeed). A crown badge with the mastery
 //      points on trained rows that have any; the open row shows points, bonus,
@@ -169,6 +171,11 @@ internal sealed partial class SkillsFace : IImGuiPanel
     private long _pendingUnassigned;
     private int _pendingCredits;
     private int _pendingVersion;
+    // The raise in flight (-1 key: a train), to tell the player when the server never took it.
+    private int _pendingKey = -1;
+    private uint _pendingRanks, _pendingSpent;
+    private long _pendingCost;
+    private string _pendingWhat = "";
 
     private string _status = "";
     private uint _statusColor;
@@ -350,10 +357,19 @@ internal sealed partial class SkillsFace : IImGuiPanel
             Order();
         }
 
-        if (_pending && (now > _pendingUntilMs
-            || (snap != null && snap.Version != _pendingVersion
-                && (snap.UnassignedXp != _pendingUnassigned || snap.SkillCredits != _pendingCredits))))
-            _pending = false;
+        if (_pending)
+        {
+            if (snap != null && snap.Version != _pendingVersion
+                && (snap.UnassignedXp != _pendingUnassigned || snap.SkillCredits != _pendingCredits))
+                _pending = false;
+            else if (now > _pendingUntilMs)
+            {
+                _pending = false;
+                // Only while the panel kept drawing (its numbers kept coming): not on a reopen much later.
+                if (now - _pendingUntilMs < 2000) NoteUnanswered(snap);
+                else _pendingKey = -1;
+            }
+        }
 
         // The open row's time-left text, once a second.
         if (second != _detailSecond && _byKey.TryGetValue(_expandedKey, out Row? open))
@@ -1278,14 +1294,17 @@ internal sealed partial class SkillsFace : IImGuiPanel
             }
             PlayerProgress s = _snap;
             long have = s.UnassignedXp;
-            int maxLeft = Math.Max(0, r.Table.Length - 1 - (int)Math.Min(r.Ranks, (uint)int.MaxValue));
-            int affordable = SkillDat.Affordable(r.Table, r.Ranks, r.Spent, have);
+            MaxRaisePlan plan = TrainingCosts.PlanMax(r.Table, r.Ranks, r.Spent, have);
+            int maxLeft = plan.RanksLeft;
+            int affordable = plan.Ranks;
             ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.Ui10));
             Vector2 p = ImGuiNET.ImGui.GetCursorScreenPos();
             float y = p.Y;
             MultiItem(r, s, "##m10", "+10", 10, maxLeft, have, p.X, ref y);
             MultiItem(r, s, "##m100", "+100", 100, maxLeft, have, p.X, ref y);
-            MultiItem(r, s, "##mmax", affordable > 0 ? $"Max (+{affordable})" : "Max", affordable, maxLeft, have, p.X, ref y);
+            // Max says when the XP doesn't reach the top ("+150 of 208"), and the tooltip how much more it needs.
+            string maxLabel = affordable <= 0 ? "Max" : plan.ReachesTop ? $"Max (+{affordable})" : $"Max (+{affordable} of {maxLeft})";
+            MultiItem(r, s, "##mmax", maxLabel, affordable, maxLeft, have, p.X, ref y, plan);
             NextLine(p, y - p.Y);
             ImGuiNET.ImGui.PopFont();
         }
@@ -1296,7 +1315,8 @@ internal sealed partial class SkillsFace : IImGuiPanel
     }
 
     /// <summary>One drop-down line: label left, XP cost right; greyed with the reason when it can't act.</summary>
-    private void MultiItem(Row r, PlayerProgress s, string id, string label, int n, int maxLeft, long have, float x, ref float y)
+    private void MultiItem(Row r, PlayerProgress s, string id, string label, int n, int maxLeft, long have, float x, ref float y,
+        MaxRaisePlan plan = default)
     {
         const float h = 22;
         long cost = n > 0 && n <= maxLeft ? SkillDat.CostOf(r.Table!, r.Ranks, r.Spent, n) : -1;
@@ -1319,7 +1339,10 @@ internal sealed partial class SkillsFace : IImGuiPanel
             right = Compact(cost) + " XP";
             ok = !_pending && PlayerTraining.Available;
             why = $"Raise {r.Name} {r.Base} → {r.Base + n} for {cost:N0} XP"
-                + (isMax && cost * 2 > have ? " (asks first: over half your unassigned XP)" : "");
+                + (isMax && cost * 2 > have ? " (asks first: over half your unassigned XP)" : "")
+                + (isMax && !plan.ReachesTop && plan.Missing > 0
+                    ? $"\nThe top rank is {maxLeft} ranks away and costs {plan.CostToTop:N0} XP: {plan.Missing:N0} more than you have."
+                    : "");
         }
         var pos = new Vector2(x, y);
         var size = new Vector2(MultiW - 6, h);
@@ -1403,6 +1426,12 @@ internal sealed partial class SkillsFace : IImGuiPanel
         Label(cost >= 0 && cost <= have
             ? $"Unassigned: {have:N0} → {have - cost:N0}"
             : $"Unassigned: {have:N0} (not enough)", Mute);
+        if (n < maxLeft && cost >= 0)
+        {
+            long toTop = SkillDat.CostOf(table, r.Ranks, r.Spent, maxLeft);
+            int gap = maxLeft - n;
+            Label($"Stops {gap} rank{(gap == 1 ? "" : "s")} short of the top: that needs {Math.Max(0L, toTop - have):N0} more XP.", Amber);
+        }
         ImFontPtr f9 = ImGuiFonts.Get(UiFont.Ui9);
         ImGuiNET.ImGui.PushFont(f9);
         Label("That is more than half of your unassigned XP. Spent XP can't be taken back.", Dim);
@@ -1458,7 +1487,7 @@ internal sealed partial class SkillsFace : IImGuiPanel
     {
         if (PlayerTraining.TrainSkill(r.Stype, (uint)r.TrainCost, defer: true))
         {
-            MarkPending(s);
+            MarkPending(s, null, 0);
             SetStatus($"Sent: train {r.Name} for {Credits(r.TrainCost)}.", Teal);
         }
         else
@@ -1467,15 +1496,41 @@ internal sealed partial class SkillsFace : IImGuiPanel
         }
     }
 
-    private void MarkPending(PlayerProgress s)
+    /// <summary>Locks the buttons until the server answers; <paramref name="raised"/> is the raise's row (null for a train).</summary>
+    private void MarkPending(PlayerProgress s, Row? raised, long cost)
     {
         _pending = true;
         _pendingUntilMs = Environment.TickCount64 + 5000;
         _pendingUnassigned = s.UnassignedXp;
         _pendingCredits = s.SkillCredits;
         _pendingVersion = s.Version;
+        _pendingKey = raised?.Key ?? -1;
+        _pendingRanks = raised?.Ranks ?? 0;
+        _pendingSpent = raised?.Spent ?? 0;
+        _pendingCost = cost;
+        _pendingWhat = raised?.Name ?? "";
         PlayerProgressHooks.RefreshSoon();
     }
+
+    /// <summary>
+    /// The 5 s lock ran out with nothing changed. ACE turns a raise down without a word (more XP
+    /// than it thinks is left to the top, or than you have), so say so here and log the numbers
+    /// the raise was worked out from.
+    /// </summary>
+    private void NoteUnanswered(PlayerProgress? snap)
+    {
+        int key = _pendingKey;
+        _pendingKey = -1;
+        if (key < 0 || snap == null || !_byKey.TryGetValue(key, out Row? r) || r.Table == null) return;
+        if (r.Ranks != _pendingRanks || r.Spent != _pendingSpent || snap.UnassignedXp != _pendingUnassigned) return;
+        SetStatus($"{_pendingWhat}: the server hasn't taken the raise ({_pendingCost:N0} XP) after 5 s; nothing was spent.", Red);
+        RynthLog.Compat($"Skills panel: {_pendingWhat} raise for {_pendingCost:N0} XP got no answer in 5 s " +
+            $"(rank {r.Ranks}, XP spent {r.Spent:N0}, unassigned {snap.UnassignedXp:N0}, class {RowClass(r, snap)}, " +
+            $"top rank {r.Table.Length - 1} at {r.Table[^1]:N0} XP)");
+    }
+
+    private static uint RowClass(Row r, PlayerProgress s) =>
+        r.Kind == RowKind.Skill && r.Stype <= PlayerProgress.MaxSkill ? s.SkillClass[r.Stype] : 0;
 
     /// <summary>
     /// Raises <paramref name="n"/> ranks at once: the XP is worked out from the current
@@ -1500,7 +1555,9 @@ internal sealed partial class SkillsFace : IImGuiPanel
         uint stype = r.Kind == RowKind.Vital ? r.Stype * 2 - 1 : r.Stype;   // vitals by their maximum
         if (PlayerTraining.Raise(kind, stype, (uint)cost, defer: true))
         {
-            MarkPending(s);
+            RynthLog.Compat($"Skills panel: raise {r.Name} +{n} from rank {r.Ranks} (XP spent {r.Spent:N0}, " +
+                $"unassigned {s.UnassignedXp:N0}) for {cost:N0} XP");
+            MarkPending(s, r, cost);
             SetStatus($"Sent: raise {r.Name} +{n} for {cost:N0} XP.", Teal);
         }
         else

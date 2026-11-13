@@ -73,7 +73,9 @@ internal sealed class SettingsFace : IImGuiPanel
         if (_requestedTab is { } wanted)
         {
             _requestedTab = null;
-            int idx = Array.FindIndex(SettingsSchema.Tabs, t => t.Name.Equals(wanted, StringComparison.OrdinalIgnoreCase));
+            // FindTab also takes the names from before the 2026-11-11 regroup (Misc = General).
+            SettingsTab? found = SettingsSchema.FindTab(wanted);
+            int idx = found == null ? -1 : Array.IndexOf(SettingsSchema.Tabs, found);
             if (idx >= 0) _tab = idx;
         }
 
@@ -107,6 +109,14 @@ internal sealed class SettingsFace : IImGuiPanel
         for (int i = 0; i < tabs.Length; i++)
         {
             string tabName = tabs[i].Name;
+            // A group's heading above its first tab (RynthCore · this PC, RynthAi · saved in the profile, Support).
+            if (tabs[i].Group is { } group)
+            {
+                ImGuiNET.ImGui.Dummy(new Vector2(0, i == 0 ? 2 : 8));
+                Vector2 gp = ImGuiNET.ImGui.GetCursorScreenPos();
+                dl.AddText(new Vector2(gp.X + 4, gp.Y), Mute, group);
+                ImGuiNET.ImGui.Dummy(new Vector2(0, ImGuiNET.ImGui.GetFontSize() + 1));
+            }
             ImGuiNET.ImGui.Dummy(new Vector2(0, 1));
             Vector2 p = ImGuiNET.ImGui.GetCursorScreenPos();
             ImGuiNET.ImGui.PushID(i);
@@ -184,18 +194,18 @@ internal sealed class SettingsFace : IImGuiPanel
     // Tab icons by tab name (SettingsSchema); a tab not listed shows its name alone.
     private static readonly System.Collections.Generic.Dictionary<string, string> TabIcons = new()
     {
-        ["Display"] = PhosphorIcons.Monitor,
-        ["UI"] = PhosphorIcons.AppWindow,
+        ["Interface"] = PhosphorIcons.AppWindow,
+        ["Game Client"] = PhosphorIcons.Monitor,
         ["Hotkeys"] = PhosphorIcons.Keyboard,
-        ["Misc"] = PhosphorIcons.DotsThree,
+        ["General"] = PhosphorIcons.SlidersHorizontal,
         ["Recharge"] = PhosphorIcons.BatteryCharging,
-        ["Melee Combat"] = PhosphorIcons.Sword,
+        ["Combat"] = PhosphorIcons.Sword,
         ["Spell Combat"] = PhosphorIcons.MagicWand,
         ["Ranges"] = PhosphorIcons.Ruler,
         ["Navigation"] = PhosphorIcons.SneakerMove,
         ["Buffing"] = PhosphorIcons.Sparkle,
-        ["Crafting"] = PhosphorIcons.Hammer,
         ["Looting"] = PhosphorIcons.Bag,
+        ["Inventory"] = PhosphorIcons.Backpack,
         ["Vendoring"] = PhosphorIcons.Storefront,
         ["Diagnostics"] = PhosphorIcons.Wrench,
     };

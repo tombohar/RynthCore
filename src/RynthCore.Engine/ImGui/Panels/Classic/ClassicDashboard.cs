@@ -10,7 +10,7 @@
 //
 //  RynthAiFace draws this instead of the dashboard while
 //  RynthAiDashboardState.Classic is on; the title bar's Modern button and
-//  Settings > Display switch back. Minimized (the dashboard's shared flag)
+//  Settings > Interface switch back. Minimized (the dashboard's shared flag)
 //  shows the title bar over a compact strip: the systems, Stop/Start and the
 //  three vitals meters.
 //
@@ -166,8 +166,8 @@ internal sealed class ClassicDashboard
         _fittedH = wantH;
         _fittedW = wantW;
         ImGuiPanelHost.RequestSize(RynthAiFace.Title, new Vector2(wantW / place, wantH / place));
-        // Applied after the size, clamped to the screen at it (the dashboard's MeasureAndFit does the same):
-        // a taller tab near the bottom of the screen moves the window up instead of running off it.
+        // A taller tab near the bottom of the screen moves the window up instead of running off it: the host
+        // pulls it onto the screen from its home at the new size (UI/PanelPlacement), and back once it fits.
         ImGuiPanelHost.RequestPos(RynthAiFace.Title, ImGuiNET.ImGui.GetWindowPos() / place);
     }
 

@@ -56,6 +56,10 @@ internal sealed class ChatLine
     /// <summary>The colour the plugin that wrote the line asked for (RynthAi's Info text colour;
     /// ChatOwnColors), or null. Below a rule's line colour, above the kind / tab / retail ones.</summary>
     public uint? OwnArgb { get; init; }
+    /// <summary>Colour runs the plugin that wrote the line asked for (RynthAi's per-part item info
+    /// colours; ChatOwnColors "nextspans"): offsets into Text, sorted, not overlapping, or null.
+    /// The rest of the line keeps its colour; a rule's colours win (ChatOwnColors.EffectiveSpans).</summary>
+    public ChatSpan[]? OwnSpans { get; init; }
     /// <summary>"HH:mm:ss text": copy, log and the Avalonia face.</summary>
     public string FormattedText { get; }
 

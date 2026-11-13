@@ -66,6 +66,9 @@ namespace PanelLayoutTests
                 Run(HotReloadWithTheNameNotKnownYet);
                 Run(TheDefaultIsOnlyReadInUse);
                 Run(CommandReplies);
+                Run(PulledOnScreenNeverMovesTheSavedSpot);
+                Run(TheBarKeepsItsHome);
+                Run(HomeSurvivesAReloadThroughTheStore);
             }
             finally
             {
@@ -325,6 +328,152 @@ namespace PanelLayoutTests
             {
                 RynthCore.Engine.Plugins.EngineSettings.RememberWindowLayout = true;
             }
+            NoTempFiles(root);
+        }
+
+        // ── where a docked window draws versus its home (UI/PanelPlacement, 2026-11-12) ──
+        //
+        // 2026-11-12, reported: "a few of the panels still move around on reload and login (shortcuts, our own
+        // toolbar)". The Shortcuts bar sits in the bottom-right corner (a fit-height plugin window: its
+        // height follows its content), the toolbar's size follows its icons, rows and text size. Before,
+        // a placement pulled onto a smaller screen, or for a taller first frame, was what the open saved
+        // (ImGuiPanelHost.Apply -> Persist(entry.Pos)) and what the bar's size step saved, and only a
+        // display change ever undid it. Numbers are the live layout's (1600x900 client).
+
+        private static readonly System.Numerics.Vector2 Full = new(1600, 900);
+
+        private static System.Numerics.Vector2 V(float x, float y) => new(x, y);
+
+        private static void PulledOnScreenNeverMovesTheSavedSpot()
+        {
+            Case("placement: a pull onto the screen is drawn, never the home");
+            Eq(HomePlace.OnScreen(V(1301, 811), V(299, 89), Full), V(1301, 811), "flush in the bottom-right corner fits as saved");
+            Eq(HomePlace.OnScreen(V(1301, 811), V(299, 120), Full), V(1301, 780), "taller than saved: pulled up by the difference");
+            Eq(HomePlace.OnScreen(V(1700, -5), V(100, 50), Full), V(1500, 0), "off the right and top: onto the screen");
+            Eq(HomePlace.OnScreen(V(1301, 811), V(299, 89), V(0, 0)), V(1301, 811), "the display not known yet: drawn at its home");
+            Eq(HomePlace.OnScreen(V(50, 50), V(2000, 1000), Full), V(0, 0), "bigger than the display: its top-left corner");
+            Check(HomePlace.Near(V(1319.6f, 811), V(1320, 811)) && !HomePlace.Near(V(1319, 811), V(1320, 811)), "Near is half a pixel");
+
+            Case("placement: login on a client smaller for a moment");
+            var p = new HomePlace();
+            p.Set(V(1301, 811), V(299, 89), V(800, 600));
+            Eq(p.Drawn, V(501, 511), "on 800x600 it draws inside the screen");
+            Check(p.Pulled, "...and knows it was pulled");
+            Eq(p.Home, V(1301, 811), "the home (what the open saves) is still the saved spot");
+            Check(p.Fit(V(299, 89), Full), "the client grows: drawn again");
+            Eq(p.Drawn, V(1301, 811), "back in the corner");
+            Check(!p.Pulled, "...not pulled any more");
+            Check(!p.Fit(V(299, 89), Full), "nothing changed: nothing to do");
+
+            Case("placement: a fit-height window, a taller then a shorter first frame");
+            p = new HomePlace();
+            p.Set(V(1301, 811), V(299, 89), Full);
+            Check(!p.Pulled, "saved flush in the corner at its height: as saved");
+            Check(p.Fit(V(299, 120), Full), "a taller frame (a key row, a bigger draw size) at the bottom edge");
+            Eq(p.Drawn, V(1301, 780), "pulled up while it is taller");
+            Eq(p.Home, V(1301, 811), "the home doesn't move");
+            Check(p.Fit(V(299, 50), Full), "one line tall ('Your shortcuts show once you're in the world.')");
+            Eq(p.Drawn, V(1301, 811), "back at its home");
+            p.Fit(V(299, 89), Full);
+            Eq(p.Drawn, V(1301, 811), "its real height: where the player left it");
+
+            Case("placement: the saved row's height is stale (fit heights aren't saved)");
+            p = new HomePlace();
+            p.Set(V(1301, 811), V(299, 120), Full);   // the row says 120, the content is 89
+            Eq(p.Drawn, V(1301, 780), "the first frame at the saved 120 is pulled up");
+            p.Fit(V(299, 89), Full);
+            Eq(p.Drawn, V(1301, 811), "fitted to 89 a frame later: back in the corner");
+            Eq(p.Home, V(1301, 811), "the home was never the pulled spot");
+
+            Case("placement: the player's drag is the new home");
+            p.MoveTo(V(900, 700), V(299, 89), Full);
+            Eq(p.Home, V(900, 700), "dragged: that is the home");
+            Eq(p.Drawn, V(900, 700), "...and where it draws");
+            p.MoveTo(V(1301, 811), V(299, 89), Full);
+            p.Fit(V(299, 89), V(1280, 720));
+            Eq(p.Drawn, V(981, 631), "a smaller client later pulls it in");
+            Eq(p.Home, V(1301, 811), "...and keeps the player's spot");
+
+            Case("placement: the load line says where and why");
+            p = new HomePlace();
+            p.Set(V(1301, 811), V(299, 89), V(800, 600));
+            string line = p.Describe("Shortcuts", "its saved place");
+            Check(line.Contains("Shortcuts placed at (501,511) 299x89 from its saved place (1301,811)", StringComparison.Ordinal)
+                && line.Contains("pulled onto the 800x600 display", StringComparison.Ordinal), $"a pulled placement: {line}");
+            p = new HomePlace();
+            p.Set(V(1301, 811), V(299, 89), Full);
+            line = p.Describe("Shortcuts", "its saved place");
+            Check(line.EndsWith("on the 1600x900 display: as saved.", StringComparison.Ordinal), $"as saved: {line}");
+            p = new HomePlace();
+            p.Set(V(148, 0), V(0, 0), V(0, 0));
+            line = p.Describe("the bar", "its saved bar row");
+            Check(line.StartsWith("the bar placed at (148,0) from its saved bar row (148,0)", StringComparison.Ordinal)
+                && line.Contains("isn't known yet", StringComparison.Ordinal), $"no size, no display yet: {line}");
+            p = new HomePlace();
+            p.Set(V(1301, 811), V(299, 89), Full);
+            p.Fit(V(299, 120), Full);
+            line = p.DescribePull("Shortcuts");
+            Check(line.Contains("(1301,780)", StringComparison.Ordinal) && line.Contains("home (1301,811) at 299x120", StringComparison.Ordinal)
+                && line.Contains("Not saved", StringComparison.Ordinal), $"the pull line: {line}");
+            Check(!new HomePlace().Fit(V(10, 10), Full), "a window never placed has nothing to fit");
+        }
+
+        private static void TheBarKeepsItsHome()
+        {
+            Case("the toolbar: icons that come in as plugins load near the right edge");
+            var bar = new HomePlace();
+            bar.Set(V(1450, 0), V(0, 0), Full);   // the size isn't known before its first frame
+            Eq(bar.Drawn, V(1450, 0), "first frame at its bar row");
+            bar.Fit(V(120, 53), Full);
+            Eq(bar.Drawn, V(1450, 0), "the engine's icons fit");
+            Check(bar.Fit(V(260, 53), Full), "plugin windows add icons: wider than the room left");
+            Eq(bar.Drawn, V(1340, 0), "pulled left while it is that wide");
+            Eq(bar.Home, V(1450, 0), "the bar row's spot is kept (the old _sizeWatch saved the pull)");
+            bar.Fit(V(140, 79), Full);
+            Eq(bar.Drawn, V(1450, 0), "fewer icons a row (three rows): back where the player left it");
+
+            Case("the toolbar: a text size step and a smaller client");
+            bar.Fit(V(150, 400), V(1600, 300));
+            Eq(bar.Drawn, V(1450, 0), "taller than a short client: its top stays at 0");
+            bar.Fit(V(150, 60), V(1024, 768));
+            Eq(bar.Drawn, V(874, 0), "a narrower client: pulled in");
+            bar.Fit(V(150, 60), Full);
+            Eq(bar.Drawn, V(1450, 0), "the client back to full size: back home");
+        }
+
+        private static void HomeSurvivesAReloadThroughTheStore()
+        {
+            Case("placement through panel_state.txt: what an open saves, read back by the next load");
+            string root = NewDir("placement");
+            string file = Path.Combine(root, "layouts", "s", "a", "panel_state.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+            File.WriteAllText(file, "bar=1450,0\r\npanel.Shortcuts=open,1301,811,299,89,docked,0,0\r\n");
+            PanelStateStore.SwitchTo(file, flushCurrent: false);
+
+            // The load: a client 800x600 for a moment (or a first frame taller than saved).
+            Check(PanelStateStore.TryGetPanel("Shortcuts", out var saved), "the row is read");
+            var place = new HomePlace();
+            place.Set(V((float)saved.Left, (float)saved.Top), V((float)saved.Width, (float)saved.Height), V(800, 600));
+            Check(place.Pulled, "drawn pulled in");
+            // ImGuiPanelHost.Persist (the open's save) writes the home:
+            PanelStateStore.SetPanel("Shortcuts", new PanelStateStore.PanelEntry(true, place.Home.X, place.Home.Y, saved.Width, saved.Height));
+            Check(File.ReadAllText(file).Contains("panel.Shortcuts=open,1301,811,299,89", StringComparison.Ordinal), "the file keeps the corner");
+            Check(place.Drawn != place.Home, "(the drawn spot, which the open wrote before, is somewhere else)");
+
+            // The bar's pull isn't written at all; only a drag is.
+            var bar = new HomePlace();
+            var row = PanelStateStore.BarPosition!.Value;
+            bar.Set(V((float)row.Left, (float)row.Top), V(0, 0), Full);
+            bar.Fit(V(260, 53), Full);
+            Check(bar.Pulled, "the bar is pulled left");
+
+            // The next load (a hot reload): the same file, read again.
+            PanelStateStore.SwitchTo(file, flushCurrent: false);
+            Check(PanelStateStore.TryGetPanel("Shortcuts", out var again) && again.Left == 1301 && again.Top == 811, "reloaded: Shortcuts in the corner");
+            Eq(PanelStateStore.BarPosition, ((double)1450, (double)0), "reloaded: the bar where its row says");
+            var next = new HomePlace();
+            next.Set(V((float)again.Left, (float)again.Top), V((float)again.Width, (float)again.Height), Full);
+            Eq(next.Drawn, V(1301, 811), "and drawn there");
             NoTempFiles(root);
         }
 
