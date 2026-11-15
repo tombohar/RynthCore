@@ -90,8 +90,12 @@ internal partial class MainWindow : Window
     // Last observed window rect per PID — set on first post-login observation,
     // used to detect an actual move before we commit anything to appsettings.
     private readonly Dictionary<int, (int x, int y, int w, int h)> _baselineWindowRects = [];
-    // When each client's saved window was put back, and the put-backs since (AcWindowRestoreRule).
-    private readonly Dictionary<int, (DateTime At, DateTime? Last, int Count)> _windowRestores = [];
+    // When each client was first seen logged in: the restore waits from then for AC to reach the saved size (AcWindowPlacementRule).
+    private readonly Dictionary<int, DateTime> _windowLoginSeenUtc = [];
+    // The window size each client was last seen at and since when (the restore waits for it to hold: RestoreSettle).
+    private readonly Dictionary<int, (int w, int h, DateTime since)> _windowSizeSinceUtc = [];
+    // Per client, a new window rect and since when it has held; saved only once it held for StableFor (AcWindowPlacementRule).
+    private readonly Dictionary<int, AcWindowPlacementRule.Pending?> _windowSavePending = [];
     // Serializes prefs-swap launches so two accounts don't race on the live
     // UserPreferences.ini. Non-prefs launches don't acquire this and stay
     // parallel.
@@ -3874,8 +3878,12 @@ internal partial class MainWindow : Window
         _everLoggedInPids.RemoveWhere(pid => !activePids.Contains(pid));
         foreach (int pid in _baselineWindowRects.Keys.Where(pid => !activePids.Contains(pid)).ToList())
             _baselineWindowRects.Remove(pid);
-        foreach (int pid in _windowRestores.Keys.Where(pid => !activePids.Contains(pid)).ToList())
-            _windowRestores.Remove(pid);
+        foreach (int pid in _windowLoginSeenUtc.Keys.Where(pid => !activePids.Contains(pid)).ToList())
+            _windowLoginSeenUtc.Remove(pid);
+        foreach (int pid in _windowSavePending.Keys.Where(pid => !activePids.Contains(pid)).ToList())
+            _windowSavePending.Remove(pid);
+        foreach (int pid in _windowSizeSinceUtc.Keys.Where(pid => !activePids.Contains(pid)).ToList())
+            _windowSizeSinceUtc.Remove(pid);
 
         // Latch any PID that's currently reporting IsLoggedIn=true. Once
         // latched, the reaper will permanently exempt it — even if some race
@@ -4882,6 +4890,49 @@ internal partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern bool IsWindowVisible(IntPtr hWnd);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public int cbSize;
+        public WinRect rcMonitor;
+        public WinRect rcWork;
+        public uint dwFlags;
+    }
+
+    private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdcMonitor, IntPtr lprcMonitor, IntPtr dwData);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr lprcClip, MonitorEnumProc lpfnEnum, IntPtr dwData);
+
+    [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfo lpmi);
+
+    /// The work area (screen minus taskbar) of every monitor, for AcWindowPlacementRule.ClampToWorkArea.
+    /// Empty if the calls fail; the rule then leaves the window where AC put it.
+    private static List<AcWindowPlacementRule.WorkArea> MonitorWorkAreas()
+    {
+        var list = new List<AcWindowPlacementRule.WorkArea>(4);
+        try
+        {
+            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (mon, _, _, _) =>
+            {
+                var mi = new MonitorInfo { cbSize = Marshal.SizeOf<MonitorInfo>() };
+                if (GetMonitorInfo(mon, ref mi))
+                    list.Add(new AcWindowPlacementRule.WorkArea(mi.rcWork.Left, mi.rcWork.Top, mi.rcWork.Right, mi.rcWork.Bottom));
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch
+        {
+            list.Clear();
+        }
+        return list;
+    }
+
+    // The launcher never resizes an AC window (AcWindowPlacementRule): every SetWindowPos on one carries this.
+    private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOZORDER = 0x0004;
     private const uint SWP_NOACTIVATE = 0x0010;
     // Posts the move to the client's thread instead of waiting for it: a plain
@@ -4923,11 +4974,13 @@ internal partial class MainWindow : Window
     }
 
     /// <summary>
-    /// On the first tick after AC reaches graphics-ready for a tracked client,
-    /// applies the saved window placement for that account. After that, every
-    /// tick reads the current rect and persists changes back to the profile so
-    /// user-initiated moves/resizes survive restart. Idempotent within a tolerance
-    /// to avoid spamming SaveSettings on DWM-frame fudge.
+    /// Once a tracked client is logged in, puts the account's saved window
+    /// position back (position only: AC sizes its own window from its
+    /// resolution), then saves the window's rect to the profile whenever a new
+    /// one has held for a while, so the player's own moves survive a restart.
+    /// The decisions are AcWindowPlacementRule's (2026-11-15, a #rynth-issues
+    /// report, 2026-11-14: a saved logout-size rect shrank the next login's
+    /// window and cut the HUD off).
     /// </summary>
     private void ApplyOrPersistWindowPlacement(
         Process process,
@@ -4976,8 +5029,11 @@ internal partial class MainWindow : Window
         if (hwnd == IntPtr.Zero)
             hwnd = FindLargestVisibleWindowForProcess(process.Id);
 
-        bool hasSaved = profile.WindowX.HasValue && profile.WindowY.HasValue
-                        && profile.WindowWidth.HasValue && profile.WindowHeight.HasValue;
+        AcWindowPlacementRule.Placement? saved =
+            profile.WindowX.HasValue && profile.WindowY.HasValue && profile.WindowWidth.HasValue && profile.WindowHeight.HasValue
+                ? new AcWindowPlacementRule.Placement(profile.WindowX.Value, profile.WindowY.Value,
+                                                      profile.WindowWidth.Value, profile.WindowHeight.Value)
+                : null;
 
         // Only act once AC reports IsLoggedIn — graphicsReady fires while AC
         // is still in its small login window, and AC will resize itself again
@@ -4987,136 +5043,98 @@ internal partial class MainWindow : Window
         // a transient size that gets restored too early next launch.
         bool loggedIn = activeSessions.TryGetValue(process.Id, out SessionStateRecord? sess) && sess.IsLoggedIn;
         if (!loggedIn)
-            return;
-
-        if (!_windowPositionAppliedPids.Contains(process.Id))
         {
-            _windowPositionAppliedPids.Add(process.Id);
-
-            if (hwnd == IntPtr.Zero)
-            {
-                LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): hwnd=0 — cannot restore or capture.");
-                return;
-            }
-
-            if (hasSaved)
-            {
-                SetWindowPos(
-                    hwnd,
-                    IntPtr.Zero,
-                    profile.WindowX!.Value,
-                    profile.WindowY!.Value,
-                    profile.WindowWidth!.Value,
-                    profile.WindowHeight!.Value,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
-                _windowRestores[process.Id] = (DateTime.UtcNow, null, 0);
-                LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): restored to ({profile.WindowX},{profile.WindowY},{profile.WindowWidth}x{profile.WindowHeight}).");
-                return;
-            }
-            // No saved position — don't capture immediately. The window may still
-            // be at character-select/login size. Record the baseline on the next
-            // poll and only persist once the user actually moves or resizes it.
+            // A rect pending from before the logout must not count its time at
+            // character select toward StableFor and save itself on the relogin.
+            _windowSavePending.Remove(process.Id);
+            return;
         }
 
+        DateTime nowUtc = DateTime.UtcNow;
+        if (!_windowLoginSeenUtc.TryGetValue(process.Id, out DateTime loginSeenUtc))
+            _windowLoginSeenUtc[process.Id] = loginSeenUtc = nowUtc;
+
         if (hwnd == IntPtr.Zero)
+        {
+            if (_windowPositionAppliedPids.Add(process.Id))
+                LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): hwnd=0 — cannot restore or capture.");
             return;
+        }
 
         if (!GetWindowRect(hwnd, out WinRect rect))
             return;
+        var current = new AcWindowPlacementRule.Placement(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top);
 
-        int x = rect.Left;
-        int y = rect.Top;
-        int w = rect.Right - rect.Left;
-        int h = rect.Bottom - rect.Top;
-
-        if (w < 200 || h < 200)
-            return;
-
-        // Reject windows parked off-screen — AC places the window at (-10000,-10000)
-        // during startup before moving it into view. Multi-monitor setups can have
-        // negative coords, but never this negative.
-        if (x < -2000 || y < -2000)
-            return;
-
-        const int Tolerance = 2;
-
-        // On first observation with no saved position, record the current rect as
-        // baseline in memory without persisting. Only save once the window moves
-        // or resizes away from that baseline — that's user intent, not a transient.
-        if (!hasSaved)
+        // ── Restore: position only, once per client ──────────────────────────
+        // Until it is decided nothing is saved, so the saved spot can't be
+        // overwritten by AC's placement while the restore still waits for AC
+        // to reach the saved size.
+        if (!_windowPositionAppliedPids.Contains(process.Id))
         {
-            if (!_baselineWindowRects.TryGetValue(process.Id, out var baseline))
+            if (saved is AcWindowPlacementRule.Placement sv)
             {
-                _baselineWindowRects[process.Id] = (x, y, w, h);
-                return; // wait for the user to move/resize before saving
+                if (!AcWindowPlacementRule.IsCapturable(current))
+                    return;   // parked off-screen / still tiny: look again next tick
+                if (!_windowSizeSinceUtc.TryGetValue(process.Id, out var size) || size.w != current.Width || size.h != current.Height)
+                    _windowSizeSinceUtc[process.Id] = size = (current.Width, current.Height, nowUtc);
+                AcWindowPlacementRule.RestoreDecision d = AcWindowPlacementRule.DecideRestore(
+                    sv, current.Width, current.Height, nowUtc - size.since, nowUtc - loginSeenUtc, MonitorWorkAreas());
+                if (d.Action == AcWindowPlacementRule.RestoreAction.Wait)
+                    return;
+                _windowPositionAppliedPids.Add(process.Id);
+                if (d.Action == AcWindowPlacementRule.RestoreAction.Move)
+                {
+                    // SWP_NOSIZE: the size stays AC's own; it renders at its
+                    // resolution, and a smaller window crops the game and the HUD.
+                    SetWindowPos(hwnd, IntPtr.Zero, d.X, d.Y, 0, 0,
+                                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                    LauncherDiag.Info(d.Clamped
+                        ? $"WindowPos PID {process.Id} ({accountName}@{serverName}): restored position to ({d.X},{d.Y}), pulled onto the screen from ({sv.X},{sv.Y}); size left to AC ({current.Width}x{current.Height})."
+                        : $"WindowPos PID {process.Id} ({accountName}@{serverName}): restored position to ({d.X},{d.Y}); size left to AC ({current.Width}x{current.Height}).");
+                    return;
+                }
+                LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): saved position ({sv.X},{sv.Y}) not restored ({d.Why}); left where AC put it.");
             }
-
-            bool movedFromBaseline = Math.Abs(baseline.x - x) > Tolerance
-                || Math.Abs(baseline.y - y) > Tolerance
-                || Math.Abs(baseline.w - w) > Tolerance
-                || Math.Abs(baseline.h - h) > Tolerance;
-            if (!movedFromBaseline)
-                return;
-        }
-        else
-        {
-            bool changed = Math.Abs(profile.WindowX!.Value - x) > Tolerance
-                || Math.Abs(profile.WindowY!.Value - y) > Tolerance
-                || Math.Abs(profile.WindowWidth!.Value - w) > Tolerance
-                || Math.Abs(profile.WindowHeight!.Value - h) > Tolerance;
-            if (!changed)
-                return;
-        }
-
-        // ── Reject AC's character-select / login window ──────────────────────
-        // IsLoggedIn latches true for the whole acclient.exe process: it is set
-        // once at the first LoginComplete and is deliberately never flipped back
-        // at char-select (so the stuck-client reaper can't kill a healthy in-game
-        // client — see SessionStateRegistry). So when the player logs a character
-        // back out to character-select, AC shrinks its own window to the small
-        // login/char-select size while this method still sees loggedIn==true and
-        // would happily persist that tiny rect over the real in-game geometry.
-        // Next launch then restores the tiny size and the game is unplayable.
-        //
-        // AC's char-select/login window is *much* smaller than any window a player
-        // games in, so treat a capture that collapses the window below half the
-        // established in-game area as that transient window and skip it. Growth
-        // and moderate resizes (genuine user intent) still persist; a profile
-        // whose saved size was already corrupted small self-heals on the first
-        // resize back up to a real in-game size.
-        int refW = profile.WindowWidth ?? 0;
-        int refH = profile.WindowHeight ?? 0;
-        if ((refW <= 0 || refH <= 0) && _baselineWindowRects.TryGetValue(process.Id, out var refRect))
-        {
-            refW = refRect.w;
-            refH = refRect.h;
-        }
-        if (refW > 0 && refH > 0 && (long)w * h * 2L < (long)refW * refH)
-        {
-            // Shortly after our restore it is AC shrinking the window back while it brings the character in
-            // (AcWindowRestoreRule): put the saved window back instead of leaving the game drawn into a small one.
-            if (hasSaved && _windowRestores.TryGetValue(process.Id, out var rs)
-                && AcWindowRestoreRule.ShouldReapply(DateTime.UtcNow, rs.At, rs.Last, rs.Count, sess?.LogoutAtUtc != null,
-                                                     w, h, profile.WindowWidth!.Value, profile.WindowHeight!.Value))
+            else
             {
-                SetWindowPos(hwnd, IntPtr.Zero, profile.WindowX!.Value, profile.WindowY!.Value,
-                             profile.WindowWidth!.Value, profile.WindowHeight!.Value,
-                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
-                _windowRestores[process.Id] = (rs.At, DateTime.UtcNow, rs.Count + 1);
-                LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): AC shrank it to {w}x{h} after the restore: put back to ({profile.WindowX},{profile.WindowY},{profile.WindowWidth}x{profile.WindowHeight}) (#{rs.Count + 1}).");
-                return;
+                // No saved position — nothing to put back. The first capturable
+                // rect becomes the baseline below; only a move away from it
+                // (the player's) is ever saved.
+                _windowPositionAppliedPids.Add(process.Id);
             }
-            LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): ignored char-select/login shrink ({w}x{h}, <50% of in-game {refW}x{refH}).");
+        }
+
+        // ── Save: only a rect that held for StableFor ────────────────────────
+        if (saved is null && AcWindowPlacementRule.IsCapturable(current) && !_baselineWindowRects.ContainsKey(process.Id))
+        {
+            _baselineWindowRects[process.Id] = (current.X, current.Y, current.Width, current.Height);
             return;
         }
+        AcWindowPlacementRule.Placement? reference = saved
+            ?? (_baselineWindowRects.TryGetValue(process.Id, out var b)
+                ? new AcWindowPlacementRule.Placement(b.x, b.y, b.w, b.h)
+                : null);
 
-        _baselineWindowRects[process.Id] = (x, y, w, h);
-        profile.WindowX = x;
-        profile.WindowY = y;
-        profile.WindowWidth = w;
-        profile.WindowHeight = h;
-        SaveSettings();
-        LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): saved ({x},{y},{w}x{h}).");
+        _windowSavePending.TryGetValue(process.Id, out AcWindowPlacementRule.Pending? pending);
+        AcWindowPlacementRule.SaveDecision save = AcWindowPlacementRule.DecideSave(current, reference, ref pending, nowUtc);
+        _windowSavePending[process.Id] = pending;
+
+        switch (save.Action)
+        {
+            case AcWindowPlacementRule.SaveAction.LoginShrink:
+                if (save.FirstSeen)
+                    LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): ignored char-select/login shrink ({current.Width}x{current.Height}, <50% of in-game {reference!.Value.Width}x{reference.Value.Height}).");
+                return;
+            case AcWindowPlacementRule.SaveAction.Save:
+                _baselineWindowRects[process.Id] = (current.X, current.Y, current.Width, current.Height);
+                profile.WindowX = current.X;
+                profile.WindowY = current.Y;
+                profile.WindowWidth = current.Width;
+                profile.WindowHeight = current.Height;
+                SaveSettings();
+                LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): saved ({current.X},{current.Y},{current.Width}x{current.Height}), unchanged for {AcWindowPlacementRule.StableFor.TotalSeconds:0} s.");
+                return;
+        }
     }
 
     /// <summary>

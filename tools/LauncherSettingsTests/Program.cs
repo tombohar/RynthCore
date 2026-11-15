@@ -736,26 +736,6 @@ internal static class Program
                     "expired stays expired through the grace");
                 Check(CrashDumpWriterRule.Grace == TimeSpan.FromSeconds(60), "the grace is 60 s");
             });
-
-            // Drakkon 2026-10-25 23:04: the saved window was put back 3 s after the login, AC shrank it to its
-            // login size 3 s later and drew the game at 1600x900 into 806x629 all night.
-            Scenario("window restore: AC's shrink right after the restore is put back", root, () =>
-            {
-                var at = new DateTime(2026, 10, 26, 3, 4, 48, DateTimeKind.Utc);
-                bool Re(double sec, DateTime? last = null, int count = 0, bool loggedOut = false, int w = 806, int h = 629) =>
-                    AcWindowRestoreRule.ShouldReapply(at.AddSeconds(sec), at, last, count, loggedOut, w, h, 1606, 929);
-                Check(Re(3), "806x629 three seconds after the restore: put back");
-                Check(!Re(3, w: 1606, h: 929), "the saved size: nothing to do");
-                Check(!Re(3, w: 1300, h: 800), "a moderate resize (the player's): left alone");
-                Check(!Re(3, loggedOut: true), "logged out (the real character select): left alone");
-                Check(!Re(61), "past the minute after the restore: left alone (the tracker only refuses to save it)");
-                Check(!Re(5, last: at.AddSeconds(3), count: 1), "two seconds after a put-back: wait (AC may still be resizing)");
-                Check(Re(6, last: at.AddSeconds(3), count: 1), "three seconds after: again");
-                Check(!Re(30, last: at.AddSeconds(20), count: AcWindowRestoreRule.MaxReapplies), "after MaxReapplies: no more");
-                Check(AcWindowRestoreRule.IsLoginShrink(806, 629, 1606, 929) && !AcWindowRestoreRule.IsLoginShrink(1200, 700, 1606, 929),
-                    "login size is under half the saved area");
-                Check(!AcWindowRestoreRule.IsLoginShrink(806, 629, 0, 0), "no saved size: never");
-            });
         }
         finally
         {
@@ -765,12 +745,172 @@ internal static class Program
 
         ClientCommandLineChecks();
         ExtraLaunchArgumentChecks();
+        WindowPlacementChecks();
         PasswordEyeChecks();
 
         Console.WriteLine(_failed == 0
             ? $"PASS: {_checks} checks"
             : $"FAIL: {_failed} of {_checks} checks failed");
         return _failed == 0 ? 0 : 1;
+    }
+
+    // ── AC window placement (AcWindowPlacementRule) ─────────────────────────
+    // A #rynth-issues report, 2026-11-14 ("login changes resolution"): the launcher saved AC's logout /
+    // character-select window (296,76,1008x786) six seconds before the client closed, put that size back
+    // on the next login, and the game (drawn at its own 1600x900 resolution) was cropped with the HUD out
+    // of reach. Now only the position is put back, only when the window is about the saved size, pulled
+    // onto the screen, and a rect is saved only after it held for 30 s.
+    private static void WindowPlacementChecks()
+    {
+        Console.WriteLine("-- AC window placement");
+        var full = new AcWindowPlacementRule.Placement(-4, 1, 1608, 936);
+        var logoutShrink = new AcWindowPlacementRule.Placement(296, 76, 1008, 786);
+        var screen = new List<AcWindowPlacementRule.WorkArea> { new(0, 0, 1920, 1040) };
+        DateTime t0 = new(2026, 11, 14, 18, 4, 43, DateTimeKind.Utc);
+
+        // Feeds one rect per 2 s launcher tick, from t0 + fromSec to t0 + toSec; returns the saves' times.
+        List<double> Run(AcWindowPlacementRule.Placement rect, AcWindowPlacementRule.Placement? reference,
+                         ref AcWindowPlacementRule.Pending? pending, double fromSec, double toSec)
+        {
+            var saves = new List<double>();
+            for (double sec = fromSec; sec <= toSec; sec += 2)
+                if (AcWindowPlacementRule.DecideSave(rect, reference, ref pending, t0.AddSeconds(sec)).Action
+                    == AcWindowPlacementRule.SaveAction.Save)
+                    saves.Add(sec);
+            return saves;
+        }
+
+        // The report's sequence of rects.
+        Check(!AcWindowPlacementRule.IsLoginShrink(1008, 786, 1608, 936),
+            "1008x786 is 52.6% of 1608x936: the <50% guard alone let the report's shrink through (so the stability check matters)");
+        {
+            AcWindowPlacementRule.Pending? p = null;
+            Check(Run(full, full, ref p, -20, -2).Count == 0, "report: in game at the saved rect: nothing to save");
+            Check(Run(logoutShrink, full, ref p, 0, 6).Count == 0,
+                "report: the logout shrink 6 s before the client closed is never saved");
+        }
+        {
+            // 09:04:05 (96,88,1408x793), back to (-4,1,1608x936) at 09:04:41: a 36 s state is real, saved at 30 s.
+            AcWindowPlacementRule.Pending? p = null;
+            var mid = new AcWindowPlacementRule.Placement(96, 88, 1408, 793);
+            List<double> first = Run(mid, full, ref p, 0, 30);
+            Check(first.SequenceEqual(new[] { 30.0 }), "report: 1408x793 held 36 s: saved once, 30 s in");
+            List<double> back = Run(full, mid, ref p, 36, 70);
+            Check(back.SequenceEqual(new[] { 66.0 }), "report: back to 1608x936: saved 30 s later");
+        }
+        {
+            // Next launch with the corrupted profile: the restore never applies 1008x786 or (296,76) to the full window.
+            AcWindowPlacementRule.RestoreDecision Dr(double sinceLogin) => AcWindowPlacementRule.DecideRestore(
+                logoutShrink, 1608, 936, TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(sinceLogin), screen);
+            Check(Dr(12).Action == AcWindowPlacementRule.RestoreAction.Wait,
+                "report: saved for 1008x786, window 1608x936, 12 s after login: wait for AC (it may still be at its login size)");
+            Check(Dr(60).Action == AcWindowPlacementRule.RestoreAction.Wait, "report: still waiting at 60 s");
+            AcWindowPlacementRule.RestoreDecision gaveUp = Dr(62);
+            Check(gaveUp.Action == AcWindowPlacementRule.RestoreAction.Skip && gaveUp.Why.Contains("1008x786"),
+                "report: past RestoreWatch: the stale small-window position is skipped, the window stays where AC put it");
+            AcWindowPlacementRule.Pending? p = null;
+            Check(Run(full, logoutShrink, ref p, 62, 92).SequenceEqual(new[] { 92.0 }),
+                "report: the profile heals: the real 1608x936 rect is saved after 30 s");
+        }
+
+        // The stability window.
+        {
+            AcWindowPlacementRule.Pending? p = null;
+            var moved = new AcWindowPlacementRule.Placement(200, 100, 1608, 936);
+            var d0 = AcWindowPlacementRule.DecideSave(moved, full, ref p, t0);
+            Check(d0.Action == AcWindowPlacementRule.SaveAction.Waiting && d0.FirstSeen, "stable: a new rect waits, first seen");
+            var d1 = AcWindowPlacementRule.DecideSave(moved, full, ref p, t0.AddSeconds(28));
+            Check(d1.Action == AcWindowPlacementRule.SaveAction.Waiting && !d1.FirstSeen, "stable: 28 s: still waiting");
+            var wobble = moved with { X = moved.X + 2, Height = moved.Height - 1 };
+            Check(AcWindowPlacementRule.DecideSave(wobble, full, ref p, t0.AddSeconds(29)).Action == AcWindowPlacementRule.SaveAction.Waiting,
+                "stable: a 2 px frame wobble does not restart the clock");
+            Check(AcWindowPlacementRule.DecideSave(moved, full, ref p, t0.AddSeconds(30)).Action == AcWindowPlacementRule.SaveAction.Save
+                  && p == null, "stable: 30 s: saved, tracker cleared");
+        }
+        {
+            AcWindowPlacementRule.Pending? p = null;
+            int saves = 0;
+            for (int i = 0; i < 30; i++)   // AC moving it every 10 s for 5 minutes
+            {
+                var r = new AcWindowPlacementRule.Placement(100 + (i % 2) * 50, 100, 1608, 936);
+                saves += Run(r, full, ref p, i * 10, i * 10 + 8).Count;
+            }
+            Check(saves == 0, "stable: a rect that never holds 30 s is never saved");
+        }
+        {
+            AcWindowPlacementRule.Pending? p = null;
+            Run(logoutShrink, full, ref p, 0, 10);
+            Check(AcWindowPlacementRule.DecideSave(full, full, ref p, t0.AddSeconds(12)).Action == AcWindowPlacementRule.SaveAction.None && p == null,
+                "stable: back to the saved rect: the pending change is forgotten");
+            Check(Run(logoutShrink, full, ref p, 14, 40).Count == 0, "stable: a second shrink starts its own 30 s");
+        }
+        {
+            var saved = new AcWindowPlacementRule.Placement(0, 0, 1606, 929);
+            var login = new AcWindowPlacementRule.Placement(400, 200, 806, 629);
+            AcWindowPlacementRule.Pending? p = null;
+            var first = AcWindowPlacementRule.DecideSave(login, saved, ref p, t0);
+            Check(first.Action == AcWindowPlacementRule.SaveAction.LoginShrink && first.FirstSeen, "stable: under half the area: login shrink");
+            var later = AcWindowPlacementRule.DecideSave(login, saved, ref p, t0.AddMinutes(10));
+            Check(later.Action == AcWindowPlacementRule.SaveAction.LoginShrink && !later.FirstSeen,
+                "stable: under half is never saved, even held 10 min (logged once)");
+        }
+        {
+            AcWindowPlacementRule.Pending? p = null;
+            var parked = new AcWindowPlacementRule.Placement(-10000, -10000, 1608, 936);
+            Check(Run(parked, full, ref p, 0, 60).Count == 0 && p == null, "stable: AC's off-screen startup park is ignored");
+            Check(Run(new(10, 10, 150, 150), full, ref p, 0, 60).Count == 0, "stable: a tiny window is ignored");
+        }
+
+        // The position-only restore.
+        {
+            var d = AcWindowPlacementRule.DecideRestore(full, 1608, 936, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(12), screen);
+            Check(d.Action == AcWindowPlacementRule.RestoreAction.Move && d.X == -4 && d.Y == 1 && !d.Clamped,
+                "restore: the window at the saved size goes to the saved spot (-4,1 is inside the frame slack)");
+            var moderate = AcWindowPlacementRule.DecideRestore(new(96, 88, 1408, 793), 1608, 936,
+                TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(12), screen);
+            Check(moderate.Action == AcWindowPlacementRule.RestoreAction.Move && moderate.X == 96 && moderate.Y == 88,
+                "restore: a size within a quarter (1408x793 vs 1608x936): the position applies, the size stays AC's");
+            Check(AcWindowPlacementRule.DecideRestore(full, 1608, 936, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(12), screen).Action
+                  == AcWindowPlacementRule.RestoreAction.Wait, "restore: the size held only 2 s: wait (AC may still be growing it)");
+            Check(AcWindowPlacementRule.DecideRestore(full, 1608, 936, TimeSpan.Zero, TimeSpan.FromSeconds(61), screen).Action
+                  == AcWindowPlacementRule.RestoreAction.Move, "restore: past RestoreWatch the settle wait no longer holds it up");
+            Check(AcWindowPlacementRule.DecideRestore(full, 1608, 936, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(12),
+                      new List<AcWindowPlacementRule.WorkArea>()).Action == AcWindowPlacementRule.RestoreAction.Skip,
+                "restore: no monitor information: left where AC put it");
+
+            // AC still at its login size when the login is reported, then growing to its resolution.
+            var saved = new AcWindowPlacementRule.Placement(300, 60, 1608, 936);
+            Check(AcWindowPlacementRule.DecideRestore(saved, 1008, 786, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(4), screen).Action
+                  == AcWindowPlacementRule.RestoreAction.Wait, "restore: still at the login size: wait");
+            var grown = AcWindowPlacementRule.DecideRestore(saved, 1608, 936, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(10), screen);
+            Check(grown.Action == AcWindowPlacementRule.RestoreAction.Move && grown.X == 300 && grown.Y == 60,
+                "restore: grown to the saved size and held: moved");
+
+            Check(AcWindowPlacementRule.SizeMatches(1608, 936, 1608, 936) && AcWindowPlacementRule.SizeMatches(1928, 1116, 1608, 936)
+                  && !AcWindowPlacementRule.SizeMatches(1608, 936, 1008, 786) && !AcWindowPlacementRule.SizeMatches(1608, 936, 0, 0),
+                "restore: size match is within a quarter per side, never for an unknown size");
+        }
+
+        // The off-screen clamp.
+        {
+            (int X, int Y) C(int x, int y, int w, int h, List<AcWindowPlacementRule.WorkArea> areas) =>
+                AcWindowPlacementRule.ClampToWorkArea(x, y, w, h, areas);
+            Check(C(296, 76, 1608, 936, screen) == (296, 76), "clamp: fits: unchanged");
+            Check(C(-7, 0, 1608, 936, screen) == (-7, 0), "clamp: snapped to the edge (invisible frame): unchanged");
+            Check(C(1500, 600, 1608, 936, screen) == (1920 - 1608 + 16, 1040 - 936 + 16),
+                "clamp: hanging off the right and bottom: pulled back onto the work area");
+            Check(C(-500, -300, 1608, 936, screen) == (-16, -16), "clamp: off the left and top: pulled back");
+            var small = new List<AcWindowPlacementRule.WorkArea> { new(0, 0, 1600, 860) };
+            Check(C(-4, 1, 1608, 936, small) == (-4, 0), "clamp: taller than the work area: top edge pinned, title bar reachable");
+            Check(C(2500, 100, 1608, 936, screen) == (328, 100), "clamp: on a monitor that is gone: onto the nearest one");
+            var two = new List<AcWindowPlacementRule.WorkArea> { new(0, 0, 1920, 1040), new(-1920, 0, 0, 1040) };
+            Check(C(-1800, 50, 1608, 936, two) == (-1800, 50), "clamp: on the left monitor: stays there");
+            Check(C(-100, 50, 1608, 936, two) == (-16, 50), "clamp: mostly on the primary: onto the primary");
+            var d = AcWindowPlacementRule.DecideRestore(new(1500, 600, 1608, 936), 1608, 936,
+                TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(12), screen);
+            Check(d.Action == AcWindowPlacementRule.RestoreAction.Move && d.Clamped && d.X == 328 && d.Y == 120,
+                "clamp: the restore pulls a saved spot onto the screen at the window's real size");
+        }
     }
 
     // ── acclient's command line ──────────────────────────────────────────────

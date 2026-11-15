@@ -58,7 +58,7 @@
     <Compile Include="..\RynthCore.App\FirstLoginRules.cs" Link="Shared\FirstLoginRules.cs" />
     <Compile Include="..\RynthCore.App\AccountServerRules.cs" Link="Shared\AccountServerRules.cs" />
     <Compile Include="..\RynthCore.App\CrashDumpWriterRule.cs" Link="Shared\CrashDumpWriterRule.cs" />
-    <Compile Include="..\RynthCore.App\AcWindowRestoreRule.cs" Link="Shared\AcWindowRestoreRule.cs" />
+    <Compile Include="..\RynthCore.App\AcWindowPlacementRule.cs" Link="Shared\AcWindowPlacementRule.cs" />
     <Compile Include="..\RynthCore.App\AcClientLaunchSettingsService.cs" Link="Shared\AcClientLaunchSettingsService.cs" />
     <Compile Include="..\RynthCore.App\UserPrefsSwapRecovery.cs" Link="Shared\UserPrefsSwapRecovery.cs" />
     <Compile Include="..\RynthCore.App\AcClientLoginAutomationService.cs" Link="Shared\AcClientLoginAutomationService.cs" />

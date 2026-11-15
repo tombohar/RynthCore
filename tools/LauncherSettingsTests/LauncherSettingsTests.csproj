@@ -41,7 +41,7 @@
     <Compile Include="..\..\src\RynthCore.App\AccountServerRules.cs" Link="App\AccountServerRules.cs" />
     <Compile Include="..\..\src\RynthCore.App\UserPrefsSwapRecovery.cs" Link="App\UserPrefsSwapRecovery.cs" />
     <Compile Include="..\..\src\RynthCore.App\CrashDumpWriterRule.cs" Link="App\CrashDumpWriterRule.cs" />
-    <Compile Include="..\..\src\RynthCore.App\AcWindowRestoreRule.cs" Link="App\AcWindowRestoreRule.cs" />
+    <Compile Include="..\..\src\RynthCore.App\AcWindowPlacementRule.cs" Link="App\AcWindowPlacementRule.cs" />
   </ItemGroup>
 
 </Project>
