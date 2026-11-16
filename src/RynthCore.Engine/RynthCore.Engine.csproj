@@ -107,6 +107,8 @@
     <Compile Include="..\RynthCore.App\CharacterCacheStore.cs" Link="Shared\CharacterCacheStore.cs" />
     <Compile Include="..\RynthCore.App\SessionStateStore.cs" Link="Shared\SessionStateStore.cs" />
     <Compile Include="..\RynthCore.App\BuildVersion.cs" Link="Shared\BuildVersion.cs" />
+    <!-- The AC window's position rule, shared with the launcher (UI/AcWindowChrome.cs, 2026-11-15: position only, saved once it held 30 s). -->
+    <Compile Include="..\RynthCore.App\AcWindowPlacementRule.cs" Link="Shared\AcWindowPlacementRule.cs" />
     <!-- DXT1/3/5 for AC icons in script windows (UI/ScriptWindows/AcIconDecoder.cs); the StatusAgent's decoder (RynthCore's own, MIT). -->
     <Compile Include="..\RynthCore.StatusAgent\Dat\DxtUtil.cs" Link="Shared\DxtUtil.cs" />
     <!-- The byte-ring protocol shared with the Decal bridge plugin (docs/DECAL_BRIDGE_PLAN.md). -->

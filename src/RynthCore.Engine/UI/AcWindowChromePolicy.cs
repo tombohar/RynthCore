@@ -5,7 +5,9 @@
 //    - Borderless windowed: what to do given the setting, the "we stripped it" marker
 //      and the window's current style bits.
 //    - Window position: whether a saved or current rect is worth restoring / saving,
-//      and which file a client's rect lives in.
+//      and which file a client's rect lives in. Since 2026-11-15 the restore and the
+//      save follow the launcher's AcWindowPlacementRule (src\RynthCore.App, compiled in):
+//      position only, and a rect is saved only once it held for 30 s.
 //  AcWindowChrome does the Win32 work and asks these first.
 //  Idea and first version: SilentKelpie (RynthCore PR 6).
 // ============================================================================
@@ -14,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using RynthCore.App;
 
 namespace RynthCore.Engine.UI;
 
@@ -96,7 +99,8 @@ internal static class AcWindowChromePolicy
     internal enum PlacementVerdict { Ok, OptedOut, ExclusiveFullscreen, TooSmall, TooLarge, OffScreen }
 
     /// <summary>
-    /// Whether <paramref name="r"/> is a rect worth saving or restoring. Off-screen rects (a monitor
+    /// Whether <paramref name="r"/> is a rect worth saving (since 2026-11-15 a restore pulls a saved
+    /// position onto the screen instead: DecideRestore). Off-screen rects (a monitor
     /// that is gone) are refused: the window's centre and the middle of its top edge must both be on
     /// a monitor, so neither the window nor its title bar ends up unreachable.
     /// </summary>
@@ -120,9 +124,84 @@ internal static class AcWindowChromePolicy
         return false;
     }
 
-    /// <summary>Write only when the rect is saveable and differs from what was last written.</summary>
-    public static bool ShouldWritePlacement(PlacementVerdict verdict, Rect current, Rect? lastWritten)
-        => verdict == PlacementVerdict.Ok && (lastWritten is null || lastWritten.Value != current);
+    // ── Restore and save (2026-11-15) ────────────────────────────────────
+    //
+    // Report R-20261115-160655-1201: right after the 2026.11.15.1 update one player's main came
+    // up in a small window, cropped, with the HUD out of reach, for three launches in a row. The
+    // log: "AcWindowChrome: restored AC window to (296,51) 806x635" in a 2560x1600 game. This
+    // option saved whatever rect differed from the last one every 10 s, character select
+    // included (the character name is kept after a logout), so AC's 800x600 logout window
+    // became "the" rect, and the restore put its SIZE back with SetWindowPos. AC draws at its own
+    // resolution whatever the window size, so the game was cropped: the launcher's bug fixed in
+    // 2026.11.15.1 (AcWindowPlacementRule), here in the engine. It had not shown before because
+    // the launcher's put-back of a shrunk window (AcWindowRestoreRule, removed in that release)
+    // resized the window again right after. So, as in the launcher:
+    //  - only the position is put back (SWP_NOSIZE), and only when the window is about the size
+    //    the position was saved at; it waits for AC's size to settle and gives up after 60 s;
+    //  - the position is pulled onto a monitor's work area at the window's real size;
+    //  - a rect is saved only in the world (never at character select), only after it held for
+    //    30 s, and never when it is the login-size shrink of the in-game window;
+    //  - a profile already holding the small rect heals itself: its position is skipped (the
+    //    sizes differ) and the real rect is saved 30 s later.
+
+    internal static AcWindowPlacementRule.Placement ToPlacement(Rect r) => new(r.Left, r.Top, r.Width, r.Height);
+
+    /// <summary>
+    /// What to do with the saved rect now: wait, move (position only), or leave the window where
+    /// AC put it. <paramref name="sinceInWorld"/> runs from the first look after the login.
+    /// </summary>
+    public static AcWindowPlacementRule.RestoreDecision DecideRestore(Rect? saved, bool minimisedOrMaximised,
+        bool looksExclusiveFullscreen, Rect current, TimeSpan sizeHeldFor, TimeSpan sinceInWorld,
+        IReadOnlyList<Rect> workAreas)
+    {
+        if (saved is not Rect sv)
+            return new(AcWindowPlacementRule.RestoreAction.Skip, 0, 0, false, "nothing saved");
+        if (minimisedOrMaximised)
+            return new(AcWindowPlacementRule.RestoreAction.Skip, 0, 0, false, "window minimised or maximised");
+        if (looksExclusiveFullscreen)
+            return new(AcWindowPlacementRule.RestoreAction.Skip, 0, 0, false, "window looks like exclusive fullscreen");
+        if (!AcWindowPlacementRule.IsCapturable(ToPlacement(current)))
+        {
+            // Parked off-screen or still tiny: AC has not shown its game window yet.
+            return sinceInWorld <= AcWindowPlacementRule.RestoreWatch
+                ? new(AcWindowPlacementRule.RestoreAction.Wait, 0, 0, false, "window not shown yet")
+                : new(AcWindowPlacementRule.RestoreAction.Skip, 0, 0, false, "window never showed");
+        }
+        var areas = new List<AcWindowPlacementRule.WorkArea>(workAreas.Count);
+        foreach (Rect a in workAreas) areas.Add(new AcWindowPlacementRule.WorkArea(a.Left, a.Top, a.Right, a.Bottom));
+        return AcWindowPlacementRule.DecideRestore(ToPlacement(sv), current.Width, current.Height,
+            sizeHeldFor, sinceInWorld, areas);
+    }
+
+    /// <summary>
+    /// One look at the window for the save. <paramref name="inWorld"/> false (character select,
+    /// the login screen, AC closing) never saves and forgets a pending rect, so time spent at
+    /// character select never counts toward the 30 s. <paramref name="saveable"/> false (minimised,
+    /// maximised, exclusive fullscreen) likewise. <paramref name="force"/> is Save Layout Now: no
+    /// 30 s wait, but still never the login-size shrink. <paramref name="reference"/> is the saved
+    /// rect, else the first rect seen after the login (so AC's own placement is never saved until
+    /// the player moves the window).
+    /// </summary>
+    public static AcWindowPlacementRule.SaveDecision DecideSave(bool inWorld, bool saveable, bool force,
+        Rect current, Rect? reference, ref AcWindowPlacementRule.Pending? pending, DateTime nowUtc)
+    {
+        if (!inWorld || !saveable)
+        {
+            pending = null;
+            return new(AcWindowPlacementRule.SaveAction.None, false);
+        }
+        AcWindowPlacementRule.Placement cur = ToPlacement(current);
+        AcWindowPlacementRule.Placement? rf = reference is Rect r ? ToPlacement(r) : null;
+        if (!force)
+            return AcWindowPlacementRule.DecideSave(cur, rf, ref pending, nowUtc);
+
+        if (!AcWindowPlacementRule.IsCapturable(cur))
+            return new(AcWindowPlacementRule.SaveAction.None, false);
+        if (rf is AcWindowPlacementRule.Placement f && AcWindowPlacementRule.IsLoginShrink(cur.Width, cur.Height, f.Width, f.Height))
+            return new(AcWindowPlacementRule.SaveAction.LoginShrink, true);
+        pending = null;
+        return new(AcWindowPlacementRule.SaveAction.Save, true);
+    }
 
     // ── Per-client file ──────────────────────────────────────────────────
 

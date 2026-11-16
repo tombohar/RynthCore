@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using RynthCore.App;
 using RynthCore.Engine.Plugins;
 using static RynthCore.Engine.UI.AcWindowChromePolicy;
 
@@ -65,6 +66,9 @@ namespace EngineSettingsTests
                 Run(nameof(PanelLayoutPerCharacterDefaultOnAndSaved), PanelLayoutPerCharacterDefaultOnAndSaved);
                 Run(nameof(BorderlessDecisions), BorderlessDecisions);
                 Run(nameof(PlacementDecisions), PlacementDecisions);
+                Run(nameof(PlacementRestoreIsPositionOnly), PlacementRestoreIsPositionOnly);
+                Run(nameof(PlacementSaveNeedsAStableInWorldRect), PlacementSaveNeedsAStableInWorldRect);
+                Run(nameof(AcWindowChromeNeverResizes), AcWindowChromeNeverResizes);
                 Run(nameof(PlacementFilesArePerClient), PlacementFilesArePerClient);
                 Run(nameof(PlacementFileRoundTrips), PlacementFileRoundTrips);
             }
@@ -809,13 +813,138 @@ namespace EngineSettingsTests
             Eq(EvaluatePlacement(true, false, new Rect(0, 0, 800, MinHeight - 1), one), PlacementVerdict.TooSmall, "shorter than the minimum");
             Eq(EvaluatePlacement(true, false, new Rect(0, 0, MinWidth, MinHeight), one), PlacementVerdict.Ok, "exactly the minimum is fine");
             Eq(EvaluatePlacement(true, false, new Rect(0, 0, MaxExtent + 1, 600), one), PlacementVerdict.TooLarge, "absurdly wide");
+        }
 
-            // Writes only when changed.
-            var r = new Rect(10, 20, 810, 620);
-            Check(ShouldWritePlacement(PlacementVerdict.Ok, r, null), "first rect is written");
-            Check(!ShouldWritePlacement(PlacementVerdict.Ok, r, r), "unchanged rect: no write");
-            Check(ShouldWritePlacement(PlacementVerdict.Ok, r with { Right = 900 }, r), "changed rect: written");
-            Check(!ShouldWritePlacement(PlacementVerdict.OffScreen, r, null), "a refused rect is never written");
+        // ── AcWindowChromePolicy: restore and save (2026-11-15, R-20261115-160655-1201) ──
+        // The report: "restored AC window to (296,51) 806x635" in a 2560x1600 game; the saved rect was
+        // AC's logout / character-select window, and the restore put its size back.
+
+        private static readonly Rect[] Screen2560 = { new Rect(0, 0, 2560, 1560) };   // work area: 2560x1600 minus a 40 px taskbar
+        private static readonly Rect LogoutRect = new(296, 51, 296 + 806, 51 + 635);   // the report's saved rect (800x600 client)
+        private static readonly Rect InGame = new(10, 10, 10 + 1936, 10 + 1119);       // a 1920x1080 game window
+
+        private static TimeSpan S(double s) => TimeSpan.FromSeconds(s);
+
+        private static void PlacementRestoreIsPositionOnly()
+        {
+            // The report's profile: a position saved for the small window never lands on the full-size one,
+            // and no decision carries a size at all (the window is moved with SWP_NOSIZE).
+            for (int t = 0; t <= 120; t += 2)
+            {
+                var d = DecideRestore(LogoutRect, false, false, InGame, S(t), S(t), Screen2560);
+                Check(d.Action != AcWindowPlacementRule.RestoreAction.Move, $"report profile at {t} s: never moved");
+                if (t <= 60) Eq(d.Action, AcWindowPlacementRule.RestoreAction.Wait, $"report profile at {t} s: waits for AC to reach the saved size");
+                else Eq(d.Action, AcWindowPlacementRule.RestoreAction.Skip, $"report profile at {t} s: gives up, window left where AC put it");
+            }
+            var skip = DecideRestore(LogoutRect, false, false, InGame, S(61), S(61), Screen2560);
+            Check(skip.Why.Contains("806x635"), "the skip says which size the position was saved for: " + skip.Why);
+
+            // A position saved for this size: moved there once AC's size held for the settle time.
+            var home = new Rect(100, 80, 100 + 1936, 80 + 1119);
+            Eq(DecideRestore(home, false, false, InGame, S(2), S(2), Screen2560).Action, AcWindowPlacementRule.RestoreAction.Wait, "size held 2 s: still settling");
+            var move = DecideRestore(home, false, false, InGame, S(4), S(4), Screen2560);
+            Eq(move.Action, AcWindowPlacementRule.RestoreAction.Move, "size held 4 s at the saved size: moved");
+            Eq((move.X, move.Y, move.Clamped), (100, 80, false), "to the saved spot");
+            // Borders toggled since the save (a few px either way): still the same window.
+            var framed = new Rect(10, 10, 10 + 1920, 10 + 1080);
+            Eq(DecideRestore(home, false, false, framed, S(4), S(4), Screen2560).Action, AcWindowPlacementRule.RestoreAction.Move, "borderless on/off since the save: still moved");
+
+            // A saved spot half off the screen is pulled onto it at the window's real size.
+            var off = new Rect(2000, 900, 2000 + 1936, 900 + 1119);
+            var pulled = DecideRestore(off, false, false, InGame, S(4), S(4), Screen2560);
+            Eq(pulled.Action, AcWindowPlacementRule.RestoreAction.Move, "half off the screen: moved");
+            Eq((pulled.X, pulled.Y, pulled.Clamped), (2560 - 1936 + AcWindowPlacementRule.EdgeSlack, 1560 - 1119 + AcWindowPlacementRule.EdgeSlack, true), "pulled onto the work area");
+            // A monitor that is gone: onto the one that is left.
+            var gone = new Rect(-2000, 100, -2000 + 1936, 100 + 1119);
+            var back = DecideRestore(gone, false, false, InGame, S(4), S(4), Screen2560);
+            Eq((back.Action, back.X), (AcWindowPlacementRule.RestoreAction.Move, -AcWindowPlacementRule.EdgeSlack), "saved on a monitor that is gone: onto this one");
+
+            // Never touched: nothing saved, minimised / maximised, exclusive fullscreen.
+            Eq(DecideRestore(null, false, false, InGame, S(10), S(10), Screen2560).Action, AcWindowPlacementRule.RestoreAction.Skip, "nothing saved: nothing done");
+            Eq(DecideRestore(home, true, false, InGame, S(10), S(10), Screen2560).Action, AcWindowPlacementRule.RestoreAction.Skip, "minimised or maximised: left alone");
+            Eq(DecideRestore(home, false, true, InGame, S(10), S(10), Screen2560).Action, AcWindowPlacementRule.RestoreAction.Skip, "exclusive fullscreen: left alone");
+            // AC's startup parking spot: wait for the real window, then give up.
+            var parked = new Rect(-32000, -32000, -32000 + 160, -32000 + 28);
+            Eq(DecideRestore(home, false, false, parked, S(10), S(10), Screen2560).Action, AcWindowPlacementRule.RestoreAction.Wait, "parked off-screen: waits");
+            Eq(DecideRestore(home, false, false, parked, S(70), S(70), Screen2560).Action, AcWindowPlacementRule.RestoreAction.Skip, "never shown in 60 s: gives up");
+        }
+
+        /// <summary>Feeds one rect for <paramref name="seconds"/> at 2 s ticks; true if any tick saved.</summary>
+        private static bool Hold(bool inWorld, Rect rect, Rect? reference, ref AcWindowPlacementRule.Pending? pending,
+            ref DateTime now, int seconds, out AcWindowPlacementRule.SaveAction last)
+        {
+            bool saved = false;
+            last = AcWindowPlacementRule.SaveAction.None;
+            for (int t = 0; t < seconds; t += 2, now = now.AddSeconds(2))
+            {
+                last = DecideSave(inWorld, true, false, rect, reference, ref pending, now).Action;
+                if (last == AcWindowPlacementRule.SaveAction.Save) { saved = true; break; }
+            }
+            return saved;
+        }
+
+        private static void PlacementSaveNeedsAStableInWorldRect()
+        {
+            var t0 = new DateTime(2026, 11, 15, 10, 3, 18, DateTimeKind.Utc);
+            AcWindowPlacementRule.Pending? pending = null;
+
+            // Self-heal: the report's profile holds the logout rect; the real window is saved 30 s later.
+            DateTime now = t0;
+            Eq(DecideSave(true, true, false, InGame, LogoutRect, ref pending, now).Action, AcWindowPlacementRule.SaveAction.Waiting, "report profile, first look: waiting");
+            Eq(DecideSave(true, true, false, InGame, LogoutRect, ref pending, now.AddSeconds(29)).Action, AcWindowPlacementRule.SaveAction.Waiting, "29 s: still waiting");
+            Eq(DecideSave(true, true, false, InGame, LogoutRect, ref pending, now.AddSeconds(30)).Action, AcWindowPlacementRule.SaveAction.Save, "30 s: the real window replaces the logout rect");
+            Check(pending == null, "nothing pending after a save");
+
+            // The report's cause: a logout to character select used to save AC's 800x600 window. Out of the
+            // world it never is, for any time, and nothing is left pending.
+            now = t0;
+            Check(!Hold(false, LogoutRect, InGame, ref pending, ref now, 300, out _), "character select for 5 min: never saved");
+            Check(pending == null, "character select: nothing pending");
+            // ...and while the mode is not known yet (counted as the world), the login-shrink guard holds.
+            Check(!Hold(true, LogoutRect, InGame, ref pending, ref now, 300, out var shrink), "the logout window in an unknown mode: never saved");
+            Eq(shrink, AcWindowPlacementRule.SaveAction.LoginShrink, "...refused as the login shrink");
+
+            // Time at character select never counts toward the 30 s: a rect pending at logout starts over.
+            pending = null;
+            now = t0;
+            var moved = new Rect(400, 200, 400 + 1936, 400 + 1119);
+            Check(!Hold(true, moved, InGame, ref pending, ref now, 20, out _), "moved, 20 s in the world: not yet");
+            Check(!Hold(false, moved, InGame, ref pending, ref now, 60, out _), "then a minute at character select: not saved");
+            Check(!Hold(true, moved, InGame, ref pending, ref now, 28, out _), "back in the world at the same rect: the 30 s start again");
+            Eq(DecideSave(true, true, false, moved, InGame, ref pending, now.AddSeconds(2)).Action, AcWindowPlacementRule.SaveAction.Save, "...and it is saved after 30 s in the world");
+
+            // A shrink just before the client closes (the launcher's report: 1008x786, 6 s before the exit,
+            // just over half the area so the guard lets it through) never lasts the 30 s.
+            pending = null;
+            now = t0;
+            var closing = new Rect(296, 76, 296 + 1008, 76 + 786);
+            var game1608 = new Rect(0, 0, 1608, 936);
+            Check(!Hold(true, closing, game1608, ref pending, ref now, 6, out var closingLast), "a rect that lasts 6 s: never saved");
+            Eq(closingLast, AcWindowPlacementRule.SaveAction.Waiting, "...it was only waiting (not the login shrink)");
+
+            // Minimised, maximised or fullscreen: nothing saved, nothing pending.
+            pending = null;
+            Eq(DecideSave(true, false, false, moved, InGame, ref pending, t0).Action, AcWindowPlacementRule.SaveAction.None, "not saveable: nothing");
+            Check(pending == null, "not saveable: nothing pending");
+            // Back where it was: nothing to save.
+            Eq(DecideSave(true, true, false, InGame, InGame, ref pending, t0).Action, AcWindowPlacementRule.SaveAction.None, "the saved rect itself: nothing");
+
+            // Save Layout Now: no 30 s wait, but never at character select and never the login shrink.
+            pending = null;
+            Eq(DecideSave(true, true, true, moved, InGame, ref pending, t0).Action, AcWindowPlacementRule.SaveAction.Save, "Save Layout Now in the world: saved at once");
+            Eq(DecideSave(true, true, true, moved, null, ref pending, t0).Action, AcWindowPlacementRule.SaveAction.Save, "Save Layout Now with nothing saved yet: saved");
+            Eq(DecideSave(false, true, true, LogoutRect, InGame, ref pending, t0).Action, AcWindowPlacementRule.SaveAction.None, "Save Layout Now at character select: nothing");
+            Eq(DecideSave(true, true, true, LogoutRect, InGame, ref pending, t0).Action, AcWindowPlacementRule.SaveAction.LoginShrink, "Save Layout Now on the login-size window: refused");
+        }
+
+        // Source guard: every SetWindowPos on the AC window keeps AC's size (R-20261115-160655-1201).
+        private static void AcWindowChromeNeverResizes()
+        {
+            string source = File.ReadAllText(FindUp(Path.Combine("src", "RynthCore.Engine", "UI", "AcWindowChrome.cs")));
+            var calls = Regex.Matches(source, @"^\s*(?:=>\s*)?SetWindowPos\(hwnd,[^;]*;", RegexOptions.Multiline | RegexOptions.Singleline);
+            Check(calls.Count >= 2, $"found the SetWindowPos calls ({calls.Count})");
+            foreach (Match m in calls)
+                Check(m.Value.Contains("SwpNosize"), "SetWindowPos keeps AC's size: " + Regex.Replace(m.Value.Trim(), @"\s+", " "));
         }
 
         private static void PlacementFilesArePerClient()

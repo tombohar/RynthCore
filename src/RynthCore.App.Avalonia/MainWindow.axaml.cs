@@ -3905,6 +3905,7 @@ internal partial class MainWindow : Window
         }) + (headlessCount > 0 ? $" ({headlessCount} headless)" : string.Empty);
 
         _sessionItems.Clear();
+        bool? engineRemembersWindow = null;   // engine.json, read once per refresh and only with a window to place
         foreach (Process process in targets.OrderBy(p => p.Id))
         {
             // Headless: no window, no D3D device. Listed, but none of the window steps apply.
@@ -3922,7 +3923,8 @@ internal partial class MainWindow : Window
             if (_settings.OverrideWindowTitle)
                 ApplyDesiredWindowTitle(process, activeContexts, activeSessions);
 
-            ApplyOrPersistWindowPlacement(process, graphicsReady, activeContexts, activeSessions);
+            engineRemembersWindow ??= EngineJsonStore.GetBool("RememberAcWindowPosition") == true;
+            ApplyOrPersistWindowPlacement(process, graphicsReady, activeContexts, activeSessions, engineRemembersWindow.Value);
         }
 
         if (_sessionItems.Count == 0)
@@ -4986,8 +4988,24 @@ internal partial class MainWindow : Window
         Process process,
         bool graphicsReady,
         IReadOnlyDictionary<int, LaunchContextRecord> activeContexts,
-        IReadOnlyDictionary<int, SessionStateRecord> activeSessions)
+        IReadOnlyDictionary<int, SessionStateRecord> activeSessions,
+        bool engineRemembersWindow)
     {
+        // 2026-11-15, report R-20261115-160655-1201: the engine's opt-in "Remember Game Window
+        // Position" (engine.json RememberAcWindowPosition, AcWindowChrome) keeps its own rect per
+        // character, the launcher one per account. Both moving the window after a login means two
+        // saved spots fighting over it, each saving the other's move 30 s later. The player who
+        // turned the engine's option on chose it, so while it is on the launcher stays out: no
+        // restore and no save. The client counts as placed, so turning the option off later in
+        // the session only starts the saves again and never moves the window late.
+        if (engineRemembersWindow)
+        {
+            _windowSavePending.Remove(process.Id);
+            if (_windowPositionAppliedPids.Add(process.Id))
+                LauncherDiag.Info($"WindowPos PID {process.Id}: left to the engine (its Remember Game Window Position is on).");
+            return;
+        }
+
         string? accountName = null;
         string? serverName = null;
         if (activeSessions.TryGetValue(process.Id, out SessionStateRecord? s))

@@ -1079,7 +1079,7 @@ internal static class SettingsSchema
                     Plugins.EngineSettings.RememberAcWindowPosition = v;
                     AcWindowChrome.RequestApply();
                 },
-                "On: save the Asheron's Call window's position and size for each character and put it back after you log in.\nOff (default): the game window is never moved. A saved spot that is off-screen (a monitor that is gone) is ignored."),
+                "On: save where the Asheron's Call window sits for each character and move it back there after you log in. The game sets the window's size from its resolution; this never changes it. While this is on, the launcher's own memory of the window's spot (per account) stands aside.\nOff (default): the engine never moves the game window. A spot off every screen (a monitor that is gone) is pulled back onto one."),
             Spacer(),
             Section("Performance"),
             Bool("Enable FPS Limit", s => s.EnableFPSLimit, (s, v) => s.EnableFPSLimit = v, gates: true),

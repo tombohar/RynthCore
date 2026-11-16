@@ -497,8 +497,9 @@ internal static class EngineSettings
     }
 
     /// <summary>"RememberAcWindowPosition" in engine.json (default false, opt-in): save the Asheron's
-    /// Call window's position and size per character and put it back at the next login.
-    /// Set in game in Settings > Game Client.</summary>
+    /// Call window's position per character and put it back at the next login (UI/AcWindowChrome).
+    /// Set in game in Settings > Game Client. Since 2026-11-15 (R-20261115-160655-1201) never its
+    /// size; while it is on, the launcher leaves the window's position alone (it reads this key).</summary>
     public static bool RememberAcWindowPosition
     {
         get

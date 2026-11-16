@@ -27,6 +27,10 @@ namespace RynthCore.App;
 ///  - A new rect is saved only after it held for <see cref="StableFor"/>: the shrink right before
 ///    the client closes, and AC's own moves at startup and portal-in, never reach the profile.
 /// The saved width and height are still written: they are what the size checks compare against.
+///
+/// 2026-11-15, report R-20261115-160655-1201: the engine's opt-in Remember Game Window Position
+/// (UI/AcWindowChrome) had the same bug and now uses this rule too (compiled into the engine, so keep
+/// it free of launcher types). While that option is on, the launcher leaves the window to the engine.
 /// </summary>
 internal static class AcWindowPlacementRule
 {

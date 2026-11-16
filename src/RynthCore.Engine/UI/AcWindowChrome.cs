@@ -7,7 +7,10 @@
 //      window's style from before, which outlives an in-process engine hot reload
 //      and dies with the process. No marker and the setting off = hands off.
 //    - Remember placement (opt-in): persist the outer window rect per client
-//      (ac_window.<server-character>.txt) and put it back once after login.
+//      (ac_window.<server-character>.txt) and put its POSITION back once after login.
+//      Since 2026-11-15 (report R-20261115-160655-1201) never its size, and a rect is
+//      saved only in the world once it held for 30 s: see AcWindowChromePolicy.
+//      While this is on, the launcher leaves the window's position to the engine.
 //  Original: SilentKelpie (RynthCore PR 6). Decisions live in AcWindowChromePolicy.
 //
 //  Threading. Tick runs inside EndScene (the render callback) and only READS there
@@ -24,6 +27,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
+using RynthCore.App;
 using RynthCore.Engine.Compatibility;
 using RynthCore.Engine.Plugins;
 using static RynthCore.Engine.UI.AcWindowChromePolicy;
@@ -45,17 +49,28 @@ internal static class AcWindowChrome
     private const string PlacementDoneProp = "RynthCore.AcWindowChrome.PlacementRestored";
 
     private const long TickIntervalMs = 2000;
-    private const long SaveIntervalMs = 10000;
     private const long NoKeyFallbackMs = 90000;     // no character this long: use the shared file
     private const long PostStuckMs = 10000;         // a posted job that never ran may be posted again
     private const long StyleRetryMs = 10000;        // a style change that does not stick is not retried every tick
 
     private static readonly object Sync = new();
     private static readonly Action PostedWork = RunOnGameThread;
-    private static long _nextTickMs, _nextSaveMs, _firstTickMs, _workPostedAtMs, _nextStyleActionMs;
+    private static long _nextTickMs, _firstTickMs, _workPostedAtMs, _nextStyleActionMs;
     private static int _workPosted;
-    private static Rect? _lastWritten;
     private static bool _loggedNoExecutor;
+
+    // Placement (under Sync). The saved rect, read once per key; the restore's clocks; what a new
+    // rect is compared with (the saved rect, else the first one seen in the world) and the rect
+    // waiting out AcWindowPlacementRule.StableFor. A hot reload resets them, which is fine: the
+    // PlacementDoneProp on the HWND keeps the restore from running twice.
+    private static string? _savedKey;
+    private static bool _savedLoaded;
+    private static Rect? _saved;
+    private static long _restoreWatchStartMs, _sizeSinceMs;
+    private static int _sizeW, _sizeH;
+    private static Rect? _reference;
+    private static bool _referenceSet;
+    private static AcWindowPlacementRule.Pending? _pending;
 
     // ── Frame loop (EndScene): reads + posts only ────────────────────────
 
@@ -86,7 +101,8 @@ internal static class AcWindowChrome
                 && DecideBorderless(EngineSettings.BorderlessWindowed, ReadMarker(hwnd), style,
                     LooksExclusiveFullscreen(hwnd, style)).Action != ChromeAction.None;
 
-            if (EngineSettings.RememberAcWindowPosition && !PlacementDone(hwnd) && KeyReady(now, out _))
+            // Posted every tick until the restore is decided: it waits for AC's size to settle.
+            if (EngineSettings.RememberAcWindowPosition && !PlacementDone(hwnd) && InWorld() && KeyReady(now, out _))
                 work = true;
 
             if (work) PostWork(now);
@@ -182,38 +198,69 @@ internal static class AcWindowChrome
 
     private static void TryRestorePlacement(IntPtr hwnd)
     {
-        if (!KeyReady(Environment.TickCount64, out string? key)) return;   // still at the login screen
-        // One attempt per window, even a skipped one; the HWND carries it across a hot reload.
+        long now = Environment.TickCount64;
+        if (!InWorld() || !KeyReady(now, out string? key)) return;   // login screen / character select
+        if (_restoreWatchStartMs == 0) _restoreWatchStartMs = now;
+        if (!GetWindowRect(hwnd, out RECT wr)) return;
+        var cur = new Rect(wr.Left, wr.Top, wr.Right, wr.Bottom);
+        if (cur.Width != _sizeW || cur.Height != _sizeH)
+        {
+            _sizeW = cur.Width;
+            _sizeH = cur.Height;
+            _sizeSinceMs = now;
+        }
+
+        Rect? saved = LoadSaved(key);
+        var d = DecideRestore(saved, IsIconic(hwnd) || IsZoomed(hwnd),
+            LooksExclusiveFullscreen(hwnd, GetWindowLong(hwnd, GwlStyle)), cur,
+            TimeSpan.FromMilliseconds(now - _sizeSinceMs), TimeSpan.FromMilliseconds(now - _restoreWatchStartMs),
+            WorkAreas());
+        if (d.Action == AcWindowPlacementRule.RestoreAction.Wait) return;   // asked again next tick
+
+        // One decision per window, even a skipped one; the HWND carries it across a hot reload.
         SetProp(hwnd, PlacementDoneProp, new IntPtr(1));
+        SetReference(saved);
+        if (d.Action == AcWindowPlacementRule.RestoreAction.Move && saved is Rect from)
+        {
+            // SWP_NOSIZE: AC sizes its own window from its resolution; a smaller window crops the
+            // picture and leaves the HUD out of reach (R-20261115-160655-1201).
+            SetWindowPos(hwnd, IntPtr.Zero, d.X, d.Y, 0, 0, SwpNosize | SwpNozorder | SwpNoactivate);
+            RynthLog.UI(d.Clamped
+                ? FormattableString.Invariant($"AcWindowChrome: restored AC window position to ({d.X},{d.Y}), pulled onto the screen from ({from.Left},{from.Top}); size left to AC ({cur.Width}x{cur.Height}).")
+                : FormattableString.Invariant($"AcWindowChrome: restored AC window position to ({d.X},{d.Y}); size left to AC ({cur.Width}x{cur.Height})."));
+        }
+        else if (saved is Rect sv)
+        {
+            RynthLog.UI(FormattableString.Invariant(
+                $"AcWindowChrome: saved position ({sv.Left},{sv.Top}) not restored ({d.Why}); leaving AC where it is."));
+        }
+    }
 
-        if (IsIconic(hwnd) || IsZoomed(hwnd)) return;
+    /// <summary>The saved rect for this client, read once per key (null: none, or unreadable).</summary>
+    private static Rect? LoadSaved(string? key)
+    {
+        if (_savedLoaded && string.Equals(_savedKey, key, StringComparison.Ordinal)) return _saved;
+        _savedLoaded = true;
+        _savedKey = key;
+        _saved = null;
         string path = PlacementPath(key);
-        if (!File.Exists(path)) return;
-
-        Rect saved;
         try
         {
-            if (!TryParsePlacement(File.ReadAllLines(path), out saved)) return;
+            if (File.Exists(path) && TryParsePlacement(File.ReadAllLines(path), out Rect r))
+                _saved = r;
         }
         catch (Exception ex)
         {
             try { RynthLog.UI($"AcWindowChrome: read placement failed - {ex.Message}"); } catch { }
-            return;
         }
+        return _saved;
+    }
 
-        PlacementVerdict v = EvaluatePlacement(true, LooksExclusiveFullscreen(hwnd, GetWindowLong(hwnd, GwlStyle)),
-            saved, Monitors());
-        if (v != PlacementVerdict.Ok)
-        {
-            RynthLog.UI($"AcWindowChrome: saved placement not restored ({v}); leaving AC where it is.");
-            return;
-        }
-
-        SetWindowPos(hwnd, IntPtr.Zero, saved.Left, saved.Top, saved.Width, saved.Height,
-            SwpNozorder | SwpNoactivate);
-        _lastWritten = saved;
-        RynthLog.UI(FormattableString.Invariant(
-            $"AcWindowChrome: restored AC window to ({saved.Left},{saved.Top}) {saved.Width}x{saved.Height}."));
+    private static void SetReference(Rect? r)
+    {
+        _reference = r;
+        _referenceSet = true;
+        _pending = null;
     }
 
     // ── Saving the rect (read on the render thread, written in the background) ──
@@ -221,23 +268,47 @@ internal static class AcWindowChrome
     private static void MaybeSavePlacement(IntPtr hwnd, long now, int style)
     {
         if (!EngineSettings.RememberAcWindowPosition) return;
-        if (now < _nextSaveMs) return;
-        // Not before the restore attempt: it would overwrite the saved rect with the launch position.
+        // Not before the restore is decided: it would overwrite the saved rect with the launch position.
         if (!PlacementDone(hwnd)) return;
-        _nextSaveMs = now + SaveIntervalMs;
         TrySavePlacement(hwnd, style, now, force: false);
     }
 
     private static void TrySavePlacement(IntPtr hwnd, int style, long now, bool force)
     {
         if (!KeyReady(now, out string? key)) return;
-        if (IsIconic(hwnd) || IsZoomed(hwnd)) return;
         if (!GetWindowRect(hwnd, out RECT wr)) return;
         var cur = new Rect(wr.Left, wr.Top, wr.Right, wr.Bottom);
-        PlacementVerdict v = EvaluatePlacement(true, LooksExclusiveFullscreen(hwnd, style), cur, Monitors());
-        if (!force && !ShouldWritePlacement(v, cur, _lastWritten)) return;
-        if (v != PlacementVerdict.Ok) return;
-        _lastWritten = cur;
+        bool saveable = !IsIconic(hwnd) && !IsZoomed(hwnd) && !LooksExclusiveFullscreen(hwnd, style);
+        bool inWorld = InWorld();
+        bool baselineOk = inWorld && saveable && AcWindowPlacementRule.IsCapturable(ToPlacement(cur));
+
+        lock (Sync)
+        {
+            // After a hot reload the restore was decided by the old engine: start from the saved rect.
+            if (!_referenceSet) SetReference(LoadSaved(key));
+            if (_reference is null && !force)
+            {
+                // Nothing saved: the first rect in the world is AC's own placement, never saved
+                // until the player moves the window away from it (as in the launcher).
+                if (baselineOk) _reference = cur;
+                return;
+            }
+
+            var d = DecideSave(inWorld, saveable, force, cur, _reference, ref _pending, DateTime.UtcNow);
+            if (d.Action == AcWindowPlacementRule.SaveAction.LoginShrink)
+            {
+                if (d.FirstSeen && _reference is Rect rf)
+                    RynthLog.UI(FormattableString.Invariant(
+                        $"AcWindowChrome: not saving {cur.Width}x{cur.Height}, under half the in-game {rf.Width}x{rf.Height} (the login / character-select window)."));
+                return;
+            }
+            if (d.Action != AcWindowPlacementRule.SaveAction.Save) return;
+
+            // Off-screen (a monitor that is gone) or absurd: not worth saving.
+            if (EvaluatePlacement(true, false, cur, Monitors()) != PlacementVerdict.Ok) return;
+            _reference = cur;
+        }
+
         string path = PlacementPath(key);
         UiBackgroundWriter.Enqueue("ac window placement", () => WritePlacement(path, cur));
     }
@@ -301,6 +372,16 @@ internal static class AcWindowChrome
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// In the world after a login: not the login screen, not character select (where AC's window
+    /// is its small 800x600 one), not AC closing. A mode not seen yet counts as the world, as
+    /// elsewhere in the engine; the 30 s rule and the login-shrink guard cover that gap.
+    /// </summary>
+    private static bool InWorld()
+        => LoginLifecycleHooks.HasObservedLoginComplete
+            && UiFlowHooks.InWorldOrUnknown
+            && !UiFlowHooks.ClientCleanupStarted;
+
     private static bool KeyReady(long now, out string? key)
         => TryResolveKey(SessionStateRegistry.LastServerName, SessionStateRegistry.LastCharacterName,
             _firstTickMs == 0 ? 0 : now - _firstTickMs, NoKeyFallbackMs, out key);
@@ -344,14 +425,22 @@ internal static class AcWindowChrome
             && Math.Abs(wr.Top - mi.rcMonitor.Top) <= 4;
     }
 
-    private static List<Rect> Monitors()
+    private static List<Rect> Monitors() => EnumMonitors(work: false);
+
+    /// <summary>Each monitor's work area (the screen minus the taskbar): where a restored window is pulled onto.</summary>
+    private static List<Rect> WorkAreas() => EnumMonitors(work: true);
+
+    private static List<Rect> EnumMonitors(bool work)
     {
         var list = new List<Rect>(4);
         EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr mon, IntPtr dc, ref RECT rc, IntPtr data) =>
         {
             var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
             if (GetMonitorInfo(mon, ref mi))
-                list.Add(new Rect(mi.rcMonitor.Left, mi.rcMonitor.Top, mi.rcMonitor.Right, mi.rcMonitor.Bottom));
+            {
+                RECT m = work ? mi.rcWork : mi.rcMonitor;
+                list.Add(new Rect(m.Left, m.Top, m.Right, m.Bottom));
+            }
             return true;
         }, IntPtr.Zero);
         return list;
