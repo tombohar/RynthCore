@@ -96,6 +96,9 @@ internal sealed class RynthAiSettings
     public bool? TargetLock { get; set; }
     // Fight the monster I select (RynthAi 2026-11-01). Null: a RynthAi without it; it leaves it alone.
     public bool? FightSelectedTarget { get; set; }
+    // Melee through walls (RynthAi 2026-11-15, on by default). Null until RynthAi sends it; a save from an
+    // engine with the row never sends null over an older RynthAi's value (it leaves an absent one alone).
+    public bool? MeleeThroughWalls { get; set; }
     public int TargetNoProgressTimeoutSec { get; set; }
     public int GiveQueueIntervalMs { get; set; } = 150;
     // Recharge
@@ -1341,6 +1344,14 @@ internal static class SettingsSchema
                 "another monster or deselect. The bot's own selections never count. Ignored (Priority 0) and\n" +
                 "never-attack monsters are not followed (/ra targetlock still forces them). Out to Disengage Range.\n" +
                 "/ra fightselected [on|off]"),
+            Bool("Melee through walls", s => s.MeleeThroughWalls ?? true, (s, v) => s.MeleeThroughWalls = v,
+                "On: melee reaches a monster within 4 m even when the line of sight test says a wall is in the way\n" +
+                "(a corner, a pillar, a thin dungeon wall: melee lands where the test is too strict). Not across a\n" +
+                "building's wall: one of you inside its rooms and the other outside is left to the hunt, which walks\n" +
+                "in through a door.\n" +
+                "Off: a monster behind a wall is never a melee target for being close; it is treated like any monster\n" +
+                "out of sight. On by default. /ra meleewalls [on|off]",
+                when: s => s.MeleeThroughWalls.HasValue),
             Int("Attempts Before Blacklist", s => s.BlacklistAttempts, (s, v) => s.BlacklistAttempts = v, 1, 20, 1,
                 "How many failed attack attempts on a mob before it gets blacklisted."),
             Int("Blacklist Timeout (sec)", s => s.BlacklistTimeoutSec, (s, v) => s.BlacklistTimeoutSec = v, 5, 120, 5,
