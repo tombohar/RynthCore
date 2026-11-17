@@ -15,8 +15,8 @@
 //  per AutoPosIntervalMs unless a sequence or the cell changed - and any other message.
 //  Kept, server to client: the game events in WantedEvent, the player's motion,
 //  position (rate-limited like AutonomousPosition), vector and effect messages,
-//  teleports, system text, and object messages (delete, pickup, state, motion) about
-//  the objects the character just used.
+//  teleports, system text, and object messages (delete, pickup, state, motion, property
+//  updates) about the objects the character just used.
 //
 //  Strictly read-only: nothing here changes, delays or drops traffic.
 //  Pure code (no engine state); compiled into tools/FlightRecorderTests.
@@ -37,6 +37,9 @@ internal static class FlightOp
     public const uint PlayEffect = 0xF755, PlayScriptId = 0xF754, ObjectDelete = 0xF747, PickupEvent = 0xF74A, SetState = 0xF74B;
     public const uint ParentEvent = 0xF749, ServerMessage = 0xF7E0, PlayerCreate = 0xF746, CharacterLogOff = 0xF653;
     public const uint InventoryRemoveObject = 0x0024, PlayerKilled = 0x019E, SetStackSize = 0x0197;
+    // An object's property changed (u8 sequence, guid, property, value; ACE GameMessagePublicUpdateProperty*).
+    public const uint PublicUpdatePropertyInt = 0x02CE, PublicUpdatePropertyInt64 = 0x02D0;
+    public const uint PublicUpdatePropertyBool = 0x02D2, PublicUpdatePropertyFloat = 0x02D4;
 
     // Game events (inside 0xF7B0).
     public const uint EvPopupString = 0x0004, EvInventoryPutObjInContainer = 0x0022, EvWieldObject = 0x0023;
@@ -146,6 +149,8 @@ internal sealed unsafe class FlightCapture
     public const int ResendMarkIntervalMs = 500;     // resend-request markers per direction
     public const int UseSettleMs = 1500;             // UseDone(0) with nothing else this long after = refused
     public const int UseRefusalStreak = 4;           // refused uses in a row that trigger a dump
+    public const int UseRefusalGapMs = 30_000;       // a refused use this long after the last one starts a new streak
+    public const int RefusalReportedMemory = 32;     // objects a use-refusal dump already named
     public const int UseUnansweredMs = 5000;         // a use with no UseDone this long = unanswered
     public const int UseUnansweredStreak = 3;
     public const int TooBusyWindowMs = 20_000;
@@ -195,6 +200,9 @@ internal sealed unsafe class FlightCapture
     private int _useCount;
     private int _refusedStreak, _unansweredStreak;
     private readonly uint[] _refusedTargets = new uint[UseRefusalStreak];
+    private long _lastRefusedSent;
+    private readonly uint[] _refusalReported = new uint[RefusalReportedMemory];
+    private int _refusalReportedNext;
     private readonly long[] _tooBusy = new long[TooBusyStreak];
     private int _tooBusyNext;
     private string? _trigger;
@@ -420,6 +428,25 @@ internal sealed unsafe class FlightCapture
                     DetectResponse(obj, now);
                 }
                 return;
+            case FlightOp.PublicUpdatePropertyInt:
+            case FlightOp.PublicUpdatePropertyInt64:
+            case FlightOp.PublicUpdatePropertyBool:
+            case FlightOp.PublicUpdatePropertyFloat:
+            {
+                // A property of the used object changed: the use did something. A summoning essence
+                // answers its use with UseDone(0) and its charge count (Structure) going down by one,
+                // and nothing else about it (the pet is a new object); four summons in a row were
+                // taken for refused uses and dumped (2026-11-15, R-20261115-172211-37eb). The
+                // guid follows a one-byte sequence.
+                if (len < 9) return;
+                uint about = AcPacketWire.ReadU32(msg + 5);
+                if (about != 0 && IsTarget(about, now))
+                {
+                    Keep(_in, now, FlightDir.In, f, msg, len, fullLen, seq, 0);
+                    DetectResponse(about, now);
+                }
+                return;
+            }
             case FlightOp.PlayerCreate:
                 if (obj != 0) _playerId = obj;
                 Keep(_in, now, FlightDir.In, f, msg, len, fullLen, seq, 0);
@@ -760,6 +787,10 @@ internal sealed unsafe class FlightCapture
     // use refusal: a Use answered by UseDone(0) with nothing about it afterwards (no
     //   ViewContents, no message about the object, no player motion with an action in it)
     //   for UseSettleMs; UseRefusalStreak of those in a row. A ViewContents resets it.
+    //   2026-11-15 (R-20261115-172211-37eb): a pet summoned from an essence every 45 s
+    //   cooldown made a "streak" spread over three minutes. A stall retries within seconds,
+    //   so a refused use more than UseRefusalGapMs after the last one starts a new streak,
+    //   and the objects a dump already named do not raise another one this session.
     // use unanswered: UseUnansweredStreak uses in a row with no UseDone for UseUnansweredMs.
     // too busy: TooBusyStreak "You're too busy" (WeenieError 0x1D or the system text)
     //   within TooBusyWindowMs.
@@ -907,11 +938,19 @@ internal sealed unsafe class FlightCapture
                 {
                     done = true;
                     _unansweredStreak = 0;
+                    if (_refusedStreak > 0 && Ms(u.Sent - _lastRefusedSent) > UseRefusalGapMs)
+                        _refusedStreak = 0;
+                    _lastRefusedSent = u.Sent;
                     _refusedTargets[_refusedStreak % _refusedTargets.Length] = u.Target;
                     _refusedStreak++;
                     if (_refusedStreak >= UseRefusalStreak)
                     {
-                        _trigger ??= $"use-refusal: {_refusedStreak} uses in a row answered UseDone(0) with nothing opened ({TargetList()})";
+                        string targets = TargetList();
+                        if (NoteRefusalReported())
+                            _trigger ??= $"use-refusal: {_refusedStreak} uses in a row answered UseDone(0) with nothing opened ({targets})";
+                        else
+                            Mark(FlightMark.Trigger, text:
+                                $"engine: use-refusal again at {targets} (no dump: one already named these objects this session)");
                         _refusedStreak = 0;
                     }
                 }
@@ -932,6 +971,26 @@ internal sealed unsafe class FlightCapture
         }
         for (int i = keep; i < _useCount; i++) _uses[i] = default;
         _useCount = keep;
+    }
+
+    /// <summary>
+    /// Remembers the objects of the streak that just reached <see cref="UseRefusalStreak"/>. True when
+    /// one of them was not named by an earlier use-refusal dump (a dump is worth it), false when
+    /// all were (the same chest or essence refusing again tells nothing new). Trigger time only.
+    /// </summary>
+    private bool NoteRefusalReported()
+    {
+        bool fresh = false;
+        int n = Math.Min(_refusedStreak, _refusedTargets.Length);
+        for (int i = 0; i < n; i++)
+        {
+            uint id = _refusedTargets[i];
+            if (Array.IndexOf(_refusalReported, id) >= 0) continue;
+            fresh = true;
+            _refusalReported[_refusalReportedNext] = id;
+            _refusalReportedNext = (_refusalReportedNext + 1) % _refusalReported.Length;
+        }
+        return fresh;
     }
 
     /// <summary>The refused objects, each once (trigger time only).</summary>
@@ -970,34 +1029,65 @@ internal sealed unsafe class FlightCapture
     }
 }
 
-/// <summary>At most one automatic dump per cooldown; manual dumps don't go through this.</summary>
+/// <summary>
+/// At most one automatic dump per cooldown and <see cref="MaxPerSession"/> per session; manual
+/// dumps don't go through this. Only the first automatic dump of a session is announced in chat
+/// (2026-11-15, R-20261115-172211-37eb: a player saw "Flight recorder saved (auto: ...)" in chat
+/// and had "no idea if it matters at all"; it is a diagnostic for the developers, and one line
+/// a session is enough to say where the files are).
+/// </summary>
 internal sealed class FlightDumpPolicy
 {
     private readonly long _cooldownMs;
+    private readonly int _maxPerSession;
     private long _lastMs;
-    private bool _any;
+    private int _accepted;
+    private bool _announced;
     private readonly object _lock = new();
 
-    public FlightDumpPolicy(long cooldownMs) { _cooldownMs = cooldownMs; }
+    public FlightDumpPolicy(long cooldownMs, int maxPerSession = int.MaxValue)
+    {
+        _cooldownMs = cooldownMs;
+        _maxPerSession = maxPerSession;
+    }
 
     public long CooldownMs => _cooldownMs;
+    public int MaxPerSession => _maxPerSession;
+    public int Accepted { get { lock (_lock) return _accepted; } }
     public int Refused { get; private set; }
 
     /// <summary>True (and the cooldown starts) when an automatic dump may be written now;
-    /// otherwise <paramref name="waitMs"/> is how long until one may.</summary>
+    /// otherwise <paramref name="waitMs"/> is how long until one may (-1: none more this session).</summary>
     public bool TryAccept(long nowMs, out long waitMs)
     {
         lock (_lock)
         {
-            if (_any && nowMs - _lastMs < _cooldownMs)
+            if (_accepted >= _maxPerSession)
+            {
+                waitMs = -1;
+                Refused++;
+                return false;
+            }
+            if (_accepted > 0 && nowMs - _lastMs < _cooldownMs)
             {
                 waitMs = _cooldownMs - (nowMs - _lastMs);
                 Refused++;
                 return false;
             }
-            _any = true;
+            _accepted++;
             _lastMs = nowMs;
             waitMs = 0;
+            return true;
+        }
+    }
+
+    /// <summary>True once a session: the automatic dump just written gets the chat line.</summary>
+    public bool TakeAnnounce()
+    {
+        lock (_lock)
+        {
+            if (_announced) return false;
+            _announced = true;
             return true;
         }
     }

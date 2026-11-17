@@ -37,6 +37,9 @@ internal static unsafe class Program
         DetectUseRefusalDelayedAnswers();
         NoTriggerWhenCorpsesOpen();
         NoTriggerForDrinksAndKits();
+        NoTriggerForEssenceSummons();
+        RefusalStreakNeedsQuickRetries();
+        RefusalDumpOncePerObject();
         DetectUnanswered();
         DetectTooBusy();
         DumpPolicy();
@@ -584,6 +587,69 @@ internal static unsafe class Program
         Eq(c.TakeTrigger(), null, "no trigger");
     }
 
+    // R-20261115-172211-37eb: an essence summoned every 45 s answers UseDone(0) and its charges
+    // (Structure, int property 92) going down; the pet is a new object. That is a use that worked.
+    private static byte[] UpdateInt(uint obj, uint prop, int value) =>
+        new Body().Bytes(1).U32(obj).U32(prop).U32(unchecked((uint)value)).Message(0x02CE);
+
+    private static void NoTriggerForEssenceSummons()
+    {
+        Case("detector: summons from an essence (UseDone(0) + its charges drop) never trigger");
+        var c = NewCapture();
+        LoginAs(c);
+        const uint Essence = 0x8044E456;
+        for (int i = 0; i < 8; i++)
+        {
+            Out(c, Use(Essence));
+            _t += 30;
+            In(c, UpdateInt(Essence, 92, 100 - i));
+            In(c, UseDone(0));
+            _t += 3000;
+            c.Tick();
+        }
+        Eq(c.TakeTrigger(), null, "no trigger");
+        Eq(c.RefusedStreak, 0, "no refused uses");
+        Has(string.Join("\n", Lines(c)), "PublicUpdatePropertyInt 0x8044E456 prop 92 = 93", "the charge update is kept and decoded");
+
+        // A property update about an object nobody used is not kept.
+        int before = Recs(c).Length;
+        In(c, UpdateInt(0x80077777, 92, 5));
+        Eq(Recs(c).Length, before, "an unused object's update is dropped");
+    }
+
+    private static void RefusalStreakNeedsQuickRetries()
+    {
+        Case("detector: refused uses spread past 30 s apart don't make a streak (the 45 s essence cadence)");
+        var c = NewCapture();
+        LoginAs(c);
+        for (int i = 0; i < 6; i++)
+        {
+            Out(c, Use(Corpse));
+            _t += 30;
+            In(c, UseDone(0));
+            _t += 2000;
+            c.Tick();
+            _t += 46_000;
+        }
+        Eq(c.TakeTrigger(), null, "no trigger at a 48 s cadence");
+        Eq(c.RefusedStreak, 1, "each refusal starts a new streak");
+    }
+
+    private static void RefusalDumpOncePerObject()
+    {
+        Case("detector: the same objects refusing again don't raise a second dump; new ones do");
+        var c = NewCapture();
+        LoginAs(c);
+        void Refuse(uint id) { Out(c, Use(id)); _t += 60; In(c, UseDone(0)); _t += 1600; c.Tick(); }
+        for (int i = 0; i < 4; i++) Refuse(Corpse);
+        Check(c.TakeTrigger()?.StartsWith("use-refusal") == true, "first streak triggers");
+        for (int i = 0; i < 4; i++) Refuse(Corpse);
+        Eq(c.TakeTrigger(), null, "the same corpse again: no trigger");
+        Has(string.Join("\n", Lines(c)), "use-refusal again at 0x80068ACE (no dump", "but a marker says so");
+        for (int i = 0; i < 4; i++) Refuse(Other);
+        Check(c.TakeTrigger()?.Contains("0x80012345") == true, "another object triggers");
+    }
+
     private static void DetectUnanswered()
     {
         Case("detector: 3 uses with no UseDone at all -> use-unanswered trigger");
@@ -619,6 +685,17 @@ internal static unsafe class Program
         Check(!p.TryAccept(600_999, out _), "just before");
         Check(p.TryAccept(601_000, out _), "after the cooldown");
         Eq(p.Refused, 2, "refusals counted");
+
+        Case("dump policy: at most N automatic dumps a session; only the first is announced in chat");
+        var q = new FlightDumpPolicy(600_000, 3);
+        Check(q.TryAccept(0, out _), "1st");
+        Check(q.TakeAnnounce(), "the first dump is announced");
+        Check(!q.TakeAnnounce(), "only once a session");
+        Check(q.TryAccept(600_000, out _), "2nd");
+        Check(q.TryAccept(1_200_000, out _), "3rd");
+        Check(!q.TryAccept(10_000_000, out long w), "4th: the session's limit");
+        Eq(w, -1L, "the limit reports no wait");
+        Eq(q.Accepted, 3, "accepted counted");
     }
 
     // ── decoding ────────────────────────────────────────────────────────────

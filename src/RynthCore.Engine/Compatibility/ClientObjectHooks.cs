@@ -1697,10 +1697,14 @@ internal static class ClientObjectHooks
             if (!TryGetObjectQualitiesPtr(playerId, out IntPtr q))
                 return false;
             // InqSkill / InqAttribute / InqAttribute2nd with raw 0 read the enchantment
-            // registry at [q+0x70] without a null check (early login): wait for it.
-            if (!IsReadableSpan(q, QualitiesEnchantmentRegistryOffset + 4)
-                || Marshal.ReadIntPtr(q + QualitiesEnchantmentRegistryOffset) == IntPtr.Zero)
+            // registry at [q+0x70] without a null check. AC makes the registry when the first
+            // enchantment lands, so a character with nothing cast on it since login has none
+            // (2026-11-16: a fresh DreamWeave character's Skills panel said "Reading your
+            // character..." for good). Without one, only the raw (base) reads are made, and the
+            // buffed numbers are the base ones, as they are with nothing cast.
+            if (!IsReadableSpan(q, QualitiesEnchantmentRegistryOffset + 4))
                 return false;
+            int buffedRead = Marshal.ReadIntPtr(q + QualitiesEnchantmentRegistryOffset) != IntPtr.Zero ? 0 : 1;
             dst.PlayerId = playerId;
 
             dst.SkillTableRead = ReadSkillRowsLive(q, dst);
@@ -1711,7 +1715,7 @@ internal static class ClientObjectHooks
                 for (uint sk = 1; sk <= PlayerProgress.MaxSkill; sk++)
                 {
                     int buffed = 0, raw = 0;
-                    bool b = _inqSkillLevel(q, sk, &buffed, 0) != 0;
+                    bool b = _inqSkillLevel(q, sk, &buffed, buffedRead) != 0;
                     bool r = _inqSkillLevel(q, sk, &raw, 1) != 0;
                     dst.SkillLevelKnown[sk] = b || r;
                     dst.SkillBuffed[sk] = b ? buffed : raw;
@@ -1723,7 +1727,7 @@ internal static class ClientObjectHooks
                 for (uint a = 1; a <= 6; a++)
                 {
                     uint v = 0;
-                    if (_inqAttribute(q, a, &v, 0) != 0) dst.AttrBuffed[a] = v;
+                    if (_inqAttribute(q, a, &v, buffedRead) != 0) dst.AttrBuffed[a] = v;
                     v = 0;
                     if (_inqAttribute(q, a, &v, 1) != 0) dst.AttrBase[a] = v;
                 }
@@ -1735,7 +1739,7 @@ internal static class ClientObjectHooks
                 for (uint i = 1; i <= 3; i++)
                 {
                     uint stype = i * 2 - 1, v = 0;
-                    if (_inqAttribute2ndBaseLevel(q, stype, &v, 0) != 0) dst.VitalBuffed[i] = v;
+                    if (_inqAttribute2ndBaseLevel(q, stype, &v, buffedRead) != 0) dst.VitalBuffed[i] = v;
                     v = 0;
                     if (_inqAttribute2ndBaseLevel(q, stype, &v, 1) != 0) dst.VitalBase[i] = v;
                 }

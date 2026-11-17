@@ -228,6 +228,11 @@ internal static unsafe class ChatCommandDispatcher
             if (StartsWithCmd(trimmed, "/f "))
                 return DispatchRaw(trimmed);
 
+            // AC's emote forms without a '/' (@e, @emote, "; text", "*wave*"): AC's own parser,
+            // as typed in its chat bar (ChatLineRoute.cs). As speech they were said word for word.
+            if (ChatLineRoute.IsAcEmoteLine(trimmed))
+                return DispatchRaw(trimmed);
+
             // Bare text → say
             if (!trimmed.StartsWith("/", StringComparison.Ordinal))
                 return DispatchSay(trimmed);

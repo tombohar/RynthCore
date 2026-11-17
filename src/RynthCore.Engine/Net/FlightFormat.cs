@@ -191,6 +191,10 @@ internal static class FlightFormat
         FlightOp.InventoryRemoveObject => "InventoryRemoveObject",
         FlightOp.SetStackSize => "SetStackSize",
         FlightOp.PlayerKilled => "PlayerKilled",
+        FlightOp.PublicUpdatePropertyInt => "PublicUpdatePropertyInt",
+        FlightOp.PublicUpdatePropertyInt64 => "PublicUpdatePropertyInt64",
+        FlightOp.PublicUpdatePropertyBool => "PublicUpdatePropertyBool",
+        FlightOp.PublicUpdatePropertyFloat => "PublicUpdatePropertyFloat",
         0xF7C8 => "CharacterEnterWorldRequest",
         0xF657 => "CharacterEnterWorld",
         0xF7DE => "TurbineChat",
@@ -501,6 +505,10 @@ internal static class FlightFormat
             case FlightOp.ParentEvent: { uint p = rd.U32(); uint c = rd.U32(); s = $"ParentEvent {Id(c)} onto {Id(p)} loc {rd.I32()}"; break; }
             case FlightOp.InventoryRemoveObject: s = $"InventoryRemoveObject {Id(rd.U32())}"; break;
             case FlightOp.SetStackSize: { rd.U8(); uint id = rd.U32(); uint n = rd.U32(); s = $"SetStackSize {Id(id)} size {n}"; break; }
+            case FlightOp.PublicUpdatePropertyInt: { rd.U8(); uint id = rd.U32(); uint p = rd.U32(); s = $"PublicUpdatePropertyInt {Id(id)} prop {p} = {rd.I32()}"; break; }
+            case FlightOp.PublicUpdatePropertyInt64:
+            case FlightOp.PublicUpdatePropertyBool:
+            case FlightOp.PublicUpdatePropertyFloat: { rd.U8(); uint id = rd.U32(); uint p = rd.U32(); s = $"{OpcodeName(op)} {Id(id)} prop {p}"; break; }
             case FlightOp.ServerMessage: { string t = rd.Str(); uint ct = rd.U32(); s = $"ServerMessage \"{t}\" (chat type {ct})"; break; }
             case FlightOp.PlayerCreate: s = $"PlayerCreate {Id(rd.U32())}"; break;
             case FlightOp.CharacterLogOff: s = "CharacterLogOff"; break;

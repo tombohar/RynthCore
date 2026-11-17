@@ -17,9 +17,11 @@
 //
 //  Dumps: /rc flightdump [note] (any time), /rc flightdump auto <reason> and the plugin
 //  command (SendPluginCommand("RynthCore.FlightRecorder", "dump", reason)) for automatic
-//  ones - at most one per AutoDumpCooldownMs, written AutoDumpDelayMs after the trigger so
-//  the aftermath is in it too. Files: Logs\flight-<pid>-<yyyyMMdd-HHmmss>.txt, written on
-//  a short-lived engine thread.
+//  ones - at most one per AutoDumpCooldownMs and AutoDumpsPerSession per session, written
+//  AutoDumpDelayMs after the trigger so the aftermath is in it too. Files:
+//  Logs\flight-<pid>-<yyyyMMdd-HHmmss>.txt, written on a short-lived engine thread. Only the
+//  first automatic dump of a session says so in chat, in words that say nothing is wrong
+//  (2026-11-15, R-20261115-172211-37eb); the rest go to the engine log only.
 //
 //  engine.json "FlightRecorder": false turns it off at the next client start (no sendto
 //  hook, nothing recorded); /rc flight off|on pauses it for the session.
@@ -39,6 +41,7 @@ internal static unsafe class FlightRecorder
 {
     public const int Capacity = 16384;                 // entries (152 bytes each, ~2.5 MB)
     public const long AutoDumpCooldownMs = 10 * 60 * 1000;
+    public const int AutoDumpsPerSession = 3;
     public const int AutoDumpDelayMs = 3000;
     public const int PruneDays = 14;
 
@@ -48,7 +51,7 @@ internal static unsafe class FlightRecorder
     private static FlightCapture? _cap;
     private static volatile bool _paused;
     private static volatile bool _autoOff;
-    private static readonly FlightDumpPolicy Policy = new(AutoDumpCooldownMs);
+    private static readonly FlightDumpPolicy Policy = new(AutoDumpCooldownMs, AutoDumpsPerSession);
     private static long _lastSummaryMs;
     private static int _lastSendErrors;
 
@@ -234,6 +237,11 @@ internal static unsafe class FlightRecorder
         long now = Environment.TickCount64;
         if (!Policy.TryAccept(now, out long waitMs))
         {
+            if (waitMs < 0)
+            {
+                c.Mark(FlightMark.Trigger, text: $"{source}: {reason} (no dump: {Policy.MaxPerSession} automatic dumps this session already)");
+                return $"Not dumped: {Policy.MaxPerSession} automatic dumps this session already (/rc flightdump writes one now).";
+            }
             c.Mark(FlightMark.Trigger, text: $"{source}: {reason} (no dump: one was written {(Policy.CooldownMs - waitMs) / 1000} s ago)");
             return $"Not dumped: the last automatic dump was {(Policy.CooldownMs - waitMs) / 1000} s ago (one per {Policy.CooldownMs / 60000} min).";
         }
@@ -313,8 +321,10 @@ internal static unsafe class FlightRecorder
             _lastDump = path;
             Interlocked.Increment(ref _dumpsWritten);
             RynthLog.Compat($"FlightRecorder: wrote {path} ({records.Length} entries; {why}).");
-            if (announce)
-                AcMainThreadQueue.EnqueueWriteToChat($"[RynthCore] Flight recorder saved ({why}): {path}", 1);
+            // The reason stays in the file and the log: in chat it read like an error to players.
+            if (announce && Policy.TakeAnnounce())
+                AcMainThreadQueue.EnqueueWriteToChat(
+                    $"[RynthCore] Saved a diagnostic snapshot for the developers to {path} (nothing to do; attach it to a problem report if something went wrong). Later ones this session go to the log only.", 1);
         }
         catch (Exception ex)
         {
@@ -398,7 +408,7 @@ internal static unsafe class FlightRecorder
         {
             $"Flight recorder: {(_paused ? "PAUSED" : "recording")}, {c.Ring.Total} entries recorded (ring {c.Ring.Capacity}, {c.Ring.Bytes / 1024} KB), " +
             $"send hook {(RawPacketHooks.IsSendInstalled ? "installed" : "NOT installed")}, receive hook {(RawPacketHooks.IsInstalled ? "installed" : "NOT installed")}, player 0x{c.PlayerId:X8}",
-            $"Automatic dumps {(_autoOff ? "OFF" : "on")} (one per {AutoDumpCooldownMs / 60000} min, {Policy.Refused} refused by the limit); " +
+            $"Automatic dumps {(_autoOff ? "OFF" : "on")} (one per {AutoDumpCooldownMs / 60000} min, {Policy.Accepted}/{AutoDumpsPerSession} this session, {Policy.Refused} refused by the limit); " +
             $"refused-use streak {c.RefusedStreak}; dumps written {_dumpsWritten}{(_lastDump.Length > 0 ? ", last " + _lastDump : "")}",
             "/rc flightdump [note] writes it now; /rc flight mark <text> adds a note; /rc flight off|on|auto off|on.",
         };

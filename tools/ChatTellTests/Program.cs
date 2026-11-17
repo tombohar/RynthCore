@@ -24,6 +24,7 @@ internal static class Program
         RewriteCases();
         PasteClean();
         PasteInsert();
+        EmoteLines();
 
         Console.WriteLine();
         Console.WriteLine($"{_checks - _failed}/{_checks} checks passed.");
@@ -166,6 +167,33 @@ internal static class Program
         string pair = new string('a', ChatInputPaste.MaxLineChars - 2);
         r = ChatInputPaste.Insert(pair, pair.Length, "b\U0001F600c", out c);   // room for "b" + half the pair
         Check(r == pair + "b" && c == pair.Length + 1, "never splits a surrogate pair");
+    }
+
+    // ── emotes (ChatLineRoute.cs) ───────────────────────────────────────────
+
+    private static void EmoteLines()
+    {
+        Case("emote lines go to AC's parser");
+        Check(ChatLineRoute.IsAcEmoteLine("@e waves"), "@e text");
+        Check(ChatLineRoute.IsAcEmoteLine("@EM waves"), "@em, any case");
+        Check(ChatLineRoute.IsAcEmoteLine("@emote looks around the town curiously."), "@emote text");
+        Check(ChatLineRoute.IsAcEmoteLine("@emotes"), "@emotes alone (the list)");
+        Check(ChatLineRoute.IsAcEmoteLine("; waves"), "; text");
+        Check(ChatLineRoute.IsAcEmoteLine(":waves"), ":text");
+        Check(ChatLineRoute.IsAcEmoteLine("*wave*"), "*wave*");
+        Check(ChatLineRoute.IsAcEmoteLine("*Warm Hands*"), "*two words*");
+
+        Case("everything else stays speech or a server command");
+        Check(!ChatLineRoute.IsAcEmoteLine("hello there"), "plain words");
+        Check(!ChatLineRoute.IsAcEmoteLine("@myquests"), "an ACE @command");
+        Check(!ChatLineRoute.IsAcEmoteLine("@echo hi"), "@echo is not @e");
+        Check(!ChatLineRoute.IsAcEmoteLine("@emu"), "@emu is not @em");
+        Check(!ChatLineRoute.IsAcEmoteLine("*"), "a lone asterisk");
+        Check(!ChatLineRoute.IsAcEmoteLine("**"), "two asterisks");
+        Check(!ChatLineRoute.IsAcEmoteLine("* *"), "asterisks round a space");
+        Check(!ChatLineRoute.IsAcEmoteLine("*wave"), "no closing asterisk");
+        Check(!ChatLineRoute.IsAcEmoteLine(";"), "a lone semicolon");
+        Check(!ChatLineRoute.IsAcEmoteLine(""), "empty");
     }
 
     private static void Case(string name)
