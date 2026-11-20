@@ -911,13 +911,14 @@ internal sealed unsafe class WebPanelHost
     private void Show()
     {
         PlaceNow(force: true);
+        IntPtr game = _env.GameHwnd;
+        if (game != IntPtr.Zero && IsWindow(game)) KeepAboveGame(game); // its z-slot before it shows: never over another program
         ShowWindow(_staHwnd, SW_SHOWNA);
         // Focus the panel only from within this process (the game, or a pop-out): a plugin opening it while the
-        // player is in another program must not pull the foreground away (the PID rule keeps it hidden meanwhile).
+        // player is in another program must not pull the foreground away (Track keeps it under that program).
         // Never while the foreground is null (mid alt-tab): that would grab focus on the way to another program.
         // Only this process, defensively: a foreground in the WebView2 browser process is assumed (not observed) to
-        // be the page's own dialog, which should keep it (IsOurPid, which includes the browser, is for the
-        // visibility rule only).
+        // be the page's own dialog, which should keep it.
         bool inProcess = ForegroundIsThisProcess();
         if (inProcess) SetForegroundWindow(_staHwnd);
         if (_ctl != null) { try { _ctl.IsVisible = true; } catch { } }
@@ -985,39 +986,21 @@ internal sealed unsafe class WebPanelHost
         if (!_open || _staHwnd == IntPtr.Zero) return;
         IntPtr game = _env.GameHwnd;
         if (game == IntPtr.Zero || !IsWindow(game)) { CloseNow(_serving); return; }
-        IntPtr fg = GetForegroundWindow();
-        uint fgPid = 0;
-        if (fg != IntPtr.Zero) GetWindowThreadProcessId(fg, out fgPid);
-        // The page's own dialogs (alert, file picker, sign-in) are windows of the WebView2 browser process: count
-        // that process as ours so they do not hide the panel they belong to.
-        if (IsOurPid(fgPid)) fgPid = _ourPid;
-        bool? visible = WebPanelWindowPolicy.Visible(true, true, IsIconic(game), IsWindowVisible(game), fg == IntPtr.Zero, fgPid, _ourPid);
+        // Shown while the game window shows, whichever window has the foreground (clicking the game or another
+        // program does not hide it); only closing it, or minimizing or hiding the game, takes it away.
+        bool visible = WebPanelWindowPolicy.Visible(true, true, IsIconic(game), IsWindowVisible(game));
         bool shown = IsWindowVisible(_staHwnd);
-        if (visible == false)
+        if (!visible)
         {
             if (shown) ShowWindow(_staHwnd, SW_HIDE);
         }
         else
         {
-            if (visible == true && !shown) { ShowWindow(_staHwnd, SW_SHOWNA); shown = true; }
-            if (shown)
-            {
-                if (!_inSizeMove) PlaceNow(force: false);
-                RaiseAboveGame(game);
-            }
+            if (!shown) ShowWindow(_staHwnd, SW_SHOWNA);
+            if (!_inSizeMove) PlaceNow(force: false);
+            KeepAboveGame(game);
         }
         UpdateStateFlags();
-    }
-
-    /// <summary>
-    /// This process, or this panel's WebView2 browser process. The browser PID is CoreWebView2.BrowserProcessId,
-    /// read when the controller is created (OnController) and cleared by TearDownWebView; 0 while there is none.
-    /// </summary>
-    private bool IsOurPid(uint pid)
-    {
-        if (pid == 0) return false;
-        uint browser = _browserPid;
-        return pid == _ourPid || (browser != 0 && pid == browser);
     }
 
     private bool GameClientScreen(out PanelRect rect)
@@ -1040,13 +1023,80 @@ internal sealed unsafe class WebPanelHost
         SetWindowPos(_staHwnd, IntPtr.Zero, want.Left, want.Top, want.Width, want.Height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
-    /// <summary>Raises the panel only when it is below the game window, so it never covers a window the user brought forward.</summary>
-    private void RaiseAboveGame(IntPtr game)
+    /// <summary>
+    /// Keeps the panel directly above the game window in the z-order: over the game whenever the game shows,
+    /// and under any window the user brought over the game, so it never covers another program.
+    /// </summary>
+    private void KeepAboveGame(IntPtr game)
+    {
+        // "Directly above the game" counts the game's own windows (RynthCore's bar and floating panels are owned
+        // by the game) as part of the game, so the panel stays over them as it did before; the panel's own
+        // windows (WebView2 dialogs) ride with the panel. The target is the first other window above all that.
+        IntPtr target = NextAbove(game, game, skipTopmost: false);
+        // No target, or a topmost one: the slot is the top of the normal band (HWND_TOP). Else the slot is under
+        // the target (insert-after places the panel below it).
+        bool bandTop = target == IntPtr.Zero || IsTopmost(target);
+        // In place: the panel is above the game, and the first window above it (past its own dialogs) is the
+        // target, or, for the band top, nothing but topmost windows are above it.
+        bool inPlace = IsAbove(_staHwnd, game) && (bandTop
+            ? NextAbove(_staHwnd, IntPtr.Zero, skipTopmost: true) == IntPtr.Zero
+            : NextAbove(_staHwnd, IntPtr.Zero, skipTopmost: false) == target);
+        if (inPlace) { ResetRaise(); return; }
+        SetWindowPos(_staHwnd, bandTop ? HWND_TOP : target, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (!bandTop || AtBandTop(game)) { ResetRaise(); return; }
+        // A topmost game: nothing in the normal band can go over it; leave it.
+        if (IsTopmost(game)) return;
+        if (_raiseBackoff > 0) { _raiseBackoff--; return; }
+        // While the game is the foreground window, HWND_TOP does not put ANY window over it, not even a new
+        // window of another process (probed in game 2026-11-13). Going topmost and straight back does: the
+        // panel lands at the top of the normal band, over the game, and the game keeps the foreground.
+        // NOACTIVATE on both, so focus never moves.
+        if (!_raiseLogged) { _raiseLogged = true; SafeLog("HWND_TOP did not raise the panel over the foreground game; raising via topmost and back"); }
+        SetWindowPos(_staHwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(_staHwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (AtBandTop(game)) { ResetRaise(); return; }
+        // If that keeps not working, say so once and back off to about once a second.
+        if (++_raiseMisses == 10) SafeLog("raising via topmost and back did not put the panel over the game");
+        if (_raiseMisses > 10) _raiseBackoff = 20;
+    }
+
+    /// <summary>Over the game with nothing but topmost windows (and its own dialogs) above it.</summary>
+    private bool AtBandTop(IntPtr game) => IsAbove(_staHwnd, game) && NextAbove(_staHwnd, IntPtr.Zero, skipTopmost: true) == IntPtr.Zero;
+
+    private void ResetRaise() { _raiseMisses = 0; _raiseBackoff = 0; }
+
+    private bool _raiseLogged; // panel thread only: log the topmost raise once per engine generation
+    private int _raiseMisses;  // panel thread only: consecutive ticks the panel stayed under the game
+    private int _raiseBackoff; // panel thread only: ticks to skip before the next topmost attempt
+
+    /// <summary>
+    /// The first window above <paramref name="from"/> that is not the panel or in its owner tree, not in
+    /// <paramref name="skipTree"/>'s owner tree (the game, or none), and (with <paramref name="skipTopmost"/>)
+    /// not topmost; zero when there is none.
+    /// </summary>
+    private IntPtr NextAbove(IntPtr from, IntPtr skipTree, bool skipTopmost)
+    {
+        int guard = 0;
+        for (IntPtr h = GetWindow(from, GW_HWNDPREV); h != IntPtr.Zero && guard < 4096; h = GetWindow(h, GW_HWNDPREV), guard++)
+        {
+            IntPtr root = GetAncestor(h, GA_ROOTOWNER);
+            if (h == _staHwnd || root == _staHwnd) continue;
+            if (skipTree != IntPtr.Zero && root == skipTree) continue;
+            if (skipTopmost && IsTopmost(h)) continue;
+            return h;
+        }
+        return IntPtr.Zero;
+    }
+
+    private static bool IsTopmost(IntPtr h) => h != IntPtr.Zero && (unchecked((uint)GetWindowLongW(h, GWL_EXSTYLE)) & WS_EX_TOPMOST) != 0;
+
+    /// <summary>The panel is somewhere above the game in the z-order.</summary>
+    private bool IsAbove(IntPtr panel, IntPtr game)
     {
         int guard = 0;
         for (IntPtr h = GetWindow(game, GW_HWNDPREV); h != IntPtr.Zero && guard < 4096; h = GetWindow(h, GW_HWNDPREV), guard++)
-            if (h == _staHwnd) return;
-        SetWindowPos(_staHwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            if (h == panel) return true;
+        return false;
     }
 
     private void UpdateStateFlags()

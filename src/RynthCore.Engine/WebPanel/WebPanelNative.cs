@@ -7,7 +7,8 @@ namespace RynthCore.Engine.WebPanel;
 internal static unsafe class WebPanelNative
 {
     public const uint WS_POPUP = 0x80000000, WS_CLIPCHILDREN = 0x02000000, WS_THICKFRAME = 0x00040000;
-    public const uint WS_EX_TOOLWINDOW = 0x00000080;
+    public const uint WS_EX_TOOLWINDOW = 0x00000080, WS_EX_TOPMOST = 0x00000008;
+    public const int GWL_EXSTYLE = -20;
     public const uint CS_VREDRAW = 0x0001, CS_HREDRAW = 0x0002;
 
     public const uint WM_NCCREATE = 0x0081, WM_SIZE = 0x0005, WM_SETFOCUS = 0x0007, WM_PAINT = 0x000F, WM_CLOSE = 0x0010,
@@ -17,8 +18,9 @@ internal static unsafe class WebPanelNative
 
     public const uint SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOZORDER = 0x0004, SWP_NOACTIVATE = 0x0010;
     public const int SW_HIDE = 0, SW_SHOWNORMAL = 1, SW_SHOWNA = 8;
-    public const uint GW_HWNDPREV = 3, GA_ROOT = 2;
+    public const uint GW_HWNDPREV = 3, GA_ROOT = 2, GA_ROOTOWNER = 3;
     public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+    public static readonly IntPtr HWND_TOPMOST = new(-1), HWND_NOTOPMOST = new(-2);
 
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003, WINEVENT_OUTOFCONTEXT = 0x0000;
     public const int TRANSPARENT = 1, DEFAULT_GUI_FONT = 17, IDC_ARROW = 32512;
@@ -66,6 +68,7 @@ internal static unsafe class WebPanelNative
     [DllImport("user32.dll")] public static extern bool KillTimer(IntPtr h, IntPtr id);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int index);
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll")] public static extern bool InvalidateRect(IntPtr h, IntPtr rect, bool erase);
     [DllImport("user32.dll")] public static extern IntPtr BeginPaint(IntPtr h, out PAINTSTRUCT ps);

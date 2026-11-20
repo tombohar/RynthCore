@@ -194,6 +194,22 @@ internal sealed class ItemsFace : IImGuiPanel
         int keep = Spinner("##keep", _data.ManaStoneKeepCount, 1, 999, new Vector2(x, p.Y));
         if (keep != _data.ManaStoneKeepCount) { _data.ManaStoneKeepCount = keep; Save(); }
         NextLine(new Vector2(p.X - 4, p.Y - 4), 30);
+        if (_data.ManaTapMacroOff is bool macroOff)
+        {
+            // Stones refill worn gear and drain tap loot with the macro stopped too.
+            p = ImGuiNET.ImGui.GetCursorScreenPos() + new Vector2(4, 0);
+            float my = p.Y + (22 - ImGuiNET.ImGui.GetFontSize()) * 0.5f;
+            dl.AddText(new Vector2(p.X, my), Text, "With macro off");
+            float mx = p.X + ImGuiNET.ImGui.CalcTextSize("With macro off").X + 6;
+            if (Button("##tapmacrooff", macroOff ? "ON" : "OFF", new Vector2(mx, p.Y), new Vector2(50, 22), macroOff ? OnText : Mute, macroOff ? OnBg : BtnFill))
+            {
+                _data.ManaTapMacroOff = !macroOff;
+                Save();
+            }
+            if (ImGuiNET.ImGui.IsItemHovered())
+                ImGuiNET.ImGui.SetTooltip("Mana stones refill your worn gear, and drain loot taken for tapping,\nwhile the macro is off too. OFF: only while the macro runs.");
+            NextLine(new Vector2(p.X - 4, p.Y), 28);
+        }
         if (_data.EnableManaTapping)
         {
             p = ImGuiNET.ImGui.GetCursorScreenPos() + new Vector2(4, 0);

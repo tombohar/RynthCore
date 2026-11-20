@@ -16,17 +16,12 @@ internal static class WebPanelWindowPolicy
     public const int DefaultPercent = 88, MinPercent = 30, MaxPercent = 100, MinWidthPx = 480, MinHeightPx = 320;
 
     /// <summary>
-    /// false when closed, the game is gone, iconic or invisible; null (keep current) when the
-    /// foreground window is null mid alt-tab, so the panel never flickers; otherwise true only
-    /// when the foreground window belongs to the game process.
+    /// false when closed, the game is gone, iconic or invisible; otherwise true. The foreground window does
+    /// not count: the panel stays over the game while the player clicks the game or another program, and the
+    /// z-order (directly above the game) keeps it under any window brought over the game.
     /// </summary>
-    public static bool? Visible(bool open, bool gameAlive, bool gameIconic, bool gameVisible,
-        bool foregroundNull, uint foregroundPid, uint ourPid)
-    {
-        if (!open || !gameAlive || gameIconic || !gameVisible) return false;
-        if (foregroundNull) return null;
-        return foregroundPid == ourPid;
-    }
+    public static bool Visible(bool open, bool gameAlive, bool gameIconic, bool gameVisible)
+        => open && gameAlive && !gameIconic && gameVisible;
 
     /// <summary>Centered fractions for a size in percent of the client; 0 means the default (88).</summary>
     public static PanelFractions Default(int widthPercent, int heightPercent)

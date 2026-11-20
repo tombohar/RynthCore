@@ -163,16 +163,13 @@ internal static unsafe class Program
     private static void Visibility()
     {
         Case("Visibility");
-        // open, alive, !iconic, visible, !fgNull, fgPid, ourPid
-        Eq(WebPanelWindowPolicy.Visible(true, true, false, true, false, 5, 5), (bool?)true, "same process shows");
-        Eq(WebPanelWindowPolicy.Visible(true, true, false, true, false, 6, 5), (bool?)false, "other process hides");
-        Eq(WebPanelWindowPolicy.Visible(true, true, false, true, true, 0, 5), (bool?)null, "null foreground keeps current");
-        Eq(WebPanelWindowPolicy.Visible(true, true, true, true, false, 5, 5), (bool?)false, "iconic hides");
-        Eq(WebPanelWindowPolicy.Visible(false, true, false, true, false, 5, 5), (bool?)false, "closed hides");
-        Eq(WebPanelWindowPolicy.Visible(true, false, false, true, false, 5, 5), (bool?)false, "dead game hides");
-        Eq(WebPanelWindowPolicy.Visible(true, true, false, false, false, 5, 5), (bool?)false, "invisible game hides");
-        Eq(WebPanelWindowPolicy.Visible(false, true, false, true, true, 0, 5), (bool?)false, "closed beats null foreground");
-        Eq(WebPanelWindowPolicy.Visible(true, true, true, true, true, 0, 5), (bool?)false, "iconic beats null foreground");
+        // open, alive, iconic, visible: the foreground window no longer counts (clicking the game or another program keeps it)
+        Eq(WebPanelWindowPolicy.Visible(true, true, false, true), true, "open over a shown game shows");
+        Eq(WebPanelWindowPolicy.Visible(true, true, true, true), false, "iconic hides");
+        Eq(WebPanelWindowPolicy.Visible(false, true, false, true), false, "closed hides");
+        Eq(WebPanelWindowPolicy.Visible(true, false, false, true), false, "dead game hides");
+        Eq(WebPanelWindowPolicy.Visible(true, true, false, false), false, "invisible game hides");
+        Eq(WebPanelWindowPolicy.Visible(false, false, true, false), false, "closed beats everything");
     }
 
     private static void Layout()

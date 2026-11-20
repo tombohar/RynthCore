@@ -61,6 +61,8 @@ internal static class ItemsPanel
         [JsonPropertyName("enableManaTapping")] public bool                  EnableManaTapping { get; set; }
         [JsonPropertyName("manaTapMinMana")]    public int                   ManaTapMinMana    { get; set; } = 2500;
         [JsonPropertyName("manaStoneKeepCount")]public int                   ManaStoneKeepCount{ get; set; } = 5;
+        // Mana tap with macro off (RynthAi from 2026-11-19). Null from an older plugin: the toggle is hidden.
+        [JsonPropertyName("manaTapMacroOff")]   public bool?                 ManaTapMacroOff   { get; set; }
         [JsonPropertyName("currentTargetName")] public string                CurrentTargetName { get; set; } = string.Empty;
         /// <summary>
         /// Listed weapons the character no longer carries (not in the pack, not wielded), by id

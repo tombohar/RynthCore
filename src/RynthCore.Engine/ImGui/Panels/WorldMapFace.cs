@@ -2,7 +2,8 @@
 //  RynthCore.Engine - ImGui/Panels/WorldMapFace.cs
 //  The World Map: an interactive map of Dereth, opened from the RynthNav panel's Map button.
 //  The map itself is WorldMapView (also the Mini Map's); this face is the toolbar around it:
-//    Follow   keeps you centred (a drag, or Fit, turns it off; a double click on the map turns it on)
+//    Follow   keeps you centred (a drag, Fit or Find turns it off; a double click on the map turns it on).
+//             It is on again each time the map opens (2026-11-19, a player: "always have to click that").
 //    Rotate   turns the map so the way you face is up
 //    - + Fit  zoom out / in / the whole world
 //    Show     which kinds of place, and the labels / route / path / grid / characters / buildings layers
@@ -10,7 +11,7 @@
 //             centres on it, zooms in and rings it
 //  and, over the map's top-left, what is under the cursor: its coordinates, the place's name, and how
 //  far and which way it is from you.
-//  Settings (zoom, Follow, Rotate, the layers) last across sessions (WorldMapSettings).
+//  Settings (zoom, Rotate, the layers) last across sessions (WorldMapSettings); Follow starts on at each open.
 // ============================================================================
 
 using System;
@@ -82,7 +83,12 @@ internal sealed class WorldMapFace : IImGuiPanel
     private bool _findOpen;
     private Vector2 _findBoxMin, _findBoxMax;
 
-    public void OnShown() => WorldMapFeeds.Subscribe();
+    public void OnShown()
+    {
+        WorldMapFeeds.Subscribe();
+        // A drag or a Find turned Follow off for that look around; opening the map again follows you.
+        _view.Follow = true;
+    }
 
     public void OnHidden()
     {

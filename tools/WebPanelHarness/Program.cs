@@ -110,7 +110,7 @@ internal static unsafe class Program
         Guard("CreateFailureBrowserFails", () => CheckCreateFailureBrowserFails(s));
         Guard("NoFocusFromAnotherProcess", () => { int r = CheckNoFocusFromAnotherProcess(s); if (r > 0) handle = r; });
         Guard("VisibilitySameProcess", () => handle = CheckVisibilitySameProcess(s));
-        Unverified("VisibilityOtherProcess", "needs another process to take the foreground (alt-tab); the harness never forces it. Owner in-game check.");
+        Unverified("VisibilityOtherProcess", "the panel should stay shown, under the other program, while another process holds the foreground (alt-tab); the harness never forces it. Owner in-game check.");
         Guard("LayoutRemembered", () => handle = CheckLayout(s, lad));
         Guard("UnloadAfterCloseCollected", () => CheckUnloadAfterClose(ref s, handle));
 
@@ -700,8 +700,8 @@ internal static unsafe class Program
         W($"session 2 open: state [{string.Join(",", State(s, h))}] host visible {visible}");
         var sd = Stopwatch.StartNew();
         s.Call("Shutdown", 2000);
-        W($"Shutdown(2000) returned in {sd.ElapsedMilliseconds} ms (panel open; window shown only if the harness held the foreground)");
-        UnloadAndJudge("UnloadWhileVisibleCollected", ref s, visible ? null : "collected, but the panel window was not visible (the PID rule hid it: the harness did not hold the foreground), so the visible-teardown path was not shown");
+        W($"Shutdown(2000) returned in {sd.ElapsedMilliseconds} ms (panel open)");
+        UnloadAndJudge("UnloadWhileVisibleCollected", ref s, visible ? null : "collected, but the panel window was not visible (hidden or not yet shown), so the visible-teardown path was not shown");
     }
 
     private static void UnloadAndJudge(string name, ref Session s, string? unverifiedIfCollected = null)
