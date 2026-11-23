@@ -7,7 +7,8 @@
 //    - Window position: whether a saved or current rect is worth restoring / saving,
 //      and which file a client's rect lives in. Since 2026-11-15 the restore and the
 //      save follow the launcher's AcWindowPlacementRule (src\RynthCore.App, compiled in):
-//      position only, and a rect is saved only once it held for 30 s.
+//      position only, and a rect is saved only once it held for 30 s. Since 2026-11-21 the
+//      window's size comes from AC's resolution (the back buffer), never from a saved rect.
 //  AcWindowChrome does the Win32 work and asks these first.
 //  Idea and first version: SilentKelpie (RynthCore PR 6).
 // ============================================================================
@@ -148,7 +149,8 @@ internal static class AcWindowChromePolicy
 
     /// <summary>
     /// What to do with the saved rect now: wait, move (position only), or leave the window where
-    /// AC put it. <paramref name="sinceInWorld"/> runs from the first look after the login.
+    /// AC put it. <paramref name="sinceInWorld"/> runs from the first look after the login. The
+    /// restore with AC's resolution unknown; the overload below takes it.
     /// </summary>
     public static AcWindowPlacementRule.RestoreDecision DecideRestore(Rect? saved, bool minimisedOrMaximised,
         bool looksExclusiveFullscreen, Rect current, TimeSpan sizeHeldFor, TimeSpan sinceInWorld,
@@ -172,6 +174,113 @@ internal static class AcWindowChromePolicy
         return AcWindowPlacementRule.DecideRestore(ToPlacement(sv), current.Width, current.Height,
             sizeHeldFor, sinceInWorld, areas);
     }
+
+    // ── AC's resolution (2026-11-21) ─────────────────────────────────────
+    //
+    // A window saved at 1940x1100 (client 1934x1071) was put back with its size at every login on a
+    // 1600x900 game (an engine and a launcher from before the 2026-11-15 rule). AC draws into a back
+    // buffer at its resolution and stretches it to whatever client area the window has: here about
+    // 21%, and ImGui's DisplaySize (the client area, 1934x1071) no longer matched GameMatrixCapture's
+    // 1600x900 viewport, so nameplates and the rest of the overlay were misplaced too. So:
+    //  - The size of AC's window comes from AC's resolution, never from a saved rect: its client area
+    //    must be the D3D back buffer's size. A window that already is that size keeps it; one that is
+    //    not (and stays so for MismatchHold) is resized to it, its frame (outer minus client, 0 when
+    //    borderless) kept as it is.
+    //  - A saved size that is not that size is ignored, with one log line (SavedSizeIgnored).
+    //  - A rect whose client area is not the resolution (a stretched picture) is never saved.
+    //  - A resolution the player picks in AC (1920x1080, say) is the back buffer's size as soon as AC
+    //    applies it, so the window follows it.
+    // With the back buffer unknown (not read yet) the restore is the position-only one above.
+
+    /// <summary>A width and height in pixels.</summary>
+    internal readonly record struct Size(int Width, int Height)
+    {
+        public bool IsUsable => Width >= MinWidth && Height >= MinHeight && Width <= MaxExtent && Height <= MaxExtent;
+        public override string ToString() => string.Create(CultureInfo.InvariantCulture, $"{Width}x{Height}");
+    }
+
+    /// <summary>
+    /// How long the client area must have differed from AC's resolution before the restore resizes the
+    /// window: AC resizes its own window and resets its device around the login, not quite together.
+    /// </summary>
+    public static readonly TimeSpan MismatchHold = TimeSpan.FromSeconds(10);
+
+    /// <summary>The client area is exactly AC's resolution: the picture is drawn 1:1, not stretched.</summary>
+    public static bool ClientFits(Size client, Size draw) => client.Width == draw.Width && client.Height == draw.Height;
+
+    /// <summary>
+    /// The outer size at which the window's client area is <paramref name="draw"/>, keeping the window's
+    /// current frame (outer minus client: caption and borders, 0 when borderless).
+    /// </summary>
+    public static Size OuterForDrawSize(Size draw, Rect outer, Size client)
+        => new(draw.Width + Math.Max(0, outer.Width - client.Width), draw.Height + Math.Max(0, outer.Height - client.Height));
+
+    /// <summary>
+    /// The restore with AC's resolution known: where to move the window (Action Move, X, Y), whether to
+    /// resize it (Resize, to Width x Height, which is AC's resolution plus the window's frame), and the
+    /// log line for a saved size that is not put back.
+    /// </summary>
+    internal readonly record struct RestorePlan(AcWindowPlacementRule.RestoreAction Action, int X, int Y, bool Clamped,
+        string Why, bool Resize, int Width, int Height, string? SavedSizeIgnored)
+    {
+        public static RestorePlan From(AcWindowPlacementRule.RestoreDecision d) => new(d.Action, d.X, d.Y, d.Clamped, d.Why, false, 0, 0, null);
+    }
+
+    /// <summary>
+    /// What to do with the saved rect now, given the window's client area and AC's resolution
+    /// (<paramref name="draw"/>: the back buffer's size, null while unknown). The saved size never
+    /// sizes the window: only AC's resolution does.
+    /// </summary>
+    public static RestorePlan DecideRestore(Rect? saved, bool minimisedOrMaximised, bool looksExclusiveFullscreen,
+        Rect current, Size client, Size? draw, TimeSpan sizeHeldFor, TimeSpan sinceInWorld, IReadOnlyList<Rect> workAreas)
+    {
+        // Nothing saved, the minimised / maximised / fullscreen guards, AC's startup park, and AC's
+        // resolution not known: exactly the position-only restore (never a resize).
+        if (draw is not Size d || !d.IsUsable || saved is not Rect sv || minimisedOrMaximised || looksExclusiveFullscreen
+            || !AcWindowPlacementRule.IsCapturable(ToPlacement(current)))
+            return RestorePlan.From(DecideRestore(saved, minimisedOrMaximised, looksExclusiveFullscreen, current,
+                sizeHeldFor, sinceInWorld, workAreas));
+
+        bool watching = sinceInWorld <= AcWindowPlacementRule.RestoreWatch;
+        if (sizeHeldFor < AcWindowPlacementRule.RestoreSettle && watching)
+            return Wait("window size still changing");
+        bool fits = ClientFits(client, d);
+        if (!fits && sizeHeldFor < MismatchHold && watching)
+            return Wait("window not at AC's resolution yet");
+
+        Size target = fits ? new Size(current.Width, current.Height) : OuterForDrawSize(d, current, client);
+        string? ignored = AcWindowPlacementRule.SavedSizeIgnored(sv.Width, sv.Height, target.Width, target.Height, d.Width, d.Height);
+
+        // A position saved for a very different window (AC's small login window) is not this window's.
+        if (!AcWindowPlacementRule.SizeMatches(target.Width, target.Height, sv.Width, sv.Height))
+        {
+            if (watching && fits)
+                return Wait("window not at the saved size yet");   // AC may still be at its login size
+            return new(AcWindowPlacementRule.RestoreAction.Skip, 0, 0, false,
+                $"the position was saved for a {sv.Width}x{sv.Height} window, AC's is {target}", !fits, target.Width, target.Height, ignored);
+        }
+        if (workAreas.Count == 0)
+            return new(AcWindowPlacementRule.RestoreAction.Skip, 0, 0, false, "no monitor information", !fits, target.Width, target.Height, ignored);
+
+        var areas = new List<AcWindowPlacementRule.WorkArea>(workAreas.Count);
+        foreach (Rect a in workAreas) areas.Add(new AcWindowPlacementRule.WorkArea(a.Left, a.Top, a.Right, a.Bottom));
+        (int x, int y) = AcWindowPlacementRule.ClampToWorkArea(sv.Left, sv.Top, target.Width, target.Height, areas);
+        bool clamped = x != sv.Left || y != sv.Top;
+        return new(AcWindowPlacementRule.RestoreAction.Move, x, y, clamped, clamped ? "pulled onto the screen" : "saved position",
+            !fits, target.Width, target.Height, ignored);
+
+        static RestorePlan Wait(string why) => new(AcWindowPlacementRule.RestoreAction.Wait, 0, 0, false, why, false, 0, 0, null);
+    }
+
+    /// <summary>
+    /// Why a rect must not be saved because of its size, or null: its client area is not AC's
+    /// resolution (the picture is stretched), so its size is not the window's. Unknown resolution: no
+    /// objection (the position-only rules decide).
+    /// </summary>
+    public static string? SaveRefusedForSize(Size client, Size? draw)
+        => draw is Size d && d.IsUsable && !ClientFits(client, d)
+            ? $"its client area {client} is not AC's resolution {d}"
+            : null;
 
     /// <summary>
     /// One look at the window for the save. <paramref name="inWorld"/> false (character select,

@@ -4,14 +4,20 @@
 //  the client knows about anywhere (not just in radar range) whose name
 //  matches shows up here. Engine only, ImGui only.
 //
-//    add row   a text box (Enter adds), Add, the settings gear, the help mark
-//    terms     one chip per term: click it to switch it on/off, X removes it
+//    add row   a text box (Enter adds), Add, Add selected (the crosshair: the
+//              selected object's name), Import (the file icon: Virindi Sense's
+//              list, Documents\Decal Plugins\Virindi Sense\patterns.txt), the
+//              look buttons, the settings gear, the help mark (2026-11-22)
+//    terms     one chip per term: click it to switch it on/off, X removes it;
+//              past four rows of chips they scroll in a box (an imported list
+//              can be a few hundred names). An empty list offers the import.
 //    status    how many matches among how many known objects (or why none)
 //    rows      direction arrow (relative to where you face), name, kind,
 //              distance, compass point, map coordinates; nearest first; a new
 //              match flashes. Click selects it in game, hover for details.
 //    gear      a chat line and/or the system beep when a new match appears
-//              (both off by default; they work with the panel closed).
+//              (both off by default; they work with the panel closed), and
+//              Remove all names (two clicks).
 //
 //  Compact (2026-10-31, the owner: "we should make a small version of it"; in
 //  item-counter.lua's spirit): only the match rows, tighter, and docked no
@@ -38,6 +44,7 @@
 
 using System;
 using System.Numerics;
+using System.Threading;
 using ImGuiNET;
 using RynthCore.Engine.Compatibility;
 using RynthCore.Engine.UI.Data;
@@ -77,6 +84,8 @@ internal sealed class SenseFace : IImGuiPanel
         "The distance shows when you and the object are both outdoors (or in surface buildings), or in the same dungeon. " +
         "Otherwise the row says elsewhere and gives the landblock.\n\n" +
         "Click a row to select it in game. Gear: a chat line or a beep when a new match appears.\n" +
+        "The crosshair adds the selected monster's or item's name. The file icon imports your Virindi Sense list " +
+        "(Documents\\Decal Plugins\\Virindi Sense\\patterns.txt).\n" +
         "The arrows-in button (or /rc sense compact on) shows just the matches, without the frame.\n" +
         "/rc sense opens and closes this panel.";
 
@@ -87,6 +96,7 @@ internal sealed class SenseFace : IImGuiPanel
     private long _messageUntilMs;
     private bool _openSettings;
     private bool _flashing;
+    private long _clearArmedUntilMs;
 
     // Compact / collapsed: the mouse is over what the last frame drew (rows, the line, the
     // buttons), so the window takes input; elsewhere it lets clicks through. A press that began
@@ -121,6 +131,7 @@ internal sealed class SenseFace : IImGuiPanel
 
     private void DrawFull()
     {
+        TakePendingMessage();
         float w = Begin(out Vector2 origin, out Vector2 size);
         DrawAddRow(w);
         DrawTerms(w);
@@ -151,7 +162,7 @@ internal sealed class SenseFace : IImGuiPanel
         const float h = 22, iconW = 22;
         string addLabel = PhosphorIcons.Plus + " Add";
         float addW = ButtonWidth(addLabel);
-        float boxW = Math.Max(60, w - addW - iconW * 4 - 20);
+        float boxW = Math.Max(60, w - addW - iconW * 6 - 28);
 
         bool enter = TextBox("##sense_input", _input, start, boxW,
             PhosphorIcons.MagnifyingGlass + " Name to watch for (* and ? wildcards)", out _,
@@ -162,6 +173,25 @@ internal sealed class SenseFace : IImGuiPanel
         if (enter || add) AddTerm();
 
         float gx = start.X + boxW + 4 + addW + 4;
+        // Add selected (2026-11-22): the selected monster's or item's name onto the list.
+        bool haveSel = SenseStore.Loaded && ClientHelperHooks.GetSelectedItemId() != 0;
+        if (IconButton("##sense_addsel", PhosphorIcons.Crosshair, new Vector2(gx, start.Y), new Vector2(iconW, h), Text, BtnFill,
+                enabled: haveSel))
+        {
+            bool ok = SenseStore.AddSelected(out string message);
+            ShowMessage(message, ok ? Mute : Amber);
+        }
+        SafeImGui.SetItemTooltip(haveSel
+            ? "Add selected: watch for the selected object's name (/rc sense addselected)"
+            : "Add selected: select a monster or an item in game, then click here to watch for its name");
+        gx += iconW + 4;
+        // Import Virindi Sense's list (Documents\Decal Plugins\Virindi Sense\patterns.txt).
+        if (IconButton("##sense_import", PhosphorIcons.FilePlus, new Vector2(gx, start.Y), new Vector2(iconW, h), Text, BtnFill,
+                enabled: SenseStore.Loaded))
+            ImportVirindiSense();
+        SafeImGui.SetItemTooltip(_importTip ??= "Import your Virindi Sense list: its names are added here, switched on\n" +
+            "(from " + SenseStore.VirindiSensePath + "; names already here are left alone).\n/rc sense import [file] does the same.");
+        gx += iconW + 4;
         // The view switch: compact, then collapsed (one line).
         if (IconButton("##sense_compact", PhosphorIcons.ArrowsInLineVertical, new Vector2(gx, start.Y), new Vector2(iconW, h), Text, BtnFill,
                 enabled: SenseStore.Loaded))
@@ -196,11 +226,29 @@ internal sealed class SenseFace : IImGuiPanel
         ShowMessage(message, ok ? Mute : Amber);
     }
 
-    private void ShowMessage(string text, uint color)
+    private void ShowMessage(string text, uint color, long ms = 3000)
     {
         _message = text;
         _messageColor = color;
-        _messageUntilMs = Environment.TickCount64 + 3000;
+        _messageUntilMs = Environment.TickCount64 + ms;
+    }
+
+    /// <summary>The import button (and the empty list's): reads the list off this thread; the line shows when it's done.</summary>
+    private void ImportVirindiSense()
+    {
+        ShowMessage("Reading the Virindi Sense list...", Mute);
+        SenseStore.ImportVirindiSense(null, (text, ok) => Volatile.Write(ref _pendingMessage, new PendingMessage(text, ok)));
+    }
+
+    private sealed record PendingMessage(string Text, bool Ok);
+
+    // Set by the import's background thread, shown by the next frame.
+    private PendingMessage? _pendingMessage;
+
+    private void TakePendingMessage()
+    {
+        PendingMessage? m = Interlocked.Exchange(ref _pendingMessage, null);
+        if (m != null) ShowMessage(m.Text, m.Ok ? Mute : Amber, 8000);
     }
 
     // ── Terms ───────────────────────────────────────────────────────────
@@ -215,20 +263,41 @@ internal sealed class SenseFace : IImGuiPanel
         SensePattern[] terms = SenseStore.Terms;
         if (terms.Length == 0)
         {
-            Label("No names yet: type one above and press Enter.", Mute);
+            Label("No names yet: type one above and press Enter, or select something and use the crosshair.", Mute);
+            // Coming from Virindi Sense: its list in one click (the file icon above does the same).
+            Vector2 bp = ImGuiNET.ImGui.GetCursorScreenPos();
+            string label = PhosphorIcons.FilePlus + " Import my Virindi Sense list";
+            if (Button("##sense_import_empty", label, bp, new Vector2(Math.Min(w, ButtonWidth(label) + 8), 22), Text, BtnFill))
+                ImportVirindiSense();
+            SafeImGui.SetItemTooltip(_importTip ??= "Import your Virindi Sense list: its names are added here, switched on\n" +
+                "(from " + SenseStore.VirindiSensePath + "; names already here are left alone).\n/rc sense import [file] does the same.");
+            NextLine(bp, 26);
             return;
+        }
+
+        const float iconW = 18, xW = 16;
+        float[] textWidths = ChipTextWidths(terms);
+
+        // A long list (an imported one can be a few hundred names) scrolls in a box of a few rows,
+        // so the matches below keep their room.
+        float needed = ChipsHeight(textWidths, w, iconW, xW);
+        bool scroll = needed > MaxChipRows * (ChipH + 4);
+        if (scroll)
+        {
+            ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(0, 0));
+            ImGuiNET.ImGui.BeginChild("##sense_terms", new Vector2(w, MaxChipRows * (ChipH + 4)));
+            w = ImGuiNET.ImGui.GetContentRegionAvail().X;   // the scrollbar's width comes off
         }
 
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
         ImFontPtr iconFont = ImGuiFonts.Get(UiFont.Ui11);
         Vector2 start = ImGuiNET.ImGui.GetCursorScreenPos();
         float x = start.X, y = start.Y;
-        const float iconW = 18, xW = 16;
         int toggle = -1, remove = -1;
         for (int i = 0; i < terms.Length; i++)
         {
             SensePattern t = terms[i];
-            float textW = ImGuiNET.ImGui.CalcTextSize(t.Text).X;
+            float textW = textWidths[i];
             float chipW = Math.Min(w, iconW + textW + 6 + xW);
             if (x > start.X && x + chipW > start.X + w) { x = start.X; y += ChipH + 4; }
             var p = new Vector2(x, y);
@@ -262,6 +331,12 @@ internal sealed class SenseFace : IImGuiPanel
             x += chipW + 4;
         }
         NextLine(start, y - start.Y + ChipH + 4);
+        if (scroll)
+        {
+            ImGuiNET.ImGui.EndChild();
+            ImGuiNET.ImGui.PopStyleVar();
+            Label($"{terms.Length} names (scroll for more)", Faded(Mute));
+        }
 
         if (toggle >= 0) SenseStore.SetEnabled(toggle, !terms[toggle].Enabled);
         if (remove >= 0)
@@ -269,6 +344,42 @@ internal sealed class SenseFace : IImGuiPanel
             ShowMessage($"Stopped watching for \"{terms[remove].Text}\".", Mute);
             SenseStore.Remove(remove);
         }
+    }
+
+    /// <summary>Rows of term chips shown before the chips scroll.</summary>
+    private const int MaxChipRows = 4;
+
+    // The chips' text widths, measured once per list (and text size), not every frame.
+    private SensePattern[]? _widthsFor;
+    private float _widthsFontSize;
+    private float[] _chipTextW = Array.Empty<float>();
+    private string? _importTip;
+
+    private float[] ChipTextWidths(SensePattern[] terms)
+    {
+        float fs = ImGuiNET.ImGui.GetFontSize();
+        if (!ReferenceEquals(terms, _widthsFor) || fs != _widthsFontSize)
+        {
+            var widths = new float[terms.Length];
+            for (int i = 0; i < terms.Length; i++) widths[i] = ImGuiNET.ImGui.CalcTextSize(terms[i].Text).X;
+            _chipTextW = widths;
+            _widthsFor = terms;
+            _widthsFontSize = fs;
+        }
+        return _chipTextW;
+    }
+
+    /// <summary>How tall the chips are at width <paramref name="w"/> (the same wrapping as DrawTerms).</summary>
+    private static float ChipsHeight(float[] textWidths, float w, float iconW, float xW)
+    {
+        float x = 0, y = 0;
+        foreach (float tw in textWidths)
+        {
+            float chipW = Math.Min(w, iconW + tw + 6 + xW);
+            if (x > 0 && x + chipW > w) { x = 0; y += ChipH + 4; }
+            x += chipW + 4;
+        }
+        return y + ChipH + 4;
     }
 
     // ── Status and header ───────────────────────────────────────────────
@@ -681,6 +792,25 @@ internal sealed class SenseFace : IImGuiPanel
         ImGuiNET.ImGui.SetItemTooltip("Windows' default sound, at most every 3 seconds.");
         Label("Alerts keep working with the panel closed.", Faded(Mute));
         Label("Saved in %LocalAppData%\\RynthCore\\sense.txt", Faded(Mute));
+
+        // Remove every name (an imported list is long to take apart chip by chip): two clicks.
+        int count = SenseStore.Terms.Length;
+        if (count > 0)
+        {
+            ImGuiNET.ImGui.Spacing();
+            bool armed = _clearArmedUntilMs > Environment.TickCount64;
+            if (ImGuiNET.ImGui.Button(armed ? $"Click again to remove all {count}" : "Remove all names"))
+            {
+                if (armed)
+                {
+                    SenseStore.Clear();
+                    _clearArmedUntilMs = 0;
+                    ShowMessage($"Removed all {count} names.", Mute);
+                }
+                else _clearArmedUntilMs = Environment.TickCount64 + 4000;
+            }
+            ImGuiNET.ImGui.SetItemTooltip("Empties the watch list (asks once more first).");
+        }
         ImGuiNET.ImGui.EndPopup();
     }
 }

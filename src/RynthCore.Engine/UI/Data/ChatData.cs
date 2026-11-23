@@ -78,6 +78,10 @@ internal sealed unsafe class ChatSource : UiSource<ChatLine[]>
     // RynthChat 0.3.0+: how many lines its ring keeps. Null for an older plugin (it keeps 500).
     private delegate* unmanaged[Cdecl]<int, int> _setCapacity;
     private int _sentCapacity;
+    // RynthChat 0.4.0+: how many player lines its ring keeps past that. Null for an older plugin.
+    private delegate* unmanaged[Cdecl]<int, int> _setPlayerCapacity;
+    private bool _playerCapacityMissing;
+    private int _sentPlayerCapacity;
     private ulong _sinceSeq;
     private long _nextId = 1;
     private bool _boundLogged;
@@ -120,14 +124,15 @@ internal sealed unsafe class ChatSource : UiSource<ChatLine[]>
             ChatModel.SendLinePtr = PluginExportBinder.Resolve("RynthChat", "RynthChatSendLine");
         ChatModel.PluginBound = _get != null;
         int maxLines = ChatModel.HistoryLines;
-        if (_get != null) SyncPluginCapacity(maxLines);
+        int playerLines = ChatModel.PlayerHistoryLines;
+        if (_get != null) SyncPluginCapacity(maxLines, playerLines);
         ChatModel.PumpLog(null);
 
         // The rules (or the name mentions look for) changed: route the kept lines again.
         long version = ChatModel.FiltersVersion;
         string name = ChatModel.PumpCharacterName();
         ChatRouter router = ChatModel.PumpRouter(name);
-        TrimToLength(maxLines);
+        TrimToLength(maxLines, playerLines);
         if (version != _routedVersion || name != _routedName)
         {
             _routedVersion = version;
@@ -186,7 +191,8 @@ internal sealed unsafe class ChatSource : UiSource<ChatLine[]>
         }
 
         ChatLine[] old = Current?.Value ?? Array.Empty<ChatLine>();
-        Publish(ChatHistory.Merge(old, added, maxLines));
+        // Player chat outlasts the rest (ChatHistory.MergeKeep, "Player chat history").
+        Publish(ChatHistory.MergeKeep(old, added, maxLines, playerLines, IsPlayerLine));
         ChatModel.PumpLog(added);
         RelayRead(added);
     }
@@ -232,16 +238,37 @@ internal sealed unsafe class ChatSource : UiSource<ChatLine[]>
         return lo - 1;
     }
 
-    /// <summary>The setting was lowered: drop the oldest kept lines now, not only when new ones arrive.</summary>
-    private void TrimToLength(int maxLines)
+    private static readonly Func<ChatLine, bool> IsPlayerLine = l => l.IsPlayerChat;
+
+    /// <summary>A setting was lowered: drop the oldest kept lines now, not only when new ones arrive.</summary>
+    private void TrimToLength(int maxLines, int playerLines)
     {
         ChatLine[]? kept = Current?.Value;
-        if (kept != null && ChatHistory.Trim(kept, maxLines) is { } trimmed) Publish(trimmed);
+        if (kept != null && ChatHistory.TrimKeep(kept, maxLines, playerLines, IsPlayerLine) is { } trimmed) Publish(trimmed);
     }
 
-    /// <summary>Tells RynthChat (0.3.0+) the history length once it's bound and whenever the setting moves.</summary>
-    private void SyncPluginCapacity(int maxLines)
+    /// <summary>
+    /// Tells RynthChat (0.3.0+) the history length once it's bound and whenever the setting moves,
+    /// and (0.4.0+, RynthChatSetPlayerCapacity) how many player lines its ring keeps past that.
+    /// </summary>
+    private void SyncPluginCapacity(int maxLines, int playerLines)
     {
+        if (_setPlayerCapacity == null && !_playerCapacityMissing)
+        {
+            _setPlayerCapacity = (delegate* unmanaged[Cdecl]<int, int>)PluginExportBinder.Resolve("RynthChat", "RynthChatSetPlayerCapacity");
+            // An older RynthChat: its ring keeps only the history length, so player lines older than
+            // that are gone after a reload, or after the chat was closed for a while.
+            _playerCapacityMissing = _setPlayerCapacity == null;
+        }
+        if (_setPlayerCapacity != null && _sentPlayerCapacity != playerLines)
+        {
+            int kept = _setPlayerCapacity(playerLines);
+            if (kept > 0)
+            {
+                _sentPlayerCapacity = playerLines;
+                RynthLog.UI($"ChatSource: RynthChat keeps {kept} player lines (player chat history {playerLines}).");
+            }
+        }
         if (_setCapacity == null)
         {
             _setCapacity = (delegate* unmanaged[Cdecl]<int, int>)PluginExportBinder.Resolve("RynthChat", "RynthChatSetCapacity");
@@ -344,6 +371,9 @@ internal sealed unsafe class ChatSource : UiSource<ChatLine[]>
         _get = null;
         _setCapacity = null;
         _sentCapacity = 0;
+        _setPlayerCapacity = null;
+        _playerCapacityMissing = false;
+        _sentPlayerCapacity = 0;
         _sinceSeq = 0;
         Discord.ChatDiscord.PumpSourceReset();
         ChatModel.SendLinePtr = IntPtr.Zero;
@@ -374,7 +404,8 @@ internal static class ChatModel
     {
         ("", "Any line"),
         ("chan:Chat", "Chat tab (say, tells, allegiance, fellowship)"),
-        ("chan:Channels", "Channels tab (General, Trade, LFG...)"),
+        // Lines filed under Channels; the tab also shows the rest of player chat (ChatPlayerText).
+        ("chan:Channels", "Channel lines (General, Trade, LFG...)"),
         ("chan:System", "System tab"),
         ("chan:Combat", "Combat tab (combat and magic)"),
         ("chan:Rynth", "Rynth tab (plugin output)"),
@@ -443,6 +474,29 @@ internal static class ChatModel
         lines = ChatHistory.Clamp(lines);
         if (lines == HistoryLines) return;
         HistoryLines = lines;
+        SaveSettings();
+    }
+
+    /// <summary>How many player lines (ChatPlayerText) the scrollback keeps past "Chat history"
+    /// (ChatHistory.MergeKeep; "Player chat history" in the gear menu, 2026-11-22).</summary>
+    public static volatile int PlayerHistoryLines = ChatHistory.DefaultPlayerLines;
+    /// <summary>The Channels tab shows every player line (tells, say, fellowship, allegiance...),
+    /// not only the General / Trade / LFG channels (2026-11-22; on unless turned off).</summary>
+    public static volatile bool ChannelsAllPlayerChat = true;
+
+    public static void SetPlayerHistoryLines(int lines)
+    {
+        lines = ChatHistory.ClampPlayer(lines);
+        if (lines == PlayerHistoryLines) return;
+        PlayerHistoryLines = lines;
+        SaveSettings();
+    }
+
+    public static void SetChannelsAllPlayerChat(bool on)
+    {
+        if (on == ChannelsAllPlayerChat) return;
+        ChannelsAllPlayerChat = on;
+        BumpRoutes();   // what the Channels tab shows changed: the faces rebuild and recount
         SaveSettings();
     }
 
@@ -714,7 +768,8 @@ internal static class ChatModel
     }
 
     /// <summary>Is the line shown under <paramref name="tab"/> (rules applied, no search)?</summary>
-    public static bool LineInTab(ChatLine line, string tab) => line.Route.ShowsIn(tab, line.Channel);
+    public static bool LineInTab(ChatLine line, string tab) =>
+        line.Route.ShowsIn(tab, line.Channel, line.IsPlayerChat && ChannelsAllPlayerChat);
 
     public static bool LineVisible(ChatLine line, string tab, string search) =>
         LineInTab(line, tab)
@@ -1434,6 +1489,8 @@ internal static class ChatModel
             MentionSound = dto.MentionSound;
             MentionWords = dto.MentionWords ?? "";
             HistoryLines = ChatHistory.Clamp(dto.HistoryLines ?? 0);   // absent before 2026-10-11: the default
+            PlayerHistoryLines = ChatHistory.ClampPlayer(dto.PlayerHistoryLines ?? 0);   // absent before 2026-11-22: the default
+            ChannelsAllPlayerChat = dto.ChannelsAllPlayerChat ?? true;   // absent (and while on): on
             TabsAcross = dto.TabsAcross ?? false;   // absent before 2026-10-20 (and while off): the drawer
             ChatLineColors.Load(dto.LineColors);   // absent before 2026-10-08: nothing set
             ChatLineColors.RetailColors = dto.RetailColors ?? true;   // absent before 2026-10-28 (and while on): on
@@ -1524,6 +1581,8 @@ internal static class ChatModel
             MentionWords = MentionWords,
             // Left out at the default, so a file follows the default if it ever changes.
             HistoryLines = HistoryLines == ChatHistory.DefaultLines ? null : HistoryLines,
+            PlayerHistoryLines = PlayerHistoryLines == ChatHistory.DefaultPlayerLines ? null : PlayerHistoryLines,
+            ChannelsAllPlayerChat = ChannelsAllPlayerChat ? null : false,   // left out while on (the default)
             TabsAcross = TabsAcross ? true : null,
             LineColors = ChatLineColors.ToJson(),   // null (left out) until a colour is set
             RetailColors = ChatLineColors.RetailColors ? null : false,   // left out while on (the default)

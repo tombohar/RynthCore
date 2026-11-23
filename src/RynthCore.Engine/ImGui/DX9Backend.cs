@@ -469,6 +469,43 @@ internal static unsafe class DX9Backend
         height = (int)vp.Height;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct D3DSURFACE_DESC
+    {
+        public uint Format, Type, Usage, Pool, MultiSampleType, MultiSampleQuality, Width, Height;
+    }
+
+    /// <summary>
+    /// The size of the device's back buffer (swap chain 0): the resolution AC draws at, whatever the
+    /// window's size (a bigger or smaller window only stretches it). False when it can't be read.
+    /// Call on the render thread (inside EndScene). 2026-11-21, AcWindowChrome.
+    /// </summary>
+    public static bool TryGetBackBufferSize(IntPtr pDevice, out int width, out int height)
+    {
+        width = 0; height = 0;
+        if (pDevice == IntPtr.Zero) return false;
+        _getBackBuffer ??= Get<GetBackBufferD>(Marshal.ReadIntPtr(pDevice), DeviceVTableIndex.GetBackBuffer);
+
+        IntPtr backBuffer = IntPtr.Zero;
+        try
+        {
+            if (_getBackBuffer(pDevice, 0, 0, D3DBACKBUFFER_TYPE_MONO, out backBuffer) < 0 || backBuffer == IntPtr.Zero)
+                return false;
+            IntPtr vtable = Marshal.ReadIntPtr(backBuffer);
+            var getDesc = (delegate* unmanaged[Stdcall]<IntPtr, D3DSURFACE_DESC*, int>)
+                Marshal.ReadIntPtr(vtable, Surface9VTableIndex.GetDesc * IntPtr.Size);
+            D3DSURFACE_DESC desc;
+            if (getDesc(backBuffer, &desc) < 0) return false;
+            width = (int)desc.Width;
+            height = (int)desc.Height;
+            return width > 0 && height > 0;
+        }
+        finally
+        {
+            ReleaseComObject(backBuffer);
+        }
+    }
+
     public static IntPtr GetDeviceWindow(IntPtr pDevice)
     {
         if (pDevice == IntPtr.Zero) return IntPtr.Zero;

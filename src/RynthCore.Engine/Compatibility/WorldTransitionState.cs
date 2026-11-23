@@ -20,6 +20,9 @@
 //      off, a motion off, StopMovement, StopCompletely, CancelAttack, a container close),
 //      which still run, in queue order, as one group. A dropped stop can leave the
 //      character running or turning, and AcMainThreadQueue never drops stops.
+//      Raises (AcMainThreadQueue's Train: the player's own click on a Skills window, a
+//      CM_Train game action that touches no world object) are kept the same way: held,
+//      then sent (2026-11-20: dropped, a raise clicked in portal space was lost unseen).
 //
 //  Walking across a landblock boundary is not a transition: it happens constantly in a
 //  fight, AC streams the neighbour in without tearing the player's world down, and a 5 s
@@ -176,6 +179,17 @@ internal sealed class WorldTransitionState
     public bool InTransition(long nowMs) => Enabled && !Overridden && RawInTransition(nowMs);
 
     public enum Verdict { Run, Hold, Drop }
+
+    /// <summary>
+    /// A wait for the server's answer to something the player queued (a raise: the Skills panels'
+    /// 5 s lock, TrainingApi's Busy) can't run out while a transition holds the queue: nothing has
+    /// been sent yet. While <paramref name="inTransition"/>, a wait still running
+    /// (<paramref name="untilMs"/> after <paramref name="nowMs"/>) is pushed to at least
+    /// <paramref name="windowMs"/> from now, so its full window starts once the queue lets the action
+    /// go. Anything else is returned as it is (no wait, a wait already over, or no transition).
+    /// </summary>
+    public static long HoldDeadline(long untilMs, long nowMs, bool inTransition, long windowMs)
+        => inTransition && untilMs > nowMs ? Math.Max(untilMs, nowMs + windowMs) : untilMs;
 
     /// <summary>
     /// A drain's check for the head of a queue: true = hold everything queued now. Records the

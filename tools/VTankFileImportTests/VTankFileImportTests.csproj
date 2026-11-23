@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline tests for the VirindiTank file copy (src/RynthCore.App/VTankFileImport.cs, compiled in;
+    installer\RynthCore.iss OfferVTankImport and the launcher's Import VirindiTank files button): which folders are looked in (Decal's VTank
+    entry, the usual locations), top level only with exact extensions (.met .af .nav .utl, no VTank state files), counts,
+    identical files, conflicts and keep both, never overwriting,
+    never changing the VTank folder, read-only copies made writable, the command line and report.
+    Writes only under %TEMP%\VTankFileImportTests-*. The registry is never written; the real VTank
+    folders are never read (every test passes its own folders).
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>VTankFileImportTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../src/RynthCore.App/VTankFileImport.cs" Link="App/VTankFileImport.cs" />
+  </ItemGroup>
+
+</Project>

@@ -381,7 +381,7 @@ internal static class EngineFrameController
 
             // Settings > Game Client: borderless windowed + AC window placement. Throttled; reads only
             // here - the window itself is changed from the game WndProc (AcWindowChrome).
-            try { UI.AcWindowChrome.Tick(_gameHwnd); }
+            try { UI.AcWindowChrome.Tick(_gameHwnd, pDevice); }
             catch (Exception ex) { RynthLog.UI($"AcWindowChrome.Tick threw {ex.GetType().Name}: {ex.Message}"); }
 
             // Panel layout per character: switches to the character's layout (or back to the

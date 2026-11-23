@@ -15,6 +15,8 @@
 //                     row height, which row the mouse is on) and /rc sense's
 //                     look commands (compact on|off, collapse on|off, view ...)
 //                     with their replies.
+//    SenseImport      Virindi Sense's list (patterns.txt) read, merged into the
+//                     watch list, and the reply (2026-11-22).
 // ============================================================================
 
 using System;
@@ -92,7 +94,12 @@ internal sealed class SenseFileData
 /// <summary>sense.txt as text (the store does the file I/O). Pure.</summary>
 internal static class SenseFile
 {
-    public const int MaxTerms = 40;
+    /// <summary>
+    /// Most terms on the list. 40 until 2026-11-22; a Virindi Sense list brought over can be a few
+    /// hundred names (one on hand had 163), so 250. The scan stops at a name's first match, and
+    /// the panel's term chips scroll past a few rows.
+    /// </summary>
+    public const int MaxTerms = 250;
     public const int MaxTermLength = 64;
 
     /// <summary>
@@ -170,6 +177,99 @@ internal static class SenseFile
     }
 }
 
+/// <summary>What merging names into the watch list did.</summary>
+internal readonly record struct SenseMerge(SensePattern[] Terms, int Added, int AlreadyThere, int NoRoom);
+
+/// <summary>
+/// Virindi Sense's list brought into Sense (2026-11-22). Virindi Sense keeps it in
+/// Documents\Decal Plugins\Virindi Sense\patterns.txt: the first line is how many names follow,
+/// then one name per line, matched anywhere in an object's name, any case (as Sense's terms
+/// without wildcards). The format is from a real file (CRLF, 163 names, repeats in it, no
+/// wildcards or other marks); nothing else about Virindi Sense is used. Pure.
+/// </summary>
+internal static class SenseImport
+{
+    public const string VirindiSenseFolder = @"Decal Plugins\Virindi Sense";
+    public const string VirindiSenseFile = "patterns.txt";
+
+    /// <summary>Where Virindi Sense keeps its list, under <paramref name="documentsDir"/> (My Documents).</summary>
+    public static string DefaultPath(string documentsDir) =>
+        System.IO.Path.Combine(documentsDir ?? string.Empty, VirindiSenseFolder, VirindiSenseFile);
+
+    /// <summary>
+    /// The names in a patterns.txt: when the first line is a number, that many lines after it (fewer
+    /// when the file ends first); without one, every line. Blank lines are skipped, names trimmed and
+    /// cut to <see cref="SenseFile.MaxTermLength"/>, and repeats (any case) dropped.
+    /// </summary>
+    public static List<string> Parse(IEnumerable<string> lines)
+    {
+        var names = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool first = true;
+        int left = int.MaxValue;
+        foreach (string raw in lines)
+        {
+            string line = (raw ?? string.Empty).Trim().TrimStart('﻿');
+            if (first)
+            {
+                first = false;
+                if (int.TryParse(line, NumberStyles.Integer, CultureInfo.InvariantCulture, out int count) && count >= 0)
+                {
+                    left = count;
+                    continue;
+                }
+            }
+            if (left-- <= 0) break;
+            string name = SenseFile.Clean(line);
+            if (name.Length == 0 || !seen.Add(name)) continue;
+            names.Add(name);
+        }
+        return names;
+    }
+
+    /// <summary>
+    /// <paramref name="current"/> with <paramref name="names"/> added at the end, switched on. A name
+    /// already on the list (any case) is left as it is; past <see cref="SenseFile.MaxTerms"/> the
+    /// rest are counted as no room.
+    /// </summary>
+    public static SenseMerge Merge(IReadOnlyList<SensePattern> current, IEnumerable<string> names)
+    {
+        var next = new List<SensePattern>(current);
+        int added = 0, there = 0, noRoom = 0;
+        foreach (string raw in names)
+        {
+            string name = SenseFile.Clean(raw);
+            if (name.Length == 0) continue;
+            if (SenseFile.IndexOf(next, name) >= 0) { there++; continue; }
+            if (next.Count >= SenseFile.MaxTerms) { noRoom++; continue; }
+            next.Add(new SensePattern(name, true));
+            added++;
+        }
+        return new SenseMerge(next.ToArray(), added, there, noRoom);
+    }
+
+    /// <summary>The line after an import (the panel and /rc sense import).</summary>
+    public static string Reply(SenseMerge m, int inFile, string file)
+    {
+        if (inFile == 0) return $"No names in {file}.";
+        var sb = new StringBuilder();
+        sb.Append(m.Added switch
+        {
+            0 => "No new names from Virindi Sense",
+            1 => "Added 1 name from Virindi Sense",
+            _ => $"Added {m.Added} names from Virindi Sense",
+        });
+        if (m.AlreadyThere > 0) sb.Append($"; {m.AlreadyThere} {(m.AlreadyThere == 1 ? "was" : "were")} on the list already");
+        if (m.NoRoom > 0) sb.Append($"; {m.NoRoom} didn't fit (the list holds {SenseFile.MaxTerms})");
+        sb.Append('.');
+        return sb.ToString();
+    }
+
+    /// <summary>The line when there's no list to import.</summary>
+    public static string NotFound(string file) =>
+        $"No Virindi Sense list at {file}. /rc sense import <file> reads one from elsewhere.";
+}
+
 /// <summary>The compact view's columns at a width (px): arrow, name and distance always.</summary>
 internal readonly record struct SenseCompactColumns(bool Location, bool Kind, float NameWidth);
 
@@ -189,7 +289,22 @@ internal static class SenseLayout
     public const float CompactNameRoom = 110f;
 
     public const string Usage =
-        "Usage: /rc sense [compact on|off | collapse on|off | view full|compact|collapsed] (alone: opens or closes the Sense panel)";
+        "Usage: /rc sense [compact on|off | collapse on|off | view full|compact|collapsed | addselected | import [file]] (alone: opens or closes the Sense panel)";
+
+    /// <summary>"/rc sense addselected" (or "add selected"): the selected object's name onto the list.</summary>
+    public static bool IsAddSelected(string args)
+    {
+        string a = string.Join(' ', (args ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
+        return a is "addselected" or "add selected" or "addsel";
+    }
+
+    /// <summary>"/rc sense import [file]": Virindi Sense's list (or the file given). <paramref name="file"/> is empty for the usual place.</summary>
+    public static bool IsImport(string args, out string file)
+    {
+        string word = FirstWord(args, out string rest);
+        file = rest.Trim().Trim('"').Trim();
+        return word == "import";
+    }
 
     /// <summary>
     /// Which compact columns fit in <paramref name="width"/> px (<paramref name="scale"/>: the text
@@ -321,6 +436,7 @@ internal static class SenseLayout
     {
         string a = (args ?? string.Empty).Trim();
         if (a.Length == 0) return true;
+        if (IsAddSelected(a) || IsImport(a, out _)) return true;
         string word = FirstWord(a, out string rest);
         string value = rest.Trim().ToLowerInvariant();
         if (value.Contains(' ')) return false;

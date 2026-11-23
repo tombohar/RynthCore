@@ -68,6 +68,10 @@ internal sealed class RynthChatSettingsDto
     [JsonPropertyName("retailColors")]    public bool?  RetailColors    { get; set; }
     // 2026-10-11: how many lines the scrollback keeps (ChatHistory); absent at the default (2000).
     [JsonPropertyName("historyLines")]    public int?   HistoryLines    { get; set; }
+    // 2026-11-22: player lines kept past historyLines (ChatHistory.MergeKeep); absent at the default (5000).
+    [JsonPropertyName("playerHistoryLines")] public int? PlayerHistoryLines { get; set; }
+    // 2026-11-22: the Channels tab shows every player line (ChatPlayerText); absent while on.
+    [JsonPropertyName("channelsAllPlayerChat")] public bool? ChannelsAllPlayerChat { get; set; }
     // 2026-10-20: the tabs in a row across the top instead of the channels drawer; absent while off.
     [JsonPropertyName("tabsAcross")]      public bool?  TabsAcross      { get; set; }
     [JsonPropertyName("customTabs")]      public string[]? CustomTabs   { get; set; }

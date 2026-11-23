@@ -77,6 +77,8 @@ internal sealed class ChatFace : IImGuiPanel
     private bool _coloursDirty;
     /// <summary>The Chat history slider's value while it's held (0: not held).</summary>
     private int _historyEdit;
+    /// <summary>The Player chat history slider's value while it's held (0: not held).</summary>
+    private int _playerHistoryEdit;
 
     public bool ClickThrough => ChatModel.CtrlGatedClickThrough && !ImGuiNET.ImGui.GetIO().KeyCtrl;
 
@@ -391,8 +393,27 @@ internal sealed class ChatFace : IImGuiPanel
             _historyEdit = 0;
         }
         ImGuiNET.ImGui.SetItemTooltip("How many lines the chat keeps, all tabs together (default 2000).\n" +
-            "About 2 MB of memory per 1000 lines. Lowering it drops the oldest lines.");
+            "About 2 MB of memory per 1000 lines. Lowering it drops the oldest lines.\n" +
+            "Player chat is kept longer: see Player chat history.");
+        // Player chat kept past that (ChatHistory.MergeKeep), applied when let go like the one above.
+        int playerHistory = _playerHistoryEdit > 0 ? _playerHistoryEdit : ChatModel.PlayerHistoryLines;
+        if (ImGuiNET.ImGui.SliderInt("Player chat history", ref playerHistory, ChatHistory.MinPlayerLines, ChatHistory.MaxPlayerLines, "%d lines"))
+            _playerHistoryEdit = ChatHistory.ClampPlayer(playerHistory);
+        if (ImGuiNET.ImGui.IsItemDeactivated() && _playerHistoryEdit > 0)
+        {
+            ChatModel.SetPlayerHistoryLines(_playerHistoryEdit);
+            _playerHistoryEdit = 0;
+        }
+        ImGuiNET.ImGui.SetItemTooltip("How many lines of player chat the chat keeps (default 5000): tells, say,\n" +
+            "emotes, fellowship, allegiance and the channels. They stay this long even when\n" +
+            "combat and system lines fill Chat history, in every tab that shows them.");
         ImGuiNET.ImGui.PopItemWidth();
+        bool allChat = ChatModel.ChannelsAllPlayerChat;
+        if (ImGuiNET.ImGui.Checkbox("Channels shows all player chat", ref allChat))
+            ChatModel.SetChannelsAllPlayerChat(allChat);
+        ImGuiNET.ImGui.SetItemTooltip("On: the Channels tab has every line players type: tells (yours too), say,\n" +
+            "emotes, fellowship, allegiance and General / Trade / LFG and the other channels.\n" +
+            "Off: only the channel lines; tells, say and the rest are under Chat.");
 
         bool across = ChatModel.TabsAcross;
         if (ImGuiNET.ImGui.Checkbox("Tabs across the top", ref across))

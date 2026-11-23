@@ -351,9 +351,24 @@ internal sealed class RadarFace : IImGuiPanel
         if (anyName)
         {
             ImFontPtr nameFont = ImGuiFonts.Get(UiFont.UiBold11);
+            // Monster names Up To (RadarSettingsStore.MonsterNamesUpTo): too many monsters on the picture, no monster names.
+            bool monsterNames = true;
+            if (RadarSettingsStore.MonsterNamesUpTo > 0 && markers.NameShown(RadarKind.Monster) && RadarSettingsStore.ShowKind(RadarKind.Monster))
+            {
+                int monsters = 0;
+                foreach (RadarMarker m in live.Markers)
+                {
+                    if (m.Kind != RadarKind.Monster) continue;
+                    Vector2 mp = proj.P(m.X, m.Y);
+                    if (_round ? _mask.Contains(mp) : (mp.X >= clipMin.X && mp.X <= clipMax.X && mp.Y >= clipMin.Y && mp.Y <= clipMax.Y))
+                        monsters++;
+                }
+                monsterNames = RadarSettingsStore.MonsterNamesFor(monsters);
+            }
             foreach (RadarMarker m in live.Markers)
             {
                 if (!markers.NameShown(m.Kind) || !RadarSettingsStore.ShowKind(m.Kind)) continue;
+                if (m.Kind == RadarKind.Monster && !monsterNames) continue;
                 if (m == _sel && RadarSettingsStore.ShowSelectedLabel) continue;   // its label has the name
                 Vector2 pp = proj.P(m.X, m.Y);
                 if (pp.X < clipMin.X - 8 || pp.X > clipMax.X || pp.Y < clipMin.Y - 8 || pp.Y > clipMax.Y + 8) continue;
@@ -1071,6 +1086,20 @@ internal sealed class RadarFace : IImGuiPanel
             RadarSettingsStore.MinText, RadarSettingsStore.MaxText, "%.0f px", xText);
         changed |= MarkerStyleEditor.SliderRow("Coordinates", ref RadarSettingsStore.CoordSize,
             RadarSettingsStore.MinText, RadarSettingsStore.MaxText, "%.0f px", xText);
+        // Monster names only while the radar isn't crowded (0 = always).
+        ImGuiNET.ImGui.TextUnformatted("Monster names up to");
+        ImGuiNET.ImGui.SameLine(xSize);
+        ImGuiNET.ImGui.SetNextItemWidth(140 * scale);
+        int upTo = RadarSettingsStore.MonsterNamesUpTo;
+        if (ImGuiNET.ImGui.SliderInt("##mnupto", ref upTo, 0, RadarSettingsStore.MaxMonsterNamesUpTo,
+                upTo == 0 ? "always" : "%d monsters"))
+        {
+            RadarSettingsStore.MonsterNamesUpTo = Math.Clamp(upTo, 0, RadarSettingsStore.MaxMonsterNamesUpTo);
+            changed = true;
+        }
+        if (ImGuiNET.ImGui.IsItemHovered())
+            ImGuiNET.ImGui.SetTooltip("With more monsters than this on the radar, their names are hidden (the markers stay);\n" +
+                                      "0 = always show them. Other names (NPCs, players, portals...) are not affected.");
         // The picker reports every drag step: save once no colour edit is in progress.
         if (_colorDirty && !ImGuiNET.ImGui.IsAnyItemActive())
         {

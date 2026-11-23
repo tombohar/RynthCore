@@ -140,8 +140,10 @@ internal static class EndSceneHook
 
         ResetInstallState(installSource);
 
-        // Vtable discovery uses a NULLREF device to avoid GPU contention
-        // with the game's render thread. Retry once on failure.
+        // LAST RESORT since 2026-11-19 (D3D9Bootstrapper takes EndScene from AC's own
+        // device, AcGameDevice): this creates a second D3D9 device, which can make AC's
+        // exclusive full-screen device lost. Vtable discovery uses a NULLREF device to
+        // avoid GPU contention with the game's render thread. Retry once on failure.
         const int maxAttempts = 2;
         for (int attempt = 1; attempt <= maxAttempts; attempt++)
         {
@@ -189,7 +191,7 @@ internal static class EndSceneHook
         InstallFromEndSceneAddress(DecalD3D9.ResolvedEndScene);
     }
 
-    public static void InstallFromDevice(IntPtr pDevice)
+    public static void InstallFromDevice(IntPtr pDevice, string installSource = "real-device")
     {
         if (_installed)
             return;
@@ -200,7 +202,7 @@ internal static class EndSceneHook
             return;
         }
 
-        ResetInstallState("real-device");
+        ResetInstallState(installSource);
 
         IntPtr deviceVTable = Marshal.ReadIntPtr(pDevice);
         IntPtr endSceneAddress = Marshal.ReadIntPtr(deviceVTable, DeviceVTableIndex.EndScene * IntPtr.Size);

@@ -110,7 +110,7 @@ internal sealed class WorldMapFace : IImGuiPanel
             CharacterRow[]? chars = WorldMapSettings.Characters ? UiSources.Characters.Current?.Value?.Rows : null;
 
             Vector2 barPos = ImGuiNET.ImGui.GetCursorScreenPos();
-            float canvasTop = DrawToolbar(barPos, w, pl.Known);
+            float canvasTop = DrawToolbar(barPos, w, pl.Known, st);
             var canvasMin = new Vector2(origin.X + 1, canvasTop);
             var canvasMax = new Vector2(origin.X + size.X - 1, origin.Y + size.Y - 1);
 
@@ -149,7 +149,7 @@ internal sealed class WorldMapFace : IImGuiPanel
     }
 
     // ── Toolbar ──────────────────────────────────────────────────────────
-    private float DrawToolbar(Vector2 pos, float width, bool canFollow)
+    private float DrawToolbar(Vector2 pos, float width, bool canFollow, RynthNavStatus? st)
     {
         float x = pos.X, y = pos.Y;
         const float h = 22f;
@@ -171,6 +171,21 @@ internal sealed class WorldMapFace : IImGuiPanel
         if (Button("##wm_show", "Show", new Vector2(x, y), new Vector2(46, h), Text, BtnFill)) ImGuiNET.ImGui.OpenPopup("##wm_show_pop");
         var showMenuAt = new Vector2(x, y + h + 2);
         x += 50;
+
+        // While RynthNav walks a trip: Pause (the route stays drawn; drive by hand) / Resume, and Stop.
+        if (st?.Goto == true)
+        {
+            bool paused = st.Paused;
+            if (IconButton("##wm_pause", paused ? PhosphorIcons.Play : PhosphorIcons.Pause, new Vector2(x, y), new Vector2(24, h),
+                    paused ? Amber : Text, paused ? Selected : BtnFill, border: paused ? Amber : 0, font: UiFont.Ui11))
+                RynthNavCommands.Command(paused ? "resume" : "pause");
+            SafeImGui.SetItemTooltip(paused ? "Resume the trip from here" : "Pause the trip: stop walking, keep the route on the map");
+            x += 28;
+            if (IconButton("##wm_stop", PhosphorIcons.Stop, new Vector2(x, y), new Vector2(24, h), Text, StopBg, font: UiFont.Ui11))
+                RynthNavCommands.Move(5);
+            SafeImGui.SetItemTooltip("Stop walking (ends the trip)");
+            x += 28;
+        }
 
         ImGuiNET.ImGui.SetNextWindowPos(showMenuAt);
         if (ImGuiNET.ImGui.BeginPopup("##wm_show_pop"))

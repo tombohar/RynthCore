@@ -99,6 +99,9 @@ internal sealed class RynthAiSettings
     // Melee through walls (RynthAi 2026-11-15, on by default). Null until RynthAi sends it; a save from an
     // engine with the row never sends null over an older RynthAi's value (it leaves an absent one alone).
     public bool? MeleeThroughWalls { get; set; }
+    // Debuff every monster in range before attacking (RynthAi 2026-11-22, off by default). Null until RynthAi
+    // sends it; a save sends null back, which RynthAi leaves alone.
+    public bool? DebuffAllBeforeAttacking { get; set; }
     public int TargetNoProgressTimeoutSec { get; set; }
     public int GiveQueueIntervalMs { get; set; } = 150;
     // Recharge
@@ -665,9 +668,20 @@ internal static class SettingsSchema
     private static bool HasWeaponSwaps(RynthAiSettings s) => s.WeaponSwapMinGainPct.HasValue;
     private static bool HasDfRotation(RynthAiSettings s) => s.DfHeightRotation.HasValue;
     // RynthAi's DirtyFightingHeights.OrderChoices, and the labels its Dirty Fighting window shows.
-    public static readonly string[] DfOrders = { "HML", "HLM", "MHL", "MLH", "LHM", "LMH" };
+    // One or two heights too (R-20261120-014055-59be: "pick just 1 or 2 heights"); an older RynthAi
+    // takes only the six with all three and keeps High, Medium, Low for the rest.
+    public static readonly string[] DfOrders =
+    {
+        "HML", "HLM", "MHL", "MLH", "LHM", "LMH",
+        "HM", "HL", "MH", "ML", "LH", "LM",
+        "H", "M", "L",
+    };
     private static readonly string[] DfOrderLabels =
-        { "High, Medium, Low", "High, Low, Medium", "Medium, High, Low", "Medium, Low, High", "Low, High, Medium", "Low, Medium, High" };
+    {
+        "High, Medium, Low", "High, Low, Medium", "Medium, High, Low", "Medium, Low, High", "Low, High, Medium", "Low, Medium, High",
+        "High, Medium", "High, Low", "Medium, High", "Medium, Low", "Low, High", "Low, Medium",
+        "High only", "Medium only", "Low only",
+    };
     // RynthAi's DfDefaultHeight -1..2, shown in this order (index = value + 1).
     private static readonly string[] DfDefaultLabels = { "Attack Height setting", "Low", "Medium", "High" };
     private static int DfOrderIndex(string? order)
@@ -676,6 +690,30 @@ internal static class SettingsSchema
         return i < 0 ? 0 : i;
     }
     private static bool HasLootByName(RynthAiSettings s) => s.LootByNames != null;
+
+    /// <summary>Settings > Looting's first row: the loot profile picker.</summary>
+    public const string LootProfileLabel = "Loot Profile";
+
+    // RynthAi's loot profile list and the one in use, from the dashboard snapshot (SettingsFace keeps it
+    // polled while Settings shows). Empty before RynthAi answers: the row is hidden.
+    private static string[] LootProfileItems() => UiSources.RynthAi.Current?.Value.Raw.LootProfiles ?? Array.Empty<string>();
+
+    private static int LootProfileIndex()
+    {
+        RynthAiSnapshot? raw = UiSources.RynthAi.Current?.Value.Raw;
+        return raw == null ? 0 : LootProfilePick.Index(raw.LootProfiles, raw.CurrentLootPath, raw.SelectedLootIdx);
+    }
+
+    // The dashboard pickers' own switch (RynthPluginSelectProfile, kind 1): RynthAi saves the choice with the
+    // character's settings and says in chat which profile is in use. Nothing in the settings copy changes.
+    private static SettingRow LootProfileRow() =>
+        new(SettingKind.Combo, LootProfileLabel,
+            "The loot profile in use: what corpses, chests and ground items give up (with Loot Mode Profile).\n" +
+            "The same list and switch as the dashboard's Loaded files (LOOT) and the Mini Remote's Loot row:\n" +
+            "RynthAi\\LootProfiles (*.utl, *.json); a file copied in shows within a few seconds. Chat says\n" +
+            "which profile is in use after a switch.",
+            _ => LootProfileIndex(), (_, v) => RynthAiCommands.SelectProfile(1, (int)v), 0, 1000, 1,
+            VisibleWhen: _ => LootProfileItems().Length > 0, ItemsNow: LootProfileItems);
     // RynthAi's Loot.LootModes, in its order.
     public static readonly string[] LootModeNames = { "Profile", "Rares and needed mana stones only" };
     // RynthAi's OffhandDefault values (OffhandRules.SettingValue), shown as they are.
@@ -1083,7 +1121,7 @@ internal static class SettingsSchema
                     Plugins.EngineSettings.RememberAcWindowPosition = v;
                     AcWindowChrome.RequestApply();
                 },
-                "On: save where the Asheron's Call window sits for each character and move it back there after you log in. The game sets the window's size from its resolution; this never changes it. While this is on, the launcher's own memory of the window's spot (per account) stands aside.\nOff (default): the engine never moves the game window. A spot off every screen (a monitor that is gone) is pulled back onto one."),
+                "On: save where the Asheron's Call window sits for each character and move it back there after you log in. The window's size always comes from the game's resolution, never from the saved spot: a window that isn't that size (a stretched picture) is put back to it. While this is on, the launcher's own memory of the window's spot (per account) stands aside.\nOff (default): the engine never moves the game window. A spot off every screen (a monitor that is gone) is pulled back onto one."),
             Spacer(),
             Section("Performance"),
             Bool("Enable FPS Limit", s => s.EnableFPSLimit, (s, v) => s.EnableFPSLimit = v, gates: true),
@@ -1313,11 +1351,12 @@ internal static class SettingsSchema
                 when: HasDfRotation, gates: true),
             Combo("   Effect order", DfOrderLabels, s => DfOrderIndex(s.DfHeightOrder),
                 (s, v) => s.DfHeightOrder = DfOrders[Math.Clamp(v, 0, DfOrders.Length - 1)],
-                "The order the three effects are put on the target. Default High, Medium, Low.",
+                "The order the effects are put on the target: all three, or just one or two of them.\n" +
+                "Default High, Medium, Low.",
                 when: s => s.DfHeightRotation == true && s.DfHeightOrder != null),
             Combo("   Then attack", DfDefaultLabels, s => Math.Clamp((s.DfDefaultHeight ?? -1) + 1, 0, DfDefaultLabels.Length - 1),
                 (s, v) => s.DfDefaultHeight = Math.Clamp(v, 0, DfDefaultLabels.Length - 1) - 1,
-                "Once all three are on, the height attacks use (Attack Height setting: the Melee or Missile Attack Height\n" +
+                "Once the effects in the order are on, the height attacks use (Attack Height setting: the Melee or Missile Attack Height\n" +
                 "above). They go back to an effect about 5 seconds before it runs out; each lasts 20 seconds.",
                 when: s => s.DfHeightRotation == true && s.DfDefaultHeight.HasValue),
             Spacer(),
@@ -1353,6 +1392,9 @@ internal static class SettingsSchema
                 "Off: a monster behind a wall is never a melee target for being close; it is treated like any monster\n" +
                 "out of sight. On by default. /ra meleewalls [on|off]",
                 when: s => s.MeleeThroughWalls.HasValue),
+            Bool("Debuff every monster in range before attacking", s => s.DebuffAllBeforeAttacking ?? false, (s, v) => s.DebuffAllBeforeAttacking = v,
+                "Casts each monster's Monsters-rule debuffs on every monster in range, nearest first, before attacking any (/ra debuffall).",
+                when: s => s.DebuffAllBeforeAttacking.HasValue),
             Int("Attempts Before Blacklist", s => s.BlacklistAttempts, (s, v) => s.BlacklistAttempts = v, 1, 20, 1,
                 "How many failed attack attempts on a mob before it gets blacklisted."),
             Int("Blacklist Timeout (sec)", s => s.BlacklistTimeoutSec, (s, v) => s.BlacklistTimeoutSec = v, 5, 120, 5,
@@ -1675,6 +1717,7 @@ internal static class SettingsSchema
 
         new("Looting", new[]
         {
+            LootProfileRow(),
             Bool("Enable Looting", s => s.EnableLooting, (s, v) => s.EnableLooting = v),
             Bool("Boost Loot Priority", s => s.BoostLootPriority, (s, v) => s.BoostLootPriority = v),
             Combo("Loot Mode", LootModeNames, s => Math.Clamp(s.LootMode ?? 0, 0, LootModeNames.Length - 1),

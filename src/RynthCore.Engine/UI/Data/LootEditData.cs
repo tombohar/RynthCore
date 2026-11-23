@@ -61,6 +61,10 @@ internal sealed class LootEditRowDto
     public int KeepCount { get; set; }
     public string Summary { get; set; } = string.Empty;
     public int Conditions { get; set; }
+    /// <summary>Keep # per day: the window in hours, 0 = a plain Keep # (added 2026-11-22; 0 from an older RynthAi).</summary>
+    public int PerDayHours { get; set; }
+    /// <summary>Keep # per day: "1 of 2 picked up in the last 24 h, ..." (empty otherwise).</summary>
+    public string PerDayStatus { get; set; } = string.Empty;
 }
 
 internal sealed class LootEditRuleDto
@@ -73,6 +77,13 @@ internal sealed class LootEditRuleDto
     public int Priority { get; set; }
     public string? CustomExpression { get; set; }
     public List<LootEditConditionDto> Conditions { get; set; } = new();
+    /// <summary>
+    /// Keep # per day: the window in hours, 0 = off (added 2026-11-22). Null from an older RynthAi,
+    /// which has no such option: the rule view hides it and sends null back (RynthAi keeps its own).
+    /// </summary>
+    public int? PerDayHours { get; set; }
+    /// <summary>Keep # per day: today's count in words from RynthAi (shown, never sent back as an edit).</summary>
+    public string PerDayStatus { get; set; } = string.Empty;
 
     public LootEditRuleDto Clone()
     {
@@ -89,6 +100,7 @@ internal sealed class LootEditRuleDto
             || CustomExpression != o.CustomExpression || Conditions.Count != o.Conditions.Count)
             return false;
         if (Action == LootEditVocabulary.KeepUpTo && KeepCount != o.KeepCount) return false;
+        if (Action == LootEditVocabulary.KeepUpTo && (PerDayHours ?? 0) != (o.PerDayHours ?? 0)) return false;
         for (int i = 0; i < Conditions.Count; i++)
             if (!Conditions[i].SameAs(o.Conditions[i])) return false;
         return true;
@@ -425,9 +437,15 @@ internal static class LootEditVocabulary
     public static readonly int[] FilterActions = { 0, Keep, KeepUpTo, Salvage, Sell, Read };
     public static readonly string[] FilterLabels = { "All", "Keep", "Keep #", "Salvage", "Sell", "Read" };
 
-    public static string Badge(int action, int keepCount) => action switch
+    /// <summary>Keep # per day: the window a new one starts with, and its bounds (RynthAi's LootPerDay).</summary>
+    public const int PerDayDefaultHours = 24, PerDayMinHours = 1, PerDayMaxHours = 168;
+
+    public static string Badge(int action, int keepCount, int perDayHours = 0) => action switch
     {
         Keep => "KEEP",
+        KeepUpTo when perDayHours == 24 => "KEEP " + keepCount.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/DAY",
+        KeepUpTo when perDayHours > 0 => "KEEP " + keepCount.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/"
+                                         + perDayHours.ToString(System.Globalization.CultureInfo.InvariantCulture) + "H",
         KeepUpTo => "KEEP " + keepCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
         Salvage => "SALVAGE",
         Sell => "SELL",

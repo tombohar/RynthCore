@@ -51,6 +51,7 @@
     <Compile Include="..\RynthCore.App\DecalLocator.cs" Link="Shared\DecalLocator.cs" />
     <Compile Include="..\RynthCore.App\DecalBridgeRegistration.cs" Link="Shared\DecalBridgeRegistration.cs" />
     <Compile Include="..\RynthCore.App\FolderAccess.cs" Link="Shared\FolderAccess.cs" />
+    <Compile Include="..\RynthCore.App\VTankFileImport.cs" Link="Shared\VTankFileImport.cs" />
     <Compile Include="..\RynthCore.App\DecalBridgeCheck.cs" Link="Shared\DecalBridgeCheck.cs" />
     <Compile Include="..\RynthCore.App\RealDecalCheckHost.cs" Link="Shared\RealDecalCheckHost.cs" />
     <Compile Include="..\RynthCore.App\AcLaunchArgumentBuilder.cs" Link="Shared\AcLaunchArgumentBuilder.cs" />

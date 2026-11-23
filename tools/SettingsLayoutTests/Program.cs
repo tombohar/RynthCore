@@ -52,7 +52,33 @@ namespace SettingsLayoutTests
             OldTabNames();
             Moves();
             HuntAndDirtyFighting();
+            LootProfileRow();
             return Finish();
+        }
+
+        // ── Settings > Looting's Loot Profile picker (2026-11-22) ──────────────────────────────
+        private static void LootProfileRow()
+        {
+            object? looting = Tabs.Cast<object>().FirstOrDefault(t => Name(t) == "Looting");
+            Check(looting != null, "there is a Looting tab");
+            if (looting == null) return;
+            object first = Rows(looting)[0]!;
+            Check(Label(first) == "Loot Profile" && Kind(first) == "Combo", $"Looting starts with the Loot Profile combo (got {Kind(first)} '{Label(first)}')");
+            Check(first.GetType().GetProperty("ItemsNow")!.GetValue(first) != null, "its list is asked for as it draws (RynthAi's, not a fixed one)");
+            Check(KeyOf(first) == "Looting//Loot Profile", $"it can be pinned to My settings (got {KeyOf(first)})");
+
+            // Which entry is the profile in use (UI/Data/LootProfilePick.cs).
+            Type pick = _engine.GetType("RynthCore.Engine.UI.Data.LootProfilePick", throwOnError: true)!;
+            int Index(string[]? items, string? path, int sel) => (int)pick.GetMethod("Index", All)!.Invoke(null, new object?[] { items, path, sel })!;
+            string[] list = { "None", "Alpha.utl", "beta.json", "Gamma.utl" };
+            Check(Index(list, "", 2) == 0, "no profile in use: None, whatever RynthAi's index says");
+            Check(Index(list, @"C:\Games\RynthSuite\RynthAi\LootProfiles\Gamma.utl", 0) == 3, "the file in use, by its name");
+            Check(Index(list, @"C:\x\BETA.JSON", 0) == 2, "any case, either extension");
+            Check(Index(list, "\"C:/x/Alpha.utl\" ", 0) == 1, "quotes, spaces and forward slashes");
+            Check(Index(list, @"C:\x\Elsewhere.utl", 2) == 2, "a file not listed: RynthAi's own index");
+            Check(Index(list, @"C:\x\Elsewhere.utl", 9) == 3 && Index(list, @"C:\x\Elsewhere.utl", -1) == 0, "...kept in range");
+            Check(Index(Array.Empty<string>(), @"C:\x\Alpha.utl", 2) == 0 && Index(null, "a.utl", 1) == 0, "no list yet: 0");
+            Check(Index(list, "None", 2) == 2, "a file called None is not the None entry");
         }
 
         // ── Hunt On Login and the Dirty Fighting rotation (rows added 2026-11-11, after the regroup) ──────
@@ -115,7 +141,12 @@ namespace SettingsLayoutTests
             object d2 = Parse("{\"DfHeightRotation\":true,\"DfHeightOrder\":\"mlh\",\"DfDefaultHeight\":0}");
             Check(Get(order, d2) == 3 && Get(then, d2) == 1, "RynthAi's MLH (any case) and Low (0) read back as theirs");
             var items = (string[])order.GetType().GetProperty("Items")!.GetValue(order)!;
-            Check(items.Length == 6 && items[0] == "High, Medium, Low" && items[5] == "Low, Medium, High", "the order choices read as RynthAi's window shows them");
+            Check(items.Length == 15 && items[0] == "High, Medium, Low" && items[5] == "Low, Medium, High" && items[6] == "High, Medium" && items[14] == "Low only",
+                  "the order choices read as RynthAi's window shows them (one or two heights too, R-20261120-014055-59be)");
+            Set(order, d, 6);
+            Check((string?)P(d, "DfHeightOrder") == "HM", "two heights: HM");
+            object d3 = Parse("{\"DfHeightRotation\":true,\"DfHeightOrder\":\"L\",\"DfDefaultHeight\":-1}");
+            Check(Get(order, d3) == 14, "RynthAi's L reads back as Low only");
         }
 
         // ── The tabs, in order, and the sidebar's groups ───────────────────────────────

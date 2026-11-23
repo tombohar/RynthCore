@@ -125,6 +125,22 @@ internal sealed class NavFace : IImGuiPanel
             NextLine(p, 26);
         }
 
+        // VirindiTank navs in a folder the list doesn't show (RynthAi's StrayNavs, 2026-11-22: they
+        // were put in RynthNav's NavData, "the nav folder"): where they are, and a button to copy them in.
+        if (d.StrayNavCount > 0 && !string.IsNullOrEmpty(d.StrayNavText))
+        {
+            ImGuiNET.ImGui.PushTextWrapPos(ImGuiNET.ImGui.GetCursorPosX() + w);
+            Label(d.StrayNavText, Amber);
+            ImGuiNET.ImGui.PopTextWrapPos();
+            p = ImGuiNET.ImGui.GetCursorScreenPos();
+            string copyLabel = d.StrayNavCount == 1 ? "Copy it into NavProfiles" : $"Copy them into NavProfiles ({d.StrayNavCount})";
+            if (Button("##straynavs", copyLabel, p, new Vector2(Math.Min(w, ButtonWidth(copyLabel) + 8), 22), Text, BtnFill))
+                NavCommands.Send(new NavCmd { Cmd = "copyStrayNavs" });
+            SafeImGui.SetItemTooltip("Copies them into RynthAi's NavProfiles folder, where the nav list shows them.\n" +
+                "Never over a nav of the same name; the originals stay where they are (/ra nav import does the same).");
+            NextLine(p, 26);
+        }
+
         // Active nav + status
         ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.UiBold11));
         Label(_activeLabel, Amber);

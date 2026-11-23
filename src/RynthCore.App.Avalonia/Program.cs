@@ -83,6 +83,16 @@ internal static class Program
             }
             return report.Ok ? 0 : 1;
         }
+        // The installer's offer to copy VirindiTank metas, navs and loot profiles into RynthAi
+        // (installer\RynthCore.iss OfferVTankImport, interactive installs only, asked once per PC):
+        // --vtank-import scan|copy "<RynthAi folder>" --report "<file>". Never overwrites, never
+        // changes a VTank folder. Never falls through to the window: a malformed command exits with 2.
+        if (Array.Exists(args, a => string.Equals(a, RynthCore.App.VTankFileImport.Argument, StringComparison.OrdinalIgnoreCase)))
+        {
+            int code = RynthCore.App.VTankFileImport.Run(args, roots: null, out string summary);
+            LauncherDiag.Info($"VTANKIMPORT: (installer) {summary}");
+            return code;
+        }
         if (Array.Exists(args, a => string.Equals(a, "--decal-bridge-status", StringComparison.OrdinalIgnoreCase)))
         {
             LauncherDiag.Info($"DECALBRIDGE: status (command line): {RynthCore.App.DecalBridgeRegistration.GetStatus()}");

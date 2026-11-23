@@ -30,6 +30,7 @@ internal sealed class ChatLine
         Text = text;
         ColorKind = ChatLineColors.KindOf(chatType, chan, text);
         ChatLineColors.NoteKind(ColorKind);
+        IsPlayerChat = ChatPlayerText.IsPlayerChat(chan, chatType, text);
         // The text already names the speaker ("Bob says, ..."); until 2026-09-29
         // the sender was printed in front of it as well ("Bob: Bob says, ...").
         FormattedText = $"{ts} {text}";
@@ -62,6 +63,9 @@ internal sealed class ChatLine
     public ChatSpan[]? OwnSpans { get; init; }
     /// <summary>"HH:mm:ss text": copy, log and the Avalonia face.</summary>
     public string FormattedText { get; }
+    /// <summary>Text a player typed (ChatPlayerText): shown under Channels too, and kept for
+    /// "Player chat history" (ChatHistory.MergeKeep). Worked out once here.</summary>
+    public bool IsPlayerChat { get; }
 
     private ChatRoute _route = ChatRoute.Default;
 
@@ -110,10 +114,13 @@ internal sealed class ChatRoute
     /// keeps its own colour (LineArgb or the channel's).</summary>
     public uint? HighlightArgb { get; }
 
-    public bool ShowsIn(string tab, string channel)
+    /// <param name="playerChat">The line is player chat and the Channels tab shows all of it
+    /// (ChatModel.LineInTab): it shows there as well as under its own channel tab.</param>
+    public bool ShowsIn(string tab, string channel, bool playerChat = false)
     {
         if (Hidden) return false;
-        if (InHome && (tab == "All" || string.Equals(tab, channel, StringComparison.OrdinalIgnoreCase))) return true;
+        if (InHome && (tab == "All" || string.Equals(tab, channel, StringComparison.OrdinalIgnoreCase)
+                       || (playerChat && string.Equals(tab, ChatPlayerText.PlayerChatTab, StringComparison.OrdinalIgnoreCase)))) return true;
         if (Tabs != null)
             foreach (string t in Tabs)
                 if (string.Equals(t, tab, StringComparison.OrdinalIgnoreCase)) return true;

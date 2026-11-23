@@ -23,6 +23,8 @@ internal static class Program
         OlderAndBadFiles();
         TermRules();
         Matching();
+        VirindiSenseList();
+        ListCommands();
 
         Console.WriteLine($"{_checks} checks, {_failed} failed");
         return _failed == 0 ? 0 : 1;
@@ -229,8 +231,8 @@ internal static class Program
         Check(d.Terms[2].Text == "2|odd" && d.Terms[2].Enabled, "only 0| and 1| are flags");
 
         var many = new List<string>();
-        for (int i = 0; i < 45; i++) many.Add("term=1|name" + i);
-        Check(SenseFile.Parse(many).Terms.Count == SenseFile.MaxTerms, "at most 40 terms");
+        for (int i = 0; i < SenseFile.MaxTerms + 5; i++) many.Add("term=1|name" + i);
+        Check(SenseFile.Parse(many).Terms.Count == SenseFile.MaxTerms, $"at most {SenseFile.MaxTerms} terms");
         string longName = new('x', 100);
         Check(SenseFile.Parse(new[] { "term=1|" + longName }).Terms[0].Text.Length == SenseFile.MaxTermLength, "a long term is cut to 64");
         Check(SenseFile.Clean(" a\r\nb ") == "a  b", "one line");
@@ -244,5 +246,60 @@ internal static class Program
             "with * the whole name must match");
         Check(new SensePattern("?ire Ant", true).Matches("Fire Ant") && !new SensePattern("?ire Ant", true).Matches("Fire Ants"), "? is one letter");
         Check(!new SensePattern("", true).Matches("Anything") && !new SensePattern("x", true).Matches(""), "empty never matches");
+    }
+
+    // ── Virindi Sense's list (patterns.txt) ────────────────────────────
+
+    private static void VirindiSenseList()
+    {
+        // The shape of a real patterns.txt: a count, then one name per line (repeats in it, any case).
+        string text = "\uFEFF6\r\nSand Caves\r\nCultist Altar\r\nOverseer\r\noverseer\r\nBabe the\r\nCultist Altar\r\nNot Counted\r\n";
+        List<string> names = SenseImport.Parse(Lines(text));
+        Check(string.Join("|", names) == "Sand Caves|Cultist Altar|Overseer|Babe the",
+            $"the count's lines, repeats (any case) dropped, nothing past the count ({string.Join("|", names)})");
+
+        List<string> shortFile = SenseImport.Parse(new[] { "10", "Drake", "", "  Golem  " });
+        Check(string.Join("|", shortFile) == "Drake|Golem", "a count past the end: what's there, blanks skipped, trimmed");
+        List<string> noCount = SenseImport.Parse(new[] { "Drake", "Golem" });
+        Check(string.Join("|", noCount) == "Drake|Golem", "no count line: every line");
+        Check(SenseImport.Parse(new[] { "0", "Drake" }).Count == 0, "a count of 0: none");
+        Check(SenseImport.Parse(Array.Empty<string>()).Count == 0, "an empty file: none");
+        Check(SenseImport.Parse(new[] { "1", new string('x', 100) })[0].Length == SenseFile.MaxTermLength, "a long name is cut to the term length");
+
+        var current = new List<SensePattern> { new("drake", false), new("Golem", true) };
+        SenseMerge m = SenseImport.Merge(current, new[] { "Drake", "Sand Caves", "Overseer" });
+        Check(m.Added == 2 && m.AlreadyThere == 1 && m.NoRoom == 0, $"two added, one already there ({m.Added}/{m.AlreadyThere}/{m.NoRoom})");
+        Check(m.Terms.Length == 4 && m.Terms[0].Text == "drake" && !m.Terms[0].Enabled, "a name already there is left as it is (still off)");
+        Check(m.Terms[2].Text == "Sand Caves" && m.Terms[2].Enabled && !m.Terms[2].IsGlob, "new names go at the end, on, plain contains");
+        Check(SenseImport.Merge(current, Array.Empty<string>()).Terms.Length == 2, "nothing to add: the list as it was");
+
+        var big = new List<string>();
+        for (int i = 0; i < SenseFile.MaxTerms + 3; i++) big.Add("Name " + i);
+        SenseMerge full = SenseImport.Merge(current, big);
+        Check(full.Terms.Length == SenseFile.MaxTerms && full.NoRoom == 5 && full.Added == SenseFile.MaxTerms - 2, "the list's cap: the rest don't fit, counted");
+        Check(SenseFile.MaxTerms >= 163, "a 163-name Virindi Sense list fits");
+
+        Check(SenseImport.Reply(m, 3, "f") == "Added 2 names from Virindi Sense; 1 was on the list already.", "the reply: " + SenseImport.Reply(m, 3, "f"));
+        Check(SenseImport.Reply(full, big.Count, "f").Contains($"5 didn't fit (the list holds {SenseFile.MaxTerms})", StringComparison.Ordinal), "the reply says what didn't fit");
+        Check(SenseImport.Reply(new SenseMerge(Array.Empty<SensePattern>(), 0, 0, 0), 0, "f") == "No names in f.", "an empty list says so");
+        Check(SenseImport.Reply(new SenseMerge(Array.Empty<SensePattern>(), 0, 4, 0), 4, "f").StartsWith("No new names", StringComparison.Ordinal), "all there already");
+        Check(SenseImport.DefaultPath(@"C:\Users\x\Documents") == @"C:\Users\x\Documents\Decal Plugins\Virindi Sense\patterns.txt", "where Virindi Sense keeps it");
+        Check(SenseImport.NotFound("f").Contains("/rc sense import <file>", StringComparison.Ordinal), "not found: how to give another file");
+
+        // Round trip: imported terms save and read back as sense.txt terms.
+        string saved = SenseFile.Format(m.Terms, false, false, SenseLayoutMode.Full);
+        Check(SenseFile.Parse(Lines(saved)).Terms.Count == 4, "the merged list saves and reads back");
+    }
+
+    private static void ListCommands()
+    {
+        foreach (string ok in new[] { "addselected", "add selected", "ADDSEL", "import", "import C:\\x\\patterns.txt", "import \"C:\\My Docs\\patterns.txt\"" })
+            Check(SenseLayout.IsValidArgs(ok), $"'/rc sense {ok}' runs");
+        Check(SenseLayout.IsAddSelected("  add   selected ") && !SenseLayout.IsAddSelected("add"), "add selected, spacing; add alone isn't it");
+        Check(SenseLayout.IsImport("import", out string f0) && f0 == "", "import alone: the usual place");
+        Check(SenseLayout.IsImport("import \"C:\\My Docs\\patterns.txt\"", out string f1) && f1 == "C:\\My Docs\\patterns.txt", "import a file (quotes dropped, spaces kept)");
+        Check(!SenseLayout.IsImport("imports", out _), "only the word import");
+        Check(!SenseLayout.IsLayoutCommand("import") && !SenseLayout.IsLayoutCommand("addselected"), "they aren't look commands");
+        Check(SenseLayout.Usage.Contains("addselected", StringComparison.Ordinal) && SenseLayout.Usage.Contains("import [file]", StringComparison.Ordinal), "the usage names them");
     }
 }

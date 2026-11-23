@@ -338,6 +338,9 @@ public static class EntryPoint
             // Before AC's main thread resumes, so no dat or network unpack runs the stock
             // signed padding; a hot reload finds every site already patched.
             RunInitStep("large-address alignment fix", LargeAddressAlignmentPatch.Initialize);
+            // Palette::makeModifiedPalette's extra reference (eriknihlen's EoR palette leak fix), one
+            // byte per site; only with the launcher's "Fix AC's palette memory leak" checked.
+            RunInitStep("palette leak fix", PaletteLeakFix.Initialize);
             // DatFileShareHooks force-shares AC's data files at the CreateFile
             // layer so we can coexist with Decal-injected clients that other
             // launchers (Thwargle etc.) have already opened against the same

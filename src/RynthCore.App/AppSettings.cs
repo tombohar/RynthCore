@@ -28,6 +28,12 @@ internal sealed class AppSettings
     public int CrashRelaunchWindowMinutes { get; set; } = 5;
     public bool OverrideWindowTitle { get; set; } = true;
 
+    /// "Fix AC's palette memory leak": the engine changes one byte at each of the two places where
+    /// the end-of-retail client keeps every custom palette forever (RynthCore.Engine PaletteLeakFix).
+    /// The engine reads it once at load, so it applies from the next game start. OFF by default (a
+    /// missing key is off): many clients already have the fix from a patched acclient or the original patch.
+    public bool FixPaletteLeak { get; set; }
+
     /// When true (default), the launcher installs RynthSuite plugin updates as soon as a
     /// check finds them. Safe mid-session: running clients keep the version they started
     /// with; the new one loads on the next AC start. Core updates always ask first.

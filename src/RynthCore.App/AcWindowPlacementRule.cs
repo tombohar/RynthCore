@@ -28,6 +28,15 @@ namespace RynthCore.App;
 ///    the client closes, and AC's own moves at startup and portal-in, never reach the profile.
 /// The saved width and height are still written: they are what the size checks compare against.
 ///
+/// 2026-11-21: a saved 1940x1100 window (client 1934x1071) on a 1600x900 game was still being put back,
+/// size included, by builds that predate the rule above, and AC stretched its 1600x900 picture about 21%
+/// to fill it (the overlay's nameplates were misplaced too). Here the launcher keeps the size AC gives
+/// the window: AC sizes it from the Resolution in its prefs when it starts (and again when the player
+/// changes the resolution in game), so a window the launcher only moves always matches the resolution,
+/// whatever it is. Reading the prefs ini instead would only repeat what AC already did, and could be
+/// stale. When the saved size differs from the window's, one line says it was ignored
+/// (<see cref="SavedSizeIgnored"/>).
+///
 /// 2026-11-15, report R-20261115-160655-1201: the engine's opt-in Remember Game Window Position
 /// (UI/AcWindowChrome) had the same bug and now uses this rule too (compiled into the engine, so keep
 /// it free of launcher types). While that option is on, the launcher leaves the window to the engine.
@@ -77,6 +86,19 @@ internal static class AcWindowPlacementRule
         savedWidth > 0 && savedHeight > 0 && width > 0 && height > 0
         && Math.Abs(width - savedWidth) * 4L <= Math.Max(width, savedWidth)
         && Math.Abs(height - savedHeight) * 4L <= Math.Max(height, savedHeight);
+
+    /// <summary>
+    /// 2026-11-21: the one log line for a saved size that is not put back, or null when the saved size is
+    /// the window's (give or take <see cref="Tolerance"/>). <paramref name="width"/> x <paramref name="height"/>
+    /// is the outer size the window has (or gets) at AC's resolution, <paramref name="drawWidth"/> x
+    /// <paramref name="drawHeight"/> that resolution (the client area AC draws into). A saved size is only
+    /// ever a hint for "is this the same window": AC stretches its picture to a window that is not its
+    /// resolution, so neither the launcher nor the engine applies one.
+    /// </summary>
+    public static string? SavedSizeIgnored(int savedWidth, int savedHeight, int width, int height, int drawWidth, int drawHeight) =>
+        Math.Abs(savedWidth - width) <= Tolerance && Math.Abs(savedHeight - height) <= Tolerance
+            ? null
+            : $"saved size {savedWidth}x{savedHeight} ignored: AC draws at {drawWidth}x{drawHeight}";
 
     /// <summary>The window collapsed below half the reference in-game area: AC's login / character-select window.</summary>
     public static bool IsLoginShrink(int width, int height, int refWidth, int refHeight) =>

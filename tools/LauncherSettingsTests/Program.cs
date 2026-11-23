@@ -736,6 +736,26 @@ internal static class Program
                     "expired stays expired through the grace");
                 Check(CrashDumpWriterRule.Grace == TimeSpan.FromSeconds(60), "the grace is 60 s");
             });
+
+            // "Fix AC's palette memory leak" (2026-11-23): off by default, a missing key is off, and it
+            // is saved under the name the engine reads at load (FixPaletteLeak).
+            Scenario("palette leak fix: off by default, saved and loaded", root, () =>
+            {
+                Check(!new AppSettings().FixPaletteLeak, "a new install: off");
+                File.WriteAllText(Main_, """{ "AllowMultipleClients": true }""");
+                Check(!AppSettingsStore.Load().FixPaletteLeak, "an appsettings.json without the key: off");
+
+                AppSettings s = Sample();
+                s.FixPaletteLeak = true;
+                AppSettingsStore.Save(s);
+                JsonNode? saved = JsonNode.Parse(File.ReadAllText(Main_));
+                Check(saved?["FixPaletteLeak"]?.GetValue<bool>() == true, "saved as \"FixPaletteLeak\": true (the engine's key)");
+                Check(AppSettingsStore.Load().FixPaletteLeak, "loaded back: on");
+
+                s.FixPaletteLeak = false;
+                AppSettingsStore.Save(s);
+                Check(!AppSettingsStore.Load().FixPaletteLeak, "unchecked, saved and loaded: off");
+            });
         }
         finally
         {
@@ -885,6 +905,21 @@ internal static class Program
             var grown = AcWindowPlacementRule.DecideRestore(saved, 1608, 936, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(10), screen);
             Check(grown.Action == AcWindowPlacementRule.RestoreAction.Move && grown.X == 300 && grown.Y == 60,
                 "restore: grown to the saved size and held: moved");
+
+            // 2026-11-21: a saved 1940x1100 (client 1934x1071) on a 1600x900 game (outer 1606x929). The
+            // launcher keeps the size AC gave the window and only moves it; the saved size gets one line.
+            var stretched = new AcWindowPlacementRule.Placement(150, 60, 1940, 1100);
+            var keep = AcWindowPlacementRule.DecideRestore(stretched, 1606, 929, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(12), screen);
+            Check(keep.Action == AcWindowPlacementRule.RestoreAction.Move && keep.X == 150 && keep.Y == 60,
+                "restore: saved 1940x1100, AC's window 1606x929: moved to the saved spot (moving never resizes)");
+            Check(AcWindowPlacementRule.SavedSizeIgnored(1940, 1100, 1606, 929, 1600, 900) == "saved size 1940x1100 ignored: AC draws at 1600x900",
+                "restore: the ignored saved size is said in one plain line");
+            Check(AcWindowPlacementRule.SavedSizeIgnored(1606, 929, 1606, 929, 1600, 900) == null
+                  && AcWindowPlacementRule.SavedSizeIgnored(1608, 931, 1606, 929, 1600, 900) == null,
+                "restore: a saved size that is the window's (give or take 2 px): no line");
+            var at1920 = AcWindowPlacementRule.DecideRestore(new(200, 100, 1606, 929), 1926, 1109, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(12), screen);
+            Check(at1920.Action == AcWindowPlacementRule.RestoreAction.Move,
+                "restore: the player set AC to 1920x1080 since the save: the position applies, the window keeps AC's new size");
 
             Check(AcWindowPlacementRule.SizeMatches(1608, 936, 1608, 936) && AcWindowPlacementRule.SizeMatches(1928, 1116, 1608, 936)
                   && !AcWindowPlacementRule.SizeMatches(1608, 936, 1008, 786) && !AcWindowPlacementRule.SizeMatches(1608, 936, 0, 0),

@@ -440,6 +440,14 @@
                               Content="Rewrite AC window titles per account"
                               ToolTip.Tip="Replaces &quot;Asheron's Call&quot; with &quot;Account / Character @ Server&quot; on tracked clients so multi-box taskbars are readable. Untracked external clients are left alone." />
                     <CheckBox x:Name="InjectAllRunningAcCheckBox" Content="Inject all running AC sessions" />
+                    <CheckBox x:Name="FixPaletteLeakCheckBox"
+                              Content="Fix AC's palette memory leak"
+                              ToolTip.Tip="AC never frees the colour palettes of creatures, armour and items, so a client's memory grows the longer it runs (hundreds of MB in a day of hunting). This changes one byte in two places in the running client to fix it (eriknihlen's EoR palette leak fix). Leave it off if your acclient.exe is already patched for this. Takes effect the next time a game starts." />
+                    <TextBlock Text="Takes effect the next time a game starts. Leave off if your client already has the palette leak fix."
+                               TextWrapping="Wrap"
+                               FontSize="12"
+                               Foreground="#9AA8B3"
+                               Margin="28,-4,0,0" />
                     <TextBlock Text="Logging level (applies live)" Foreground="#EAF0F4" Margin="0,4,0,0" />
                     <ComboBox x:Name="LoggingLevelComboBox" SelectedIndex="3"
                               ToolTip.Tip="Engine log threshold. Written to engine.json immediately; running clients pick it up within a second. Off = errors only.">
@@ -546,6 +554,17 @@
                   <TextBlock Text="Manual inject target scope follows the 'Inject all running AC sessions' launch behavior toggle. Reset Overlay Bar signals all running RynthCore clients via the dispatch file."
                              TextWrapping="Wrap"
                              Foreground="#9AA8B3" />
+                </StackPanel>
+              </Border>
+
+              <Border Background="#132028" CornerRadius="16" Padding="18">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Coming from VirindiTank" FontSize="16" FontWeight="SemiBold" Foreground="#26C1A6" />
+                  <TextBlock Text="Copies your VirindiTank metas, nav routes and loot profiles into RynthAi. You see what it will copy before anything happens; files RynthAi already has are never replaced, and nothing in your VirindiTank folder changes."
+                             TextWrapping="Wrap"
+                             Foreground="#9AA8B3" />
+                  <Button x:Name="ImportVTankFilesButton" Content="Import VirindiTank files"
+                          ToolTip.Tip="Copies VirindiTank's .met and .af metas, .nav routes and .utl loot profiles into RynthAi's MetaFiles, NavProfiles and LootProfiles folders. Finds your VirindiTank folder (Decal's plugin list or the usual places), or lets you pick it." />
                 </StackPanel>
               </Border>
             </StackPanel>

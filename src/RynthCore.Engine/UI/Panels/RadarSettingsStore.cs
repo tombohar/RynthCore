@@ -70,6 +70,18 @@ internal static class RadarSettingsStore
     /// <summary>...and one at its Ring Range (ring spells). Off by default.</summary>
     public static bool ShowRingRangeRing;
 
+    /// <summary>
+    /// ImGui face: monster names show only while this many monsters or fewer are on the radar; with more,
+    /// the markers stay and their names go (R-20261122-165442-286c: "if there are more than 20 monsters
+    /// on the radar, i don't want to see the names, it is too cluttered"). 0 = always (the default).
+    /// Other kinds' names are not affected.
+    /// </summary>
+    public static int MonsterNamesUpTo;
+    public const int MaxMonsterNamesUpTo = 200;
+
+    /// <summary>Whether monster names are drawn with <paramref name="monstersShown"/> monsters on the radar.</summary>
+    public static bool MonsterNamesFor(int monstersShown) => MonsterNamesUpTo <= 0 || monstersShown <= MonsterNamesUpTo;
+
     // Text sizes of the compass letters and the coordinate strip (px at 100% UI scale).
     public const float DefaultCompassSize = 14f, DefaultCoordSize = 11f, MinText = 8f, MaxText = 28f;
     public static float CompassSize = DefaultCompassSize;
@@ -234,6 +246,10 @@ internal static class RadarSettingsStore
                         case "worldMap":     ShowWorldMap     = val == "1"; break;
                         case "monsterRangeRing": ShowMonsterRangeRing = val == "1"; break;
                         case "ringRangeRing":    ShowRingRangeRing    = val == "1"; break;
+                        case "monsterNamesUpTo":
+                            if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out int mn))
+                                MonsterNamesUpTo = Math.Clamp(mn, 0, MaxMonsterNamesUpTo);
+                            break;
                         case "worldMapOpacity":
                             if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float wo) && float.IsFinite(wo))
                                 WorldMapOpacity = Math.Clamp(wo, 0.1f, 1.0f);
@@ -305,6 +321,7 @@ internal static class RadarSettingsStore
                 sw.WriteLine(FormattableString.Invariant($"worldMapOpacity={WorldMapOpacity:0.##}"));
                 sw.WriteLine($"monsterRangeRing={(ShowMonsterRangeRing ? "1" : "0")}");
                 sw.WriteLine($"ringRangeRing={(ShowRingRangeRing ? "1" : "0")}");
+                sw.WriteLine($"monsterNamesUpTo={MonsterNamesUpTo.ToString(CultureInfo.InvariantCulture)}");
                 sw.WriteLine(FormattableString.Invariant($"compassSize={CompassSize:0.##}"));
                 sw.WriteLine(FormattableString.Invariant($"coordSize={CoordSize:0.##}"));
                 var styleLines = new System.Collections.Generic.List<string>();

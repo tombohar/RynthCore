@@ -70,8 +70,9 @@ internal static class DeviceResetHook
         try
         {
             int released = ImGuiPopOuts.ReleaseDeviceResources();
+            int overlay = OverlayTextureRenderer.ReleaseDefaultPoolResources();
             if (n <= 20)
-                RynthLog.D3D9($"DeviceResetHook: device Reset #{n}: released {released} pop-out surface set(s) first.");
+                RynthLog.D3D9($"DeviceResetHook: device Reset #{n}: released {released} pop-out surface set(s){(overlay > 0 ? " and the overlay's shared texture" : "")} first.");
         }
         catch (Exception ex)
         {

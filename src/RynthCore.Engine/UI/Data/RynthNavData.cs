@@ -72,6 +72,8 @@ internal sealed class RynthNavStatus
     public string Landblock = "----", LoadedLb = "----", Status = "", LastPath = "";
     public double NS, EW;
     public bool Goto;
+    /// <summary>The goto is paused (RynthNav from 11-19: /rnav pause): the trip stays, the walking stopped.</summary>
+    public bool Paused;
 
     // Travel (RynthNav 0.6+; absent from older plugins: Travel stays false).
     public bool Travel;
@@ -84,6 +86,14 @@ internal sealed class RynthNavStatus
     public int OpenArrow;
     public RynthNavArrow? Arrow;
     public string RouteFor = "", RouteSummary = "";
+    /// <summary>How long the route takes, seconds (RynthNav from 11-19: route "secs"; -1 = not known, an older RynthNav).</summary>
+    public double RouteSecs = -1;
+    /// <summary>
+    /// Which of the ways there the route is (RynthNav from 11-19: "way" of "ways", 0 = older), and what
+    /// it leaves out that a cheaper way took. The route view's Another way button asks for the next.
+    /// </summary>
+    public int RouteWay, RouteWays;
+    public string RouteAvoids = "";
     /// <summary>The walking path RynthNav worked out for the trip: segments (one per walk), each a flat list of ns, ew pairs in degrees. Empty: none (older RynthNav, or no trip on the ground).</summary>
     public float[][] PathSegments = Array.Empty<float[]>();
     public bool RouteActive;
@@ -102,6 +112,8 @@ internal sealed class RynthNavStatus
     public string Version = "";
     public string GoLine = "", GoPhase = "";
     public double GoLeft = -1;
+    /// <summary>The trip's time left while walking, seconds (RynthNav from 11-19: go "eta"; -1 = not known).</summary>
+    public double GoEta = -1;
     public bool HasInfo, GraphLoaded, Indoors;
     public int TileHere = -1, OnDisk = -1;
     public string NavDir = "", NavSource = "", GraphStatus = "";
@@ -128,6 +140,8 @@ internal sealed class RynthNavStatus
     public string Tie1Text = "", Tie2Text = "", TiePendingText = "";
     public string[] MineLines = Array.Empty<string>();
     public string InfoHere = "", InfoNavData = "", InfoTiles = "", InfoGraph = "", InfoTownNet = "", InfoAtlas = "", InfoStatus = "";
+    /// <summary>How long this character's trips take, as RynthNav has measured them (RynthNav from 11-19: info "times"; "" on older ones).</summary>
+    public string InfoTimes = "";
 
     // Display strings, built once per status.
     public string PlayerText = "— no pose —", MeshText = "not loaded", PathText = "";
@@ -152,6 +166,7 @@ internal sealed class RynthNavStatus
             if (r.TryGetProperty("runState", out v)) s.RunState = v.GetInt32();
             if (r.TryGetProperty("turnState", out v)) s.TurnState = v.GetInt32();
             if (r.TryGetProperty("goto", out v)) s.Goto = v.GetInt32() != 0;
+            if (r.TryGetProperty("paused", out v)) s.Paused = s.Goto && v.GetInt32() != 0;
             // RynthNav 0.6.3+: "onMap" 0 in a dungeon, where ns/ew aren't map coordinates.
             s.OnMap = !r.TryGetProperty("onMap", out v) || v.ValueKind != JsonValueKind.Number || v.GetInt32() != 0;
             s.PlayerText = !s.HasPose ? "— no pose —"
@@ -219,9 +234,16 @@ internal sealed class RynthNavStatus
                 }
             s.Route = steps.ToArray();
             double est = Num(route, "est");
+            s.RouteSecs = route.TryGetProperty("secs", out var secs) && secs.ValueKind == JsonValueKind.Number ? secs.GetDouble() : -1;
+            string time = About(s.RouteSecs);
             s.RouteSummary = teleports == 0
-                ? $"walk, about {Yards(est)}"
-                : $"{teleports} teleport{(teleports == 1 ? "" : "s")}, about {Yards(est)} of effort";
+                ? $"walk, {(time.Length > 0 ? time + ", " : "")}about {Yards(est)}"
+                : $"{(time.Length > 0 ? time + ", " : "")}{teleports} teleport{(teleports == 1 ? "" : "s")}, about {Yards(est)} of effort";
+            s.RouteWay = Int(route, "way");
+            s.RouteWays = Int(route, "ways");
+            s.RouteAvoids = Str(route, "avoids");
+            if (s.RouteWays > 1)
+                s.RouteSummary += $"; way {s.RouteWay} of {s.RouteWays}" + (s.RouteAvoids.Length > 0 ? $" (avoids {s.RouteAvoids})" : "");
             s.RouteHeader = "To " + s.RouteFor + ": " + s.RouteSummary + (s.RouteActive ? "  (walking)" : "");
             var lines = new string[s.Route.Length];
             for (int i = 0; i < lines.Length; i++)
@@ -265,10 +287,14 @@ internal sealed class RynthNavStatus
             s.GoLine = Str(go, "line");
             s.GoPhase = Str(go, "phase");
             s.GoLeft = go.TryGetProperty("left", out var l) && l.ValueKind == JsonValueKind.Number ? l.GetDouble() : -1;
+            s.GoEta = go.TryGetProperty("eta", out var eta) && eta.ValueKind == JsonValueKind.Number ? eta.GetDouble() : -1;
         }
         s.StatusLine = s.Panel ? (s.GoLine.Length > 0 ? s.GoLine : s.Goto ? "walking" : "ready") : s.Status;
         // "town": walking inside the Town Network (RynthNav 0.6.2+).
         s.StepLeft = s.Goto && (s.GoPhase == "walk" || s.GoPhase == "town") && s.GoLeft >= 0 ? Yards(s.GoLeft) + " left" : "";
+        // The whole trip's time left (RynthNav from 11-19), beside the step's distance: "340 yd left, about 2 min to go".
+        string togo = s.Goto && s.GoEta >= 0 ? About(s.GoEta) + " to go" : "";
+        if (togo.Length > 0) s.StepLeft = s.StepLeft.Length > 0 ? s.StepLeft + ", " + togo : togo;
 
         if (r.TryGetProperty("info", out var info) && info.ValueKind == JsonValueKind.Object)
         {
@@ -283,6 +309,7 @@ internal sealed class RynthNavStatus
             s.HasTownNet = info.TryGetProperty("townNet", out _);
             s.TownNetLoaded = Int(info, "townNet") != 0;
             s.TownNetStatus = Str(info, "townNetStatus");
+            s.InfoTimes = Str(info, "times");
         }
         if (r.TryGetProperty("markers", out var mk) && mk.ValueKind == JsonValueKind.Object)
         {
@@ -407,6 +434,17 @@ internal sealed class RynthNavStatus
     public static string CommandCoord(double ns, double ew) =>
         Math.Abs(ns).ToString("F2", CultureInfo.InvariantCulture) + (ns >= 0 ? "N" : "S") + ", "
         + Math.Abs(ew).ToString("F2", CultureInfo.InvariantCulture) + (ew >= 0 ? "E" : "W");
+
+    /// <summary>"about 45 s", "about 4 min", "about 1 h 5 min" ("" for none): RynthNav's own wording (TripTimes.About).</summary>
+    public static string About(double seconds)
+    {
+        if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0) return "";
+        if (seconds < 60) return "about " + Math.Max(5, Math.Round(seconds / 5) * 5).ToString("0", CultureInfo.InvariantCulture) + " s";
+        double min = Math.Round(seconds / 60);
+        if (min < 60) return "about " + min.ToString("0", CultureInfo.InvariantCulture) + " min";
+        return "about " + Math.Floor(min / 60).ToString("0", CultureInfo.InvariantCulture) + " h "
+             + (min % 60).ToString("0", CultureInfo.InvariantCulture) + " min";
+    }
 
     public static string Yards(double units) =>
         units < 1000 ? units.ToString("0", CultureInfo.InvariantCulture) + " yd"

@@ -72,16 +72,14 @@ internal static class D3D9Bootstrapper
                 return;
             }
 
-            // This runs after character login, so d3d9.dll and the game's
-            // device are fully initialized. Use the NULLREF throwaway device
-            // for vtable discovery — it's safe post-login because the
-            // d3d9-on-d3d12 wrapper has finished all its one-time init work.
+            // This runs after character login (or on a hot reload, in the world), so d3d9.dll
+            // and the game's device are fully initialized: take EndScene from AC's own device
+            // and create none (AcGameDevice). A throwaway device here could make AC's exclusive
+            // full-screen device lost, and AC quits when its Reset fails (2026-11-19).
             IntPtr earlyModule = GetModuleHandleA("d3d9.dll");
             if (earlyModule != IntPtr.Zero)
             {
-                RynthLog.D3D9("D3D9Bootstrapper: d3d9.dll loaded — discovering EndScene via NULLREF device.");
-                Compatibility.MemoryUse.Mark("D3D9 bootstrap: NULLREF device for the vtable");
-                EndSceneHook.Install("post-login-vtable");
+                InstallFromAcDeviceOrThrowaway("post-login");
                 Compatibility.MemoryUse.Mark("EndScene hook installed");
                 return;
             }
@@ -103,7 +101,7 @@ internal static class D3D9Bootstrapper
                 {
                     RynthLog.D3D9("D3D9Bootstrapper: Real CreateDevice path was not observed in time. Falling back to shared vtable discovery.");
                     RemoveBootstrapHooks();
-                    EndSceneHook.Install();
+                    InstallFromAcDeviceOrThrowaway("fallback");
                     return;
                 }
 
@@ -118,9 +116,44 @@ internal static class D3D9Bootstrapper
             {
                 RynthLog.D3D9("D3D9Bootstrapper: Attempting fallback EndScene install after bootstrap failure.");
                 RemoveBootstrapHooks();
-                EndSceneHook.Install();
+                InstallFromAcDeviceOrThrowaway("fallback");
             }
         }
+    }
+
+    // How long the post-login install waits for AC's device when AC has none yet (it always has one
+    // after login; this covers an odd moment such as a device being re-created).
+    private const int AcDeviceWaitMs = 5000;
+    private const int AcDevicePollMs = 100;
+
+    /// <summary>
+    /// The EndScene hook from AC's own device (AcGameDevice): no D3D9 object is created. Only when AC's
+    /// device can't be found or used does it fall back, with a log line saying why, to the
+    /// throwaway-device discovery (EndSceneHook.Install), which can make an exclusive full-screen
+    /// device lost.
+    /// </summary>
+    private static void InstallFromAcDeviceOrThrowaway(string stage)
+    {
+        IntPtr device = AcGameDevice.WaitFor(AcDeviceWaitMs, AcDevicePollMs, out string why);
+        if (device != IntPtr.Zero)
+        {
+            RynthLog.D3D9($"D3D9Bootstrapper: hooking EndScene from AC's own {why} - no device created.");
+            EndSceneHook.InstallFromDevice(device, $"{stage}-ac-device");
+            if (EndSceneHook.IsInstalled())
+                return;
+            RynthLog.D3D9("D3D9Bootstrapper: the EndScene hook from AC's device didn't install.");
+        }
+        else
+        {
+            RynthLog.D3D9($"D3D9Bootstrapper: AC's own device wasn't usable: {why}.");
+        }
+
+        if (EngineLifecycle.IsShuttingDown)
+            return;
+        RynthLog.D3D9("D3D9Bootstrapper: LAST RESORT - discovering EndScene via a throwaway device " +
+                      "(it can make an exclusive full-screen device lost).");
+        Compatibility.MemoryUse.Mark("D3D9 bootstrap: throwaway device for the vtable");
+        EndSceneHook.Install($"{stage}-vtable");
     }
 
     private static void TryHookDirect3DCreate9(IntPtr d3d9Module)

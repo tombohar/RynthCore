@@ -11,6 +11,24 @@ internal static class LauncherSettings
     // The launcher's own default (AppSettings.AllowMultipleClients, on since 2026-10-14) until it has saved one.
     private static bool _allowMultipleClients = true;
     private static string _statusMessage = "Launcher settings not loaded.";
+    // The launcher's "Fix AC's palette memory leak" (AppSettings.FixPaletteLeak): off until checked.
+    private static bool _fixPaletteLeak;
+
+    /// <summary>The launcher's "Fix AC's palette memory leak" checkbox (PaletteLeakFix). A missing key is off.</summary>
+    public static bool FixPaletteLeakEnabled
+    {
+        get
+        {
+            EnsureLoaded();
+            return _fixPaletteLeak;
+        }
+    }
+
+    /// <summary>appsettings.json's FixPaletteLeak: true only when it is there and true (tools\PaletteLeakFixTests).</summary>
+    internal static bool ReadFixPaletteLeak(JsonElement root) =>
+        root.ValueKind == JsonValueKind.Object
+        && root.TryGetProperty("FixPaletteLeak", out JsonElement v)
+        && v.ValueKind == JsonValueKind.True;
 
     public static bool AllowMultipleClientsEnabled
     {
@@ -53,6 +71,7 @@ internal static class LauncherSettings
                 }
 
                 using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(settingsPath));
+                _fixPaletteLeak = ReadFixPaletteLeak(document.RootElement);
                 if (!document.RootElement.TryGetProperty("AllowMultipleClients", out JsonElement property) ||
                     (property.ValueKind != JsonValueKind.True && property.ValueKind != JsonValueKind.False))
                 {

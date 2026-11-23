@@ -95,6 +95,8 @@ internal static class SwapChain9VTableIndex
 internal static class Surface9VTableIndex
 {
     public const int Release = 2;
+    // IDirect3DResource9 3-10, then IDirect3DSurface9: 11=GetContainer, 12=GetDesc.
+    public const int GetDesc = 12;
 }
 
 /// <summary>

@@ -26,7 +26,10 @@
 //  a read is asked for and Stale comes back: try again a moment later); one
 //  raise at a time (Busy until the unassigned XP or the credits change, or 5 s;
 //  while Busy each GetTrainingInfo asks for a read at the next tick, so the
-//  answer is seen as soon as it lands). Any thread.
+//  answer is seen as soon as it lands). In a world transition (portal space, a
+//  death, the 5 s after landing) a raise is queued and sent once it ends
+//  (AcMainThreadQueue keeps Train entries through it), and Busy lasts until 5 s
+//  after that. Any thread.
 // ============================================================================
 
 using System;
@@ -170,6 +173,10 @@ internal static unsafe class TrainingApi
                 _busyUntilMs = 0;
                 return false;
             }
+            // Portal space, a death, the seconds after landing: the raise waits in AcMainThreadQueue and
+            // isn't sent yet, so Busy lasts until 5 s after the queue lets it go (a press made meanwhile
+            // is the caller's to hold; the DreamWeave panel holds it).
+            _busyUntilMs = WorldTransitionState.HoldDeadline(_busyUntilMs, now, PlayerLifecycleLog.InWorldTransition, BusyMs);
             return true;
         }
     }

@@ -20,6 +20,7 @@ internal static class Program
         TheTypeId();
         WorldTakesTheClick();
         AcWindowsKeepTheClick();
+        PortalSpaceViewIsTheWorld();
         FailOpen();
         NothingUnderTheMouse();
 
@@ -61,6 +62,33 @@ internal static class Program
             Check(t == AcMouseTarget.AcWindow, $"type 0x{type:X8} = AcWindow (got {t})");
             Check(!AcMouseOverRules.UnderUiOverlayMayTakeClick(t), $"type 0x{type:X8}: plate may not take the click");
         }
+    }
+
+    private static void PortalSpaceViewIsTheWorld()
+    {
+        // 2026-11-20: in portal space gmSmartBoxUI shows its viewport child 0x10000436 (the portal swirl)
+        // over the 3D view. Classed as an AC window, every window drawn under AC's UI went click-through
+        // for the whole portal (the DreamWeave Skills window took no clicks, scrolls or tab changes).
+        Case("portal space: the portal-space view (element 0x10000436, a viewport) stands in for the world");
+        Check(AcMouseOverRules.ElementIdPortalSpaceView == 0x10000436, "gmSmartBoxUI PostInit's GetChildRecursive(0x10000436)");
+        const int Viewport = 0xD;   // PostInit's DynamicCast type
+        AcMouseTarget p = AcMouseOverRules.Classify(true, false, SomeElement, true, Viewport, AcMouseOverRules.ElementIdPortalSpaceView);
+        Check(p == AcMouseTarget.World, $"portal-space view under the mouse = World (got {p})");
+        Check(AcMouseOverRules.UnderUiOverlayMayTakeClick(p), "portal-space view: an under-UI window may take the click");
+
+        Case("portal space: AC's real windows (chat, radar...) still keep the click");
+        AcMouseTarget other = AcMouseOverRules.Classify(true, false, SomeElement, true, Viewport, 0x10000437);
+        Check(other == AcMouseTarget.AcWindow, $"another viewport (another element id) = AcWindow (got {other})");
+        AcMouseTarget list = AcMouseOverRules.Classify(true, false, SomeElement, true, ItemList, 0x100001A5);
+        Check(list == AcMouseTarget.AcWindow, $"an item list = AcWindow (got {list})");
+        AcMouseTarget noId = AcMouseOverRules.Classify(true, false, SomeElement, true, Viewport, 0);
+        Check(noId == AcMouseTarget.AcWindow, $"a viewport whose id couldn't be read = AcWindow (got {noId})");
+
+        Case("the id alone doesn't change the other answers");
+        AcMouseTarget unk = AcMouseOverRules.Classify(true, false, SomeElement, false, 0, AcMouseOverRules.ElementIdPortalSpaceView);
+        Check(unk == AcMouseTarget.Unknown, $"type unreadable = Unknown, id or not (got {unk})");
+        AcMouseTarget outside = AcMouseOverRules.Classify(true, true, SomeElement, true, Viewport, AcMouseOverRules.ElementIdPortalSpaceView);
+        Check(outside == AcMouseTarget.Nothing, $"cursor outside the client = Nothing (got {outside})");
     }
 
     private static void FailOpen()

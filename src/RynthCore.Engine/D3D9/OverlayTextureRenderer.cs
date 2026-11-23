@@ -249,6 +249,21 @@ internal static unsafe class OverlayTextureRenderer
             $"(handle=0x{descriptor.Value.SharedHandle:X8}, size={descriptor.Value.Width}x{descriptor.Value.Height}, adapterLuid=0x{descriptor.Value.AdapterLuid:X}).");
     }
 
+    /// <summary>
+    /// DeviceResetHook, just before AC resets its device (AC's main thread): an opened shared
+    /// texture is D3DPOOL_DEFAULT, and a plain D3D9 device can't be Reset while one is alive (AC then
+    /// quits with "Could not initialize Direct3D"). The managed software texture survives a Reset
+    /// and is kept. The shared one is opened again from the next frame the overlay sends.
+    /// Returns how many textures it released.
+    /// </summary>
+    public static int ReleaseDefaultPoolResources()
+    {
+        if (_texture == IntPtr.Zero || _sharedTextureHandle == IntPtr.Zero)
+            return 0;
+        ReleaseTexture();
+        return 1;
+    }
+
     public static void Shutdown()
     {
         ReleaseTexture();

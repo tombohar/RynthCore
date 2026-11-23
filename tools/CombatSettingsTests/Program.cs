@@ -34,6 +34,7 @@ namespace CombatSettingsTests
             ("KitePullMeters", typeof(int?), "20"),
             ("KiteTagFirst", typeof(bool?), "true"),
             ("MeleeThroughWalls", typeof(bool?), "true"),   // Combat > Targeting > Melee through walls (2026-11-15)
+            ("DebuffAllBeforeAttacking", typeof(bool?), "false"),   // Combat > Targeting > Debuff every monster in range before attacking (2026-11-22)
         };
 
         private static int Main()
@@ -101,11 +102,12 @@ namespace CombatSettingsTests
                 ("Combat", "Tag Before Fleeing", "Bool", 1, 0, 1),
                 ("Combat", "Magic Response", "Combo", 0, 0, 3),   // beside Missile Response since 2026-11-11
                 ("Combat", "Melee through walls", "Bool", 1, 0, 1),   // on by default (2026-11-15)
+                ("Combat", "Debuff every monster in range before attacking", "Bool", 0, 0, 1),   // off by default (2026-11-22)
             };
             object older = Parse("{\"BoostNavPriority\":true}");            // what an older RynthAi sends
             object newer = Parse("{\"VariablePowerMin\":50,\"VariablePowerMax\":100,\"MissileEnvironmentResponse\":0,\"MagicEnvironmentResponse\":0," +
                                  "\"EnvironmentImpactLimit\":2,\"EnvironmentImpactWindowSec\":20,\"EnvironmentApproachMeters\":6,\"EnvironmentMinDistance\":3," +
-                                 "\"EnvironmentSkipSec\":30,\"KitePullMeters\":20,\"KiteTagFirst\":true,\"MeleeThroughWalls\":true}");   // the plugin's own defaults
+                                 "\"EnvironmentSkipSec\":30,\"KitePullMeters\":20,\"KiteTagFirst\":true,\"MeleeThroughWalls\":true,\"DebuffAllBeforeAttacking\":false}");   // the plugin's own defaults
             foreach (var (tab, label, kind, def, min, max) in rows)
             {
                 object? row = Row(tab, label, kind);
@@ -144,8 +146,10 @@ namespace CombatSettingsTests
             Set(Row("Combat", "Tag Before Fleeing", "Bool")!, edit, 1);
             Set(Row("Combat", "Magic Response", "Combo")!, edit, 1);
             Set(Row("Combat", "Melee through walls", "Bool")!, edit, 0);
+            Set(Row("Combat", "Debuff every monster in range before attacking", "Bool")!, edit, 1);
             string after = JsonSerializer.Serialize(edit, info);
             Check(after.Contains("\"MeleeThroughWalls\":false"), "Melee through walls unticked saves false (RynthAi turns it off)");
+            Check(after.Contains("\"DebuffAllBeforeAttacking\":true"), "Debuff every monster ticked saves true (RynthAi turns it on)");
             Check(after.Contains("\"KitePullMeters\":55") && after.Contains("\"KiteTagFirst\":true") && after.Contains("\"MagicEnvironmentResponse\":1"), "the edits land on their own properties");
             Check(after.Contains("\"BoostNavPriority\":true") && after.Contains("\"EnvironmentSkipSec\":60") && after.Contains("\"MissileEnvironmentResponse\":2"), "the other settings ride along unchanged");
 

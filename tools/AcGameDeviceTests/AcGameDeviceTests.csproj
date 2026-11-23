@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for the pure part of finding AC's own D3D9 device (2026-11-19):
+    src\RynthCore.Engine\D3D9\AcGameDevicePolicy.cs, compiled in. The device field's offset read
+    out of RenderDeviceD3D::SetFFAmbientColor32's code (and refused when the code isn't that), the
+    render device global's call site landing on that function, and which devices may be hooked
+    (EndScene, Reset and Present all in the loaded d3d9.dll). No AC, no files.
+    Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>AcGameDeviceTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\D3D9\AcGameDevicePolicy.cs" Link="Engine\AcGameDevicePolicy.cs" />
+  </ItemGroup>
+
+</Project>

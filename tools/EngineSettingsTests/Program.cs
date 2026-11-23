@@ -69,6 +69,8 @@ namespace EngineSettingsTests
                 Run(nameof(PlacementRestoreIsPositionOnly), PlacementRestoreIsPositionOnly);
                 Run(nameof(PlacementSaveNeedsAStableInWorldRect), PlacementSaveNeedsAStableInWorldRect);
                 Run(nameof(AcWindowChromeNeverResizes), AcWindowChromeNeverResizes);
+                Run(nameof(PlacementSizeIsAcsResolution), PlacementSizeIsAcsResolution);
+                Run(nameof(SavedSizeIgnoredLine), SavedSizeIgnoredLine);
                 Run(nameof(PlacementFilesArePerClient), PlacementFilesArePerClient);
                 Run(nameof(PlacementFileRoundTrips), PlacementFileRoundTrips);
             }
@@ -937,14 +939,120 @@ namespace EngineSettingsTests
             Eq(DecideSave(true, true, true, LogoutRect, InGame, ref pending, t0).Action, AcWindowPlacementRule.SaveAction.LoginShrink, "Save Layout Now on the login-size window: refused");
         }
 
-        // Source guard: every SetWindowPos on the AC window keeps AC's size (R-20261115-160655-1201).
+        // Source guard: no SetWindowPos on the AC window takes its size from a saved rect
+        // (R-20261115-160655-1201, and 2026-11-21: a saved 1940x1100 stretched a 1600x900 picture).
+        // A call either keeps AC's size (SwpNosize), sizes the window for AC's resolution (the restore
+        // plan's d.Width x d.Height, from the back buffer), or keeps the client area across a borderless
+        // style change (outerW x outerH, from the client rect).
         private static void AcWindowChromeNeverResizes()
         {
             string source = File.ReadAllText(FindUp(Path.Combine("src", "RynthCore.Engine", "UI", "AcWindowChrome.cs")));
             var calls = Regex.Matches(source, @"^\s*(?:=>\s*)?SetWindowPos\(hwnd,[^;]*;", RegexOptions.Multiline | RegexOptions.Singleline);
-            Check(calls.Count >= 2, $"found the SetWindowPos calls ({calls.Count})");
+            Check(calls.Count >= 4, $"found the SetWindowPos calls ({calls.Count})");
+            int sized = 0;
             foreach (Match m in calls)
-                Check(m.Value.Contains("SwpNosize"), "SetWindowPos keeps AC's size: " + Regex.Replace(m.Value.Trim(), @"\s+", " "));
+            {
+                string call = Regex.Replace(m.Value.Trim(), @"\s+", " ");
+                bool keepsSize = call.Contains("SwpNosize");
+                bool forResolution = call.Contains("d.Width, d.Height");
+                bool keepsClient = call.Contains("outerW, outerH");
+                if (!keepsSize) sized++;
+                Check(keepsSize || forResolution || keepsClient, "SetWindowPos keeps AC's size or sizes it for AC's resolution: " + call);
+                Check(!Regex.IsMatch(call, @"\b(saved|sv|from|_saved|_reference|rf)\b"), "SetWindowPos never uses a saved rect: " + call);
+            }
+            Eq(sized, 2, "two calls size the window (the restore for AC's resolution, the borderless style change)");
+            // The restore plan's size is AC's resolution plus the frame, never the saved size.
+            string policy = File.ReadAllText(FindUp(Path.Combine("src", "RynthCore.Engine", "UI", "AcWindowChromePolicy.cs")));
+            Check(policy.Contains("OuterForDrawSize(d, current, client)"), "the resize target comes from the back buffer's size");
+        }
+
+        // ── 2026-11-21: the window's size is AC's resolution ────────────────
+        // AC drew at 1600x900 (outer 1606x929 at 96 DPI); the saved rect was 1940x1100 (client 1934x1071).
+
+        private static readonly Size Draw1600 = new(1600, 900);
+        private static readonly Rect At1600 = new(200, 100, 200 + 1606, 100 + 929);        // AC's own window for 1600x900
+        private static readonly Size Client1600 = new(1600, 900);
+        private static readonly Rect Saved1940 = new(150, 60, 150 + 1940, 60 + 1100);      // the saved, stretched rect
+        private static readonly Rect Stretched1940 = new(150, 60, 150 + 1940, 60 + 1100);
+        private static readonly Size Client1934 = new(1934, 1071);
+
+        private static void PlacementSizeIsAcsResolution()
+        {
+            // The live case: AC came up at its own size; the saved size is ignored, the position applies.
+            var d = DecideRestore(Saved1940, false, false, At1600, Client1600, Draw1600, S(4), S(4), Screen2560);
+            Eq(d.Action, AcWindowPlacementRule.RestoreAction.Move, "saved 1940x1100, window at AC's 1600x900: moved");
+            Eq((d.X, d.Y, d.Resize), (150, 60, false), "to the saved spot, AC's size kept");
+            Eq(d.SavedSizeIgnored, "saved size 1940x1100 ignored: AC draws at 1600x900", "one plain line for the ignored size");
+
+            // A window that is stretched at the restore (an old build put the saved size back first): once it
+            // held for MismatchHold it is sized back to the resolution plus its frame (6x29 here).
+            Eq(DecideRestore(Saved1940, false, false, Stretched1940, Client1934, Draw1600, S(4), S(4), Screen2560).Action,
+                AcWindowPlacementRule.RestoreAction.Wait, "stretched, held 4 s: AC may still be resizing it");
+            var fix = DecideRestore(Saved1940, false, false, Stretched1940, Client1934, Draw1600, S(10), S(10), Screen2560);
+            Eq((fix.Action, fix.Resize, fix.Width, fix.Height), (AcWindowPlacementRule.RestoreAction.Move, true, 1606, 929),
+                "stretched for 10 s: moved and sized for AC's 1600x900");
+            Eq(fix.SavedSizeIgnored, "saved size 1940x1100 ignored: AC draws at 1600x900", "...and the saved size is said to be ignored");
+            var late = DecideRestore(Saved1940, false, false, Stretched1940, Client1934, Draw1600, S(2), S(61), Screen2560);
+            Eq((late.Action, late.Resize), (AcWindowPlacementRule.RestoreAction.Move, true), "past the watch: no more waiting");
+
+            // Never a saved size: no plan ever carries one.
+            foreach (var (cur, client) in new[] { (At1600, Client1600), (Stretched1940, Client1934) })
+                for (int t = 0; t <= 90; t += 2)
+                {
+                    var p = DecideRestore(Saved1940, false, false, cur, client, Draw1600, S(t), S(t), Screen2560);
+                    Check(!(p.Resize && (p.Width, p.Height) == (1940, 1100)), $"{cur.Width}x{cur.Height} at {t} s: the saved size is never applied");
+                    if (p.Resize) Eq((p.Width - 6, p.Height - 29), (1600, 900), $"{cur.Width}x{cur.Height} at {t} s: a resize is AC's resolution plus the frame");
+                }
+
+            // Borderless (no frame: outer = client): the target is the resolution itself.
+            var borderless = new Rect(0, 0, 1934, 1071);
+            var b = DecideRestore(new Rect(0, 0, 1600, 900), false, false, borderless, new Size(1934, 1071), Draw1600, S(12), S(12), Screen2560);
+            Eq((b.Action, b.Resize, b.Width, b.Height), (AcWindowPlacementRule.RestoreAction.Move, true, 1600, 900), "borderless and stretched: sized to 1600x900 exactly");
+            Eq(b.SavedSizeIgnored, null, "borderless, saved at the resolution: nothing ignored");
+            Eq(OuterForDrawSize(Draw1600, new Rect(0, 0, 1600, 900), new Size(1600, 900)), new Size(1600, 900), "no frame: outer = client");
+            Eq(OuterForDrawSize(Draw1600, Stretched1940, Client1934), new Size(1606, 929), "the frame is kept: 1600x900 + 6x29");
+
+            // A resolution the player picked in AC: the window follows it, not the saved size.
+            var at1920 = new Rect(100, 50, 100 + 1926, 50 + 1109);
+            var r1920 = DecideRestore(At1600, false, false, at1920, new Size(1920, 1080), new Size(1920, 1080), S(4), S(4), Screen2560);
+            Eq((r1920.Action, r1920.Resize, r1920.X, r1920.Y), (AcWindowPlacementRule.RestoreAction.Move, false, 200, 100), "AC at 1920x1080: moved, its size kept");
+            Eq(r1920.SavedSizeIgnored, "saved size 1606x929 ignored: AC draws at 1920x1080", "...the 1600x900 save is the ignored size");
+            var at2560 = new Rect(0, 0, 2566, 1469);
+            var r2560 = DecideRestore(At1600, false, false, at2560, new Size(2560, 1440), new Size(2560, 1440), S(4), S(4), Screen2560);
+            Eq(r2560.Action, AcWindowPlacementRule.RestoreAction.Wait, "AC at 2560x1440, position saved for a much smaller window: waits as before");
+            var r2560late = DecideRestore(At1600, false, false, at2560, new Size(2560, 1440), new Size(2560, 1440), S(61), S(61), Screen2560);
+            Eq((r2560late.Action, r2560late.Resize), (AcWindowPlacementRule.RestoreAction.Skip, false), "...then leaves it where AC put it, at AC's size");
+
+            // The guards still hold with the resolution known.
+            Eq(DecideRestore(Saved1940, true, false, Stretched1940, Client1934, Draw1600, S(30), S(30), Screen2560),
+                RestorePlan.From(DecideRestore(Saved1940, true, false, Stretched1940, S(30), S(30), Screen2560)), "minimised / maximised: the old decision, no resize");
+            Eq(DecideRestore(Saved1940, false, true, Stretched1940, Client1934, Draw1600, S(30), S(30), Screen2560).Resize, false, "exclusive fullscreen: no resize");
+            Eq(DecideRestore(null, false, false, Stretched1940, Client1934, Draw1600, S(30), S(30), Screen2560).Action, AcWindowPlacementRule.RestoreAction.Skip, "nothing saved: nothing done");
+            var parked = new Rect(-32000, -32000, -32000 + 160, -32000 + 28);
+            Eq(DecideRestore(Saved1940, false, false, parked, new Size(0, 0), Draw1600, S(10), S(10), Screen2560).Action, AcWindowPlacementRule.RestoreAction.Wait, "parked: waits");
+            var offscreen = new Rect(2400, 1500, 2400 + 1940, 1500 + 1100);
+            var pulled = DecideRestore(offscreen, false, false, At1600, Client1600, Draw1600, S(4), S(4), Screen2560);
+            Eq((pulled.Action, pulled.Clamped, pulled.X, pulled.Y), (AcWindowPlacementRule.RestoreAction.Move, true, 2560 - 1606 + AcWindowPlacementRule.EdgeSlack, 1560 - 929 + AcWindowPlacementRule.EdgeSlack),
+                "off-screen spot: pulled onto the work area at AC's size, not the saved one");
+
+            // Resolution not known yet: exactly the position-only restore.
+            Eq(DecideRestore(Saved1940, false, false, Stretched1940, Client1934, null, S(4), S(4), Screen2560),
+                RestorePlan.From(DecideRestore(Saved1940, false, false, Stretched1940, S(4), S(4), Screen2560)), "no back buffer yet: position only");
+            Eq(DecideRestore(Saved1940, false, false, Stretched1940, Client1934, new Size(0, 0), S(4), S(4), Screen2560).Resize, false, "an unusable back-buffer size: no resize");
+
+            // The save: a stretched window is never saved; AC's own size is.
+            Eq(SaveRefusedForSize(Client1934, Draw1600), "its client area 1934x1071 is not AC's resolution 1600x900", "stretched: refused");
+            Eq(SaveRefusedForSize(Client1600, Draw1600), null, "at the resolution: no objection");
+            Eq(SaveRefusedForSize(Client1934, null), null, "resolution unknown: no objection (position-only rules)");
+            Eq(SaveRefusedForSize(new Size(1600, 899), Draw1600), "its client area 1600x899 is not AC's resolution 1600x900", "one pixel off is still stretched");
+        }
+
+        // The launcher's shared line for the ignored size (AcWindowPlacementRule.SavedSizeIgnored).
+        private static void SavedSizeIgnoredLine()
+        {
+            Eq(AcWindowPlacementRule.SavedSizeIgnored(1940, 1100, 1606, 929, 1600, 900), "saved size 1940x1100 ignored: AC draws at 1600x900", "the line");
+            Eq(AcWindowPlacementRule.SavedSizeIgnored(1606, 929, 1606, 929, 1600, 900), null, "same size: nothing to say");
+            Eq(AcWindowPlacementRule.SavedSizeIgnored(1608, 931, 1606, 929, 1600, 900), null, "within the 2 px frame wobble: nothing to say");
         }
 
         private static void PlacementFilesArePerClient()

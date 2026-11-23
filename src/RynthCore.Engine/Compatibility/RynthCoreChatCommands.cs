@@ -1266,6 +1266,8 @@ internal static class RynthCoreChatCommands
     /// <summary>
     /// "/rc sense compact on|off | collapse on|off | view full|compact|collapsed": the Sense panel's
     /// look (saved in sense.txt), and the look now; alone, compact / collapse / view say the look now.
+    /// "/rc sense addselected" adds the selected object's name; "/rc sense import [file]" brings a
+    /// Virindi Sense list over (its result is a second line when the file has been read).
     /// </summary>
     private static void SenseLayoutCommand(string args)
     {
@@ -1278,7 +1280,23 @@ internal static class RynthCoreChatCommands
         if (!UI.Data.SenseStore.Loaded)
         {
             UI.Data.SenseStore.EnsureLoadQueued();
-            Fail("Can't change the Sense view yet: its settings are still loading. Try again in a moment.");
+            Fail("Can't change the Sense list or view yet: its settings are still loading. Try again in a moment.");
+            return;
+        }
+        // The list (2026-11-22): the selected object's name, and Virindi Sense's list brought over.
+        if (UI.Data.SenseLayout.IsAddSelected(args))
+        {
+            bool added = UI.Data.SenseStore.AddSelected(out string message);
+            Answer(added, "Sense: " + message, "Sense: " + message);
+            return;
+        }
+        if (UI.Data.SenseLayout.IsImport(args, out string importFile))
+        {
+            bool okToChat = ChatCommandReplies.ToChat(ChatReplyKind.Ok, _origin);
+            bool failToChat = ChatCommandReplies.ToChat(ChatReplyKind.Fail, _origin);
+            Reply("Sense: reading the Virindi Sense list...");
+            UI.Data.SenseStore.ImportVirindiSense(importFile, (text, ok) =>
+                WriteReply("Sense: " + text, ok ? ChatReplyKind.Ok : ChatReplyKind.Fail, ok ? okToChat : failToChat));
             return;
         }
         UI.Data.SenseLayoutAnswer a = UI.Data.SenseLayout.Apply(args, UI.Data.SenseStore.Layout,
@@ -1877,6 +1895,16 @@ internal static class RynthCoreChatCommands
     private static void Reply(string text, ChatReplyKind kind, bool toChat)
     {
         _answered = true;
+        WriteReply(text, kind, toChat);
+    }
+
+    /// <summary>
+    /// The one writer of every reply (the log line, and chat unless a script sent the command).
+    /// Also a command's second line that comes later, off AC's thread (/rc sense import's
+    /// result): <paramref name="toChat"/> worked out when the command ran.
+    /// </summary>
+    private static void WriteReply(string text, ChatReplyKind kind, bool toChat)
+    {
         RynthLog.Compat($"RynthCoreChatCommands: {text}{(toChat ? "" : " (log only: a script's command)")}");
         if (toChat)
             AcMainThreadQueue.EnqueueWriteToChat(ChatCommandReplies.ReplyPrefix + text, ChatCommandReplies.ChatType(kind));

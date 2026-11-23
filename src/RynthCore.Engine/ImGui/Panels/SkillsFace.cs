@@ -18,7 +18,9 @@
 //      PlayerTraining.Raise(defer) queues it for AC's main thread outside the
 //      ImGui frame; raise buttons stay locked until the new values arrive (or 5 s
 //      pass: then the panel says the server hasn't taken it). Train (skill
-//      credits) always asks first.
+//      credits) always asks first. In portal space (a death, the 5 s after
+//      landing) the raise is held and sent once it ends; the panel says
+//      "Queued" meanwhile and the 5 s start then.
 //    - Aelrynth only (ServerInfo.IsAelrynth): skill mastery from the SkillMastery
 //      mod's /mastery-data reply (MasteryFeed). A crown badge with the mastery
 //      points on trained rows that have any; the open row shows points, bonus,
@@ -167,6 +169,7 @@ internal sealed partial class SkillsFace : IImGuiPanel
     private bool _confirmOpenRequested;
     private Vector2 _confirmAt;
     private bool _pending;
+    private const long PendingMs = 5000;              // the wait for the server's answer to a raise or a train
     private long _pendingUntilMs;
     private long _pendingUnassigned;
     private int _pendingCredits;
@@ -359,6 +362,9 @@ internal sealed partial class SkillsFace : IImGuiPanel
 
         if (_pending)
         {
+            // Portal space, a death, the seconds after landing: the raise waits in AcMainThreadQueue
+            // until then, so the 5 s wait for the answer starts once it is let go.
+            _pendingUntilMs = WorldTransitionState.HoldDeadline(_pendingUntilMs, now, PlayerLifecycleLog.InWorldTransition, PendingMs);
             if (snap != null && snap.Version != _pendingVersion
                 && (snap.UnassignedXp != _pendingUnassigned || snap.SkillCredits != _pendingCredits))
                 _pending = false;
@@ -764,11 +770,14 @@ internal sealed partial class SkillsFace : IImGuiPanel
             x += tw + 14;
         }
         long now = Environment.TickCount64;
-        string status = _pending ? "Sent... waiting for the server" : now < _statusUntilMs ? _status : "";
+        // In portal space (a death, the seconds after landing) the raise is held, not lost: say so.
+        bool held = _pending && PlayerLifecycleLog.InWorldTransition;
+        string status = held ? "Queued: it goes to the server a few seconds after you land."
+            : _pending ? "Sent... waiting for the server" : now < _statusUntilMs ? _status : "";
         if (status.Length > 0)
         {
             y += lineH + 2;
-            dl.AddText(new Vector2(start.X, y), _pending ? Teal : _statusColor, status);
+            dl.AddText(new Vector2(start.X, y), held ? Amber : _pending ? Teal : _statusColor, status);
         }
         else if ((!PlayerTraining.Available || !PlayerTraining.TrainAvailable) && _snap != null)
         {
@@ -1500,7 +1509,7 @@ internal sealed partial class SkillsFace : IImGuiPanel
     private void MarkPending(PlayerProgress s, Row? raised, long cost)
     {
         _pending = true;
-        _pendingUntilMs = Environment.TickCount64 + 5000;
+        _pendingUntilMs = Environment.TickCount64 + PendingMs;
         _pendingUnassigned = s.UnassignedXp;
         _pendingCredits = s.SkillCredits;
         _pendingVersion = s.Version;

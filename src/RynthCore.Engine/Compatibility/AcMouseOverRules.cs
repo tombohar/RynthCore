@@ -39,23 +39,45 @@ internal static class AcMouseOverRules
     /// </summary>
     public const int UIElementTypeGmSmartBoxUI = 0x10000014;
 
+    /// <summary>
+    /// The portal-space view: gmSmartBoxUI's child element 0x10000436, a 3D viewport
+    /// (gmSmartBoxUI PostInit 0x004D77C7: GetChildRecursive(0x10000436), DynamicCast 0xD, kept at
+    /// +0x678, with the portal swirl object and its light and camera added). gmSmartBoxUI::UseTime
+    /// (0x004D7A90) shows it (vtable +0x18 with 1) and hides the SmartBox while a teleport is in
+    /// progress (its states 2..5) and hides it again after. It covers the 3D view then, so in
+    /// portal space it is what AC has under the cursor where the world normally is: it stands in
+    /// for the world, not for one of AC's windows. Counted as an AC window, every window drawn
+    /// under AC's UI went click-through for the whole portal (2026-11-20: the DreamWeave Skills
+    /// window took no clicks, scrolls or tab changes in portal space).
+    /// </summary>
+    public const uint ElementIdPortalSpaceView = 0x10000436;
+
     /// <summary>One of the 3D view's element types.</summary>
     public static bool IsWorldType(int elementType) =>
         elementType == UIElementTypeSmartBoxWrapper || elementType == UIElementTypeGmSmartBoxUI;
+
+    /// <summary>
+    /// The 3D view, or what stands in for it: one of its element types, or the portal-space view
+    /// (by its element id, <see cref="ElementIdPortalSpaceView"/>).
+    /// </summary>
+    public static bool IsWorldElement(int elementType, uint elementId) =>
+        IsWorldType(elementType) || elementId == ElementIdPortalSpaceView;
 
     /// <summary>
     /// Classifies one read of UIElementManager. <paramref name="stateReadable"/>: the manager
     /// was known and its fields readable. <paramref name="mouseOutside"/>: its +0x2D4 flag (the
     /// cursor left the client; AC then hit-tests nothing). <paramref name="element"/>: +0x244,
     /// the raw element under the mouse. <paramref name="typeKnown"/>/<paramref name="elementType"/>:
-    /// that element's GetUIElementType, when it could be read safely.
+    /// that element's GetUIElementType, when it could be read safely. <paramref name="elementId"/>:
+    /// its element id (+0x2E4; 0 when it couldn't be read).
     /// </summary>
-    public static AcMouseTarget Classify(bool stateReadable, bool mouseOutside, uint element, bool typeKnown, int elementType)
+    public static AcMouseTarget Classify(bool stateReadable, bool mouseOutside, uint element, bool typeKnown, int elementType,
+        uint elementId = 0)
     {
         if (!stateReadable) return AcMouseTarget.Unknown;
         if (mouseOutside || element == 0) return AcMouseTarget.Nothing;
         if (!typeKnown) return AcMouseTarget.Unknown;
-        return IsWorldType(elementType) ? AcMouseTarget.World : AcMouseTarget.AcWindow;
+        return IsWorldElement(elementType, elementId) ? AcMouseTarget.World : AcMouseTarget.AcWindow;
     }
 
     /// <summary>

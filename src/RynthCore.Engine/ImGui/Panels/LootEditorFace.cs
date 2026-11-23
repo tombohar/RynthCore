@@ -660,7 +660,7 @@ internal sealed class LootEditorFace : IImGuiPanel
 
         // Action badge
         const float badgeW = 64;
-        string badge = LootEditVocabulary.Badge(r.Action, r.KeepCount);
+        string badge = LootEditVocabulary.Badge(r.Action, r.KeepCount, r.PerDayHours);
         uint badgeCol = RynthTheme.Argb(LootEditVocabulary.BadgeArgb(r.Action));
         dl.AddRectFilled(new Vector2(x, p.Y + 3), new Vector2(x + badgeW, p.Y + RowH - 3), r.Enabled ? badgeCol : Faded(badgeCol), 3);
         ImFontPtr f9 = ImGuiFonts.Get(UiFont.Ui9);
@@ -715,7 +715,8 @@ internal sealed class LootEditorFace : IImGuiPanel
         {
             ImGuiNET.ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
             dl.AddRect(new Vector2(x - 2, p.Y), new Vector2(x + textW, p.Y + RowH), BtnBord, 2);
-            SafeImGui.SetTooltip((r.Name.Length == 0 ? "(no name)" : r.Name) + "\n" + r.Summary);
+            SafeImGui.SetTooltip((r.Name.Length == 0 ? "(no name)" : r.Name) + "\n" + r.Summary
+                + (r.PerDayStatus.Length > 0 ? "\nKeep # per day: " + r.PerDayStatus : string.Empty));
         }
         ImGuiNET.ImGui.PopID();
 
@@ -825,6 +826,7 @@ internal sealed class LootEditorFace : IImGuiPanel
         _fields.Clear();
         _nameField.Shown = null;
         _keepField.Shown = null;
+        _hoursField.Shown = null;
     }
 
     private void Apply()
@@ -952,6 +954,10 @@ internal sealed class LootEditorFace : IImGuiPanel
             r.Enabled = !r.Enabled;
         NextLine(p, h + 8);
 
+        // Keep # per day (RynthAi 2026-11-22). Null from an older RynthAi: not offered.
+        if (r.Action == LootEditVocabulary.KeepUpTo && r.PerDayHours != null)
+            PerDayRows(r, w, ro, labelW, h);
+
         // Conditions
         ImFontPtr bold = ImGuiFonts.Get(UiFont.UiBold11);
         p = ImGuiNET.ImGui.GetCursorScreenPos();
@@ -984,6 +990,103 @@ internal sealed class LootEditorFace : IImGuiPanel
                 ClearFields();
             }, 260);
         NextLine(p, h + 4);
+    }
+
+    private const string PerDayTip =
+        "Keep # per day: count what this character picked up, not what the pack holds.\n" +
+        "For items with a pick-up timer that get used or sold (treasure maps, two a day).\n" +
+        "Rolling window: each pickup frees its place that many hours after it was made.\n" +
+        "Counted per character and server; the counts survive reloads and relogs. Also: /ra loot today\n" +
+        "VTank skips the option and reads the rule as a plain Keep #.";
+
+    // The help line, built when the count or window changes (not every frame).
+    private (int Count, int Hours) _perDayHelpKey = (-1, -1);
+    private string _perDayHelp = string.Empty;
+    private string _hoursText = "24";
+    private int _hoursTextValue = -1;
+    private readonly FieldBuffer _hoursField = new();
+
+    /// <summary>
+    /// Keep # per day: [x] Per day  in any [- 24 +] hours; a help line; today's count from RynthAi
+    /// with Reset count (which only forgets this character's pickups: no profile edit).
+    /// </summary>
+    private void PerDayRows(LootEditRuleDto r, float w, bool ro, float labelW, float h)
+    {
+        var dl = ImGuiNET.ImGui.GetWindowDrawList();
+        Vector2 p = ImGuiNET.ImGui.GetCursorScreenPos();
+        float ty = p.Y + (h - ImGuiNET.ImGui.GetFontSize()) * 0.5f;
+        int hours = r.PerDayHours ?? 0;
+        bool on = hours > 0;
+        float x = p.X + labelW;
+        string box = (on ? PhosphorIcons.CheckSquare : PhosphorIcons.Square) + " Per day";
+        float boxW = ButtonWidth(box);
+        if (Button("##perday", box, new Vector2(x, p.Y), new Vector2(boxW, h), on ? Teal : Mute, BtnFill, !ro))
+        {
+            r.PerDayHours = on ? 0 : LootEditVocabulary.PerDayDefaultHours;
+            _hoursField.Shown = null;
+        }
+        SafeImGui.SetItemTooltip(PerDayTip);
+        x += boxW + 8;
+        if (on)
+        {
+            dl.AddText(new Vector2(x, ty), Mute, "in any");
+            x += ImGuiNET.ImGui.CalcTextSize("in any").X + 6;
+            if (_hoursTextValue != hours || _hoursText.Length == 0)
+            {
+                _hoursTextValue = hours;
+                _hoursText = hours.ToString(CultureInfo.InvariantCulture);
+            }
+            if (IconButton("##pd_dec", PhosphorIcons.Minus, new Vector2(x, p.Y), new Vector2(h, h), Teal, BtnFill,
+                    !ro && hours > LootEditVocabulary.PerDayMinHours, font: UiFont.Ui11))
+            { r.PerDayHours = Math.Max(LootEditVocabulary.PerDayMinHours, hours - 1); _hoursField.Shown = null; }
+            x += h + 2;
+            if (Field("##pd_hours", _hoursField, _hoursText, new Vector2(x, p.Y), 44, "24", ro, out string typed, h)
+                && int.TryParse(typed.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int th) && th > 0)
+                r.PerDayHours = Math.Clamp(th, LootEditVocabulary.PerDayMinHours, LootEditVocabulary.PerDayMaxHours);
+            x += 46;
+            if (IconButton("##pd_inc", PhosphorIcons.Plus, new Vector2(x, p.Y), new Vector2(h, h), Teal, BtnFill,
+                    !ro && hours < LootEditVocabulary.PerDayMaxHours, font: UiFont.Ui11))
+            { r.PerDayHours = Math.Min(LootEditVocabulary.PerDayMaxHours, hours + 1); _hoursField.Shown = null; }
+            x += h + 6;
+            dl.AddText(new Vector2(x, ty), Mute, "hours (24 = a day)");
+        }
+        else
+            dl.AddText(new Vector2(x, ty), Mute, "off: counts what the pack holds");
+        NextLine(p, h + 4);
+
+        // Help line (wrapped).
+        if (_perDayHelpKey != (r.KeepCount, hours))
+        {
+            _perDayHelpKey = (r.KeepCount, hours);
+            _perDayHelp = on
+                ? $"Loots at most {r.KeepCount.ToString(CultureInfo.InvariantCulture)} picked up in any {hours.ToString(CultureInfo.InvariantCulture)} h, counted per character; each pickup frees its place {hours.ToString(CultureInfo.InvariantCulture)} h after it was made. Over the count, matching items are left. VTank reads this rule as a plain Keep #."
+                : "Per day counts what this character picked up instead of the pack, for items that get used or sold (treasure maps, two a day).";
+        }
+        p = ImGuiNET.ImGui.GetCursorScreenPos();
+        ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(p.X + labelW, p.Y));
+        ImGuiNET.ImGui.PushTextWrapPos(ImGuiNET.ImGui.GetCursorPos().X + Math.Max(60, w - labelW));
+        Label(_perDayHelp, Mute);
+        ImGuiNET.ImGui.PopTextWrapPos();
+
+        // Today's count (the latest from RynthAi, even while this view has unapplied edits).
+        string status = _ruleSeen?.PerDayStatus ?? r.PerDayStatus;
+        if (on && (_editBase?.PerDayHours ?? 0) > 0 && status.Length > 0)
+        {
+            p = ImGuiNET.ImGui.GetCursorScreenPos();
+            float sx = p.X + labelW;
+            string reset = PhosphorIcons.ArrowCounterClockwise + " Reset count";
+            float resetW = ButtonWidth(reset);
+            float right = p.X + w - resetW;
+            dl.PushClipRect(new Vector2(sx, p.Y), new Vector2(Math.Max(sx + 1, right - 6), p.Y + h), true);
+            dl.AddText(new Vector2(sx, p.Y + (h - ImGuiNET.ImGui.GetFontSize()) * 0.5f), Teal, status);
+            dl.PopClipRect();
+            if (ImGuiNET.ImGui.IsMouseHoveringRect(new Vector2(sx, p.Y), new Vector2(right - 6, p.Y + h))) SafeImGui.SetTooltip(status);
+            if (Button("##pd_reset", reset, new Vector2(right, p.Y), new Vector2(resetW, h), Text, BtnFill))
+                LootEditCommands.Simple("perday_reset", _editIndex, expect: _expect);
+            SafeImGui.SetItemTooltip("Forget this character's pickups for this rule (it counts from 0 again).\nThe profile is not changed. Also: /ra loot today clear <rule>");
+            NextLine(p, h + 4);
+        }
+        ImGuiNET.ImGui.Dummy(new Vector2(0, 4));
     }
 
     private static void FieldLabel(ImDrawListPtr dl, Vector2 p, float h, string text) =>

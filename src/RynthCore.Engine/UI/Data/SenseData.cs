@@ -161,6 +161,68 @@ internal static class SenseStore
         }
     }
 
+    /// <summary>
+    /// The selected object's name onto the list (the panel's "Add selected" button and /rc sense
+    /// addselected): a monster, NPC, item, portal, anything the client has a name for. AC's thread
+    /// (reads the selection and the name snapshot only).
+    /// </summary>
+    public static bool AddSelected(out string message)
+    {
+        uint id = ClientHelperHooks.GetSelectedItemId();
+        if (id == 0) { message = "Select something in game first (a monster, an item...), then Add selected."; return false; }
+        if (!ClientObjectHooks.TryGetSnapshotName(id, out string name) || string.IsNullOrWhiteSpace(name))
+        {
+            message = "The selected object has no name the client knows yet; try again in a moment.";
+            return false;
+        }
+        return Add(name, out message);
+    }
+
+    /// <summary>Where Virindi Sense keeps its list on this PC.</summary>
+    public static string VirindiSensePath =>
+        _virindiSensePath ??= SenseImport.DefaultPath(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+
+    private static string? _virindiSensePath;
+
+    /// <summary>True when Virindi Sense's list is where it keeps it (a file check; not on AC's thread every frame).</summary>
+    public static bool VirindiSenseListExists()
+    {
+        try { return File.Exists(VirindiSensePath); } catch { return false; }
+    }
+
+    /// <summary>
+    /// Reads a Virindi Sense list (<paramref name="file"/>, or its usual place when empty) on
+    /// UiBackgroundWriter and adds its names (SenseImport). <paramref name="done"/> gets the line to
+    /// show and whether it worked, on that thread. Any thread.
+    /// </summary>
+    public static void ImportVirindiSense(string? file, Action<string, bool> done)
+    {
+        if (!_loaded) { done("The watch list is still loading. Try again in a moment.", false); return; }
+        string path = string.IsNullOrWhiteSpace(file) ? VirindiSensePath : file.Trim();
+        UiBackgroundWriter.Enqueue("sense list (import)", () =>
+        {
+            List<string> names;
+            try
+            {
+                if (!File.Exists(path)) { done(SenseImport.NotFound(path), false); return; }
+                names = SenseImport.Parse(File.ReadAllLines(path));
+            }
+            catch (Exception ex)
+            {
+                done($"Couldn't read {path}: {ex.Message}", false);
+                return;
+            }
+            SenseMerge m;
+            lock (Sync)
+            {
+                m = SenseImport.Merge(_terms, names);
+                if (m.Added > 0) Publish(m.Terms);
+            }
+            RynthLog.UI($"Sense: imported {path}: {names.Count} names, {m.Added} added, {m.AlreadyThere} already there, {m.NoRoom} no room");
+            done(SenseImport.Reply(m, names.Count, path), names.Count > 0);
+        });
+    }
+
     public static void SetEnabled(int index, bool enabled)
     {
         lock (Sync)
@@ -181,6 +243,16 @@ internal static class SenseStore
             Array.Copy(cur, 0, next, 0, index);
             Array.Copy(cur, index + 1, next, index, cur.Length - index - 1);
             Publish(next);
+        }
+    }
+
+    /// <summary>Empties the watch list (the gear's "Remove all names").</summary>
+    public static void Clear()
+    {
+        lock (Sync)
+        {
+            if (_terms.Length == 0) return;
+            Publish(Array.Empty<SensePattern>());
         }
     }
 

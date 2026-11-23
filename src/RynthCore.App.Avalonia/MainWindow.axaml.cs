@@ -277,6 +277,7 @@ internal partial class MainWindow : Window
         CheckDecalBridgeButton.Click += async (_, _) => await CheckDecalBridgeAsync();
         RepairDecalButton.Click += async (_, _) => await RepairDecalAsync();
         FixFolderPermissionsButton.Click += async (_, _) => await FixFolderPermissionsAsync();
+        ImportVTankFilesButton.Click += async (_, _) => await ImportVTankFilesAsync();
         AddPluginDllButton.Click += async (_, _) => await AddPluginDllAsync();
         CheckUpdatesButton.Click += async (_, _) => await CheckForUpdatesAsync();
         RollbackButton.Click += async (_, _) => await RollBackAsync();
@@ -417,6 +418,7 @@ internal partial class MainWindow : Window
         InjectAllRunningAcCheckBox.IsChecked = _settings.InjectAllRunningClients;
         SetLoggingLevelSelection(_settings.LoggingLevel);
         OverrideWindowTitleCheckBox.IsChecked = _settings.OverrideWindowTitle;
+        FixPaletteLeakCheckBox.IsChecked = _settings.FixPaletteLeak;
         LaunchStaggerMsBox.Value = _settings.LaunchStaggerMs;
         CrashRelaunchLimitBox.Value = _settings.CrashRelaunchLimitInWindow;
         CrashRelaunchWindowBox.Value = _settings.CrashRelaunchWindowMinutes;
@@ -1670,6 +1672,7 @@ internal partial class MainWindow : Window
         _settings.InjectAllRunningClients = InjectAllRunningAcCheckBox.IsChecked == true;
         _settings.LoggingLevel = GetSelectedLoggingLevel();
         _settings.OverrideWindowTitle = OverrideWindowTitleCheckBox.IsChecked == true;
+        _settings.FixPaletteLeak = FixPaletteLeakCheckBox.IsChecked == true;
         if (LaunchStaggerMsBox.Value is decimal staggerMs)
             _settings.LaunchStaggerMs = (int)staggerMs;
         if (CrashRelaunchLimitBox.Value is decimal crashLimit)
@@ -4877,6 +4880,11 @@ internal partial class MainWindow : Window
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowRect(IntPtr hWnd, out WinRect lpRect);
 
+    // The area AC draws into: its resolution while the launcher leaves the size to AC (no message sent).
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(IntPtr hWnd, out WinRect lpRect);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -5106,6 +5114,11 @@ internal partial class MainWindow : Window
                     // resolution, and a smaller window crops the game and the HUD.
                     SetWindowPos(hwnd, IntPtr.Zero, d.X, d.Y, 0, 0,
                                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                    // 2026-11-21: a saved size that is not the window's is never applied; say so once.
+                    if (GetClientRect(hwnd, out WinRect client)
+                        && AcWindowPlacementRule.SavedSizeIgnored(sv.Width, sv.Height, current.Width, current.Height,
+                               client.Right - client.Left, client.Bottom - client.Top) is string ignored)
+                        LauncherDiag.Info($"WindowPos PID {process.Id} ({accountName}@{serverName}): {ignored}.");
                     LauncherDiag.Info(d.Clamped
                         ? $"WindowPos PID {process.Id} ({accountName}@{serverName}): restored position to ({d.X},{d.Y}), pulled onto the screen from ({sv.X},{sv.Y}); size left to AC ({current.Width}x{current.Height})."
                         : $"WindowPos PID {process.Id} ({accountName}@{serverName}): restored position to ({d.X},{d.Y}); size left to AC ({current.Width}x{current.Height}).");

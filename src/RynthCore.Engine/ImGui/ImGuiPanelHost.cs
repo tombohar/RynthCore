@@ -1248,7 +1248,8 @@ internal static class ImGuiPanelHost
         // Popped out, a panel is always interactive (like the Avalonia pop-out was).
         if (!popped) try { clickThrough = entry.Instance?.ClickThrough ?? false; } catch { }
         // Under AC's UI: where an AC window covers the cursor the click is AC's (unless a press that
-        // began on this panel is still held, so a drag over an AC window isn't dropped).
+        // began on this panel is still held, so a drag over an AC window isn't dropped). In portal space
+        // AC's portal-space view covers the 3D view; AcMouseOver counts it as the world, not a window.
         bool underUi = spec.UnderUi && !popped;
         if (underUi && !clickThrough && !ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left)
             && Compatibility.AcMouseOver.Current() == Compatibility.AcMouseTarget.AcWindow)

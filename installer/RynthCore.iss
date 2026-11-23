@@ -239,9 +239,156 @@ begin
     Log('Decal bridge: per-user step did not start: ' + SysErrorMessage(Code));
 end;
 
+(* -------------------------------------------------------------------------------------
+  VirindiTank files: offer to copy the player's VTank metas (*.met, and metaf's *.af), nav
+  routes (*.nav) and loot profiles (*.utl) into RynthAi's MetaFiles, NavProfiles and
+  LootProfiles, which RynthAi loads as they are. VTank's "--<character>_<server>" state files
+  and character settings (.usd) are not part of this (settings are imported per character in
+  game). Nothing about Decal changes. The same copy is in the launcher (Runtime > Coming from
+  VirindiTank > Import VirindiTank files), which can also pick a folder and keep both copies
+  when RynthAi has a different file of the same name; Setup only ever skips those.
+
+  - Interactive installs only: never with /SILENT or /VERYSILENT (the launcher's updates) or
+    on the /RELAUNCH update path.
+  - Asked once per PC: the answer, Yes or No, is recorded in VTankAskedMarker (in RynthAi's
+    folder, which uninstall never removes), and Setup never asks again while it exists.
+  - Files first: RynthCore.exe --vtank-import scan (src\RynthCore.App\VTankFileImport.cs,
+    tested by tools\VTankFileImportTests) looks at the top level of VTank's folder(s): Decal's
+    VTank entry (read only) and the usual install locations. Nothing new to copy: no question
+    and nothing recorded.
+  - Yes: --vtank-import copy. Never overwrites a file RynthAi has, never changes, moves or
+    deletes anything in a VTank folder. Every copied and skipped file goes to the setup log;
+    one closing message gives the counts.
+  Both commands run as the user who started Setup (their Documents, their files).
+  ------------------------------------------------------------------------------------- *)
+const
+  VTankRynthAiDir = 'C:\Games\RynthSuite\RynthAi';
+  VTankAskedMarker = 'C:\Games\RynthSuite\RynthAi\vtank-import-asked.txt';
+
+function VTankReportValue(const Lines: TArrayOfString; const Key: String): Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+    if Pos(Key + '=', Lines[I]) = 1 then
+    begin
+      Result := StrToIntDef(Copy(Lines[I], Length(Key) + 2, MaxInt), 0);
+      Exit;
+    end;
+end;
+
+function RunVTankImport(const Mode: String; var Lines: TArrayOfString): Boolean;
+var
+  Report: String;
+  Code, I: Integer;
+begin
+  Result := False;
+  Report := ExpandConstant('{tmp}\rynthcore-vtank-import-' + Mode + '.txt');
+  DeleteFile(Report);
+  if not ExecAsOriginalUser(ExpandConstant('{app}\RynthCore.exe'),
+                            '--vtank-import ' + Mode + ' "' + VTankRynthAiDir + '" --report "' + Report + '"',
+                            ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
+  begin
+    Log('VTank import: ' + Mode + ' did not start: ' + SysErrorMessage(Code));
+    Exit;
+  end;
+  Log('VTank import: ' + Mode + ' exit code ' + IntToStr(Code));
+  if not LoadStringsFromFile(Report, Lines) then
+  begin
+    Log('VTank import: no ' + Mode + ' report - nothing more done.');
+    Exit;
+  end;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+    if Pos('log=', Lines[I]) = 1 then
+      Log(Copy(Lines[I], 5, MaxInt));
+  Result := True;
+end;
+
+function VTankCount(N: Integer; const One, Many: String): String;
+begin
+  if N = 1 then
+    Result := '1 ' + One
+  else
+    Result := IntToStr(N) + ' ' + Many;
+end;
+
+procedure VTankAddPart(var List: String; N: Integer; const One, Many: String);
+begin
+  if N <= 0 then Exit;
+  if List <> '' then List := List + ', ';
+  List := List + VTankCount(N, One, Many);
+end;
+
+procedure OfferVTankImport;
+var
+  Scan, Done: TArrayOfString;
+  Found, Answer, Msg: String;
+  Copied, Skipped, Already, Failed: Integer;
+begin
+  if WizardSilent or CmdLineParamExists('/RELAUNCH') then Exit;
+  if FileExists(VTankAskedMarker) then
+  begin
+    Log('VTank import: asked before (' + VTankAskedMarker + ') - not asked again.');
+    Exit;
+  end;
+  if not DirExists(VTankRynthAiDir) then Exit;
+  if not RunVTankImport('scan', Scan) then Exit;
+  if VTankReportValue(Scan, 'new') <= 0 then
+  begin
+    Log('VTank import: no VirindiTank files that RynthAi does not have already - nothing asked.');
+    Exit;
+  end;
+
+  Found := '';
+  VTankAddPart(Found, VTankReportValue(Scan, 'metas'), 'meta', 'metas');
+  VTankAddPart(Found, VTankReportValue(Scan, 'navs'), 'nav route', 'nav routes');
+  VTankAddPart(Found, VTankReportValue(Scan, 'loot'), 'loot profile', 'loot profiles');
+  if MsgBox('RynthCore found your VirindiTank files: ' + Found + '.' + #13#10#13#10 +
+            'Copy them to RynthAi so you can use them there? Files you already have in RynthAi are not replaced, ' +
+            'and nothing in your VirindiTank folder is changed.' + #13#10#13#10 +
+            'You can also do this later from the launcher: Runtime tab, Import VirindiTank files.',
+            mbConfirmation, MB_YESNO) = IDYES then
+    Answer := 'Yes'
+  else
+    Answer := 'No';
+  Log('VTank import: offered ' + Found + '; answer ' + Answer + '.');
+  if not SaveStringToFile(VTankAskedMarker,
+                          'RynthCore Setup asked on ' + GetDateTimeString('yyyy/mm/dd hh:nn', '-', ':') +
+                          ' whether to copy the VirindiTank files (' + Found + ') to RynthAi. Answer: ' + Answer + '.' + #13#10 +
+                          'While this file exists Setup does not ask again.' + #13#10, False) then
+    Log('VTank import: could not record the answer in ' + VTankAskedMarker + ' - Setup may ask again next time.');
+  if Answer <> 'Yes' then Exit;
+
+  WizardForm.StatusLabel.Caption := 'Copying your VirindiTank files to RynthAi...';
+  if not RunVTankImport('copy', Done) then
+  begin
+    MsgBox('RynthCore could not copy your VirindiTank files. Nothing in your VirindiTank folder was changed.',
+           mbError, MB_OK);
+    Exit;
+  end;
+  Copied := VTankReportValue(Done, 'copied');
+  Skipped := VTankReportValue(Done, 'skipped');
+  Failed := VTankReportValue(Done, 'failed');
+  Already := VTankReportValue(Done, 'already');
+  Msg := 'Copied ' + VTankCount(Copied, 'VirindiTank file', 'VirindiTank files') + ' to RynthAi.';
+  if Already > 0 then
+    Msg := Msg + #13#10 + VTankCount(Already, 'file was', 'files were') + ' already in RynthAi.';
+  if Skipped > 0 then
+    Msg := Msg + #13#10 + VTankCount(Skipped, 'file was', 'files were') +
+           ' skipped: RynthAi already has a different file of that name (yours was kept). ' +
+           'The launcher''s Import VirindiTank files button (Runtime tab) can copy them beside yours.';
+  if Failed > 0 then
+    Msg := Msg + #13#10 + VTankCount(Failed, 'file', 'files') + ' could not be copied (the setup log says why).';
+  MsgBox(Msg, mbInformation, MB_OK);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   { After the files, before [Run] (which relaunches the launcher after an update). }
   if CurStep = ssPostInstall then
+  begin
     RegisterDecalBridge;
+    OfferVTankImport;
+  end;
 end;

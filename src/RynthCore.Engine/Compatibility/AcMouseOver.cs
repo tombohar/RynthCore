@@ -39,6 +39,13 @@
 //  (or `/rc acmouse watch` for 20 s of changes in chat) names what AC has
 //  under the cursor; Identify is the one place that decides.
 //
+//  Portal space (2026-11-20): gmSmartBoxUI::UseTime (0x004D7A90) hides the
+//  SmartBox and shows its child 0x10000436, a 3D viewport holding the portal
+//  swirl (gmSmartBoxUI PostInit 0x004D77C7), over the 3D view. That element
+//  counts as the world too (AcMouseOverRules.ElementIdPortalSpaceView): as an
+//  AC window it made every window drawn under AC's UI click-through for the
+//  whole portal (ImGuiPanelHost: underUi + AcWindow = NoInputs).
+//
 //  Threads: AC's main thread only (EndScene and the UI detours run there);
 //  anything else gets Unknown. Every read goes through the memory probe first.
 // ============================================================================
@@ -102,7 +109,7 @@ internal static unsafe class AcMouseOver
                 if (ClientObjectHooks.IsReadableSpan(s.Element + ElementIdOffset, 4))
                     s.ElementId = *(uint*)(s.Element + ElementIdOffset);
             }
-            s.Target = Identify(readable, outside, s.Element, s.TypeKnown, s.Type);
+            s.Target = Identify(readable, outside, s.Element, s.TypeKnown, s.Type, s.ElementId);
         }
         catch
         {
@@ -112,11 +119,12 @@ internal static unsafe class AcMouseOver
     }
 
     /// <summary>
-    /// The one decision: the 3D view is gmSmartBoxUI (type 0x10000014) or its SmartBox wrapper (0x10000030);
-    /// any other element AC reports is one of its windows; nothing readable is Unknown.
+    /// The one decision: the 3D view is gmSmartBoxUI (type 0x10000014) or its SmartBox wrapper (0x10000030),
+    /// and in portal space the portal-space view (element 0x10000436); any other element AC reports is one
+    /// of its windows; nothing readable is Unknown.
     /// </summary>
-    private static AcMouseTarget Identify(bool readable, bool outside, IntPtr element, bool typeKnown, int type)
-        => AcMouseOverRules.Classify(readable, outside, (uint)element.ToInt32(), typeKnown, type);
+    private static AcMouseTarget Identify(bool readable, bool outside, IntPtr element, bool typeKnown, int type, uint id)
+        => AcMouseOverRules.Classify(readable, outside, (uint)element.ToInt32(), typeKnown, type, id);
 
     /// <summary>The element's UIElement type (vtable +0x98), asked once per class. Main thread.</summary>
     private static bool TryGetType(IntPtr element, out int type)

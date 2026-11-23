@@ -109,6 +109,7 @@ internal static unsafe class PhosphorIcons
     public const string Path = "\uE39C";
     public const string PencilSimple = "\uE3B4";
     public const string PersonSimpleRun = "\uE730";
+    public const string Pause = "\uE39E";
     public const string Play = "\uE3D0";
     public const string Package = "\uE390";
     public const string Plus = "\uE3D4";
@@ -173,6 +174,7 @@ internal static unsafe class PhosphorIcons
         + Binoculars + Crown + Sun
         + CastleTurret + ClockCounterClockwise + GlobeHemisphereWest + Path + Star + Target + User
         + TextAa + Leaf + Keyboard
+        + Pause + PersonSimpleRun
         + PushPin + SlidersHorizontal + Wrench
         + Scroll
         + Moon;

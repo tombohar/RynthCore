@@ -10,7 +10,7 @@ namespace ChatFilterTests;
 /// and a file without it is a file of Regex rules, written back unchanged; every standard filter
 /// catches its example lines and spares player speech.
 /// </summary>
-internal static class Program
+internal static partial class Program
 {
     private static int _checks, _failed;
     private static string _case = "";
@@ -73,6 +73,12 @@ internal static class Program
         OwnSpansQueue();
         OwnSpansOverRules();
         SlowRulesNeedStrikes();
+        PlayerChatLines();
+        PlayerChatInChannels();
+        PlayerChatKeptLonger();
+        PlayerChatFeedSimulated();
+        PlayerChatViewDrops();
+        PlayerChatSettings();
 
         Console.WriteLine();
         Console.WriteLine($"{_checks - _failed}/{_checks} checks passed.");

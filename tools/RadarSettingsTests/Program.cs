@@ -47,6 +47,7 @@ namespace RadarSettingsTests
                 Run("StyleKeysClampAndIgnore", StyleKeysClampAndIgnore);
                 Run("WorldMapBackdropSettings", () => WorldMapBackdropSettings(root));
                 Run("RangeRings", () => RangeRings(root));   // after FileRoundTrip: a file from before keeps the defaults
+                Run("MonsterNamesUpTo", () => MonsterNamesUpTo(root));
                 Run("RoundRadarAndClipping", () => RoundRadarAndClipping(root));
                 Run("ClickThroughWheelZoom", () => ClickThroughWheelZoom(root));
                 Run("SelectionSettingsSave", () => SelectionSettingsSave(root));
@@ -253,6 +254,26 @@ namespace RadarSettingsTests
         // The range rings (2026-11-06): Monster Range on and Ring Range off by default, a settings file
         // from before (FileRoundTrip's, no ring lines) leaves them so, both save under their keys, and
         // the ring is range x zoom pixels round you, drawn only while some of it is on the picture.
+        // R-20261122-165442-286c: "if there are more than 20 monsters on the radar, i don't want to see the names".
+        private static void MonsterNamesUpTo(string root)
+        {
+            Check(RadarSettingsStore.MonsterNamesUpTo == 0, "off by default (and after loading an older file)");
+            Check(RadarSettingsStore.MonsterNamesFor(500), "off: names with any number of monsters");
+            RadarSettingsStore.MonsterNamesUpTo = 20;
+            Check(RadarSettingsStore.MonsterNamesFor(20), "20 monsters at a limit of 20: names");
+            Check(!RadarSettingsStore.MonsterNamesFor(21), "21 monsters: no names");
+            Check(RadarSettingsStore.MonsterNamesFor(0), "none: nothing to hide");
+
+            string saved = Path.Combine(root, "names.txt");
+            Environment.SetEnvironmentVariable("RYNTHCORE_RADAR_SETTINGS", saved);
+            RadarSettingsStore.Save();
+            string text = File.ReadAllText(saved).Replace("\r\n", "\n");
+            Check(text.Contains("monsterNamesUpTo=20\n"), "saved monsterNamesUpTo=20");
+            RadarSettingsStore.MonsterNamesUpTo = 0;
+            RadarSettingsStore.Save();
+            Check(File.ReadAllText(saved).Replace("\r\n", "\n").Contains("monsterNamesUpTo=0\n"), "saved back to 0");
+        }
+
         private static void RangeRings(string root)
         {
             Check(RadarSettingsStore.ShowMonsterRangeRing, "Monster Range ring on by default (and after loading an older file)");

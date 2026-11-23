@@ -294,6 +294,15 @@ internal static unsafe class Program
             var added = EngineLines(3, new Random(1), router).ToList();
             return Time(() => { kept = ChatHistory.Merge(kept, added, n); }, 200);
         });
+        // 2026-11-22: what the pump does now, player chat kept to 5,000 past the history.
+        Row("engine merge, player chat kept (MergeKeep)", "pump, per poll", n =>
+        {
+            var router = MakeRouter();
+            ChatLine[] kept = EngineLines(n, new Random(n), router);
+            var added = EngineLines(3, new Random(1), router).ToList();
+            Func<ChatLine, bool> isPlayer = l => l.IsPlayerChat;
+            return Time(() => { kept = ChatHistory.MergeKeep(kept, added, n, ChatHistory.DefaultPlayerLines, isPlayer); }, 200);
+        });
         Row("first read: whole ring, JSON+parse+route", "pump, once per bind/reload", n =>
         {
             var router = MakeRouter();
@@ -485,7 +494,8 @@ internal static unsafe class Program
         Check("Trim drops the oldest, or nothing", t1 != null && t1.SequenceEqual(new[] { 7, 8, 9, 10 }) && ChatHistory.Trim(old, 10) == null, "");
 #if HAVE_RYNTHCHAT
         var r = new Random(5);
-        var b = new RynthCore.Plugin.RynthChat.ChatBuffer(500);
+        // The main ring alone (0.4.0's player ring off): its own contract, as in 0.3.0.
+        var b = new RynthCore.Plugin.RynthChat.ChatBuffer(500, playerCapacity: 0);
         for (int i = 0; i < 700; i++) { var (t, ty) = MakeLine(r); b.Add(t, ty); }
         ulong[] Seqs(string json) => JsonSerializer.Deserialize(json, RynthChatJsonContext.Default.RynthChatLineDtoArray)!.Select(d => d.Seq).ToArray();
         ulong[] all = Seqs(b.BuildJson(0));
@@ -503,7 +513,7 @@ internal static unsafe class Program
             $"{all.Length} lines, {all[0]}..{all[^1]}; since 790: {since.Length}");
         Check("capacity clamped to 100..10000", b.SetCapacity(5) == 100 && b.SetCapacity(50000) == 10000 && b.Capacity == 10000, "");
         var old500 = new OldChatBuffer(500);
-        var new500 = new RynthCore.Plugin.RynthChat.ChatBuffer(500);
+        var new500 = new RynthCore.Plugin.RynthChat.ChatBuffer(500, playerCapacity: 0);
         var r1 = new Random(9);
         bool same = true;
         for (int i = 0; i < 1200; i++)
@@ -520,6 +530,16 @@ internal static unsafe class Program
                 }
         }
         Check("0.3.0 returns the same lines as 0.2.1 for any 'since'", same, "");
+        // 0.4.0: with the player ring on, a read from 0 gets the player lines the main ring lost, first,
+        // then the main ring; an ordinary poll still gets only the new lines.
+        var withPlayers = new RynthCore.Plugin.RynthChat.ChatBuffer(500);
+        var r2 = new Random(9);
+        for (int i = 0; i < 1200; i++) { var (t, ty) = MakeLine(r2); withPlayers.Add(t, ty); }
+        ulong[] p0 = Seqs(withPlayers.BuildJson(0)), main = Seqs(new500.BuildJson(0)), poll = Seqs(withPlayers.BuildJson(1195));
+        Check("0.4.0 player ring: older player lines first, then the same main ring; polls unchanged",
+            p0.Length > main.Length && p0.Skip(p0.Length - main.Length).SequenceEqual(main) && p0[0] < main[0]
+            && p0.Zip(p0.Skip(1)).All(q => q.Second > q.First) && poll.SequenceEqual(new ulong[] { 1196, 1197, 1198, 1199, 1200 }),
+            $"{p0.Length} lines ({p0.Length - main.Length} older player lines), main {main.Length}");
 #endif
     }
 

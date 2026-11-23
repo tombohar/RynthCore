@@ -73,6 +73,22 @@ internal sealed class ClassicRouteTab : IClassicTab
             y += fileH;
         }
 
+        // VirindiTank navs RynthAi found outside its NavProfiles folder (2026-11-22): one line; the
+        // Nav panel says where they are and has the button that copies them in.
+        if (nav != null && nav.StrayNavCount > 0 && !string.IsNullOrEmpty(nav.StrayNavText))
+        {
+            float hh = Px(16);
+            string hint = nav.StrayNavCount == 1
+                ? "1 VirindiTank nav isn't in the list: the Nav panel copies it in"
+                : $"{nav.StrayNavCount} VirindiTank navs aren't in the list: the Nav panel copies them in";
+            ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(o.X, y));
+            if (ImGuiNET.ImGui.InvisibleButton("##cr_stray", new Vector2(w, hh)))
+                PanelRouter.Toggle("Nav");
+            SafeImGui.SetItemTooltip(nav.StrayNavText + "\nClick for the Nav panel and its Copy button.");
+            TextMid(dl, o.X + Px(3), y, hh, hint, Amber, 10);
+            y += hh;
+        }
+
         // Route type.
         {
             float gw = w / 4;

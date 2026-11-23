@@ -10,6 +10,7 @@ namespace RynthCore.App.Avalonia;
 /// <summary>
 /// Small code-built dialogs for the Decal bridge: the "Check Decal bridge" report (with
 /// Repair / Copy), the yes/no before an administrator step or Repair Decal, and plain messages.
+/// Also used by other launcher actions (Fix folder permissions, Import VirindiTank files).
 /// </summary>
 internal static class DecalBridgeDialog
 {
@@ -31,6 +32,32 @@ internal static class DecalBridgeDialog
             yesButton, noButton);
         bool? result = await dialog.ShowDialog<bool?>(owner);
         return result == true;
+    }
+
+    /// <summary>
+    /// A message with several buttons (selectable text). Returns the index of the button pressed,
+    /// -1 when the window was closed. The first button is the default; the last is Cancel (Esc).
+    /// </summary>
+    public static async Task<int> ChooseAsync(Window owner, string title, string message, params string[] buttons)
+    {
+        var dialog = NewWindow(title, 640);
+        var controls = new Control[buttons.Length];
+        for (int i = 0; i < buttons.Length; i++)
+        {
+            int index = i;
+            var b = new Button { Content = buttons[i], IsDefault = i == 0, IsCancel = i == buttons.Length - 1 };
+            b.Click += (_, _) => dialog.Close(index);
+            controls[i] = b;
+        }
+        dialog.Content = Layout(title,
+            new ScrollViewer
+            {
+                MaxHeight = 460,
+                Content = new SelectableTextBlock { Text = message, TextWrapping = TextWrapping.Wrap, Foreground = Text },
+            },
+            controls);
+        int? result = await dialog.ShowDialog<int?>(owner);
+        return result ?? -1;
     }
 
     /// <summary>A message with one OK button (selectable text, so paths can be copied).</summary>

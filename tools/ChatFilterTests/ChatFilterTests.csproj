@@ -30,6 +30,9 @@
     <!-- 2026-10-19: the retail-chat verdict (a hidden line also stays out of AC's own chat window):
          the real router, standard filters and verdict, with EngineStubs.cs standing in for the engine. -->
     <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatRouting.cs" Link="Engine\ChatRouting.cs" />
+    <!-- 2026-11-22: player chat (the Channels tab, kept longer) and the scrollback's length. -->
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatPlayerText.cs" Link="Engine\ChatPlayerText.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatHistory.cs" Link="Engine\ChatHistory.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatRetailVerdict.cs" Link="Engine\ChatRetailVerdict.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\UI\Panels\RynthChatPresets.cs" Link="Engine\RynthChatPresets.cs" />
     <!-- 2026-10-19: re-reading the shared rynthchat_settings.json when another client saved it. -->

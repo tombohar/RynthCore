@@ -54,6 +54,11 @@ internal sealed class NavPayload
     /// <summary>Map editing commands RynthAi understands (addPointAt, movePointTo, setActive): 1 from
     /// RynthAi 2026-10-12. Older plugins omit it (0) and the Dungeon Map doesn't offer editing.</summary>
     public int MapEdit { get; set; }
+    /// <summary>VirindiTank navs RynthAi found outside its NavProfiles folder (RynthAi 2026-11-22), and
+    /// the line saying where they are. The Nav face shows them with a "Copy them into NavProfiles"
+    /// button (copyStrayNavs). Older plugins omit both (0 / empty: nothing shown).</summary>
+    public int StrayNavCount { get; set; }
+    public string StrayNavText { get; set; } = string.Empty;
 
     /// <summary>A copy a face may change (its own point list); the points themselves are shared.</summary>
     public NavPayload Clone()

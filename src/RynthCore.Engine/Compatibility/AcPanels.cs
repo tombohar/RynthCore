@@ -30,6 +30,17 @@
 //  anything and the plugin's command runs on the next game tick instead
 //  (AC's toolbar button and key both send it). A command no plugin takes
 //  (the plugin unloaded) drops the claim and opens AC's panel after all.
+//
+//  The pack showing under another panel (2026-11-22: the inventory's 3D
+//  figure drawn over AC's Vitae panel, now and then):
+//  closing a panel that was opened over another one (vitae over the pack)
+//  from outside a UI message - RynthCore's bar or /rc panels on the game
+//  tick - makes AC's container handler re-enter itself and end with its
+//  window hidden, no current panel, and the pack still shown inside; the
+//  next panel AC opens there shows on top of the pack, the paper doll over
+//  both. Each container's current and previous panel (+0x608, +0x60C) are
+//  noted before a close notice and AC's result is repaired after it
+//  (PanelSwapPolicy, which has the addresses and the whole account).
 // ============================================================================
 
 using System;
@@ -54,6 +65,8 @@ internal static unsafe class AcPanels
         [(0x1000004F, 8), (0x10000008, 8), (0x1000004E, 12), (0x10000033, 12), (0x10000054, 12)];
 
     private const int TableOffset = 0x5FC, CountOffset = 0x604, RegionFlagsOffset = 0xA4, VisibleBit = 0x2;
+    // The container's notice handler +0x10 / +0x14: the panel it shows, and the one to bring back when that closes.
+    private const int CurrentOffset = 0x608, PreviousOffset = 0x60C;
     private const int MgrElements = 0x14, MgrElementCount = 0x1C, MaxRegistered = 200_000, MaxPanels = 64;
     private const int ChildCountOffset = 0x120, ChildHeadOffset = 0x124;
 
@@ -137,7 +150,100 @@ internal static unsafe class AcPanels
             }
         }
         catch { /* never in AC's way */ }
-        return ((delegate* unmanaged[Cdecl]<uint, int, byte>)_noticeOriginal)(id, visible);
+        if ((visible & 0xFF) != 0)
+            return ((delegate* unmanaged[Cdecl]<uint, int, byte>)_noticeOriginal)(id, visible);
+
+        // A close: note the containers AC should bring a previous panel back in, repair after (see the header).
+        Span<CloseWatch> watch = stackalloc CloseWatch[Hosts.Length];
+        int watching = 0;
+        try { watching = WatchClose(id, watch); }
+        catch { watching = 0; }
+        byte result = ((delegate* unmanaged[Cdecl]<uint, int, byte>)_noticeOriginal)(id, visible);
+        if (watching > 0)
+        {
+            try { RepairClose(id, watch[..watching]); }
+            catch { /* never in AC's way */ }
+        }
+        return result;
+    }
+
+    /// <summary>A container whose current panel is closing and which has a previous panel to bring back.</summary>
+    private readonly record struct CloseWatch(IntPtr Host, IntPtr Previous, uint PreviousId);
+
+    private static int _repairsLogged;
+
+    /// <summary>Before AC handles the close of panel <paramref name="id"/>: the containers to check after it.</summary>
+    private static int WatchClose(uint id, Span<CloseWatch> into)
+    {
+        using var probe = MemoryProbe.BeginWalk();
+        bool any = false;
+        for (int h = 0; h < Hosts.Length; h++) any |= Valid(h);
+        if (!any) Find();
+        int n = 0;
+        for (int h = 0; h < Hosts.Length && n < into.Length; h++)
+        {
+            if (!Valid(h)) continue;
+            IntPtr host = _found[h];
+            if (!ClientObjectHooks.IsReadableSpan(host, PreviousOffset + 4)) continue;
+            IntPtr closing = EntryOf(host, Hosts[h].Stride, id);
+            if (closing == IntPtr.Zero) continue;
+            nint prev = PanelSwapPolicy.PreviousToWatch(open: false, closing, Marshal.ReadIntPtr(host, CurrentOffset),
+                Marshal.ReadIntPtr(host, PreviousOffset));
+            if (prev == 0) continue;
+            uint prevId = IdOf(host, Hosts[h].Stride, prev);
+            if (prevId == 0) continue;
+            into[n++] = new CloseWatch(host, prev, prevId);
+        }
+        return n;
+    }
+
+    /// <summary>After AC handled the close of panel <paramref name="id"/>: a previous panel left shown in a hidden container is opened properly.</summary>
+    private static void RepairClose(uint id, ReadOnlySpan<CloseWatch> watched)
+    {
+        foreach (CloseWatch w in watched)
+        {
+            if (!ClientObjectHooks.IsReadableSpan(w.Host, PreviousOffset + 4)) continue;
+            IntPtr current = Marshal.ReadIntPtr(w.Host, CurrentOffset);
+            bool shows = ClientObjectHooks.IsReadableSpan(w.Previous, RegionFlagsOffset + 4) && Shows(w.Previous);
+            if (!PanelSwapPolicy.ShouldReopen(w.Previous, current, shows, Replacements.ContainsKey(w.PreviousId))) continue;
+            int k = Interlocked.Increment(ref _repairsLogged);
+            if (k <= 50 || k % 100 == 0)
+                RynthLog.Compat($"AcPanels: closing panel {id} left panel {w.PreviousId} shown in a hidden window with no current panel " +
+                                $"(AC's handler re-entered itself); opened panel {w.PreviousId} again so the window shows only it (#{k}).");
+            Send(w.PreviousId, open: true);
+        }
+    }
+
+    /// <summary>The table entry (panel element) with notice id <paramref name="id"/>, or zero.</summary>
+    private static IntPtr EntryOf(IntPtr host, int stride, uint id)
+    {
+        if (!TryTable(host, stride, out IntPtr table, out int n)) return IntPtr.Zero;
+        for (int i = 0; i < n; i++)
+            if (unchecked((uint)Marshal.ReadInt32(table, i * stride + 4)) == id) return Marshal.ReadIntPtr(table, i * stride);
+        return IntPtr.Zero;
+    }
+
+    /// <summary>The notice id of table entry <paramref name="panel"/>, or 0.</summary>
+    private static uint IdOf(IntPtr host, int stride, IntPtr panel)
+    {
+        if (panel == IntPtr.Zero || !TryTable(host, stride, out IntPtr table, out int n)) return 0;
+        for (int i = 0; i < n; i++)
+            if (Marshal.ReadIntPtr(table, i * stride) == panel)
+            {
+                uint id = unchecked((uint)Marshal.ReadInt32(table, i * stride + 4));
+                return id is > 0 and <= 0xFFFF ? id : 0;
+            }
+        return 0;
+    }
+
+    private static bool TryTable(IntPtr host, int stride, out IntPtr table, out int n)
+    {
+        table = IntPtr.Zero;
+        n = 0;
+        if (!ClientObjectHooks.IsReadableSpan(host, CountOffset + 4)) return false;
+        n = Marshal.ReadInt32(host, CountOffset);
+        table = Marshal.ReadIntPtr(host, TableOffset);
+        return n > 0 && n <= MaxPanels && ClientObjectHooks.IsReadableSpan(table, n * stride);
     }
 
     /// <summary>Game thread: the claimed panels AC asked to open run their plugin's command.</summary>
@@ -161,9 +267,11 @@ internal static unsafe class AcPanels
 
     private static unsafe void Send(uint id, bool open)
     {
+        // Saved, not cleared: a repair sends from inside a notice that may itself be ours.
+        bool was = _bypass;
         _bypass = true;
         try { ((delegate* unmanaged[Cdecl]<uint, int, byte>)_notice)(id, open ? 1 : 0); }
-        finally { _bypass = false; }
+        finally { _bypass = was; }
         _cachedMs = long.MinValue / 2;
     }
 

@@ -10,6 +10,10 @@
 //      (ac_window.<server-character>.txt) and put its POSITION back once after login.
 //      Since 2026-11-15 (report R-20261115-160655-1201) never its size, and a rect is
 //      saved only in the world once it held for 30 s: see AcWindowChromePolicy.
+//      Since 2026-11-21 the window's size is AC's resolution (its D3D back buffer, read in
+//      Tick): a client area that is not that size is resized to it at the restore, a saved
+//      size that differs is ignored (one log line), and a stretched window is never saved.
+//      Borderless windowed keeps the client area where it is (outer = client).
 //      While this is on, the launcher leaves the window's position to the engine.
 //  Original: SilentKelpie (RynthCore PR 6). Decisions live in AcWindowChromePolicy.
 //
@@ -37,6 +41,7 @@ namespace RynthCore.Engine.UI;
 internal static class AcWindowChrome
 {
     private const int GwlStyle = -16;
+    private const int GwlExStyle = -20;
 
     private const uint SwpNosize = 0x0001;
     private const uint SwpNomove = 0x0002;
@@ -71,11 +76,15 @@ internal static class AcWindowChrome
     private static Rect? _reference;
     private static bool _referenceSet;
     private static AcWindowPlacementRule.Pending? _pending;
+    // AC's back-buffer size as (width << 32) | height, 0 = unknown; written by Tick on the render thread.
+    private static long _drawSize;
+    // The last stretched rect the save refused, so it is logged once (under Sync).
+    private static (Size Client, Size Draw)? _refusedLogged;
 
     // ── Frame loop (EndScene): reads + posts only ────────────────────────
 
-    /// <summary>Call from the frame loop; throttled. Never changes the window itself.</summary>
-    public static void Tick(IntPtr hwnd)
+    /// <summary>Call from the frame loop (EndScene, with AC's device); throttled. Never changes the window itself.</summary>
+    public static void Tick(IntPtr hwnd, IntPtr device)
     {
         if (hwnd == IntPtr.Zero) return;
         long now = Environment.TickCount64;
@@ -85,6 +94,12 @@ internal static class AcWindowChrome
 
         try
         {
+            // AC's resolution, for the window's size (2026-11-21): the back buffer it draws into. Read
+            // here because the device belongs to the render thread; the game thread uses the copy.
+            if (EngineSettings.RememberAcWindowPosition)
+                Interlocked.Exchange(ref _drawSize,
+                    ImGuiBackend.DX9Backend.TryGetBackBufferSize(device, out int bw, out int bh) ? ((long)bw << 32) | (uint)bh : 0);
+
             if (!ImGuiBackend.Win32Backend.CanRunOnGameThread)
             {
                 // No WndProc subclass to run window changes from: stay out of the window.
@@ -173,15 +188,13 @@ internal static class AcWindowChrome
         switch (d.Action)
         {
             case ChromeAction.Strip:
-                SetWindowLong(hwnd, GwlStyle, d.NewStyle);
                 SetProp(hwnd, StyleProp, new IntPtr(d.NewMarker));
-                Refresh(hwnd);
+                SetStyleKeepingClient(hwnd, d.NewStyle);
                 RynthLog.UI("AcWindowChrome: borderless windowed on.");
                 break;
             case ChromeAction.Restore:
-                SetWindowLong(hwnd, GwlStyle, d.NewStyle);
                 RemoveProp(hwnd, StyleProp);
-                Refresh(hwnd);
+                SetStyleKeepingClient(hwnd, d.NewStyle);
                 RynthLog.UI("AcWindowChrome: window borders restored.");
                 break;
             case ChromeAction.ClearMarker:
@@ -195,6 +208,38 @@ internal static class AcWindowChrome
     private static void Refresh(IntPtr hwnd)
         => SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
             SwpNomove | SwpNosize | SwpNozorder | SwpNoactivate | SwpFramechanged);
+
+    /// <summary>
+    /// Sets a new style and keeps the client area (AC's picture) the same size in the same place
+    /// (2026-11-21): borderless, the outer rect becomes the client rect (no frame, outer = client);
+    /// with the chrome back, the frame grows around it again. Keeping the outer rect instead, as
+    /// before, grew or shrank the client area by the frame, so AC stretched its picture by a few
+    /// pixels and the overlay was off by as much. Minimised or maximised: the style only.
+    /// </summary>
+    private static void SetStyleKeepingClient(IntPtr hwnd, int newStyle)
+    {
+        RECT client = default;
+        bool keep = !IsIconic(hwnd) && !IsZoomed(hwnd) && GetClientRect(hwnd, out client);
+        var origin = new POINT();
+        keep = keep && ClientToScreen(hwnd, ref origin);
+        SetWindowLong(hwnd, GwlStyle, newStyle);
+        if (keep)
+        {
+            var outer = new RECT
+            {
+                Left = origin.X, Top = origin.Y,
+                Right = origin.X + (client.Right - client.Left), Bottom = origin.Y + (client.Bottom - client.Top),
+            };
+            if (AdjustWindowRectEx(ref outer, newStyle, false, GetWindowLong(hwnd, GwlExStyle)))
+            {
+                int outerW = outer.Right - outer.Left, outerH = outer.Bottom - outer.Top;
+                SetWindowPos(hwnd, IntPtr.Zero, outer.Left, outer.Top, outerW, outerH,
+                    SwpNozorder | SwpNoactivate | SwpFramechanged);
+                return;
+            }
+        }
+        Refresh(hwnd);
+    }
 
     private static void TryRestorePlacement(IntPtr hwnd)
     {
@@ -210,9 +255,13 @@ internal static class AcWindowChrome
             _sizeSinceMs = now;
         }
 
+        if (!GetClientRect(hwnd, out RECT cr)) return;
+        var client = new Size(cr.Right - cr.Left, cr.Bottom - cr.Top);
+        Size? draw = DrawSize();
+
         Rect? saved = LoadSaved(key);
-        var d = DecideRestore(saved, IsIconic(hwnd) || IsZoomed(hwnd),
-            LooksExclusiveFullscreen(hwnd, GetWindowLong(hwnd, GwlStyle)), cur,
+        RestorePlan d = DecideRestore(saved, IsIconic(hwnd) || IsZoomed(hwnd),
+            LooksExclusiveFullscreen(hwnd, GetWindowLong(hwnd, GwlStyle)), cur, client, draw,
             TimeSpan.FromMilliseconds(now - _sizeSinceMs), TimeSpan.FromMilliseconds(now - _restoreWatchStartMs),
             WorkAreas());
         if (d.Action == AcWindowPlacementRule.RestoreAction.Wait) return;   // asked again next tick
@@ -220,20 +269,44 @@ internal static class AcWindowChrome
         // One decision per window, even a skipped one; the HWND carries it across a hot reload.
         SetProp(hwnd, PlacementDoneProp, new IntPtr(1));
         SetReference(saved);
-        if (d.Action == AcWindowPlacementRule.RestoreAction.Move && saved is Rect from)
+        if (d.SavedSizeIgnored != null)
+            RynthLog.UI("AcWindowChrome: " + d.SavedSizeIgnored + ".");
+
+        bool move = d.Action == AcWindowPlacementRule.RestoreAction.Move;
+        if (move || d.Resize)
         {
-            // SWP_NOSIZE: AC sizes its own window from its resolution; a smaller window crops the
-            // picture and leaves the HUD out of reach (R-20261115-160655-1201).
-            SetWindowPos(hwnd, IntPtr.Zero, d.X, d.Y, 0, 0, SwpNosize | SwpNozorder | SwpNoactivate);
+            // The size is never the saved one: SWP_NOSIZE, or AC's resolution plus the window's own
+            // frame when the client area is not that resolution (the picture would be stretched;
+            // a smaller window crops it and leaves the HUD out of reach, R-20261115-160655-1201).
+            uint flags = SwpNozorder | SwpNoactivate | (move ? 0 : SwpNomove);
+            if (d.Resize)
+                SetWindowPos(hwnd, IntPtr.Zero, d.X, d.Y, d.Width, d.Height, flags);
+            else
+                SetWindowPos(hwnd, IntPtr.Zero, d.X, d.Y, 0, 0, flags | SwpNosize);
+        }
+        string size = d.Resize
+            ? FormattableString.Invariant($"resized to {d.Width}x{d.Height} for AC's {draw} (it was {cur.Width}x{cur.Height}, client {client})")
+            : FormattableString.Invariant($"size left to AC ({cur.Width}x{cur.Height})");
+        if (move && saved is Rect from)
+        {
             RynthLog.UI(d.Clamped
-                ? FormattableString.Invariant($"AcWindowChrome: restored AC window position to ({d.X},{d.Y}), pulled onto the screen from ({from.Left},{from.Top}); size left to AC ({cur.Width}x{cur.Height}).")
-                : FormattableString.Invariant($"AcWindowChrome: restored AC window position to ({d.X},{d.Y}); size left to AC ({cur.Width}x{cur.Height})."));
+                ? FormattableString.Invariant($"AcWindowChrome: restored AC window position to ({d.X},{d.Y}), pulled onto the screen from ({from.Left},{from.Top}); {size}.")
+                : FormattableString.Invariant($"AcWindowChrome: restored AC window position to ({d.X},{d.Y}); {size}."));
         }
         else if (saved is Rect sv)
         {
             RynthLog.UI(FormattableString.Invariant(
-                $"AcWindowChrome: saved position ({sv.Left},{sv.Top}) not restored ({d.Why}); leaving AC where it is."));
+                $"AcWindowChrome: saved position ({sv.Left},{sv.Top}) not restored ({d.Why}); leaving AC where it is{(d.Resize ? "; " + size : "")}."));
         }
+    }
+
+    /// <summary>AC's resolution (the back buffer's size) as of the last tick, or null while unknown.</summary>
+    private static Size? DrawSize()
+    {
+        long v = Interlocked.Read(ref _drawSize);
+        if (v == 0) return null;
+        var s = new Size((int)(v >> 32), (int)(uint)v);
+        return s.IsUsable ? s : null;
     }
 
     /// <summary>The saved rect for this client, read once per key (null: none, or unreadable).</summary>
@@ -281,9 +354,26 @@ internal static class AcWindowChrome
         bool saveable = !IsIconic(hwnd) && !IsZoomed(hwnd) && !LooksExclusiveFullscreen(hwnd, style);
         bool inWorld = InWorld();
         bool baselineOk = inWorld && saveable && AcWindowPlacementRule.IsCapturable(ToPlacement(cur));
+        if (!GetClientRect(hwnd, out RECT cr)) return;
+        var client = new Size(cr.Right - cr.Left, cr.Bottom - cr.Top);
+        Size? draw = DrawSize();
 
         lock (Sync)
         {
+            // 2026-11-21: a window whose client area is not AC's resolution (a stretched picture) is
+            // never saved, so its size can't become "the" size; nothing is left pending either.
+            if (inWorld && saveable && SaveRefusedForSize(client, draw) is string refused)
+            {
+                _pending = null;
+                if (_refusedLogged != (client, draw!.Value))
+                {
+                    _refusedLogged = (client, draw.Value);
+                    RynthLog.UI(FormattableString.Invariant(
+                        $"AcWindowChrome: not saving the window at {cur.Width}x{cur.Height}: {refused}."));
+                }
+                return;
+            }
+
             // After a hot reload the restore was decided by the old engine: start from the saved rect.
             if (!_referenceSet) SetReference(LoadSaved(key));
             if (_reference is null && !force)
@@ -450,6 +540,9 @@ internal static class AcWindowChrome
     private struct RECT { public int Left, Top, Right, Bottom; }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct MONITORINFO
     {
         public int cbSize;
@@ -472,6 +565,15 @@ internal static class AcWindowChrome
 
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    private static extern bool AdjustWindowRectEx(ref RECT lpRect, int dwStyle, bool bMenu, int dwExStyle);
 
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr hWnd);

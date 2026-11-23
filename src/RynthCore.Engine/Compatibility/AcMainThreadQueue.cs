@@ -272,6 +272,16 @@ internal static class AcMainThreadQueue
         _ => false,
     };
 
+    /// <summary>
+    /// Kept through a world transition (held while it lasts, then run, not dropped): the teardown
+    /// group, and a raise (Train). A raise is the player's own click on a Skills window (the engine's
+    /// Skills panel, a plugin's through TrainingApi), a CM_Train game action that reads and changes no
+    /// world object, and ACE takes it whenever it lands (Player.HandleActionRaise* / TrainSkill check
+    /// only the XP or the credits). Dropped, a raise clicked in portal space was lost with no word to
+    /// the player (2026-11-20); the panels now say it waits for the landing.
+    /// </summary>
+    private static bool KeptThroughTransition(in Entry e) => IsTeardown(e) || e.Kind == ActionKind.Train;
+
     // World-transition drops: counted, and folded into the rate-limited stale summary line.
     private static long _transitionDropped;
     public static long TransitionDroppedCount => Interlocked.Read(ref _transitionDropped);
@@ -734,7 +744,7 @@ internal static class AcMainThreadQueue
             if (gestureSafeOnly && !RunsDuringGesture(e.Kind)) break;
             _ring.Pop();
             long age = runAt - e.At;
-            if (PlayerLifecycleLog.DecideQueued(runAt, e.At, IsTeardown(e)) == WorldTransitionState.Verdict.Drop)
+            if (PlayerLifecycleLog.DecideQueued(runAt, e.At, KeptThroughTransition(e)) == WorldTransitionState.Verdict.Drop)
             {
                 NoteTransitionDrop(Describe(e), age);
                 if (e.Kind == ActionKind.SalvageDirect) TakeSalvageDirectList(e.B);   // free its list slot

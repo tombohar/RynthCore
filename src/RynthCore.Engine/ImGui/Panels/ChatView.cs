@@ -393,21 +393,7 @@ internal sealed class ChatView
         _seenLinesVersion = snap.Version;
 
         // Drop lines the source no longer keeps, then add the new ones.
-        long oldest = lines.Length > 0 ? lines[0].Id : long.MaxValue;
-        int drop = 0;
-        while (drop < _vis.Count && _vis[drop].Id < oldest) drop++;
-        if (drop > 0 && !_selDragging)
-        {
-            if (!Following)
-                for (int i = 0; i < drop; i++) _droppedAbove += _h[i];
-            _vis.RemoveRange(0, drop);
-            _h.RemoveRange(0, drop);
-            _lay.RemoveRange(0, drop);
-            _heightsFrom = Math.Max(0, _heightsFrom - drop);
-            _measuredFrom = Math.Max(0, _measuredFrom - drop);
-            if (_selAnchor >= 0) { _selAnchor -= drop; _selEnd -= drop; if (_selAnchor < 0 || _selEnd < 0) ClearSelection(); }
-            _topsDirty = true;
-        }
+        if (!_selDragging) DropGone(lines);
         foreach (ChatLine line in lines)
         {
             if (line.Id <= _lastId) continue;
@@ -420,6 +406,65 @@ internal sealed class ChatView
             _topsDirty = true;
         }
     }
+
+    /// <summary>
+    /// Takes out the shown lines the source no longer keeps. Until 2026-11-22 those were always the
+    /// oldest (a prefix below the source's first Id). Since player chat is kept longer than the rest
+    /// (ChatHistory.MergeKeep), the source can keep an old tell and drop the combat line after it,
+    /// so the check is by Id, both lists in Id order: one walk, as long as the source.
+    /// Scrolled up, the view moves up by the height of what left above it, so the lines being read
+    /// stay put.
+    /// </summary>
+    private void DropGone(ChatLine[] lines)
+    {
+        int n = _vis.Count;
+        if (n == 0) return;
+        ChatHistory.FindGone(_vis, lines, LineId, _gone);
+        if (_gone.Count == 0) return;
+        int write = 0, g = 0;
+        float y = 0f, viewTop = _lastScrollY;
+        bool follow = Following, selGone = false;
+        int selLo = Math.Min(_selAnchor, _selEnd), selHi = Math.Max(_selAnchor, _selEnd);
+        int removedBeforeAnchor = 0, removedBeforeEnd = 0, removedBeforeHeights = 0, removedBeforeMeasured = 0;
+        for (int i = 0; i < n; i++)
+        {
+            float h = _h[i];
+            if (g < _gone.Count && _gone[g] == i)
+            {
+                g++;
+                if (!follow && y + h <= viewTop) _droppedAbove += h;
+                if (_selAnchor >= 0)
+                {
+                    if (i < _selAnchor) removedBeforeAnchor++;
+                    if (i < _selEnd) removedBeforeEnd++;
+                    if (i >= selLo && i <= selHi) selGone = true;
+                }
+                if (i < _heightsFrom) removedBeforeHeights++;
+                if (i < _measuredFrom) removedBeforeMeasured++;
+            }
+            else
+            {
+                if (write != i) { _vis[write] = _vis[i]; _h[write] = h; _lay[write] = _lay[i]; }
+                write++;
+            }
+            y += h;
+        }
+        int removed = n - write;
+        _vis.RemoveRange(write, removed);
+        _h.RemoveRange(write, removed);
+        _lay.RemoveRange(write, removed);
+        _heightsFrom = Math.Max(0, _heightsFrom - removedBeforeHeights);
+        _measuredFrom = Math.Max(0, _measuredFrom - removedBeforeMeasured);
+        if (_selAnchor >= 0)
+        {
+            if (selGone) ClearSelection();
+            else { _selAnchor -= removedBeforeAnchor; _selEnd -= removedBeforeEnd; }
+        }
+        _topsDirty = true;
+    }
+
+    private readonly List<int> _gone = new();
+    private static readonly Func<ChatLine, long> LineId = l => l.Id;
 
     /// <summary>The view follows the newest line (auto-scroll on and not scrolled away).</summary>
     private bool Following => ChatModel.AutoScroll && _stick;

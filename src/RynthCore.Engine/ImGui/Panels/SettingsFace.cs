@@ -62,7 +62,20 @@ internal sealed class SettingsFace : IImGuiPanel
     public void OnHidden()
     {
         UiSources.Settings.Unsubscribe();
+        SetDashboardFeed(false);
         _rows.LeaveHotkeys();
+    }
+
+    private const string LootingTab = "Looting";
+    private bool _dashboardFeed;
+
+    /// <summary>Subscribes (once) to RynthAi's dashboard snapshot, or lets it go.</summary>
+    private void SetDashboardFeed(bool on)
+    {
+        if (on == _dashboardFeed) return;
+        _dashboardFeed = on;
+        if (on) { UiSources.RynthAi.Subscribe(); UiSources.RynthAi.RequestRefresh(); }
+        else UiSources.RynthAi.Unsubscribe();
     }
 
     public void Draw()
@@ -178,6 +191,9 @@ internal sealed class SettingsFace : IImGuiPanel
 
         SettingRow[] rows = SettingsSchema.Tabs[_tab].Rows;
         if (SettingsSchema.Tabs[_tab].Name != HotkeysSettingsUi.TabName) _rows.LeaveHotkeys();
+        // Looting's Loot Profile row lists RynthAi's loot profiles from the dashboard snapshot: keep it
+        // polled while that tab shows, even with the dashboard closed.
+        SetDashboardFeed(SettingsSchema.Tabs[_tab].Name == LootingTab);
         for (int i = 0; i < rows.Length; i++)
         {
             SettingRow row = rows[i];

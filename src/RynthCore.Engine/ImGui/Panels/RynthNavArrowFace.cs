@@ -136,10 +136,11 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
             ImGuiPanelHost.Close(Title);
         ImGuiNET.ImGui.SetItemTooltip("Hide the arrow (the RynthNav panel's Arrow tab shows it again)");
 
-        // Bottom row: where to go, Plan, Go, Stop, the route's steps.
+        // Bottom row: where to go, Plan, Go, Pause, Stop, the route's steps.
         var routePos = new Vector2(right - b, rowY);
         var stopPos = routePos - new Vector2(b + gap, 0);
-        var goPos = stopPos - new Vector2(b + gap, 0);
+        var pausePos = stopPos - new Vector2(b + gap, 0);
+        var goPos = pausePos - new Vector2(b + gap, 0);
         var planPos = goPos - new Vector2(b + gap, 0);
         float inputX = origin.X + pad, inputW = planPos.X - gap - inputX;
         string typed = TypedTarget();
@@ -163,9 +164,15 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
             if (typed.Length > 0) RynthNavCommands.Command("go " + typed);
             else if (st?.Arrow is RynthNavArrow ar) RynthNavCommands.Go(ar.Final, ar.FinalNs, ar.FinalEw);
         }
+        bool walking = st?.Goto == true, paused = walking && st!.Paused;
+        if (IconButton("##rna_pause", paused ? PhosphorIcons.Play : PhosphorIcons.Pause, pausePos, new Vector2(b, b), paused ? Amber : Text,
+                paused ? Selected : BtnFill, enabled: walking, border: paused ? Amber : 0, font: UiFont.Ui11) && walking)
+            RynthNavCommands.Command(paused ? "resume" : "pause");
+        SafeImGui.SetItemTooltip(!walking ? "Pause: while RynthNav walks a trip, stop and keep the route on the map"
+            : paused ? "Resume: carry on with the trip from here" : "Pause: stop walking and keep the route on the map (drive by hand meanwhile)");
         if (IconButton("##rna_stop", PhosphorIcons.Stop, stopPos, new Vector2(b, b), Red, BtnFill, font: UiFont.Ui11))
             RynthNavCommands.Move(5);
-        ImGuiNET.ImGui.SetItemTooltip("Stop walking");
+        ImGuiNET.ImGui.SetItemTooltip("Stop walking (ends the trip)");
         if (IconButton("##rna_route", _showRoute ? PhosphorIcons.CaretUp : PhosphorIcons.CaretDown, routePos, new Vector2(b, b), _showRoute ? Teal : Mute,
                 _showRoute ? Selected : BtnFill, enabled: hasRoute, font: UiFont.Ui11))
         {

@@ -193,9 +193,12 @@ internal sealed class RynthNavFace : IImGuiPanel
         const float h = 22;
         bool walking = st?.Goto == true;
         bool stop = walking && _tab != TabGo;
-        float textRight = p.X + w - (stop ? 26 : 6);
+        bool paused = walking && st!.Paused;
+        // Pause sits left of Stop while a goto runs, on every tab (the Go tab's own Stop is in its row).
+        float pauseX = p.X + w - (stop ? 46 : 22);
+        float textRight = walking ? pauseX - 4 : p.X + w - 6;
         dl.AddRectFilled(p, p + new Vector2(w, h), PanelBg, 3);
-        uint col = st == null ? Mute : !walking ? Text
+        uint col = st == null ? Mute : !walking ? Text : paused ? Amber
             : st.GoPhase == "portal" ? Purple : st.GoPhase == "recall" ? Amber : st.GoPhase == "town" ? Teal : RunGreen;
         dl.AddCircleFilled(p + new Vector2(9, h * 0.5f), 3.5f, walking ? col : Mute);
         string text = st == null ? "RynthNav isn't answering (is it loaded?)" : st.StatusLine.Length > 0 ? st.StatusLine : "ready";
@@ -206,11 +209,20 @@ internal sealed class RynthNavFace : IImGuiPanel
         ImGuiNET.ImGui.SetCursorScreenPos(p);
         ImGuiNET.ImGui.InvisibleButton("##rnav_status", new Vector2(Math.Max(1, textRight - p.X), h));
         if (text.Length > 40) SafeImGui.SetItemTooltip(text);
+        if (walking)
+        {
+            if (IconButton("##rnav_status_pause", paused ? PhosphorIcons.Play : PhosphorIcons.Pause, new Vector2(pauseX, p.Y + 1), new Vector2(20, 20),
+                    paused ? Amber : Text, paused ? Selected : BtnFill, border: paused ? Amber : 0, font: UiFont.Ui11))
+                RynthNavCommands.Command(paused ? "resume" : "pause");
+            ImGuiNET.ImGui.SetItemTooltip(paused
+                ? "Resume: carry on with the trip from here (/rnav resume)"
+                : "Pause: stop walking and keep the route on the map; drive by hand meanwhile (/rnav pause)");
+        }
         if (stop)
         {
             if (IconButton("##rnav_status_stop", PhosphorIcons.Stop, new Vector2(p.X + w - 22, p.Y + 1), new Vector2(20, 20), Text, StopBg, font: UiFont.Ui11))
                 RynthNavCommands.Move(5);
-            ImGuiNET.ImGui.SetItemTooltip("Stop walking");
+            ImGuiNET.ImGui.SetItemTooltip("Stop walking (ends the trip)");
         }
         NextLine(p, h + 6);
     }
@@ -497,6 +509,7 @@ internal sealed class RynthNavFace : IImGuiPanel
         ImGuiNET.ImGui.PushFont(ImGuiFonts.Get(UiFont.UiBold11));
         Wrapped(st.RouteHeader, Text, cw);
         ImGuiNET.ImGui.PopFont();
+        DrawOtherWays(st, cw);
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
         for (int i = 0; i < st.Route.Length && i < st.RouteLines.Length; i++)
         {
@@ -600,6 +613,7 @@ internal sealed class RynthNavFace : IImGuiPanel
             if (st.InfoTiles.Length > 0) InfoRow("Tiles", st.InfoTiles, iw);
             InfoRow("Route graph", st.InfoGraph, iw);
             InfoRow("Town Network", st.InfoTownNet, iw);
+            if (st.InfoTimes.Length > 0) InfoRow("Trip times", st.InfoTimes, iw);   // what the trip planner costs teleports with
             InfoRow("Atlas", st.InfoAtlas, iw);
             InfoRow("Navmesh", st.InfoStatus, iw);
         }
@@ -767,6 +781,29 @@ internal sealed class RynthNavFace : IImGuiPanel
     /// Below the route: a name (the place's, to start with) and Save, which writes the trip as a
     /// RynthAi nav route into NavProfiles (/rnav saveroute). A name already taken: Replace.
     /// </summary>
+    /// <summary>
+    /// Another way (RynthNav from 11-19): the next of the ways there, cheapest first; a goto under way
+    /// switches to it. Go this way walks the way shown (Go on the place plans the way chosen too).
+    /// </summary>
+    private static void DrawOtherWays(RynthNavStatus st, float cw)
+    {
+        if (st.RouteWays <= 1) return;
+        Vector2 p = ImGuiNET.ImGui.GetCursorScreenPos();
+        float bw = st.RouteActive ? cw : (cw - 4) * 0.5f;
+        if (Button("##route_next", PhosphorIcons.ArrowRight + " Another way", p, new Vector2(bw, 22), Teal, BtnFill))
+            RynthNavCommands.Command("route next");
+        SafeImGui.SetItemTooltip($"Way {st.RouteWay} of {st.RouteWays}, cheapest first. Shows the next way there"
+            + (st.RouteActive ? ", and the walk switches to it." : "; Go this way walks it.")
+            + "\nEach leaves out a portal or recall the ways before it took.");
+        if (!st.RouteActive)
+        {
+            if (Button("##route_go", PhosphorIcons.PersonSimpleRun + " Go this way", new Vector2(p.X + bw + 4, p.Y), new Vector2(bw, 22), Text, BtnFill))
+                RynthNavCommands.Command("route go");
+            SafeImGui.SetItemTooltip("Walk to " + st.RouteFor + " this way");
+        }
+        NextLine(p, 26);
+    }
+
     private void DrawSaveRoute(RynthNavStatus st, float cw)
     {
         if (!st.HasSave || !st.CanSave) return;

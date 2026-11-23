@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Offline checks for AcPanels' repair of AC's panel container after a close
+    (src\RynthCore.Engine\Compatibility\PanelSwapPolicy.cs, compiled in): the policy itself, and a model of
+    AC's gmPanelUI::RecvNotice_SetPanelVisibility (0x004BD380) with its synchronous element message 0x18
+    re-entering it, driven through the same watch / repair steps as AcPanels.NoticeDetour.
+    No game client. Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>PanelSwapPolicyTests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\PanelSwapPolicy.cs" Link="Engine\PanelSwapPolicy.cs" />
+  </ItemGroup>
+
+</Project>

@@ -37,6 +37,8 @@ internal static partial class Program
         TransitionDiagonalAndBorderWalksNeverHold();
         TransitionTwoLandblockJumpHolds();
         TransitionDrainHoldThenStopsSurvive();
+        TransitionPortalRaiseIsHeldThenSent();
+        TransitionHoldDeadline();
         TransitionValveOpensAfterMaxHold();
         TransitionValveStuckPortalAndReset();
         TransitionGateDisabledNeverHolds();
@@ -272,6 +274,48 @@ internal static partial class Program
         s.Sample(9000, false, false, 0x00AE);   // revived
         Check(s.InTransition(9000 + WorldTransitionState.SettleMs - 1), "settle window after revival");
         Check(!s.InTransition(9000 + WorldTransitionState.SettleMs), "window ends");
+    }
+
+    // 2026-11-20: a raise clicked on a Skills window in portal space was held by the gate and then
+    // dropped with the rest (queued during the transition). AcMainThreadQueue now decides a Train
+    // entry the way it decides a stop (teardown: true): held while the portal lasts, then sent.
+    private static void TransitionPortalRaiseIsHeldThenSent()
+    {
+        _case = "portal raise kept";
+        var s = Started(0x0007);
+        s.Sample(2000, false, true, 0x0007);                 // portal space entered
+        long clickAt = 4000;                                 // the + pressed mid-portal
+        Check(s.Decide(4100, clickAt, true) == WorldTransitionState.Verdict.Hold, "mid-portal the raise is held, not sent");
+        s.Sample(8700, false, false, 0x02E7);                // landed (a landblock jump too)
+        long settled = 8700 + WorldTransitionState.SettleMs;
+        Check(s.Decide(settled - 1, clickAt, true) == WorldTransitionState.Verdict.Hold, "still held through the settle window");
+        Check(s.Decide(settled, clickAt, true) == WorldTransitionState.Verdict.Run, "sent once the gate opens");
+        Check(s.Decide(settled, clickAt, false) == WorldTransitionState.Verdict.Drop,
+            "(an ordinary action queued in portal space is still dropped)");
+    }
+
+    // WorldTransitionState.HoldDeadline: a raise's wait for the server's answer (TrainingApi's Busy, the
+    // Skills panel's lock) doesn't run out while the gate holds the raise unsent.
+    private static void TransitionHoldDeadline()
+    {
+        _case = "hold deadline";
+        const long W = 5000;
+        Check(WorldTransitionState.HoldDeadline(6000, 4000, false, W) == 6000, "no transition: unchanged");
+        Check(WorldTransitionState.HoldDeadline(6000, 4000, true, W) == 9000, "in transition: pushed to a full window from now");
+        Check(WorldTransitionState.HoldDeadline(20_000, 4000, true, W) == 20_000, "never shortened");
+        Check(WorldTransitionState.HoldDeadline(0, 4000, true, W) == 0, "no wait running: none started");
+        Check(WorldTransitionState.HoldDeadline(3000, 4000, true, W) == 3000, "a wait already over stays over");
+        // Held for a whole portal (6.7 s) plus the settle (5 s), checked every frame: the wait ends a full
+        // window after the transition ends, never during it.
+        long until = 1000 + W;
+        long end = 1000 + 11_700;
+        for (long t = 1000; t < end; t += 16)
+        {
+            until = WorldTransitionState.HoldDeadline(until, t, true, W);
+            Check(until > t, $"still waiting at t={t}");
+        }
+        until = WorldTransitionState.HoldDeadline(until, end, false, W);
+        Check(until >= end + W - 16 && until <= end + W, $"the wait ends about a window after the gate opens (until={until}, end={end})");
     }
 
     // The safety valve (review 2026-10-18): a character that keeps reading dead (Health 0 after a

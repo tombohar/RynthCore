@@ -130,12 +130,13 @@ internal sealed class ClassicLootTab : IClassicTab
             ImGuiNET.ImGui.SetCursorScreenPos(rp);
             if (ImGuiNET.ImGui.InvisibleButton("##row", new Vector2(listW - Px(22), rh))) _selected = i;
             if (ImGuiNET.ImGui.IsItemHovered() && !sel) dl.AddRectFilled(rp, p + new Vector2(listW, rh), Hover);
-            SafeImGui.SetItemTooltip(rule.Name + "\n" + rule.Summary + (rule.Conditions > 0 ? $"\n{rule.Conditions} conditions" : ""));
+            SafeImGui.SetItemTooltip(rule.Name + "\n" + rule.Summary + (rule.Conditions > 0 ? $"\n{rule.Conditions} conditions" : "")
+                + (rule.PerDayStatus.Length > 0 ? "\nKeep # per day: " + rule.PerDayStatus : ""));
             ImGuiNET.ImGui.PopID();
             float x = rp.X;
             uint badge = RynthTheme.Argb(LootEditVocabulary.BadgeArgb(rule.Action));
             dl.AddRectFilled(new Vector2(x, p.Y + Px(2)), new Vector2(x + badgeW - Px(4), p.Y + rh - Px(2)), badge, Px(2));
-            TextClip(dl, x + Px(4), p.Y, rh, x + badgeW - Px(6), LootEditVocabulary.Badge(rule.Action, rule.KeepCount), White, 9);
+            TextClip(dl, x + Px(4), p.Y, rh, x + badgeW - Px(6), LootEditVocabulary.Badge(rule.Action, rule.KeepCount, rule.PerDayHours), White, 9);
             x += badgeW;
             TextClip(dl, x, p.Y, rh, x + nameW - Px(4), rule.Name, rule.Enabled ? White : Faint, 10);
             x += nameW;

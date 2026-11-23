@@ -89,8 +89,61 @@ namespace LootAddWireTests
             cmdType.GetProperty("Item")!.SetValue(cmd, bare);
             Check(JsonSerializer.Serialize(cmd, cmdInfo).Contains("\"Choices\":null"), "which is written as null (an older RynthAi ignores the field)");
 
+            PerDayChecks(engine, ctxType, ctx, stateInfo, cmdInfo, cmdType);
+
             Console.WriteLine(_fails == 0 ? $"All {_asserts} checks passed." : $"{_fails} of {_asserts} checks FAILED.");
             return _fails == 0 ? 0 : 1;
+        }
+
+        // Keep # per day (2026-11-22): the rule view's option and count, both ways, and with an older RynthAi.
+        private static void PerDayChecks(Assembly engine, Type ctxType, object ctx, JsonTypeInfo stateInfo, JsonTypeInfo cmdInfo, Type cmdType)
+        {
+            var ruleInfo = (JsonTypeInfo)ctxType.GetProperty("LootEditRuleDto", All)!.GetValue(ctx)!;
+            Type ruleType = engine.GetType(Ns + "LootEditRuleDto", throwOnError: true)!;
+            Type stateType = engine.GetType(Ns + "LootEditStateDto", throwOnError: true)!;
+            Type rowType = engine.GetType(Ns + "LootEditRowDto", throwOnError: true)!;
+            Type vocab = engine.GetType(Ns + "LootEditVocabulary", throwOnError: true)!;
+
+            // RynthAi -> engine: the rule (LootEditRule) and the list row (LootEditRow).
+            object rule = JsonSerializer.Deserialize(
+                "{\"Index\":3,\"Name\":\"Treasure Maps\",\"Action\":10,\"KeepCount\":2,\"PerDayHours\":24,\"PerDayStatus\":\"1 of 2 picked up in the last 24 h, next frees in 5 h\",\"Conditions\":[]}",
+                ruleInfo)!;
+            Check((int?)ruleType.GetProperty("PerDayHours")!.GetValue(rule) == 24, "the rule's per-day window is read");
+            Check((string)ruleType.GetProperty("PerDayStatus")!.GetValue(rule)! == "1 of 2 picked up in the last 24 h, next frees in 5 h", "and its count line");
+            object older = JsonSerializer.Deserialize("{\"Index\":3,\"Name\":\"Maps\",\"Action\":10,\"KeepCount\":2,\"Conditions\":[]}", ruleInfo)!;
+            Check(ruleType.GetProperty("PerDayHours")!.GetValue(older) == null, "an older RynthAi: PerDayHours is null (the option is hidden)");
+
+            object state = JsonSerializer.Deserialize(
+                "{\"Rules\":[{\"Name\":\"Treasure Maps\",\"Action\":10,\"KeepCount\":2,\"PerDayHours\":24,\"PerDayStatus\":\"2 of 2\"},{\"Name\":\"Gems\",\"Action\":10,\"KeepCount\":5}]}",
+                stateInfo)!;
+            var rows = ((System.Collections.IEnumerable)stateType.GetProperty("Rules", All)!.GetValue(state)!).Cast<object>().ToList();
+            Check((int)rowType.GetProperty("PerDayHours")!.GetValue(rows[0])! == 24 && (int)rowType.GetProperty("PerDayHours")!.GetValue(rows[1])! == 0,
+                "rows: the per-day one has its window, a plain Keep # has 0");
+
+            // The badge.
+            MethodInfo badge = vocab.GetMethod("Badge", All)!;
+            string B(int a, int k, int h) => (string)badge.Invoke(null, new object[] { a, k, h })!;
+            Check(B(10, 2, 24) == "KEEP 2/DAY" && B(10, 2, 48) == "KEEP 2/48H" && B(10, 5, 0) == "KEEP 5" && B(1, 0, 24) == "KEEP",
+                $"badges: {B(10, 2, 24)} / {B(10, 2, 48)} / {B(10, 5, 0)} / {B(1, 0, 24)}");
+
+            // Engine -> RynthAi: update_rule carries the window; an edit of it makes the view "changed".
+            MethodInfo clone = ruleType.GetMethod("Clone", All)!, same = ruleType.GetMethod("SameAs", All)!;
+            object edit = clone.Invoke(rule, null)!;
+            Check((bool)same.Invoke(edit, new[] { rule })!, "a clone is the same rule");
+            ruleType.GetProperty("PerDayHours")!.SetValue(edit, 0);
+            Check(!(bool)same.Invoke(edit, new[] { rule })!, "turning Per day off is an edit");
+            ruleType.GetProperty("PerDayHours")!.SetValue(edit, 24);
+            ruleType.GetProperty("PerDayStatus")!.SetValue(edit, "something else");
+            Check((bool)same.Invoke(edit, new[] { rule })!, "the count line is not an edit");
+            ruleType.GetProperty("PerDayHours")!.SetValue(edit, 0);
+            object cmd = Activator.CreateInstance(cmdType, nonPublic: true)!;
+            cmdType.GetProperty("Op")!.SetValue(cmd, "update_rule");
+            cmdType.GetProperty("Rule")!.SetValue(cmd, edit);
+            string cj = JsonSerializer.Serialize(cmd, cmdInfo);
+            Check(cj.Contains("\"PerDayHours\":0"), "update_rule writes the window RynthAi's LootEditRule reads: " + cj);
+            object fromOlder = clone.Invoke(older, null)!;
+            cmdType.GetProperty("Rule")!.SetValue(cmd, fromOlder);
+            Check(JsonSerializer.Serialize(cmd, cmdInfo).Contains("\"PerDayHours\":null"), "with an older RynthAi's rule it writes null (RynthAi keeps its own)");
         }
     }
 }
