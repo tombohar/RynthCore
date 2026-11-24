@@ -71,5 +71,13 @@ internal static class PluginContractVersion
     /// <summary>The API version whose ArmConfirmation takes the leave-below (sticky) flag.</summary>
     public const uint ConfirmationLeaveBelow = 97;
 
-    public const uint Current = 97;
+    // v98: no table change. Runtime\PluginShared's RynthCore.LootSdk gained Keep # per day (VTankLootRule.PerDayHours,
+    //      LootPerDay, LootEditSession.Say; 2026.11.23.1). Release plugins ship alone and bind PluginShared's copy,
+    //      so a RynthAi built against it threw MissingMethodException on a 2026.11.19.1 core and turned looting off.
+    //      The number had stayed 97, so the launcher let it install there (2026.11.23.3). A changed public surface in
+    //      a PluginShared assembly needs an API bump, like a table change.
+    /// <summary>The API version whose PluginShared RynthCore.LootSdk has Keep # per day.</summary>
+    public const uint LootSdkPerDay = 98;
+
+    public const uint Current = 98;
 }
