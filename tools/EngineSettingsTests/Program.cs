@@ -70,6 +70,7 @@ namespace EngineSettingsTests
                 Run(nameof(PlacementSaveNeedsAStableInWorldRect), PlacementSaveNeedsAStableInWorldRect);
                 Run(nameof(AcWindowChromeNeverResizes), AcWindowChromeNeverResizes);
                 Run(nameof(PlacementSizeIsAcsResolution), PlacementSizeIsAcsResolution);
+                Run(nameof(BorderlessFullScreenFillsMonitor), BorderlessFullScreenFillsMonitor);
                 Run(nameof(SavedSizeIgnoredLine), SavedSizeIgnoredLine);
                 Run(nameof(PlacementFilesArePerClient), PlacementFilesArePerClient);
                 Run(nameof(PlacementFileRoundTrips), PlacementFileRoundTrips);
@@ -956,11 +957,14 @@ namespace EngineSettingsTests
                 bool keepsSize = call.Contains("SwpNosize");
                 bool forResolution = call.Contains("d.Width, d.Height");
                 bool keepsClient = call.Contains("outerW, outerH");
+                bool fillsMonitor = call.Contains("fill.Width, fill.Height");   // borderless full screen (2026-11-26)
                 if (!keepsSize) sized++;
-                Check(keepsSize || forResolution || keepsClient, "SetWindowPos keeps AC's size or sizes it for AC's resolution: " + call);
+                Check(keepsSize || forResolution || keepsClient || fillsMonitor, "SetWindowPos keeps AC's size or sizes it for AC's resolution: " + call);
                 Check(!Regex.IsMatch(call, @"\b(saved|sv|from|_saved|_reference|rf)\b"), "SetWindowPos never uses a saved rect: " + call);
             }
-            Eq(sized, 2, "two calls size the window (the restore for AC's resolution, the borderless style change)");
+            Eq(sized, 3, "three calls size the window (the restore for AC's resolution, the borderless style change, borderless full screen)");
+            // The full screen rect is the monitor's, from BorderlessFill: never a saved rect.
+            Check(Regex.IsMatch(source, @"BorderlessFill(Needed)?\(outer, client, DrawSize\(\), monitor\)"), "the full screen rect comes from the monitor");
             // The restore plan's size is AC's resolution plus the frame, never the saved size.
             string policy = File.ReadAllText(FindUp(Path.Combine("src", "RynthCore.Engine", "UI", "AcWindowChromePolicy.cs")));
             Check(policy.Contains("OuterForDrawSize(d, current, client)"), "the resize target comes from the back buffer's size");
@@ -1045,6 +1049,54 @@ namespace EngineSettingsTests
             Eq(SaveRefusedForSize(Client1600, Draw1600), null, "at the resolution: no objection");
             Eq(SaveRefusedForSize(Client1934, null), null, "resolution unknown: no objection (position-only rules)");
             Eq(SaveRefusedForSize(new Size(1600, 899), Draw1600), "its client area 1600x899 is not AC's resolution 1600x900", "one pixel off is still stretched");
+        }
+
+        // ── 2026-11-26: borderless full screen fills its monitor ────────────
+        // Discord 11-26: since 2026.11.23.1 a 1920x1080 game made borderless kept its picture at (3,26),
+        // under where the caption had been: a gap at the top and the taskbar showing.
+
+        private static readonly Rect Monitor1080 = new(0, 0, 1920, 1080);
+        private static readonly Rect Monitor2Right = new(1920, 0, 1920 + 2560, 1440);   // a second monitor
+        private static readonly Size Draw1080 = new(1920, 1080);
+
+        private static void BorderlessFullScreenFillsMonitor()
+        {
+            // The report: AC at the monitor's resolution, its framed window at (0,0) (client at (3,26)).
+            var framed = new Rect(0, 0, 1926, 1109);
+            Eq(BorderlessFill(framed, Draw1080, Draw1080, Monitor1080), Monitor1080, "1920x1080 game on a 1920x1080 monitor: fills the monitor, taskbar included");
+            // The 11.23 result itself (borderless at the client's old spot) is put back on the monitor.
+            var gap = new Rect(3, 26, 3 + 1920, 26 + 1080);
+            Eq(BorderlessFillNeeded(gap, Draw1080, Draw1080, Monitor1080), Monitor1080, "borderless with the caption-high gap: moved back onto the monitor");
+            Eq(BorderlessFillNeeded(Monitor1080, Draw1080, Draw1080, Monitor1080), (Rect?)null, "already exactly on the monitor: nothing to do");
+            // Centred by AC, framed window hanging off every edge: still the monitor it is on.
+            Eq(BorderlessFill(new Rect(-3, -14, 1923, 1095), new Size(1920, 1080), Draw1080, Monitor1080), Monitor1080, "centred framed window: fills");
+            // Windows clamped the framed window, so the client is smaller than the game: the game's size decides.
+            Eq(BorderlessFill(new Rect(0, 0, 1926, 1092), new Size(1920, 1063), Draw1080, Monitor1080), Monitor1080, "clamped framed window: fills");
+            // Back buffer not read yet: the client area decides, and so does a window covering the monitor.
+            Eq(BorderlessFill(framed, Draw1080, null, Monitor1080), Monitor1080, "resolution unknown, client at the monitor's size: fills");
+            Eq(BorderlessFill(new Rect(-8, -31, 1928, 1088), new Size(1920, 1050), null, Monitor1080), Monitor1080, "resolution unknown, framed window covers the monitor: fills");
+            // An older borderless window a few pixels bigger than the monitor (the strip kept the outer rect): snapped exactly.
+            Eq(BorderlessFillNeeded(new Rect(0, 0, 1926, 1109), new Size(1926, 1109), Draw1080, Monitor1080), Monitor1080, "a borderless window past the monitor's edges: snapped onto it");
+            // A game bigger than the monitor: fills (the best a borderless window can do).
+            Eq(BorderlessFill(new Rect(0, 0, 1926, 1109), new Size(1920, 1080), new Size(2560, 1440), Monitor1080), Monitor1080, "game above the monitor's size: fills");
+
+            // The monitor the window is on, not the primary one.
+            var onSecond = new Rect(1920, 0, 1920 + 2566, 1469);
+            Eq(BorderlessFill(onSecond, new Size(2560, 1440), new Size(2560, 1440), Monitor2Right), Monitor2Right, "second monitor: fills that monitor");
+
+            // Normal borderless windowed (2026-11-21) is unchanged: a smaller game keeps its client area.
+            Eq(BorderlessFill(At1600, Client1600, Draw1600, Monitor1080), (Rect?)null, "1600x900 on 1920x1080: no fill, the client area stays");
+            Eq(BorderlessFillNeeded(new Rect(203, 129, 1803, 1029), Client1600, Draw1600, Monitor1080), (Rect?)null, "1600x900 borderless: never moved or resized");
+            Eq(BorderlessFill(new Rect(0, 0, 1926, 1109), Draw1080, Draw1080, new Rect(0, 0, 1920, 1200)), (Rect?)null, "1920x1080 on a 1920x1200 monitor: not full screen, no stretch");
+            Eq(BorderlessFill(new Rect(0, 0, 1926, 1109), new Size(1920, 1080), new Size(1920, 1080), new Rect(0, 0, 2560, 1440)), (Rect?)null, "1920x1080 on 2560x1440: no fill");
+            Eq(BorderlessFill(new Rect(0, 0, 1926, 1109), Draw1080, Draw1080, new Rect(0, 0, 0, 0)), (Rect?)null, "no monitor information: no fill");
+            // One dimension at the monitor's size is not full screen.
+            Eq(BorderlessFill(new Rect(0, 0, 1926, 909), new Size(1920, 880), new Size(1920, 880), Monitor1080), (Rect?)null, "full width, short: no fill");
+
+            // Once filled, the window is what LooksExclusiveFullscreen calls full screen, so the strip is not
+            // repeated and the restore / save stand down (the existing guards).
+            Eq(DecideBorderless(true, 0x00CF0000, 0x00CF0000 & ~BorderChromeMask, true).Action, ChromeAction.None, "filled and ours: no further strip");
+            Eq(DecideRestore(Saved1940, false, true, Monitor1080, Draw1080, Draw1080, S(30), S(30), Screen2560).Resize, false, "filled: the restore never resizes it");
         }
 
         // The launcher's shared line for the ignored size (AcWindowPlacementRule.SavedSizeIgnored).

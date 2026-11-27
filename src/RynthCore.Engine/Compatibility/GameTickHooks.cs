@@ -152,6 +152,9 @@ internal static class GameTickHooks
         // keys reach the toolbar: before this tick. Alloc-free when nothing is queued.
         try { AcShortcuts.Drain(); }
         catch { }
+        // The camera's keys from a plugin (AcCamera, v99), the same moment AC's own camera keys arrive.
+        try { AcCamera.Drain(); }
+        catch { }
 
         // Run AC's own game-logic + physics + animation pass.
         int result;

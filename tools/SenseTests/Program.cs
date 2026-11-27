@@ -25,6 +25,9 @@ internal static class Program
         Matching();
         VirindiSenseList();
         ListCommands();
+        ExactMatching();
+        ExactInTheFile();
+        ExactCommands();
 
         Console.WriteLine($"{_checks} checks, {_failed} failed");
         return _failed == 0 ? 0 : 1;
@@ -301,5 +304,89 @@ internal static class Program
         Check(!SenseLayout.IsImport("imports", out _), "only the word import");
         Check(!SenseLayout.IsLayoutCommand("import") && !SenseLayout.IsLayoutCommand("addselected"), "they aren't look commands");
         Check(SenseLayout.Usage.Contains("addselected", StringComparison.Ordinal) && SenseLayout.Usage.Contains("import [file]", StringComparison.Ordinal), "the usage names them");
+    }
+
+    // ── Exact match (2026-11-26) ───────────────────────────────────────
+
+    private static void ExactMatching()
+    {
+        var drake = new SensePattern("Drake", true, exact: true);
+        Check(drake.Exact && !drake.IsGlob && drake.MatchKind == "exact", "an exact term says so");
+        Check(drake.Matches("Drake") && drake.Matches("drake") && drake.Matches("DRAKE"), "exact: the whole name, any case");
+        Check(!drake.Matches("Dragon's Isle Drake") && !drake.Matches("Drake Hatchling") && !drake.Matches("Drakes"), "exact: not a name that only contains it");
+        Check(drake.Matches(" Drake "), "exact: spaces around the name don't count");
+        Check(!drake.Matches("") && !new SensePattern("", true, exact: true).Matches("Drake"), "exact: empty never matches");
+
+        var literal = new SensePattern("Drake*", true, exact: true);
+        Check(!literal.IsGlob && literal.Matches("drake*") && !literal.Matches("Drake Hatchling"), "exact: * and ? are plain letters");
+
+        var plain = new SensePattern("Drake", true);
+        Check(!plain.Exact && plain.MatchKind == "contains" && plain.Matches("Dragon's Isle Drake"), "a term without Exact still contains (the old behaviour)");
+        Check(new SensePattern("Drake*", true).MatchKind == "wildcards", "wildcards say so");
+
+        SensePattern off = drake.WithEnabled(false);
+        Check(!off.Enabled && off.Exact && off.Text == "Drake", "switching a term off keeps Exact");
+        SensePattern loose = off.WithExact(false);
+        Check(!loose.Exact && !loose.Enabled && loose.Matches("Isle Drake") , "switching Exact off keeps on/off (off terms are skipped by the scan, not by Matches)");
+        Check(ReferenceEquals(drake.WithExact(true), drake) && ReferenceEquals(drake.WithEnabled(true), drake), "no change: the same term");
+        Check(loose.WithExact(true).IsGlob == false && new SensePattern("D?ake", true).WithExact(true).Matches("D?ake")
+              && !new SensePattern("D?ake", true).WithExact(true).Matches("Drake"), "a wildcard term made exact takes its letters as they are");
+        Check(new SensePattern("D?ake", true, exact: true).WithExact(false).Matches("Drake"), "and back to wildcards");
+
+        Check(SenseFile.ExactReply("Drake", true).Contains("exact", StringComparison.Ordinal)
+              && SenseFile.ExactReply("Drake", false).Contains("containing", StringComparison.Ordinal), "the line after the = is clicked");
+    }
+
+    private static void ExactInTheFile()
+    {
+        var terms = new List<SensePattern> { new("Drake", true, exact: true), new("Golem", true), new("Mattekar*", false), new("Olthoi", false, exact: true) };
+        string text = SenseFile.Format(terms, false, false, SenseLayoutMode.Full);
+        Check(text.Contains("term=1|Drake\nexact=Drake", StringComparison.Ordinal) || text.Contains("term=1|Drake\r\nexact=Drake", StringComparison.Ordinal),
+            "an exact term is written as its term line, then an exact line");
+        Check(!text.Contains("exact=Golem", StringComparison.Ordinal) && !text.Contains("exact=Mattekar", StringComparison.Ordinal), "only exact terms get one");
+        SenseFileData back = SenseFile.Parse(Lines(text));
+        Check(back.Terms.Count == 4, $"four terms come back ({back.Terms.Count})");
+        Check(back.Terms[0].Exact && back.Terms[0].Enabled && !back.Terms[1].Exact && !back.Terms[2].Exact && back.Terms[2].IsGlob
+              && back.Terms[3].Exact && !back.Terms[3].Enabled, "Exact comes back on the right terms, with on/off and wildcards");
+
+        // A file from before Exact: every term matches as before.
+        SenseFileData old = SenseFile.Parse(new[] { "alertChat=0", "term=1|Drake", "term=0|Golem*" });
+        Check(old.Terms.TrueForAll(t => !t.Exact) && old.Terms[1].IsGlob, "an older file: no term is exact");
+
+        // An engine from before Exact skips the exact lines and still has every term (as contains): what it keeps.
+        var withoutExact = Lines(text).Where(l => !l.StartsWith("exact=", StringComparison.Ordinal));
+        SenseFileData olderEngine = SenseFile.Parse(withoutExact);
+        Check(olderEngine.Terms.Count == 4 && olderEngine.Terms[0].Text == "Drake" && !olderEngine.Terms[0].Exact,
+            "the term lines alone are the whole list (an older engine reads them as contains terms)");
+
+        // By hand: an exact line before its term, any case, or with no term at all.
+        SenseFileData hand = SenseFile.Parse(new[] { "exact=drake", "term=1|Drake", "exact=  Banderling  ", "exact=", "exact=Drake" });
+        Check(hand.Terms.Count == 2, $"an exact line for a term already there adds nothing ({hand.Terms.Count})");
+        Check(hand.Terms[0].Text == "Drake" && hand.Terms[0].Exact, "an exact line before its term, any case, still makes it exact");
+        Check(hand.Terms[1].Text == "Banderling" && hand.Terms[1].Exact && hand.Terms[1].Enabled, "an exact line alone adds an exact term, on, trimmed");
+
+        var many = new List<string>();
+        for (int i = 0; i < SenseFile.MaxTerms; i++) many.Add("term=1|name" + i);
+        many.Add("exact=one too many");
+        many.Add("exact=name7");
+        SenseFileData full = SenseFile.Parse(many);
+        Check(full.Terms.Count == SenseFile.MaxTerms && full.Terms[7].Exact, "a full list: an exact line still marks its term, and adds none past the cap");
+
+        // The Virindi Sense import: patterns.txt has no match-type field, so its names stay contains.
+        SenseMerge m = SenseImport.Merge(new List<SensePattern> { new("Drake", true, exact: true) }, new[] { "drake", "Sand Caves" });
+        Check(m.Terms[0].Exact && !m.Terms[1].Exact, "importing keeps an exact term exact and adds contains terms, as Virindi Sense matched");
+    }
+
+    private static void ExactCommands()
+    {
+        Check(SenseLayout.IsAddSelected("addselected", out bool e1) && e1, "addselected adds the exact name");
+        Check(SenseLayout.IsAddSelected("add selected exact", out bool e2) && e2, "addselected exact");
+        Check(SenseLayout.IsAddSelected("ADDSEL Contains", out bool e3) && !e3, "addselected contains: a contains term (any case)");
+        Check(SenseLayout.IsAddSelected("add  selected   contains", out bool e4) && !e4, "spacing");
+        Check(!SenseLayout.IsAddSelected("addselected maybe", out _) && !SenseLayout.IsAddSelected("addselectedcontains", out _), "only exact or contains after it");
+        foreach (string ok in new[] { "addselected contains", "addselected exact", "add selected contains" })
+            Check(SenseLayout.IsValidArgs(ok), $"'/rc sense {ok}' runs");
+        Check(!SenseLayout.IsValidArgs("addselected maybe"), "'/rc sense addselected maybe' gets the usage");
+        Check(SenseLayout.Usage.Contains("addselected [contains]", StringComparison.Ordinal), "the usage names contains");
     }
 }

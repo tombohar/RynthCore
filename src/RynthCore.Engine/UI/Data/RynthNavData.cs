@@ -85,7 +85,14 @@ internal sealed class RynthNavStatus
     public double AvoidPortalM, AvoidWallM, CornerM;
     public int OpenArrow;
     public RynthNavArrow? Arrow;
+    /// <summary>RynthNav has /rnav clear (from 11-26: "clearCmd"): the arrow window's x sends it, else "arrow off".</summary>
+    public bool HasClear;
     public string RouteFor = "", RouteSummary = "";
+    /// <summary>Where the route goes (RynthNav from 11-26: route "gns"/"gew"; RouteHasGoal false on older ones).</summary>
+    public bool RouteHasGoal;
+    public double RouteGoalNs, RouteGoalEw;
+    /// <summary>The arrow and route as the arrow window picks its one target from them (ArrowTarget).</summary>
+    public ArrowTargetInput Target;
     /// <summary>How long the route takes, seconds (RynthNav from 11-19: route "secs"; -1 = not known, an older RynthNav).</summary>
     public double RouteSecs = -1;
     /// <summary>
@@ -200,6 +207,7 @@ internal sealed class RynthNavStatus
         s.AvoidWallM = Num(r, "avoidWallM");
         s.CornerM = Num(r, "cornerM");
         s.OpenArrow = Int(r, "openArrow");
+        s.HasClear = Int(r, "clearCmd") != 0;
 
         if (r.TryGetProperty("arrow", out var a) && a.ValueKind == JsonValueKind.Object)
         {
@@ -220,6 +228,10 @@ internal sealed class RynthNavStatus
         if (r.TryGetProperty("route", out var route) && route.ValueKind == JsonValueKind.Object)
         {
             s.RouteFor = Str(route, "for");
+            s.RouteHasGoal = route.TryGetProperty("gns", out var gns) && gns.ValueKind == JsonValueKind.Number
+                && route.TryGetProperty("gew", out var gew) && gew.ValueKind == JsonValueKind.Number;
+            s.RouteGoalNs = Num(route, "gns");
+            s.RouteGoalEw = Num(route, "gew");
             s.RouteActive = Int(route, "active") != 0;
             s.RouteIdx = Int(route, "idx", -1);
             var steps = new List<RynthNavRouteStep>();
@@ -270,6 +282,14 @@ internal sealed class RynthNavStatus
         }
         s.Favorites = Places(r, "favs", recall: false);
         s.Recent = Places(r, "recent", recall: false);
+
+        RynthNavArrow? ta = s.Arrow;
+        bool hasRoute = s.Route.Length > 0;
+        RynthNavRouteStep? last = hasRoute ? s.Route[^1] : null;
+        s.Target = new ArrowTargetInput(
+            ta != null, ta?.Final ?? "", ta?.FinalNs ?? 0, ta?.FinalEw ?? 0, ta?.Steps ?? 0,
+            hasRoute, s.RouteFor, s.RouteHasGoal, s.RouteGoalNs, s.RouteGoalEw,
+            last != null, last?.Ns ?? 0, last?.Ew ?? 0);
     }
 
     /// <summary>
@@ -564,6 +584,18 @@ internal static unsafe class RynthNavCommands
 
     public static void Arrow(string name, double ns, double ew) =>
         Command("arrow " + RynthNavStatus.CommandCoord(ns, ew) + " " + name);
+
+    /// <summary>
+    /// The arrow window's x: no target at all. RynthNav from 11-26 has /rnav clear (stops a walk, drops
+    /// the route, arrow off); an older one gets Stop (while walking) and "arrow off".
+    /// </summary>
+    public static void ClearTarget(RynthNavStatus? st)
+    {
+        ArrowTarget.ForgetChat();
+        if (st?.HasClear == true) { Command("clear"); return; }
+        if (st?.Goto == true) Command("stop");
+        Command("arrow off");
+    }
 
     public static void Go(string name, double ns, double ew) =>
         Command("go " + RynthNavStatus.CommandCoord(ns, ew) + " " + name);

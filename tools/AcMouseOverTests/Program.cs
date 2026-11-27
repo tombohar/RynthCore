@@ -23,6 +23,7 @@ internal static class Program
         PortalSpaceViewIsTheWorld();
         FailOpen();
         NothingUnderTheMouse();
+        GameDragsGoThroughUnderUiPanels();
 
         Console.WriteLine();
         Console.WriteLine($"{_checks - _failed}/{_checks} checks passed.");
@@ -118,6 +119,26 @@ internal static class Program
     {
         _case = name;
         Console.WriteLine($"-- {name}");
+    }
+
+    private static void GameDragsGoThroughUnderUiPanels()
+    {
+        // Problem report R-20261126-194457-f7d8: a panel drawn under AC's UI (the DreamWeave Skills
+        // window) sat behind AC's inventory. While the button was down it stopped being click-through,
+        // so every item dragged inside AC's inventory was "released over an ImGui window" and snapped back.
+        Case("under-UI panel behind an AC window: click-through unless its own press is held");
+        Check(AcMouseOverRules.UnderUiPanelClickThrough(AcMouseTarget.AcWindow, leftDown: false, pressBelongsToGame: false),
+            "AC window, no button: click-through");
+        Check(AcMouseOverRules.UnderUiPanelClickThrough(AcMouseTarget.AcWindow, leftDown: true, pressBelongsToGame: true),
+            "AC window, a game press held (an AC inventory drag): click-through, the drop is AC's");
+        Check(!AcMouseOverRules.UnderUiPanelClickThrough(AcMouseTarget.AcWindow, leftDown: true, pressBelongsToGame: false),
+            "AC window, the panel's own press held: the panel keeps its drag");
+
+        Case("under-UI panel over the world (or AC can't tell): the panel takes the mouse");
+        foreach (AcMouseTarget t in new[] { AcMouseTarget.World, AcMouseTarget.Nothing, AcMouseTarget.Unknown })
+            foreach (bool down in new[] { false, true })
+                Check(!AcMouseOverRules.UnderUiPanelClickThrough(t, down, pressBelongsToGame: down),
+                    $"{t}, leftDown={down}: not click-through");
     }
 
     private static void Check(bool ok, string what)

@@ -4,13 +4,17 @@
 //  the client knows about anywhere (not just in radar range) whose name
 //  matches shows up here. Engine only, ImGui only.
 //
-//    add row   a text box (Enter adds), Add, Add selected (the crosshair: the
-//              selected object's name), Import (the file icon: Virindi Sense's
-//              list, Documents\Decal Plugins\Virindi Sense\patterns.txt), the
-//              look buttons, the settings gear, the help mark (2026-11-22)
-//    terms     one chip per term: click it to switch it on/off, X removes it;
-//              past four rows of chips they scroll in a box (an imported list
-//              can be a few hundred names). An empty list offers the import.
+//    add row   a text box (Enter adds), Exact (2026-11-26: the typed name
+//              matches the whole name only), Add, Add selected (the crosshair:
+//              the selected object's name, as an exact term), Import (the file
+//              icon: Virindi Sense's list, Documents\Decal Plugins\Virindi
+//              Sense\patterns.txt), the look buttons, the settings gear, the
+//              help mark (2026-11-22)
+//    terms     one chip per term: click it to switch it on/off, = switches
+//              Exact (lit = whole name only), X removes it; right-click for a
+//              menu with the Exact match checkbox; past four rows of chips they
+//              scroll in a box (an imported list can be a few hundred names).
+//              An empty list offers the import.
 //    status    how many matches among how many known objects (or why none)
 //    rows      direction arrow (relative to where you face), name, kind,
 //              distance, compass point, map coordinates; nearest first; a new
@@ -80,11 +84,12 @@ internal sealed class SenseFace : IImGuiPanel
         "around you (outdoors: your landblock and the ones around it, a few hundred yards, far past the radar), or the whole " +
         "dungeon you are in. Nothing beyond that reaches the client, so no plugin can see it.\n\n" +
         "Terms ignore case. Without * or ? a name only has to contain the term (drake finds Dragon's Isle Drake). " +
-        "With them the whole name must match: Drake* starts with Drake, ? is any one letter.\n\n" +
+        "With them the whole name must match: Drake* starts with Drake, ? is any one letter. " +
+        "Exact (the box by Add, or a name's = button): only that whole name matches, so Drake finds Drake but not Drake Hatchling.\n\n" +
         "The distance shows when you and the object are both outdoors (or in surface buildings), or in the same dungeon. " +
         "Otherwise the row says elsewhere and gives the landblock.\n\n" +
         "Click a row to select it in game. Gear: a chat line or a beep when a new match appears.\n" +
-        "The crosshair adds the selected monster's or item's name. The file icon imports your Virindi Sense list " +
+        "The crosshair adds the selected monster's or item's exact name. The file icon imports your Virindi Sense list " +
         "(Documents\\Decal Plugins\\Virindi Sense\\patterns.txt).\n" +
         "The arrows-in button (or /rc sense compact on) shows just the matches, without the frame.\n" +
         "/rc sense opens and closes this panel.";
@@ -96,6 +101,10 @@ internal sealed class SenseFace : IImGuiPanel
     private long _messageUntilMs;
     private bool _openSettings;
     private bool _flashing;
+    // The add row's Exact box (this session; off, so a typed name matches as before).
+    private bool _addExact;
+    // The term whose right-click menu is open (by text: the list can change under it).
+    private string _menuTerm = "";
     private long _clearArmedUntilMs;
 
     // Compact / collapsed: the mouse is over what the last frame drew (rows, the line, the
@@ -162,17 +171,26 @@ internal sealed class SenseFace : IImGuiPanel
         const float h = 22, iconW = 22;
         string addLabel = PhosphorIcons.Plus + " Add";
         float addW = ButtonWidth(addLabel);
-        float boxW = Math.Max(60, w - addW - iconW * 6 - 28);
+        // Exact (2026-11-26): the next typed name matches the whole name only. A checkbox of its own.
+        string exactLabel = (_addExact ? PhosphorIcons.CheckSquare : PhosphorIcons.Square) + " Exact";
+        float exactW = ButtonWidth(exactLabel);
+        float boxW = Math.Max(60, w - addW - exactW - iconW * 6 - 32);
 
         bool enter = TextBox("##sense_input", _input, start, boxW,
             PhosphorIcons.MagnifyingGlass + " Name to watch for (* and ? wildcards)", out _,
             ImGuiInputTextFlags.EnterReturnsTrue, h);
-        bool add = Button("##sense_add", addLabel, new Vector2(start.X + boxW + 4, start.Y), new Vector2(addW, h), Text, BtnFill,
+        float ex = start.X + boxW + 4;
+        if (Button("##sense_add_exact", exactLabel, new Vector2(ex, start.Y), new Vector2(exactW, h), _addExact ? Teal : Mute, BtnFill))
+            _addExact = !_addExact;
+        SafeImGui.SetItemTooltip(_addExact
+            ? "Exact match is on: the name you add matches only that whole name, any case\n(\"Drake\" finds Drake, not Dragon's Isle Drake). Click for names containing it."
+            : "Exact match is off: the name you add matches every name containing it\n(\"Drake\" also finds Dragon's Isle Drake). Click so it matches the whole name only.\nEach name's = button switches it later.");
+        bool add = Button("##sense_add", addLabel, new Vector2(ex + exactW + 4, start.Y), new Vector2(addW, h), Text, BtnFill,
             enabled: SenseStore.Loaded);
         ImGuiNET.ImGui.SetItemTooltip("Add the name to the watch list (Enter in the box does the same)");
         if (enter || add) AddTerm();
 
-        float gx = start.X + boxW + 4 + addW + 4;
+        float gx = ex + exactW + 4 + addW + 4;
         // Add selected (2026-11-22): the selected monster's or item's name onto the list.
         bool haveSel = SenseStore.Loaded && ClientHelperHooks.GetSelectedItemId() != 0;
         if (IconButton("##sense_addsel", PhosphorIcons.Crosshair, new Vector2(gx, start.Y), new Vector2(iconW, h), Text, BtnFill,
@@ -182,8 +200,8 @@ internal sealed class SenseFace : IImGuiPanel
             ShowMessage(message, ok ? Mute : Amber);
         }
         SafeImGui.SetItemTooltip(haveSel
-            ? "Add selected: watch for the selected object's name (/rc sense addselected)"
-            : "Add selected: select a monster or an item in game, then click here to watch for its name");
+            ? "Add selected: watch for the selected object's exact name (/rc sense addselected;\n/rc sense addselected contains for names containing it)"
+            : "Add selected: select a monster or an item in game, then click here to watch for its exact name");
         gx += iconW + 4;
         // Import Virindi Sense's list (Documents\Decal Plugins\Virindi Sense\patterns.txt).
         if (IconButton("##sense_import", PhosphorIcons.FilePlus, new Vector2(gx, start.Y), new Vector2(iconW, h), Text, BtnFill,
@@ -221,7 +239,7 @@ internal sealed class SenseFace : IImGuiPanel
     private void AddTerm()
     {
         string text = Utf8(_input);
-        bool ok = SenseStore.Add(text, out string message);
+        bool ok = SenseStore.Add(text, out string message, _addExact);
         if (ok) WriteUtf8(_input, "");
         ShowMessage(message, ok ? Mute : Amber);
     }
@@ -275,7 +293,7 @@ internal sealed class SenseFace : IImGuiPanel
             return;
         }
 
-        const float iconW = 18, xW = 16;
+        const float iconW = 18, xW = 16 + EqW;   // the = (Exact) and X segments at the chip's end
         float[] textWidths = ChipTextWidths(terms);
 
         // A long list (an imported one can be a few hundred names) scrolls in a box of a few rows,
@@ -293,7 +311,7 @@ internal sealed class SenseFace : IImGuiPanel
         ImFontPtr iconFont = ImGuiFonts.Get(UiFont.Ui11);
         Vector2 start = ImGuiNET.ImGui.GetCursorScreenPos();
         float x = start.X, y = start.Y;
-        int toggle = -1, remove = -1;
+        int toggle = -1, remove = -1, exactFlip = -1, menu = -1;
         for (int i = 0; i < terms.Length; i++)
         {
             SensePattern t = terms[i];
@@ -307,12 +325,22 @@ internal sealed class SenseFace : IImGuiPanel
             ImGuiNET.ImGui.SetCursorScreenPos(p);
             if (ImGuiNET.ImGui.InvisibleButton("##t", new Vector2(chipW - xW, ChipH))) toggle = i;
             bool hotT = ImGuiNET.ImGui.IsItemHovered();
+            if (hotT && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Right)) menu = i;
             if (hotT)
-                SafeImGui.SetItemTooltip(t.Enabled
-                    ? (t.IsGlob ? "On: the whole name must match (wildcards). Click to switch off." : "On: names containing this match. Click to switch off.")
-                    : "Off. Click to switch on.");
+                SafeImGui.SetItemTooltip((t.Enabled
+                    ? (t.Exact ? "On: only this exact name matches (any case)." : t.IsGlob ? "On: the whole name must match (wildcards)." : "On: names containing this match.") + " Click to switch off."
+                    : "Off. Click to switch on.") + "\nRight-click: Exact match and Remove.");
+            // Exact (2026-11-26): = lit when only the whole name matches; click to switch.
             ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x + chipW - xW, y));
-            if (ImGuiNET.ImGui.InvisibleButton("##x", new Vector2(xW, ChipH))) remove = i;
+            if (ImGuiNET.ImGui.InvisibleButton("##eq", new Vector2(EqW, ChipH))) exactFlip = i;
+            bool hotE = ImGuiNET.ImGui.IsItemHovered();
+            if (hotE && ImGuiNET.ImGui.IsMouseClicked(ImGuiMouseButton.Right)) menu = i;
+            if (hotE)
+                SafeImGui.SetItemTooltip(t.Exact
+                    ? "Exact match: on. Only the whole name \"" + t.Text + "\" matches (any case).\nClick to match every name containing it."
+                    : "Exact match: off. Every name containing \"" + t.Text + "\" matches" + (t.IsGlob ? " its wildcards" : "") + ".\nClick to match only this exact name.");
+            ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(x + chipW - xW + EqW, y));
+            if (ImGuiNET.ImGui.InvisibleButton("##x", new Vector2(xW - EqW, ChipH))) remove = i;
             bool hotX = ImGuiNET.ImGui.IsItemHovered();
             if (hotX) ImGuiNET.ImGui.SetItemTooltip("Remove");
             ImGuiNET.ImGui.PopID();
@@ -326,11 +354,23 @@ internal sealed class SenseFace : IImGuiPanel
             dl.PushClipRect(p, p + new Vector2(chipW - xW, ChipH), true);
             dl.AddText(new Vector2(x + iconW, y + (ChipH - ImGuiNET.ImGui.GetFontSize()) * 0.5f), fg, t.Text);
             dl.PopClipRect();
-            PhosphorIcons.DrawCentered(dl, iconFont, PhosphorIcons.X, new Vector2(x + chipW - xW, y), new Vector2(xW, ChipH),
+            // The = mark: lit (teal) for an exact term, faint for the others.
+            Vector2 eqAt = new(x + chipW - xW, y);
+            if (hotE) dl.AddRectFilled(eqAt + new Vector2(1, 2), eqAt + new Vector2(EqW - 1, ChipH - 2), Lighten(bg), 2);
+            float eqTw = ImGuiNET.ImGui.CalcTextSize("=").X;
+            dl.AddText(new Vector2(eqAt.X + (EqW - eqTw) * 0.5f, y + (ChipH - ImGuiNET.ImGui.GetFontSize()) * 0.5f),
+                t.Exact ? Teal : hotE ? Mute : Faded(Faded(Mute)), "=");
+            PhosphorIcons.DrawCentered(dl, iconFont, PhosphorIcons.X, new Vector2(x + chipW - xW + EqW, y), new Vector2(xW - EqW, ChipH),
                 hotX ? Red : Faded(Mute));
             x += chipW + 4;
         }
         NextLine(start, y - start.Y + ChipH + 4);
+        if (menu >= 0)
+        {
+            _menuTerm = terms[menu].Text;
+            ImGuiNET.ImGui.OpenPopup("##sense_term_menu");
+        }
+        DrawTermMenu(terms);
         if (scroll)
         {
             ImGuiNET.ImGui.EndChild();
@@ -338,6 +378,12 @@ internal sealed class SenseFace : IImGuiPanel
             Label($"{terms.Length} names (scroll for more)", Faded(Mute));
         }
 
+        if (exactFlip >= 0)
+        {
+            bool exact = !terms[exactFlip].Exact;
+            SenseStore.SetExact(exactFlip, exact);
+            ShowMessage(SenseFile.ExactReply(terms[exactFlip].Text, exact), Mute);
+        }
         if (toggle >= 0) SenseStore.SetEnabled(toggle, !terms[toggle].Enabled);
         if (remove >= 0)
         {
@@ -348,6 +394,54 @@ internal sealed class SenseFace : IImGuiPanel
 
     /// <summary>Rows of term chips shown before the chips scroll.</summary>
     private const int MaxChipRows = 4;
+
+    /// <summary>The = (Exact) segment of a chip, before its X.</summary>
+    private const float EqW = 14;
+
+    private const string ExactMenuTip =
+        "On: only a name that is exactly this matches, any case (Drake finds Drake, not Drake Hatchling).\n" +
+        "Off: every name containing it matches (or, with * or ?, the whole name matches them).\n" +
+        "The = on the chip switches it too.";
+
+    /// <summary>A chip's right-click menu: the Exact match checkbox, on/off, Remove.</summary>
+    private void DrawTermMenu(SensePattern[] terms)
+    {
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.PopupBg, ShellBg);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Border, Teal);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Text);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.FrameBg, BtnFill);
+        ImGuiNET.ImGui.PushStyleColor(ImGuiCol.CheckMark, Teal);
+        ImGuiNET.ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(10, 8));
+        bool open = ImGuiNET.ImGui.BeginPopup("##sense_term_menu");
+        ImGuiNET.ImGui.PopStyleVar();
+        ImGuiNET.ImGui.PopStyleColor(5);
+        if (!open) return;
+        try
+        {
+            int i = SenseFile.IndexOf(terms, _menuTerm);
+            if (i < 0) { ImGuiNET.ImGui.CloseCurrentPopup(); return; }
+            SensePattern t = terms[i];
+            ImGuiNET.ImGui.TextUnformatted(t.Text);
+            bool exact = t.Exact;
+            if (ImGuiNET.ImGui.Checkbox("Exact match (whole name, any case)", ref exact))
+            {
+                SenseStore.SetExact(i, exact);
+                ShowMessage(SenseFile.ExactReply(t.Text, exact), Mute);
+            }
+            SafeImGui.SetItemTooltip(ExactMenuTip);
+            bool on = t.Enabled;
+            if (ImGuiNET.ImGui.Checkbox("Watching", ref on)) SenseStore.SetEnabled(i, on);
+            SafeImGui.SetItemTooltip("Off: kept on the list, but not looked for (a click on the chip does the same).");
+            ImGuiNET.ImGui.Spacing();
+            if (ImGuiNET.ImGui.Button("Remove"))
+            {
+                ShowMessage($"Stopped watching for \"{t.Text}\".", Mute);
+                SenseStore.Remove(i);
+                ImGuiNET.ImGui.CloseCurrentPopup();
+            }
+        }
+        finally { ImGuiNET.ImGui.EndPopup(); }
+    }
 
     // The chips' text widths, measured once per list (and text size), not every frame.
     private SensePattern[]? _widthsFor;

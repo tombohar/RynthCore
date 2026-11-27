@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\VendorRatePolicy.cs" Link="Engine\VendorRatePolicy.cs" />
+    <!-- 2026-11-26: the Inventory panel's "Buy how many?" box (max, prefill, clamp). -->
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\VendorBuyMath.cs" Link="Engine\VendorBuyMath.cs" />
   </ItemGroup>
 
 </Project>

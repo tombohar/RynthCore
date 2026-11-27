@@ -214,6 +214,13 @@ internal static class Program
         Check(ChatCommandReplies.Check("window save").Problem!.StartsWith("Unknown command '/rc window'", StringComparison.Ordinal),
             "'/rc window save' (sent by /ub window save) is not an engine verb, and now says so");
         Check(ChatCommandReplies.Check("  SKILLS   Show ").Problem == null, "case and spaces as IsVerb takes them");
+
+        // /rc inv [ac] (2026-11-26): alone toggles RynthCore's Inventory; ac / retail / game open AC's own bags.
+        foreach (string ok in new[] { "inv", "inventory", "inv ac", "INV AC", "inventory retail", "inv game" })
+            Check(ChatCommandReplies.Check(ok).Problem == null, $"'/rc {ok}' runs");
+        ChatVerbCheck badInv = ChatCommandReplies.Check("inv bags");
+        Check(badInv.Problem != null && badInv.Problem.Contains("/rc inventory ac", StringComparison.Ordinal),
+            $"'/rc inv bags' answers with the usage, which names /rc inventory ac: {badInv.Problem}");
     }
 
     private static void ModuleLinesClassified()

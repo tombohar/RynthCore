@@ -39,4 +39,29 @@ internal static class ChatLineRoute
         }
         return false;
     }
+
+    /// <summary>
+    /// "/me text", the text emote other games have (2026-11-24 request: "/me looks menacingly at
+    /// the mob"). AC has no /me; it is AC's "@emote text" ("Name looks menacingly at the mob").
+    /// <paramref name="text"/> is what follows, trimmed; "" for "/me" alone.
+    /// </summary>
+    public static bool IsMeEmote(string trimmed, out string text)
+    {
+        text = "";
+        if (string.IsNullOrEmpty(trimmed) || !trimmed.StartsWith("/me", StringComparison.OrdinalIgnoreCase)) return false;
+        if (trimmed.Length == 3) return true;
+        if (!char.IsWhiteSpace(trimmed[3])) return false;   // "/meet", "/menu" are not /me
+        text = trimmed[3..].Trim();
+        return true;
+    }
+
+    /// <summary>
+    /// True for an AC chat command written with '@' ("@loc", "@friends", "@age", "@myquests"):
+    /// '@' then a letter. AC's chat bar takes '@' and '/' alike; it runs its own commands
+    /// itself and passes the rest to the server, as it does for '/' lines. (They used to go out
+    /// as speech text, which the server runs as a command but AC never sees: "@loc" and the
+    /// other client commands did nothing from the RynthChat window.)
+    /// </summary>
+    public static bool IsAtCommand(string trimmed) =>
+        trimmed is { Length: >= 2 } && trimmed[0] == '@' && char.IsAsciiLetter(trimmed[1]);
 }

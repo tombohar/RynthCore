@@ -310,6 +310,18 @@ internal static partial class PluginManager
     private static WebPanelCloseCallbackDelegate? _webPanelCloseCallback;                 // v94
     private static WebPanelGetStateCallbackDelegate? _webPanelGetStateCallback;           // v94
 #endif
+    private static CameraActionCallbackDelegate? _cameraActionCallback;                   // v99
+
+    /// <summary>v99 CameraAction: 1 queued, 0 not available, -1 a bad action. Never throws.</summary>
+    private static int CameraAction(int action, int pressed)
+    {
+        try
+        {
+            if (action is < 0 or > 7) return -1;
+            return Compatibility.AcCamera.Enqueue((Compatibility.AcCamera.Action)action, pressed != 0) ? 1 : 0;
+        }
+        catch { return 0; }
+    }
     private static ForceResetBusyCountCallbackDelegate? _forceResetBusyCountCallback;
     private static GetObjectSpellIdsCallbackDelegate? _getObjectSpellIdsCallback;
     private static GetObjectSkillLevelCallbackDelegate? _getObjectSkillBuffedCallback;
@@ -1702,6 +1714,7 @@ internal static partial class PluginManager
         Compatibility.RetailVitalsHooks.ResetCachedInstance();
         Compatibility.RetailToolbarHooks.ResetCachedInstance();
         Compatibility.AcShortcuts.Reset();
+        Compatibility.AcCamera.Reset();
         Compatibility.AcKeymapLive.Reset();
         Compatibility.AcPanels.Reset();
         Compatibility.ChatCallbackHooks.ResetOutgoingTarget();
@@ -3446,6 +3459,8 @@ internal static partial class PluginManager
         _api.WebPanelCloseFn = Marshal.GetFunctionPointerForDelegate(_webPanelCloseCallback!);
         _api.WebPanelGetStateFn = Marshal.GetFunctionPointerForDelegate(_webPanelGetStateCallback!);
 #endif
+        _cameraActionCallback ??= CameraAction;
+        _api.CameraActionFn = Marshal.GetFunctionPointerForDelegate(_cameraActionCallback);
         RouteApiThroughLoader();
     }
 

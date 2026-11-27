@@ -1094,6 +1094,7 @@ internal static class ChatModel
             SetInput(text, text.Length, null);
         };
         // The line has no selection: copy and cut take all of it, paste goes in at the caret.
+        // (Ctrl+C copies the chat's selected text instead when there is some.)
         Win32Backend.OnChatPaste = () =>
         {
             InputState s = _input;
@@ -1102,6 +1103,8 @@ internal static class ChatModel
             _historyIndex = -1;
             SetInput(text, cursor, null);
         };
+        // Text selected in a chat window wins over the input line (ChatView.CopyActiveSelection).
+        Win32Backend.OnChatSelectionCopy = RynthCore.Engine.ImGuiBackend.Panels.ChatView.CopyActiveSelection;
         Win32Backend.OnChatCopy = () =>
         {
             string text = _input.Text;

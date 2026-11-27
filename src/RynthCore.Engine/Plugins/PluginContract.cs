@@ -1091,6 +1091,15 @@ internal struct RynthCoreAPI
     /// <summary>v94: <c>int WebPanelGetState(int handle, WebPanelStateNative* state)</c>: the WebPanelStatusCode
     /// (a handle that is not the live one reads 6 Superseded), -1 bad args.</summary>
     public IntPtr WebPanelGetStateFn;
+
+    // ── v99: AC's camera (Compatibility\AcCamera.cs) ──
+
+    /// <summary>v99: <c>int CameraAction(int action, int pressed)</c>: AC's own camera key for <c>action</c> (0 the
+    /// default view, 1 turn left, 2 turn right, 3 raise, 4 lower, 5 closer, 6 farther, 7 first person), pressed
+    /// (1) or let go (0); a held one goes on until it is let go, as the key does. Done on AC's game thread before its
+    /// tick. Returns 1 queued, 0 not available (AC's camera handler not found, a full queue), -1 bad action. Any
+    /// thread. Requires API v99+.</summary>
+    public IntPtr CameraActionFn;
 }
 
 /// <summary>v94 WebPanelOpen argument (Pack 4; 48 bytes on x86). Mirrors RynthCore.PluginSdk/WebPanelTypes.cs.</summary>
@@ -2015,6 +2024,9 @@ internal delegate int WebPanelCloseCallbackDelegate(int handle);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate int WebPanelGetStateCallbackDelegate(int handle, WebPanelStateNative* state);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate int CameraActionCallbackDelegate(int action, int pressed);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal unsafe delegate uint VendorBuyCallbackDelegate(uint vendorId, VendorTradeEntryNative* entries, int count);

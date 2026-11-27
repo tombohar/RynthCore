@@ -7,7 +7,9 @@
     the mouse and when clicks go to the game), the collapsed line, /rc sense's look commands
     (compact on|off, collapse on|off, view ...: the look they lead to and their replies, and the
     argument check), sense.txt read and written (terms, alerts and the look, a file from before
-    the look, bad values), and the term matching. No file I/O, no AC, no ImGui.
+    the look, bad values), and the term matching (contains, wildcards, and Exact: the whole name,
+    2026-11-26, with its exact= lines in sense.txt and /rc sense addselected [contains]).
+    No file I/O, no AC, no ImGui.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->
   <PropertyGroup>

@@ -177,12 +177,14 @@ internal sealed partial class InventoryFace : IImGuiPanel
         InventoryModel.Hover(_dragItem == null ? _hover?.Id ?? 0 : 0);
         FinishDrag();
         UiDropTargets.EngineDragObject = _dragItem?.Id ?? 0;
+        AcceptVendorDrops(origin, size);
         End(origin, size);
 
         Tooltip();
         DrawDragGhost();
         ContextMenu(view);
         SplitDialog(view);
+        BuyDialog();
         ConfirmDialog();
         AttrFilterDialog();
         _lootAdd.Draw();
@@ -269,6 +271,41 @@ internal sealed partial class InventoryFace : IImGuiPanel
     /// <summary>Opens or closes RynthSort (same as /rsort).</summary>
     private static void ToggleRynthSort() => ToggleScriptWindow(RynthSortKey, "/rsort");
 
+    // ── AC's own bags (2026-11-26) ──────────────────────────────────────
+    // This window never hides AC's inventory; it only looks like it in the Classic look. The way back
+    // to AC's: this menu (the ⋯ button, or right-click the title bar), /rc inv ac, or Settings >
+    // Inventory > AC's Own Bags. With "Hide retail toolbar" on, AC's backpack button and the number
+    // box for buying or splitting several are hidden too: the menu then offers to show the toolbar.
+
+    internal const string UseAcBagsTip =
+        "Close this window and open the game's own inventory (its backpack, as AC's backpack button or key does).\n" +
+        "RynthCore never hides AC's bags: this window is an extra one. Open it again from the RynthCore bar or /rc inv.";
+
+    private const string TitleMenuTip = "Drag to move. Right-click: Use AC's own bags, and the related windows.";
+
+    private const string ShowToolbarTip =
+        "Hide retail toolbar is on: the game's toolbar is hidden, with its backpack button and the number box\n" +
+        "where you type how many to buy or split. This shows it again (Settings > Interface > Hide The Game's Own).";
+
+    /// <summary>
+    /// Closes the Inventory panel and opens AC's own pack (queued for AC's game tick). Returns what was
+    /// done, or why not. Main thread (the panel's menu, the Settings button, /rc inv ac).
+    /// </summary>
+    internal static (bool Ok, string Message) UseAcBags()
+    {
+        bool wasOpen = ImGuiPanelHost.IsOpen(Title);
+        if (wasOpen) ImGuiPanelHost.Close(Title);
+        bool queued = AcPanels.Enqueue(7 /* RynthAcPanel.Inventory */, AcPanels.Op.Open);
+        string toolbar = RetailToolbarHooks.HideRetailToolbar
+            ? " The game's toolbar (its backpack button and the buy/split number box) is hidden: /rc ui retailtoolbar off, or Settings > Interface > Hide retail toolbar, shows it."
+            : string.Empty;
+        if (!queued)
+            return (false, (wasOpen ? "Closed RynthCore's Inventory window, but c" : "C") +
+                           "an't open AC's own inventory from here (" + AcPanels.Status + "): use the game's backpack button or key." + toolbar);
+        return (true, (wasOpen ? "Closed RynthCore's Inventory window and opened" : "Opened") +
+                      " AC's own inventory. RynthCore's is on its bar button or /rc inv." + toolbar);
+    }
+
     // The "more" menu both looks use when their bar is too short for the four buttons.
     private bool _openMore;
 
@@ -283,6 +320,18 @@ internal sealed partial class InventoryFace : IImGuiPanel
         PushMenuStyle();
         if (ImGuiNET.ImGui.BeginPopup("##inv_more_menu"))
         {
+            // AC's own bags (2026-11-26: a player took this window for a replacement of AC's and
+            // couldn't find the way back).
+            if (ImGuiNET.ImGui.MenuItem(PhosphorIcons.Backpack + " Use AC's own bags", "/rc inv ac", false, AcPanels.CanToggle))
+                UseAcBags();
+            SafeImGui.SetItemTooltip(UseAcBagsTip);
+            if (RetailToolbarHooks.HideRetailToolbar)
+            {
+                if (ImGuiNET.ImGui.MenuItem("Show the game's toolbar", "/rc ui retailtoolbar off"))
+                    RetailToolbarHooks.HideRetailToolbar = false;
+                SafeImGui.SetItemTooltip(ShowToolbarTip);
+            }
+            ImGuiNET.ImGui.Separator();
             if (ImGuiNET.ImGui.MenuItem("Mini Remote", "/rc miniremote", MiniRemoteOpen, ImGuiPanelHost.HasFace(MiniRemoteFace.Title)))
                 ToggleMiniRemote();
             SafeImGui.SetItemTooltip(MiniRemoteTip);
@@ -366,7 +415,7 @@ internal sealed partial class InventoryFace : IImGuiPanel
             if (IconButton("##inv_more", PhosphorIcons.DotsThree, At(hl.More), btn22,
                     MiniRemoteOpen || RynthSortOpen || ItemCountOpen || GlobalInventoryOpen ? Teal : Amber, BtnFill, font: UiFont.Ui11))
                 _openMore = true;
-            ImGuiNET.ImGui.SetItemTooltip("Mini Remote, RynthSort, Item Count, Global Inventory");
+            ImGuiNET.ImGui.SetItemTooltip("Use AC's own bags; Mini Remote, RynthSort, Item Count, Global Inventory");
         }
         RelatedMenu();
 
@@ -393,6 +442,8 @@ internal sealed partial class InventoryFace : IImGuiPanel
             ImGuiNET.ImGui.SetCursorScreenPos(new Vector2(dragFrom, p.Y));
             ImGuiNET.ImGui.InvisibleButton("##inv_drag", new Vector2(dragTo - dragFrom, RowH));
             ImGuiPanelHost.DragWindowWithLastItem();
+            if (ImGuiNET.ImGui.IsItemClicked(ImGuiMouseButton.Right)) _openMore = true;
+            SafeImGui.SetItemTooltip(TitleMenuTip);
         }
         NextLine(p, RowH + 2);
     }
@@ -980,6 +1031,12 @@ internal sealed partial class InventoryFace : IImGuiPanel
         {
             PhosphorIcons.DrawCentered(dl, ImGuiFonts.Get(UiFont.Ui11), PhosphorIcons.CheckSquare, p, new Vector2(16, statusH), Teal);
             dl.AddText(new Vector2(p.X + 18, ty), Text, _selHint);
+        }
+        else if (VendorTrade.TradableSnapshot != null)
+        {
+            // At a vendor: how to buy with this window up (InventoryFace.VendorBuy.cs).
+            PhosphorIcons.DrawCentered(dl, ImGuiFonts.Get(UiFont.Ui11), PhosphorIcons.Storefront, p, new Vector2(16, statusH), Teal);
+            dl.AddText(new Vector2(p.X + 18, ty), Text, "Drag a vendor's item here to buy (any number)");
         }
         else if (idleView != null)
         {

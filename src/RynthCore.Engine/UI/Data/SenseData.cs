@@ -10,7 +10,8 @@
 //                  format is SenseFile in SenseModel.cs).
 //    SensePattern  (SenseModel.cs) one term, case-insensitive. Without wildcards
 //                  the name only has to contain it ("drake" finds "Dragon's Isle
-//                  Drake"); with * or ? the whole name must match ("Drake*").
+//                  Drake"); with * or ? the whole name must match ("Drake*");
+//                  Exact (2026-11-26): the whole name is the term ("Drake" only).
 //    SenseSource   the scan: on the plugin pump thread at 2 Hz, reading only the
 //                  engine's main-thread snapshots (LiveObjectIds, the identity,
 //                  position, PWD and attackable snapshots, the player pose),
@@ -133,10 +134,11 @@ internal static class SenseStore
     }
 
     /// <summary>
-    /// Adds a term (switched on). An existing term with the same text is switched
-    /// on instead. False when the text is empty, the list is full or not loaded yet.
+    /// Adds a term (switched on; <paramref name="exact"/>: whole name only). An existing term with
+    /// the same text is switched on instead, keeping how it matches. False when the text is empty,
+    /// the list is full or not loaded yet.
     /// </summary>
-    public static bool Add(string text, out string message)
+    public static bool Add(string text, out string message, bool exact = false)
     {
         text = SenseFile.Clean(text);
         if (!_loaded) { message = "The watch list is still loading."; return false; }
@@ -148,25 +150,29 @@ internal static class SenseStore
             if (at >= 0)
             {
                 message = cur[at].Enabled ? $"\"{cur[at].Text}\" is already on the list." : $"\"{cur[at].Text}\" switched on.";
-                if (!cur[at].Enabled) Replace(at, new SensePattern(cur[at].Text, true));
+                if (cur[at].Exact != exact)
+                    message += cur[at].Exact ? " It matches the exact name only (Exact is on)." : " It matches names containing it (Exact is off).";
+                if (!cur[at].Enabled) Replace(at, cur[at].WithEnabled(true));
                 return true;
             }
             if (cur.Length >= MaxTerms) { message = $"The list is full ({MaxTerms} terms)."; return false; }
             var next = new SensePattern[cur.Length + 1];
             Array.Copy(cur, next, cur.Length);
-            next[^1] = new SensePattern(text, true);
+            next[^1] = new SensePattern(text, true, exact);
             Publish(next);
-            message = $"Watching for \"{text}\".";
+            message = exact ? $"Watching for \"{text}\" (exact name)." : $"Watching for \"{text}\".";
             return true;
         }
     }
 
     /// <summary>
     /// The selected object's name onto the list (the panel's "Add selected" button and /rc sense
-    /// addselected): a monster, NPC, item, portal, anything the client has a name for. AC's thread
-    /// (reads the selection and the name snapshot only).
+    /// addselected): a monster, NPC, item, portal, anything the client has a name for. An exact
+    /// term since 2026-11-26 (the name was taken from the very object, so "Drake" doesn't also find
+    /// "Drake Hatchling"); <paramref name="exact"/> false ("/rc sense addselected contains") adds it
+    /// as a contains term. AC's thread (reads the selection and the name snapshot only).
     /// </summary>
-    public static bool AddSelected(out string message)
+    public static bool AddSelected(out string message, bool exact = true)
     {
         uint id = ClientHelperHooks.GetSelectedItemId();
         if (id == 0) { message = "Select something in game first (a monster, an item...), then Add selected."; return false; }
@@ -175,7 +181,7 @@ internal static class SenseStore
             message = "The selected object has no name the client knows yet; try again in a moment.";
             return false;
         }
-        return Add(name, out message);
+        return Add(name, out message, exact);
     }
 
     /// <summary>Where Virindi Sense keeps its list on this PC.</summary>
@@ -229,7 +235,18 @@ internal static class SenseStore
         {
             SensePattern[] cur = _terms;
             if ((uint)index >= (uint)cur.Length || cur[index].Enabled == enabled) return;
-            Replace(index, new SensePattern(cur[index].Text, enabled));
+            Replace(index, cur[index].WithEnabled(enabled));
+        }
+    }
+
+    /// <summary>Exact match on or off for one term (its chip's Exact box). Saved with the list.</summary>
+    public static void SetExact(int index, bool exact)
+    {
+        lock (Sync)
+        {
+            SensePattern[] cur = _terms;
+            if ((uint)index >= (uint)cur.Length || cur[index].Exact == exact) return;
+            Replace(index, cur[index].WithExact(exact));
         }
     }
 
@@ -667,7 +684,7 @@ internal sealed class SenseSource : UiSource<SenseView>
         if (coords.Length > 0) sb.Append(coords).Append("  ");
         sb.Append("landblock ").Append((cell >> 16).ToString("X4", CultureInfo.InvariantCulture))
           .Append(", cell 0x").Append(cell.ToString("X8", CultureInfo.InvariantCulture)).Append('\n');
-        sb.Append("Matches \"").Append(term.Text).Append("\"\n");
+        sb.Append("Matches \"").Append(term.Text).Append(term.Exact ? "\" (exact name)\n" : "\"\n");
         sb.Append("Click to select it.");
         return sb.ToString();
     }

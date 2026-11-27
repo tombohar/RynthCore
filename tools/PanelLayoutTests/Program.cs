@@ -69,6 +69,8 @@ namespace PanelLayoutTests
                 Run(PulledOnScreenNeverMovesTheSavedSpot);
                 Run(TheBarKeepsItsHome);
                 Run(HomeSurvivesAReloadThroughTheStore);
+                Run(PopOutsFollowTheGameWindowAndStayOnScreen);
+                Run(BringWindowsBack);
             }
             finally
             {
@@ -913,16 +915,17 @@ namespace PanelLayoutTests
             Eq(PanelLayoutPolicy.ParseCommand("default"), LayoutCommand.MakeDefault, "default");
             Eq(PanelLayoutPolicy.ParseCommand("reset"), LayoutCommand.ResetAsk, "reset alone asks");
             Eq(PanelLayoutPolicy.ParseCommand("reset   Confirm"), LayoutCommand.ResetConfirm, "reset confirm, any spacing and case");
+            Eq(PanelLayoutPolicy.ParseCommand(" HERE "), LayoutCommand.BringHere, "here: bring the popped-out windows back");
             foreach (string bad in new[] { "frob", "default now", "reset now", "confirm", "reset confirm please" })
                 Eq(PanelLayoutPolicy.ParseCommand(bad), LayoutCommand.Invalid, $"'{bad}' is not a form");
 
             Case("/rc layout: the check before it runs (ChatCommandReplies)");
-            foreach (string ok in new[] { "layout", "layout status", "layout default", "layout reset", "layout reset confirm", "LAYOUT  Reset  confirm" })
+            foreach (string ok in new[] { "layout", "layout status", "layout default", "layout reset", "layout reset confirm", "LAYOUT  Reset  confirm", "layout here" })
             {
                 ChatVerbCheck c = ChatCommandReplies.Check(ok);
                 Check(c.Problem == null && c.Verb?.Name == "layout", $"'/rc {ok}' runs");
             }
-            foreach (string bad in new[] { "layout frob", "layout default now", "layout reset please" })
+            foreach (string bad in new[] { "layout frob", "layout default now", "layout reset please", "layout here now" })
             {
                 ChatVerbCheck c = ChatCommandReplies.Check(bad);
                 Check(c.Verb?.Name == "layout" && c.Problem == PanelLayoutPolicy.Usage, $"'/rc {bad}' answers with the usage");
@@ -1005,6 +1008,99 @@ namespace PanelLayoutTests
             Check(PanelLayoutPolicy.ResetConfirmText(null).Contains("nothing to reset", StringComparison.Ordinal), "no character's layout: nothing to reset");
             // The button runs /rc layout reset confirm, the form the command takes.
             Eq(PanelLayoutPolicy.ParseCommand("reset confirm"), LayoutCommand.ResetConfirm, "the button's command is reset confirm");
+        }
+
+        // ── pop-outs: following the game window, on the screen (2026-11-24 report) ──
+
+        private static void PopOutsFollowTheGameWindowAndStayOnScreen()
+        {
+            Case("pop-outs: the anchor text");
+            var client = ScreenRect.FromSize(100, 50, 1600, 900);
+            string text = PopOutPlacement.FormatAnchor(client);
+            Eq(text, "100,50,1600,900", "left,top,width,height");
+            Check(PopOutPlacement.TryParseAnchor(text, out ScreenRect back) && back == client, "reads back");
+            Check(PopOutPlacement.TryParseAnchor(" -1920 , 0 , 1920 , 1080 ", out ScreenRect left) && left == ScreenRect.FromSize(-1920, 0, 1920, 1080),
+                "a monitor left of the main one, any spacing");
+            foreach (string bad in new[] { "", "  ", "1,2,3", "1,2,3,4,5", "a,b,c,d", "1,2,0,5", "1,2,5,-3" })
+                Check(!PopOutPlacement.TryParseAnchor(bad, out _), $"'{bad}' isn't an anchor");
+            Eq(PopOutPlacement.AnchorKey("RynthChat"), "popout.anchor.RynthChat", "the panel_state value's key");
+
+            Case("pop-outs: a saved spot over the game window moves with it");
+            var was = ScreenRect.FromSize(0, 0, 1600, 900);
+            var now = ScreenRect.FromSize(1920, 100, 1600, 900);   // the launcher opened it on the second monitor
+            int l = 1200, t = 600;
+            Check(PopOutPlacement.FollowGameWindow(ref l, ref t, 300, 200, was, now), "it moves");
+            Eq((l, t), (3120, 700), "the same place on the game window");
+            l = 1500; t = 850;   // only its corner was over the game window: still "on it"
+            Check(PopOutPlacement.FollowGameWindow(ref l, ref t, 300, 200, was, now) && (l, t) == (3420, 950), "a pop-out half over the edge follows too");
+
+            Case("pop-outs: a spot away from the game window stays where the player put it");
+            l = 2000; t = 100;   // on the second monitor, beside the game window
+            Check(!PopOutPlacement.FollowGameWindow(ref l, ref t, 300, 200, was, now) && (l, t) == (2000, 100), "not over the game window: kept");
+            l = 1600; t = 0;     // touching the right edge (right is exclusive): not over it
+            Check(!PopOutPlacement.FollowGameWindow(ref l, ref t, 300, 200, was, now) && (l, t) == (1600, 0), "touching the edge isn't over it");
+
+            Case("pop-outs: nothing known, nothing moved");
+            l = 1200; t = 600;
+            Check(!PopOutPlacement.FollowGameWindow(ref l, ref t, 300, 200, null, now), "no anchor saved (a spot from an older engine)");
+            Check(!PopOutPlacement.FollowGameWindow(ref l, ref t, 300, 200, was, null), "no game window now (minimized)");
+            Check(!PopOutPlacement.FollowGameWindow(ref l, ref t, 300, 200, was, was), "the game window didn't move");
+            Check(!PopOutPlacement.FollowGameWindow(ref l, ref t, 300, 200, default(ScreenRect), now), "an empty anchor");
+            Eq((l, t), (1200, 600), "...and the spot is as saved");
+
+            Case("pop-outs: onto the monitor's work area");
+            var work = new ScreenRect(0, 0, 1920, 1040);   // a 1080p monitor above a 40 px taskbar
+            l = 100; t = 100;
+            Check(!PopOutPlacement.ClampInside(ref l, ref t, 400, 300, work) && (l, t) == (100, 100), "already on it: unchanged");
+            l = 1800; t = 950;
+            Check(PopOutPlacement.ClampInside(ref l, ref t, 400, 300, work) && (l, t) == (1520, 740), "hanging off the bottom-right: wholly on it");
+            l = -5000; t = -3000;
+            Check(PopOutPlacement.ClampInside(ref l, ref t, 400, 300, work) && (l, t) == (0, 0), "far off (a monitor since unplugged): its corner");
+            l = 3000; t = 2000;
+            Check(PopOutPlacement.ClampInside(ref l, ref t, 2400, 1200, work) && (l, t) == (0, 0),
+                "bigger than the screen: the top-left corner, so the title bar is there to drag");
+            l = 10; t = 10;
+            Check(!PopOutPlacement.ClampInside(ref l, ref t, 400, 300, default), "no work area known: unchanged");
+
+            Case("pop-outs: followed off the screen, then pulled back on");
+            var wide = ScreenRect.FromSize(0, 0, 3840, 1080);
+            var moved = ScreenRect.FromSize(-1700, 0, 1600, 900);   // the game window now on a monitor left of it
+            l = 200; t = 200;
+            PopOutPlacement.FollowGameWindow(ref l, ref t, 400, 300, wide, moved);
+            Eq((l, t), (-1500, 200), "it followed to the left monitor");
+            var leftWork = new ScreenRect(-1920, 0, 0, 1040);
+            Check(!PopOutPlacement.ClampInside(ref l, ref t, 400, 300, leftWork), "and that monitor has it whole");
+        }
+
+        private static void BringWindowsBack()
+        {
+            Case("bring windows back: a cascade on the game window");
+            var client = ScreenRect.FromSize(100, 50, 1600, 900);
+            var first = PopOutPlacement.GatherSpot(0, 300, 200, client);
+            Eq(first, (100 + PopOutPlacement.GatherInset, 50 + PopOutPlacement.GatherInset), "the first one near the top-left");
+            var second = PopOutPlacement.GatherSpot(1, 300, 200, client);
+            Eq(second, (first.Left + PopOutPlacement.GatherStep, first.Top + PopOutPlacement.GatherStep), "the next one a step down and right");
+            var spots = new HashSet<(int, int)>();
+            for (int i = 0; i < 40; i++)
+            {
+                var (x, y) = PopOutPlacement.GatherSpot(i, 300, 200, client);
+                Check(x >= client.Left && y >= client.Top && x + 300 <= client.Right && y + 200 <= client.Bottom, $"window {i} is wholly on the game window");
+                spots.Add((x, y));
+            }
+            Eq(spots.Count, 40, "forty windows: forty spots (title bars don't stack)");
+            var scaled = PopOutPlacement.GatherSpot(1, 300, 200, client, 2f);
+            Eq(scaled, (100 + 2 * PopOutPlacement.GatherInset + 2 * PopOutPlacement.GatherStep, 50 + 2 * PopOutPlacement.GatherInset + 2 * PopOutPlacement.GatherStep),
+                "UI scale 2: twice the steps");
+            var tiny = ScreenRect.FromSize(0, 0, 640, 480);
+            var big = PopOutPlacement.GatherSpot(3, 900, 700, tiny);
+            Eq(big, (0, 0), "a window bigger than the game window: its corner on the game window's");
+            Eq(PopOutPlacement.GatherSpot(0, 300, 200, client, float.NaN), first, "a bad scale counts as 1");
+
+            Case("bring windows back: the answer");
+            Check(PopOutPlacement.GatherReply(0, 0).StartsWith("No popped-out windows", StringComparison.Ordinal), "none open says so");
+            Eq(PopOutPlacement.GatherReply(1, 1), "Brought 1 popped-out window onto the game window.", "one");
+            Eq(PopOutPlacement.GatherReply(3, 2), "Brought 3 popped-out windows onto the game window (1 already there).", "some already there");
+            Check(ChatCommandReplies.KindOfLine(PopOutPlacement.GatherReply(3, 3)) != ChatReplyKind.Fail, "a success isn't red");
         }
 
         // ── helpers ────────────────────────────────────────────────────────

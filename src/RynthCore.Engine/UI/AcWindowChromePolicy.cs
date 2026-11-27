@@ -9,6 +9,7 @@
 //      save follow the launcher's AcWindowPlacementRule (src\RynthCore.App, compiled in):
 //      position only, and a rect is saved only once it held for 30 s. Since 2026-11-21 the
 //      window's size comes from AC's resolution (the back buffer), never from a saved rect.
+//    - Borderless full screen (2026-11-26): which borderless window fills its monitor.
 //  AcWindowChrome does the Win32 work and asks these first.
 //  Idea and first version: SilentKelpie (RynthCore PR 6).
 // ============================================================================
@@ -84,6 +85,40 @@ internal static class AcWindowChromePolicy
             return new ChromeDecision(ChromeAction.ClearMarker, 0, 0, "marker stale");
         return new ChromeDecision(ChromeAction.Restore, style | (marker & BorderChromeMask), 0, "restore");
     }
+
+    // ── Borderless full screen (2026-11-26) ──────────────────────────────
+    //
+    // Discord 11-26: after 2026.11.23.1 borderless windowed at the monitor's resolution was no longer
+    // full screen: the taskbar showed, and there was a caption-high gap at the top. Since 2026-11-21
+    // the strip kept the CLIENT area where it was (AcWindowChrome.SetStyleKeepingClient), so a
+    // 1920x1080 game whose framed window sat at (0,0) kept its picture at (3,26), under where the
+    // caption had been, and a window that does not cover its monitor does not get the taskbar out of
+    // the way. Before, the strip kept the OUTER rect, which covered the monitor. So:
+    //  - a borderless window whose game is at least its monitor's size (AC's resolution, else the
+    //    client area), or whose window covers the whole monitor, fills that monitor exactly
+    //    (rcMonitor, the taskbar's part included): borderless full screen;
+    //  - any other borderless window keeps its client area where it is (2026-11-21), so a game
+    //    smaller than the screen is not stretched.
+
+    /// <summary>
+    /// The monitor rect a borderless window must fill, or null when it is a smaller game that keeps its
+    /// client area. <paramref name="outer"/> is the window's rect (framed before a strip, = client after),
+    /// <paramref name="client"/> its client size, <paramref name="draw"/> AC's resolution (null: unknown)
+    /// and <paramref name="monitor"/> the full rect of the monitor the window is on.
+    /// </summary>
+    public static Rect? BorderlessFill(Rect outer, Size client, Size? draw, Rect monitor)
+    {
+        if (monitor.Width < MinWidth || monitor.Height < MinHeight) return null;
+        Size game = draw is Size d && d.IsUsable ? d : client;
+        bool gameFills = game.Width >= monitor.Width && game.Height >= monitor.Height;
+        bool covers = outer.Left <= monitor.Left && outer.Top <= monitor.Top
+            && outer.Right >= monitor.Right && outer.Bottom >= monitor.Bottom;
+        return gameFills || covers ? monitor : null;
+    }
+
+    /// <summary>A borderless window that should fill its monitor and is not exactly on it: the monitor, else null.</summary>
+    public static Rect? BorderlessFillNeeded(Rect outer, Size client, Size? draw, Rect monitor)
+        => BorderlessFill(outer, client, draw, monitor) is Rect m && m != outer ? m : null;
 
     // ── Window position ──────────────────────────────────────────────────
 

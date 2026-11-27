@@ -11,6 +11,8 @@ internal static partial class Program
     private static void RunRingAndGateTests()
     {
         RingTakesAStopWhenFullOfStarts();
+        GestureDeferWaitsForAPlayingMotion();
+        GestureDeferStopsWaitingOnAStuckMotion();
         RingRefusesStartsDuringATransition();
         RingStopRunsFirstAfterTheWindow();
         CastStopFindsAnOutOfOrderStop();
@@ -42,6 +44,43 @@ internal static partial class Program
     // ---- the action ring (the real ActionRing, the one AcMainThreadQueue uses) --------
 
     private readonly record struct Act(string What, long At, bool Teardown);
+
+    // ---- the gesture defer (GestureDeferRule, R-20261123-152528-b02d) --------------------
+
+    private static void GestureDeferWaitsForAPlayingMotion()
+    {
+        _case = "gesture defer";
+        var r = new GestureDeferRule(2_500);
+        Check(!r.Defer(0, 1_000, out _), "an empty motion list: nothing waits");
+        Check(r.Defer(0x100, 1_000, out _), "a motion in flight: the ring waits");
+        Check(r.Defer(0x100, 3_400, out _), "2.4 s on it: still waiting");
+        // Swing after swing: a new motion at the head each time keeps the waits, capped as before.
+        Check(r.Defer(0x200, 3_450, out bool w1) && !w1, "the next swing: still waiting, not stuck");
+        Check(!r.Defer(0x300, 3_502, out bool w2) && !w2, "the wait is 2.5 s at most: then the ring runs (not stuck)");
+        Check(r.Defer(0x400, 3_503, out _), "and a new wait starts");
+        r.RingEmptied();
+        Check(r.Defer(0x500, 7_000, out _), "after the ring emptied, a full wait again");
+    }
+
+    private static void GestureDeferStopsWaitingOnAStuckMotion()
+    {
+        _case = "gesture defer stuck";
+        var r = new GestureDeferRule(2_500);
+        Check(r.Defer(0x100, 10_000, out _), "a motion at the head: the ring waits");
+        Check(r.Defer(0x100, 12_400, out bool w1) && !w1, "2.4 s on the same motion: still waiting");
+        Check(!r.Defer(0x100, 12_501, out bool w2) && w2 && r.Wedged, "the same motion there past 2.5 s: taken as stuck (logged once), the ring runs");
+        int waits = 0;
+        bool again = false;
+        for (long t = 12_600; t < 20_000; t += 33)
+        {
+            if (r.Defer(0x100, t, out bool w)) waits++;
+            again |= w;
+        }
+        Check(waits == 0 && !again, $"while it stays stuck the ring never waits on it (was a 2.5 s wait each time; {waits} waits)");
+        Check(r.Defer(0x200, 20_000, out _) && !r.Wedged, "a new motion at the head: waited on again");
+        Check(!r.Defer(0, 20_100, out _) && !r.Wedged, "an empty list clears it");
+        Check(r.Defer(0x200, 20_200, out _), "the same pointer coming back after an empty read is a new motion");
+    }
 
     private static void RingTakesAStopWhenFullOfStarts()
     {

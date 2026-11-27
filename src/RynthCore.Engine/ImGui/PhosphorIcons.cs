@@ -177,7 +177,8 @@ internal static unsafe class PhosphorIcons
         + Pause + PersonSimpleRun
         + PushPin + SlidersHorizontal + Wrench
         + Scroll
-        + Moon;
+        + Moon
+        + XCircle;
 
     /// <summary>
     /// Draws <paramref name="glyph"/> (one icon) centred in the box at

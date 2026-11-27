@@ -77,6 +77,7 @@ internal sealed class ChatWindowFace : IImGuiPanel
     public bool ClickThrough => ChatModel.CtrlGatedClickThrough && !ImGuiNET.ImGui.GetIO().KeyCtrl;
 
     public int PopOutIdleHz => 5;
+    public bool ShowsChatTyping => true;
 
     public void OnShown()
     {

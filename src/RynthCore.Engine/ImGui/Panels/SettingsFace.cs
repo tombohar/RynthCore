@@ -63,6 +63,8 @@ internal sealed class SettingsFace : IImGuiPanel
     {
         UiSources.Settings.Unsubscribe();
         SetDashboardFeed(false);
+        SetMonsterRulesFeed(false);
+        SetRynthNavFeed(false);
         _rows.LeaveHotkeys();
     }
 
@@ -76,6 +78,36 @@ internal sealed class SettingsFace : IImGuiPanel
         _dashboardFeed = on;
         if (on) { UiSources.RynthAi.Subscribe(); UiSources.RynthAi.RequestRefresh(); }
         else UiSources.RynthAi.Unsubscribe();
+    }
+
+    private const string SpellCombatTab = "Spell Combat";
+    private bool _rulesFeed;
+
+    /// <summary>
+    /// Spell Combat's Attack Spell Shapes rows read RynthAi's monster rules (UI/Data/DefaultSpellShapes.cs):
+    /// subscribes (once) while that tab shows, even with the Damage panel closed.
+    /// </summary>
+    private void SetMonsterRulesFeed(bool on)
+    {
+        if (on == _rulesFeed) return;
+        _rulesFeed = on;
+        if (on) { UiSources.MonsterRules.Subscribe(); UiSources.MonsterRules.RequestRefresh(); }
+        else UiSources.MonsterRules.Unsubscribe();
+    }
+
+    private const string NavigationTab = "Navigation";
+    private bool _navFeed;
+
+    /// <summary>
+    /// Navigation's Navmesh View rows read RynthNav's status (UI/Data/NavmeshView.cs): subscribes (once)
+    /// while that tab shows, even with the RynthNav window closed.
+    /// </summary>
+    private void SetRynthNavFeed(bool on)
+    {
+        if (on == _navFeed) return;
+        _navFeed = on;
+        if (on) { UiSources.RynthNav.Subscribe(); UiSources.RynthNav.RequestRefresh(); }
+        else UiSources.RynthNav.Unsubscribe();
     }
 
     public void Draw()
@@ -194,6 +226,8 @@ internal sealed class SettingsFace : IImGuiPanel
         // Looting's Loot Profile row lists RynthAi's loot profiles from the dashboard snapshot: keep it
         // polled while that tab shows, even with the dashboard closed.
         SetDashboardFeed(SettingsSchema.Tabs[_tab].Name == LootingTab);
+        SetMonsterRulesFeed(SettingsSchema.Tabs[_tab].Name == SpellCombatTab);
+        SetRynthNavFeed(SettingsSchema.Tabs[_tab].Name == NavigationTab);
         for (int i = 0; i < rows.Length; i++)
         {
             SettingRow row = rows[i];

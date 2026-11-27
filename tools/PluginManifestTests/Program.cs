@@ -60,6 +60,7 @@ internal static class Program
             Run(nameof(TrainingStructsMirror), TrainingStructsMirror);
             Run(nameof(ContainerOrderSlots), ContainerOrderSlots);
             Run(nameof(WebPanelFieldsAppended), WebPanelFieldsAppended);
+            Run(nameof(CameraFieldAppended), CameraFieldAppended);
             Run(nameof(WebPanelStructsMatch), WebPanelStructsMatch);
             Run(nameof(WebPanelCodesMatch), WebPanelCodesMatch);
             Run(nameof(HasWebPanel_FalseOnOldOrPartialTable), HasWebPanel_FalseOnOldOrPartialTable);
@@ -608,8 +609,20 @@ internal static class Program
                (int)Marshal.OffsetOf<RynthCore.PluginSdk.RynthCoreApiNative>(prev) + IntPtr.Size, "SDK " + slot + " right after " + prev);
             prev = slot;
         }
-        Eq(typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).SkipLast(4).Last(), "GetMonsterHealthFn", "engine table: GetMonsterHealthFn precedes the four");
-        Eq(typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).SkipLast(4).Last(), "GetMonsterHealthFn", "SDK table: GetMonsterHealthFn precedes the four");
+        // v99's CameraActionFn follows the four (see CameraFieldAppended).
+        Eq(typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).SkipLast(5).Last(), "GetMonsterHealthFn", "engine table: GetMonsterHealthFn precedes the four");
+        Eq(typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).SkipLast(5).Last(), "GetMonsterHealthFn", "SDK table: GetMonsterHealthFn precedes the four");
+    }
+
+    // v99: CameraActionFn is appended right after v94's WebPanelGetStateFn and ends the table, on both sides.
+    private static void CameraFieldAppended()
+    {
+        Eq((int)Marshal.OffsetOf<RynthCore.Engine.Plugins.RynthCoreAPI>("CameraActionFn"),
+           (int)Marshal.OffsetOf<RynthCore.Engine.Plugins.RynthCoreAPI>("WebPanelGetStateFn") + IntPtr.Size, "engine CameraActionFn right after WebPanelGetStateFn");
+        Eq((int)Marshal.OffsetOf<RynthCore.PluginSdk.RynthCoreApiNative>("CameraActionFn"),
+           (int)Marshal.OffsetOf<RynthCore.PluginSdk.RynthCoreApiNative>("WebPanelGetStateFn") + IntPtr.Size, "SDK CameraActionFn right after WebPanelGetStateFn");
+        Eq(typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).Last(), "CameraActionFn", "engine table ends with CameraActionFn");
+        Eq(typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).Last(), "CameraActionFn", "SDK table ends with CameraActionFn");
     }
 
     private static void StructMirror(Type engine, Type sdk, int size)
@@ -758,11 +771,11 @@ internal static class Program
         Eq(RynthCore.PluginSdk.TrainingInfoFlags.Busy, RynthCore.Engine.Plugins.TrainingInfoFlags.Busy, "info flag bits");
         Eq(RynthCore.PluginSdk.TrainingEntryFlags.Trainable, RynthCore.Engine.Plugins.TrainingEntryFlags.Trainable, "entry flag bits");
         // The three v79 slots follow v78's, then v80's two and v81's GetMergeStackResultFn (v82-v91 follow:
-        // eleven slots to v89, then v90's thirteen, v91's two, v93's one and v94's four).
-        var names = typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).SkipLast(31).TakeLast(6).ToArray();
+        // eleven slots to v89, then v90's thirteen, v91's two, v93's one, v94's four and v99's one).
+        var names = typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).SkipLast(32).TakeLast(6).ToArray();
         Check(names.SequenceEqual(new[] { "GetTrainingInfoFn", "RaiseFn", "TrainSkillFn", "GetContainerOrderFn", "PutItemInContainerFn", "GetMergeStackResultFn" }),
             "v79, v80 then v81 slots last: " + string.Join(",", names));
-        var sdkNames = typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).SkipLast(31).TakeLast(6).ToArray();
+        var sdkNames = typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).SkipLast(32).TakeLast(6).ToArray();
         Check(sdkNames.SequenceEqual(names), "SDK v79, v80 and v81 slots in the same order");
     }
 
@@ -773,7 +786,12 @@ internal static class Program
     {
         var all = typeof(RynthCore.Engine.Plugins.RynthCoreAPI).GetFields().Select(f => f.Name).ToArray();
         var sdkAll = typeof(RynthCore.PluginSdk.RynthCoreApiNative).GetFields().Select(f => f.Name).ToArray();
-        // v94: the web panel's four slots end the table; the checks after these are on the table before them.
+        // v99: CameraActionFn ends the table; the checks after it are on the table before it.
+        Check(all.Last() == "CameraActionFn", "v99 slot last: " + all.Last());
+        Check(sdkAll.Last() == "CameraActionFn", "SDK v99 slot last: " + sdkAll.Last());
+        all = all.SkipLast(1).ToArray();
+        sdkAll = sdkAll.SkipLast(1).ToArray();
+        // v94: the web panel's four slots come next; the checks after these are on the table before them.
         string[] v94 = { "WebPanelOpenFn", "WebPanelNavigateFn", "WebPanelCloseFn", "WebPanelGetStateFn" };
         Check(all.TakeLast(v94.Length).SequenceEqual(v94), "v94 slots last: " + string.Join(",", all.TakeLast(v94.Length)));
         Check(sdkAll.TakeLast(v94.Length).SequenceEqual(v94), "SDK v94 slots last: " + string.Join(",", sdkAll.TakeLast(v94.Length)));

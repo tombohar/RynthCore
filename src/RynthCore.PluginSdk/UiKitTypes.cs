@@ -61,6 +61,25 @@ public enum RynthPanelPopOut
 }
 
 /// <summary>What RynthCoreHost.ShortcutAction does to an AC shortcut slot (v90).</summary>
+/// <summary>v99: AC's camera keys (<see cref="RynthCoreHost.CameraAction"/>).</summary>
+public enum RynthCameraAction
+{
+    /// <summary>The default view, behind the character (on the press).</summary>
+    Home = 0,
+    RotateLeft = 1,
+    RotateRight = 2,
+    /// <summary>The camera swings up.</summary>
+    Raise = 3,
+    /// <summary>The camera swings down.</summary>
+    Lower = 4,
+    /// <summary>Zoom in.</summary>
+    Closer = 5,
+    /// <summary>Zoom out.</summary>
+    Farther = 6,
+    /// <summary>First person (on the press); Home goes back.</summary>
+    FirstPerson = 7,
+}
+
 public enum RynthShortcutOp
 {
     Use = 0, Set = 1, Clear = 2,

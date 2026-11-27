@@ -324,7 +324,7 @@ internal sealed partial class InventoryFace
                 if (TitleToggle("##inv_more", PhosphorIcons.DotsThree, At(lay.More), btn,
                         MiniRemoteOpen || RynthSortOpen || ItemCountOpen || GlobalInventoryOpen))
                     _openMore = true;
-                ImGuiNET.ImGui.SetItemTooltip("Mini Remote, RynthSort, Item Count, Global Inventory");
+                ImGuiNET.ImGui.SetItemTooltip("Use AC's own bags; Mini Remote, RynthSort, Item Count, Global Inventory");
                 break;
         }
         RelatedMenu();
@@ -334,6 +334,8 @@ internal sealed partial class InventoryFace
         ImGuiNET.ImGui.SetCursorScreenPos(o);
         ImGuiNET.ImGui.InvisibleButton("##inv_titledrag", new Vector2(dragW, h));
         ImGuiPanelHost.DragWindowWithLastItem();
+        if (ImGuiNET.ImGui.IsItemClicked(ImGuiMouseButton.Right)) _openMore = true;   // the menu, with Use AC's own bags
+        SafeImGui.SetItemTooltip(TitleMenuTip);
 
         // The title: centred on the bar when it fits, else against the left edge and cut with "...".
         float room = lay.TitleWidth - 4 * s;

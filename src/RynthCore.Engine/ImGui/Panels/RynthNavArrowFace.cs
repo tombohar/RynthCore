@@ -9,10 +9,17 @@
 //    arrow      turns with you every frame (the pose snapshot's heading); green
 //               within 30 yd, amber while it points at a portal on a route; a
 //               wand instead of the arrow when the next step is a recall.
+//    top line   the one target and where it came from ("Chat coords 42.1N, 33.6E",
+//               "Route: Holtburg", "Arrow: Holtburg"; ArrowTarget), with an x that clears
+//               it (/rnav clear: the walk stops, the route goes, the arrow goes off).
+//               Popped out at a height saved before it had this line, the line folds
+//               into the name's place.
 //    text       name, distance and compass point, the route step (n/m).
 //    row        a box for coordinates or a place (Plan: route only; Enter or Go: RynthNav goes
-//               there), Plan, Go, Stop, and the caret: the route's steps open
-//               under it, current one green (the window fits its height).
+//               there; Route here for chat coords), Plan, Go, Stop, and the caret: the
+//               route's steps open under it, current one green (the window fits its
+//               height). Only a route to the arrow's own target opens there: an older
+//               route for somewhere else is not this window's target.
 //    corner     small pop out and hide buttons. No resize grip: it sizes itself.
 //
 //  The target comes from RynthNav's status (UiSources.RynthNav); RynthNav owns
@@ -37,7 +44,7 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
 
     // Sized to its content (FitHeight): these are only the first-open size and the narrowest it goes.
     public static void Register() => ImGuiPanelHost.Register(Title,
-        new PanelSpec(new Vector2(232, 68), new Vector2(232, 60), PanelChrome.None, Background: 0, Rounding: 6, EdgeToEdge: true,
+        new PanelSpec(new Vector2(232, 82), new Vector2(232, 60), PanelChrome.None, Background: 0, Rounding: 6, EdgeToEdge: true,
             NoResize: true),
         () => new RynthNavArrowFace());
 
@@ -65,6 +72,11 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
     private RynthNavRouteStep[]? _openWhenNot;
     private int _scrolledTo = -1;
     private float _requestedH = -1;
+    // The one target (ArrowTarget.Pick), rebuilt when the status or the chat note changes.
+    private ArrowTargetPick _pick = new(ArrowTargetSource.None, "No target", false);
+    private RynthNavStatus? _pickFor;
+    private int _pickChatV = -1;
+    private string _pickText = "No target";
 
     public void OnShown()
     {
@@ -84,48 +96,50 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
         if (size.X < 40 || size.Y < 30) return;
         RynthNavStatus? st = UiSources.RynthNav.Current?.Value;
         _read.Update(st);
+        UpdatePick(st);
 
         ImFontPtr bold = ImGuiFonts.Get(UiFont.UiBold11), f10 = ImGuiFonts.Get(UiFont.Ui10), f9 = ImGuiFonts.Get(UiFont.Ui9);
         const float pad = 5, gap = 3;
+        const float sb = 14;   // the corner buttons: small, for a small panel
         float b = MathF.Round(MathF.Max(20, f10.FontSize + 8));        // buttons and the input row
         float d = MathF.Round(bold.FontSize + f10.FontSize + 14);       // the arrow's ring
-        float rowY = origin.Y + pad + d + 4;
-        bool hasRoute = st != null && st.Route.Length > 0 && st.RouteLines.Length > 0;
+        bool hasRoute = st != null && st.Route.Length > 0 && st.RouteLines.Length > 0 && _pick.RouteBelongs;
         if (_openWhenNot != null && hasRoute && !ReferenceEquals(st!.Route, _openWhenNot)) { _showRoute = true; _scrolledTo = -1; _openWhenNot = null; }
         if (!hasRoute) _showRoute = false;
         float lineH = f10.FontSize + 3;
         int rows = hasRoute ? Math.Min(st!.Route.Length, MaxRouteRows) : 0;
         float listH = _showRoute ? MathF.Round(bold.FontSize + 4 + rows * lineH + 6) : 0;
-        float wantH = pad + d + 4 + b + pad + (_showRoute ? 4 + listH : 0);
+        // The target's line on top. Popped out, the OS window keeps the size it had: one saved before
+        // this line was there is too short for it, so the line folds into the name's place.
+        float wantH = pad + sb + d + 4 + b + pad + (_showRoute ? 4 + listH : 0);
+        bool topLine = !ImGuiPopOuts.InPopOutFrame || size.Y + 0.5f >= wantH;
+        float lift = topLine ? sb : 0;
+        if (!topLine) wantH -= sb;
+        float rowY = origin.Y + pad + lift + d + 4;
         FitHeight(wantH, size.Y);
 
         dl.AddRectFilled(origin, origin + size, Glass, 6);
         dl.AddRect(origin, origin + size, BtnBord, 6);
 
         // The arrow, in a ring on the left.
-        Vector2 c = origin + new Vector2(pad + d * 0.5f, pad + d * 0.5f);
+        Vector2 c = origin + new Vector2(pad + d * 0.5f, pad + lift + d * 0.5f);
         dl.AddCircleFilled(c, d * 0.5f, ShellBg, 32);
         dl.AddCircle(c, d * 0.5f, Ring, 32, 1.5f);
         _read.DrawPointer(dl, c, d * 0.5f - 5);
 
-        // Name, then distance and compass point (the route step on the right of it).
+        // Top-right corner: clear the target, pop out, hide (small and flat).
         float tx = origin.X + pad + d + 8, right = origin.X + size.X - pad;
-        const float sb = 14;   // the corner buttons: small, for a small panel
-        dl.PushClipRect(new Vector2(tx, origin.Y), new Vector2(right - 2 * sb - 4, origin.Y + size.Y), true);
-        dl.AddText(bold, bold.FontSize, new Vector2(tx, origin.Y + pad + 2), Teal, _read.Line1);
-        dl.PopClipRect();
-        string step = _read.HasTarget && st?.Arrow is { Steps: > 1 } sa ? $"{sa.Step}/{sa.Steps}" : "";
-        float stepW = step.Length > 0 ? f9.CalcTextSizeA(f9.FontSize, float.MaxValue, 0, step).X + 4 : 0;
-        float line2Y = origin.Y + pad + 2 + bold.FontSize + 4;
-        dl.PushClipRect(new Vector2(tx, origin.Y), new Vector2(right - stepW, origin.Y + size.Y), true);
-        if (_read.HasTarget) dl.AddText(f10, f10.FontSize, new Vector2(tx, line2Y), Text, _read.Line2);
-        else dl.AddText(f9, f9.FontSize, new Vector2(tx, line2Y + 1), Mute, _read.Line3.Length > 0 ? "Type coordinates or a place below" : "");
-        dl.PopClipRect();
-        if (step.Length > 0) dl.AddText(f9, f9.FontSize, new Vector2(right - stepW + 4, line2Y + 1), Mute, step);
-
-        // Top-right corner: pop out, hide (small and flat).
         var closePos = new Vector2(origin.X + size.X - 3 - sb, origin.Y + 3);
         var popPos = closePos - new Vector2(sb + 2, 0);
+        var clearPos = (PanelRouter.CanPopOut ? popPos : closePos) - new Vector2(sb + 2, 0);
+        bool walking = st?.Goto == true;
+        bool canClear = _pick.Source != ArrowTargetSource.None || walking;
+        if (IconButton("##rna_clear", PhosphorIcons.XCircle, clearPos, new Vector2(sb, sb), canClear ? Text : Done, Glass, enabled: canClear, font: UiFont.Ui9)
+            && canClear)
+            RynthNavCommands.ClearTarget(st);
+        SafeImGui.SetItemTooltip(!canClear ? "No target to clear"
+            : walking ? "Clear the target: stop walking, drop the route, turn the arrow off"
+            : "Clear the target: turn the arrow off and drop its route");
         if (PanelRouter.CanPopOut)
         {
             if (IconButton("##rna_pop", ImGuiPanelHost.PopOutGlyph, popPos, new Vector2(sb, sb), Done, Glass, font: UiFont.Ui9))
@@ -135,6 +149,31 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
         if (IconButton("##rna_close", PhosphorIcons.X, closePos, new Vector2(sb, sb), Done, Glass, font: UiFont.Ui9))
             ImGuiPanelHost.Close(Title);
         ImGuiNET.ImGui.SetItemTooltip("Hide the arrow (the RynthNav panel's Arrow tab shows it again)");
+
+        // The target's line: where it came from, beside the corner buttons.
+        if (topLine)
+        {
+            var labelPos = new Vector2(origin.X + pad + 2, origin.Y + 3 + (sb - f9.FontSize) * 0.5f);
+            dl.PushClipRect(new Vector2(origin.X + pad, origin.Y), new Vector2(clearPos.X - 3, origin.Y + 3 + sb), true);
+            dl.AddText(f9, f9.FontSize, labelPos, SourceColor(_pick.Source), _pickText);
+            dl.PopClipRect();
+        }
+
+        // Name, then distance and compass point (the route step on the right of it). Without the
+        // top line the target's line takes the name's place, beside the corner buttons.
+        float line1Y = origin.Y + pad + lift + 2;
+        dl.PushClipRect(new Vector2(tx, origin.Y), new Vector2(topLine ? right : clearPos.X - 3, origin.Y + size.Y), true);
+        if (topLine) dl.AddText(bold, bold.FontSize, new Vector2(tx, line1Y), Teal, _read.Line1);
+        else dl.AddText(bold, bold.FontSize, new Vector2(tx, line1Y), SourceColor(_pick.Source), _pick.Label);
+        dl.PopClipRect();
+        string step = _read.HasTarget && st?.Arrow is { Steps: > 1 } sa ? $"{sa.Step}/{sa.Steps}" : "";
+        float stepW = step.Length > 0 ? f9.CalcTextSizeA(f9.FontSize, float.MaxValue, 0, step).X + 4 : 0;
+        float line2Y = line1Y + bold.FontSize + 4;
+        dl.PushClipRect(new Vector2(tx, origin.Y), new Vector2(right - stepW, origin.Y + size.Y), true);
+        if (_read.HasTarget) dl.AddText(f10, f10.FontSize, new Vector2(tx, line2Y), Text, _read.Line2);
+        else dl.AddText(f9, f9.FontSize, new Vector2(tx, line2Y + 1), Mute, _read.Line3.Length > 0 ? "Type coordinates or a place below" : "");
+        dl.PopClipRect();
+        if (step.Length > 0) dl.AddText(f9, f9.FontSize, new Vector2(right - stepW + 4, line2Y + 1), Mute, step);
 
         // Bottom row: where to go, Plan, Go, Pause, Stop, the route's steps.
         var routePos = new Vector2(right - b, rowY);
@@ -154,6 +193,8 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
         }
         SafeImGui.SetItemTooltip(typed.Length > 0
             ? "Plan a route to " + typed + " without walking it (the steps open below)"
+            : _pick.Source == ArrowTargetSource.Chat
+            ? "Route here: plan a route to the chat coordinates without walking it (the steps open below)"
             : "Plan a route to the arrow's target without walking it (the steps open below)");
         bool go = IconButton("##rna_go", PhosphorIcons.Play, goPos, new Vector2(b, b), Green, BtnFill, enabled: canGo, font: UiFont.Ui11);
         SafeImGui.SetItemTooltip(typed.Length > 0
@@ -164,7 +205,7 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
             if (typed.Length > 0) RynthNavCommands.Command("go " + typed);
             else if (st?.Arrow is RynthNavArrow ar) RynthNavCommands.Go(ar.Final, ar.FinalNs, ar.FinalEw);
         }
-        bool walking = st?.Goto == true, paused = walking && st!.Paused;
+        bool paused = walking && st!.Paused;
         if (IconButton("##rna_pause", paused ? PhosphorIcons.Play : PhosphorIcons.Pause, pausePos, new Vector2(b, b), paused ? Amber : Text,
                 paused ? Selected : BtnFill, enabled: walking, border: paused ? Amber : 0, font: UiFont.Ui11) && walking)
             RynthNavCommands.Command(paused ? "resume" : "pause");
@@ -179,7 +220,7 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
             _showRoute = !_showRoute;
             _scrolledTo = -1;
         }
-        SafeImGui.SetItemTooltip(hasRoute ? (_showRoute ? "Hide the route's steps" : "Show the route's steps") : "No route yet: Plan or Go makes one");
+        SafeImGui.SetItemTooltip(hasRoute ? (_showRoute ? "Hide the route's steps" : "Show the route's steps") : "No route to this target yet: Plan or Go makes one");
 
         if (_showRoute && hasRoute)
             RouteList(st!, new Vector2(origin.X + pad, rowY + b + 4), new Vector2(size.X - 2 * pad, listH), bold, lineH);
@@ -189,9 +230,42 @@ internal sealed class RynthNavArrowFace : IImGuiPanel
         ImGuiNET.ImGui.SetCursorScreenPos(origin);
         ImGuiNET.ImGui.InvisibleButton("##rna_surface", new Vector2(size.X, rowY - origin.Y - 2));
         ImGuiPanelHost.DragWindowWithLastItem();
-        if (ImGuiNET.ImGui.IsItemHovered() && _read.Tooltip.Length > 0)
-            SafeImGui.SetItemTooltip(_read.Tooltip + (_read.Line3.Length > 0 && _read.Kind == "portal" ? "\n" + _read.Line3 : ""));
+        if (ImGuiNET.ImGui.IsItemHovered())
+        {
+            // The top line: where the target came from. Below it: the arrow's own tooltip.
+            if (topLine && ImGuiNET.ImGui.GetMousePos().Y < origin.Y + 3 + sb)
+                SafeImGui.SetItemTooltip(_pick.Label + "\nOne target at a time: a new one (chat coordinates, Plan, Go) replaces it. The x clears it.");
+            else if (_read.Tooltip.Length > 0)
+                SafeImGui.SetItemTooltip(_read.Tooltip + (_read.Line3.Length > 0 && _read.Kind == "portal" ? "\n" + _read.Line3 : ""));
+        }
     }
+
+    /// <summary>The one target, rebuilt when the status or the chat window's note changes (not per frame).</summary>
+    private void UpdatePick(RynthNavStatus? st)
+    {
+        if (ReferenceEquals(st, _pickFor) && ArrowTarget.ChatVersion == _pickChatV) return;
+        _pickFor = st;
+        _pickChatV = ArrowTarget.ChatVersion;
+        if (st == null) { _pick = new(ArrowTargetSource.None, "No target", false); _pickText = "No target"; return; }
+        ArrowTargetInput t = st.Target;
+        _pick = ArrowTarget.Pick(t, t.HasArrow && t.Steps <= 1 && ArrowTarget.FromChat(t.FinalNs, t.FinalEw));
+        string glyph = _pick.Source switch
+        {
+            ArrowTargetSource.Chat => PhosphorIcons.ChatCircleText,
+            ArrowTargetSource.Route => PhosphorIcons.Path,
+            ArrowTargetSource.Arrow => PhosphorIcons.NavigationArrow,
+            _ => "",
+        };
+        _pickText = glyph.Length > 0 ? glyph + " " + _pick.Label : _pick.Label;
+    }
+
+    private static uint SourceColor(ArrowTargetSource s) => s switch
+    {
+        ArrowTargetSource.Chat => Teal,
+        ArrowTargetSource.Route => Purple,
+        ArrowTargetSource.Arrow => Text,
+        _ => Mute,
+    };
 
     /// <summary>The coordinates or place typed in the box, trimmed.</summary>
     private string TypedTarget()

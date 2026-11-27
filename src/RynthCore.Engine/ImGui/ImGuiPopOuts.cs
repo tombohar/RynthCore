@@ -63,6 +63,9 @@ internal static unsafe class ImGuiPopOuts
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] private static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern short GetKeyState(int vk);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
 
@@ -88,6 +91,8 @@ internal static unsafe class ImGuiPopOuts
         public Action<float, Vector2>? Draw;
         public Action<int, int>? OnMoved;
         public bool SizeToContent, ResizeGrip = true;
+        // Left/Top are the saved spot (not where a docked panel sat): it follows the game window (UI/PopOutPlacement).
+        public bool FromSaved;
         public Vector2 ContentSize;
         public int ShownWidth, ShownHeight;           // the picture size last pushed
         public long IdleInterval = Stopwatch.Frequency / 10;
@@ -98,6 +103,11 @@ internal static unsafe class ImGuiPopOuts
         public int MarginL, MarginT, MarginR, MarginB;
         // Cost, for /rc imgui diag: frames built / pictures pushed, and the time spent.
         public long Built, Pushed, BuildTicks, PushTicks;
+        // Typing: the first key not yet drawn (ticks), and key-to-screen times for the log.
+        public long PendingKeyAt;
+        public bool ShowsChatTyping;                  // the face's IImGuiPanel.ShowsChatTyping, refreshed each frame
+        public int Keys;
+        public long KeySumTicks, KeyMaxTicks, KeyLogAt;
     }
 
     private static readonly Dictionary<string, PopOut> Pops = new(StringComparer.OrdinalIgnoreCase);
@@ -165,11 +175,29 @@ internal static unsafe class ImGuiPopOuts
     }
 
     /// <summary>
+    /// The game window's client area on the screen; false while it is minimized or there is none
+    /// (a minimized window's client sits at -32000). Any thread.
+    /// </summary>
+    public static bool TryGetGameClientOnScreen(out ScreenRect client)
+    {
+        client = default;
+        IntPtr game = Win32Backend.GameHwnd;
+        if (game == IntPtr.Zero || IsIconic(game) || !GetClientRect(game, out RECT r)) return false;
+        var p = new POINT();
+        if (!ClientToScreen(game, ref p)) return false;
+        client = ScreenRect.FromSize(p.X, p.Y, r.Right - r.Left, r.Bottom - r.Top);
+        return !client.IsEmpty;
+    }
+
+    /// <summary>
     /// Pops a panel out at the given screen geometry. Call with the main context
-    /// current (its font atlas is shared). AC thread.
+    /// current (its font atlas is shared). <paramref name="fromSaved"/>: the geometry is the
+    /// saved spot (panel_state.txt), which then follows the game window if it moved since
+    /// (UI/PopOutPlacement). AC thread.
     /// </summary>
     public static void Open(string title, int left, int top, int width, int height, int captionHeight, int captionRightInset, float uiScale,
-        Action<float, Vector2>? draw = null, Action<int, int>? onMoved = null, bool sizeToContent = false, bool resizable = true)
+        Action<float, Vector2>? draw = null, Action<int, int>? onMoved = null, bool sizeToContent = false, bool resizable = true,
+        bool fromSaved = false)
     {
         if (Pops.ContainsKey(title)) return;
         IntPtr main = ImGuiNET.ImGui.GetCurrentContext();
@@ -195,6 +223,7 @@ internal static unsafe class ImGuiPopOuts
             Left = left, Top = top, Width = Math.Max(80, width), Height = Math.Max(40, height),
             CaptionHeight = captionHeight, CaptionRightInset = captionRightInset,
             Draw = draw, OnMoved = onMoved, SizeToContent = sizeToContent, ResizeGrip = resizable && !sizeToContent,
+            FromSaved = fromSaved,
         };
         Pops[title] = pop;
         Order.Add(pop);
@@ -208,6 +237,15 @@ internal static unsafe class ImGuiPopOuts
         if (!Pops.TryGetValue(pop.Title, out PopOut? live) || live != pop || pop.Window != null) return;
         try
         {
+            int askedLeft = pop.Left, askedTop = pop.Top;
+            bool haveClient = TryGetGameClientOnScreen(out ScreenRect client);
+            // A saved spot over the game window stays on it when the game window opened somewhere else
+            // (the launcher, another client's layout, a window dragged since): 2026-11-24 report.
+            if (pop.FromSaved && haveClient
+                && PanelStateStore.TryGetValue(PopOutPlacement.AnchorKey(pop.Title), out string anchorText)
+                && PopOutPlacement.TryParseAnchor(anchorText, out ScreenRect savedClient)
+                && PopOutPlacement.FollowGameWindow(ref pop.Left, ref pop.Top, pop.Width, pop.Height, savedClient, client))
+                RynthLog.UI($"ImGuiPopOuts: {pop.Title}: the game window moved from ({savedClient.Left},{savedClient.Top}) to ({client.Left},{client.Top}) since its spot was saved; moved with it to ({pop.Left},{pop.Top}).");
             // A saved spot off the screen (a monitor since unplugged, a bad save) comes back on it.
             if (LayeredWindow.ClampToWorkArea(ref pop.Left, ref pop.Top, pop.Width, pop.Height))
                 RynthLog.UI($"ImGuiPopOuts: {pop.Title}: saved spot was off the screen; moved to ({pop.Left},{pop.Top}).");
@@ -220,11 +258,14 @@ internal static unsafe class ImGuiPopOuts
             window.OnInput = (msg, wParam, lParam, _, _) => OnWindowInput(pop, msg, wParam, lParam);
             window.OnResized = (_, _) => pop.HotFrames = Math.Max(pop.HotFrames, 2);
             window.OnMoved = (x, y) => NotifyMoved(pop, window, x, y);
-            window.OnResizeEnd = (w, h) => ImGuiPanelHost.OnPopOutGeometry(pop.Title, window.ScreenLeft, window.ScreenTop, w, h);
+            window.OnResizeEnd = (w, h) => NotifyResized(pop, window, w, h);
             LayeredWindow.ClaimTitle(pop.Title, window.Hwnd);
             pop.Window = window;
             pop.HotFrames = HotFramesAfterInput;
             RynthLog.UI($"ImGuiPopOuts: {pop.Title} popped out at ({pop.Left},{pop.Top}) {pop.Width}x{pop.Height}.");
+            // The spot it opened at is the one saved, with the game window it goes with.
+            if (pop.Left != askedLeft || pop.Top != askedTop) NotifyMoved(pop, window, pop.Left, pop.Top);
+            else if (haveClient) SaveAnchor(pop.Title, client);
         }
         catch (Exception ex)
         {
@@ -237,6 +278,58 @@ internal static unsafe class ImGuiPopOuts
     {
         if (pop.OnMoved != null) pop.OnMoved(x, y);
         else ImGuiPanelHost.OnPopOutGeometry(pop.Title, x, y, window.Width, window.Height);
+        if (TryGetGameClientOnScreen(out ScreenRect client)) SaveAnchor(pop.Title, client);
+    }
+
+    /// <summary>A pop-out's resize ended: its spot and size are saved (ImGuiPanelHost), with the game window. AC thread.</summary>
+    private static void NotifyResized(PopOut pop, LayeredWindow window, int width, int height)
+    {
+        ImGuiPanelHost.OnPopOutGeometry(pop.Title, window.ScreenLeft, window.ScreenTop, width, height);
+        if (TryGetGameClientOnScreen(out ScreenRect client)) SaveAnchor(pop.Title, client);
+    }
+
+    /// <summary>Saves the game window's client rectangle that a pop-out's saved spot goes with (UI/PopOutPlacement).</summary>
+    private static void SaveAnchor(string title, ScreenRect client)
+    {
+        string key = PopOutPlacement.AnchorKey(title), text = PopOutPlacement.FormatAnchor(client);
+        UiBackgroundWriter.Enqueue($"pop-out anchor {title}", () => PanelStateStore.SetValue(key, text));
+    }
+
+    /// <summary>
+    /// "Bring the windows back" (Settings > Interface, /rc layout here): every open pop-out (panels,
+    /// the popped-out bar) moves onto the game window, in a cascade from its top-left, and the spots
+    /// are saved. <paramref name="reply"/> gets the answer (text, ok). Any thread: the moves run on
+    /// the game thread.
+    /// </summary>
+    public static void RequestGather(Action<string, bool> reply)
+    {
+        if (!Win32Backend.PostToGameThread(() => Gather(reply)))
+            reply("No game window to bring the windows onto.", false);
+    }
+
+    private static void Gather(Action<string, bool> reply)
+    {
+        if (!TryGetGameClientOnScreen(out ScreenRect client))
+        {
+            reply("The game window is minimized: restore it, then bring the windows back.", false);
+            return;
+        }
+        int moved = 0, n = 0;
+        foreach (PopOut pop in Order.ToArray())
+        {
+            LayeredWindow? window = pop.Window;
+            if (window == null || window.Hwnd == IntPtr.Zero) continue;
+            var (x, y) = PopOutPlacement.GatherSpot(n++, window.Width, window.Height, client, EngineFrameController.FontScale);
+            LayeredWindow.ClampToWorkArea(ref x, ref y, window.Width, window.Height);
+            if (x != window.ScreenLeft || y != window.ScreenTop)
+            {
+                window.Move(x, y);
+                moved++;
+            }
+            NotifyMoved(pop, window, window.ScreenLeft, window.ScreenTop);
+        }
+        RynthLog.UI($"ImGuiPopOuts: brought {n} pop-out(s) onto the game window at ({client.Left},{client.Top}) {client.Width}x{client.Height}; {moved} moved.");
+        reply(PopOutPlacement.GatherReply(n, moved), true);
     }
 
     /// <summary>Closes a pop-out: its window, surfaces and context. AC thread.</summary>
@@ -370,10 +463,28 @@ internal static unsafe class ImGuiPopOuts
                 if (sink == null || !sink.WantTextInput) return false;
                 sink.Input.Add(new InputMessage(msg, wParam, lParam));
                 sink.HotFrames = HotFramesAfterInput;
+                if (msg is WM_CHAR or WM_KEYDOWN && sink.PendingKeyAt == 0) sink.PendingKeyAt = Stopwatch.GetTimestamp();
                 return true;
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// A key typed into the chat line (Win32Backend's chat capture: the keys never reach a
+    /// pop-out's own input). Every shown pop-out of a face that draws the line is redrawn on
+    /// the next frame, not at its idle 5 Hz (11-26: typing in a popped-out chat lagged). AC thread.
+    /// </summary>
+    public static void NoteChatKey()
+    {
+        if (Order.Count == 0) return;
+        long now = Stopwatch.GetTimestamp();
+        foreach (PopOut pop in Order)
+        {
+            if (!pop.Visible || !pop.ShowsChatTyping) continue;
+            pop.HotFrames = HotFramesAfterInput;
+            if (pop.PendingKeyAt == 0) pop.PendingKeyAt = now;
+        }
     }
 
     /// <param name="offsetX">Added to a message's client x to make it ImGui's (the window's origin in ImGui coordinates).</param>
@@ -466,6 +577,26 @@ internal static unsafe class ImGuiPopOuts
         }
     }
 
+    /// <summary>
+    /// Key-to-screen time for a pop-out's text box (the key reaching the game window to its
+    /// picture going to the layered window; the desktop's compositor adds up to a refresh
+    /// on top). Logged per 25 keys, or after 10 s of typing. AC thread.
+    /// </summary>
+    private static void NoteKeyShown(PopOut pop, long keyAt)
+    {
+        if (keyAt == 0) return;
+        long now = Stopwatch.GetTimestamp(), took = now - keyAt;
+        if (pop.Keys == 0) pop.KeyLogAt = now + 10 * Stopwatch.Frequency;
+        pop.Keys++;
+        pop.KeySumTicks += took;
+        if (took > pop.KeyMaxTicks) pop.KeyMaxTicks = took;
+        if (pop.Keys < 25 && now < pop.KeyLogAt) return;
+        double ms = 1000.0 / Stopwatch.Frequency;
+        RynthLog.Info($"ImGuiPopOuts: typing in {pop.Title}: {pop.Keys} key(s), key to screen avg {pop.KeySumTicks * ms / pop.Keys:0} ms, max {pop.KeyMaxTicks * ms:0} ms.");
+        pop.Keys = 0;
+        pop.KeySumTicks = pop.KeyMaxTicks = 0;
+    }
+
     private static void RenderOne(IntPtr device, PopOut pop, float uiScale, long now)
     {
         LayeredWindow window = pop.Window!;
@@ -547,14 +678,21 @@ internal static unsafe class ImGuiPopOuts
             // Nothing changed since the last picture: skip the render, readback and
             // window update (most panels are still most of the time).
             ulong hash = HashDrawData(drawData, sw, sh) ^ Mix(sx, sy, w, h);
+            long keyAt = pop.PendingKeyAt;
             if (hash == pop.LastHash && pop.Visible && pop.Surface.SnapshotPath == null)
             {
+                // ImGui can take a key a frame later (its input queue trickles): keep the key's time
+                // for the picture it changes, unless nothing changed within a second (Shift alone).
+                if (keyAt != 0 && now - keyAt > Stopwatch.Frequency) pop.PendingKeyAt = 0;
                 pop.Surface.Flush(device, window);
             }
             else
             {
+                pop.PendingKeyAt = 0;
                 pop.LastHash = hash;
-                if (pop.Surface.Render(device, drawData, sw, sh, new PopOutSurface.Placement(pop.MarginL, pop.MarginT, w, h), window))
+                // Typing (a text box had the keys last frame): this frame's own picture, not last frame's.
+                if (pop.Surface.Render(device, drawData, sw, sh, new PopOutSurface.Placement(pop.MarginL, pop.MarginT, w, h), window,
+                        sameFrame: pop.WantTextInput || (pop.ShowsChatTyping && Win32Backend.ChatCaptureActive), keyAt: keyAt))
                 {
                     // Shown, or its picture changed size (the bar grows to its content):
                     // none of it may hang off the screen.
@@ -571,12 +709,14 @@ internal static unsafe class ImGuiPopOuts
                 pop.Pushed++;
                 pop.PushTicks += Stopwatch.GetTimestamp() - built;
             }
+            NoteKeyShown(pop, pop.Surface.TakePushedKeyAt());
 
             // io.WantTextInput lags a frame behind the box (ImGui publishes it from the
             // previous frame's widgets); a box that went active this frame counts too, so
             // the keys typed right after the click already come here, not to AC.
             pop.WantTextInput = ImGuiTextFocus.EndPopOutFrame(pop.Title, io.WantTextInput);
             pop.IdleInterval = Stopwatch.Frequency / ImGuiPanelHost.PopOutIdleHz(pop.Title);
+            pop.ShowsChatTyping = pop.Draw == null && ImGuiPanelHost.ShowsChatTyping(pop.Title);
             if (pop.WantTextInput) _keyboard = pop;
             else if (_keyboard == pop) _keyboard = null;
             if (pop.HotFrames > 0) pop.HotFrames--;

@@ -53,7 +53,85 @@ namespace SettingsLayoutTests
             Moves();
             HuntAndDirtyFighting();
             LootProfileRow();
+            NavmeshViewRows();
             return Finish();
+        }
+
+        // ── Settings > Navigation > Navmesh View: RynthNav's navmesh switches (2026-11-26) ─────────────
+        private static void NavmeshViewRows()
+        {
+            object? nav = Tabs.Cast<object>().FirstOrDefault(t => Name(t) == "Navigation");
+            Check(nav != null, "there is a Navigation tab");
+            if (nav == null) return;
+            List<object> rows = Rows(nav).Cast<object>().ToList();
+            int Index(string kind, string label) => rows.FindIndex(r => Kind(r) == kind && Label(r).Trim() == label);
+
+            // Right after Nav Marker Display (it ends with Guide Line), before Doors.
+            int guide = Index("Bool", "Guide Line"), section = Index("Section", "Navmesh View"), doors = Index("Section", "Doors");
+            Check(guide >= 0 && section > guide && doors > section, $"Navmesh View sits between Guide Line and Doors (Guide Line {guide}, Navmesh View {section}, Doors {doors})");
+            Check(section > guide && rows.Skip(guide + 1).Take(section - guide - 1).All(r => Kind(r) == "Spacer"), "...with only a spacer between Guide Line and it");
+            if (section < 0 || doors < 0) return;
+            List<object> mine = rows.Skip(section + 1).Take(doors - section - 1).ToList();
+            object? Mine(string kind, string label) => mine.FirstOrDefault(r => Kind(r) == kind && Label(r).Trim() == label);
+
+            double D(object row, string prop) => (double)row.GetType().GetProperty(prop)!.GetValue(row)!;
+            string? Tip(object row) => (string?)row.GetType().GetProperty("Tooltip")!.GetValue(row);
+            foreach (var (kind, label, min, max, step, tipStart) in new[]
+            {
+                ("Bool", "Show Navmesh", 0.0, 0.0, 1.0, "Draw the navigation mesh in the world"),
+                ("Bool", "Green Floor", 0, 0, 1, "The walkable ground, in green."),
+                ("Bool", "Red Walls", 0, 0, 1, "Upright red strips along every edge nav will not cross."),
+                ("Int", "Mesh Radius (m)", 10, 150, 10, "How far around you the mesh is drawn."),
+                ("Int", "Mesh Detail (triangles)", 200, 7000, 500, "The most triangles the mesh may use."),
+            })
+            {
+                object? row = Mine(kind, label);
+                Check(row != null, $"Navmesh View has a {kind} row '{label}'");
+                if (row == null) continue;
+                if (kind == "Int") Check(D(row, "Min") == min && D(row, "Max") == max && D(row, "Step") == step, $"{label}: {min}..{max}, step {step} (the Go tab's)");
+                Check(Tip(row)?.StartsWith(tipStart, StringComparison.Ordinal) == true, $"{label}: the Go tab's tooltip");
+                Check(Tip(row)?.Contains("not in the RynthAi profile") == true, $"{label}: the tooltip says it is RynthNav's, not the profile's");
+                Check(KeyOf(row) == "Navigation/Navmesh View/" + label, $"{label} can be pinned under Navmesh View (got {KeyOf(row)})");
+            }
+            Check(mine.Count(r => Kind(r) is "Bool" or "Int") == 5, "five switches and steppers, no more");
+
+            // Without RynthNav (no status here): the rows hide and a note says why.
+            Type settings = _engine.GetType("RynthCore.Engine.UI.Data.RynthAiSettings", throwOnError: true)!;
+            object s = Activator.CreateInstance(settings, true)!;
+            bool Visible(object row) => (bool)row.GetType().GetMethod("IsVisible")!.Invoke(row, new[] { s })!;
+            Check(mine.Where(r => Kind(r) is "Bool" or "Int" or "Status").All(r => !Visible(r)), "no RynthNav: the switches, steppers and status line hide");
+            List<object> notes = mine.Where(r => Kind(r) == "Note" && Visible(r)).ToList();
+            Check(notes.Count == 1 && Label(notes[0]).Contains("RynthNav plugin"), $"...and one note says RynthNav is needed (got {string.Join(" | ", notes.Select(Label))})");
+            Check(Visible(rows[section]), "...under the Navmesh View heading, which stays");
+            double Get(object row) => (double)((Delegate)row.GetType().GetProperty("Get")!.GetValue(row)!).DynamicInvoke(s)!;
+            Check(Get(Mine("Bool", "Show Navmesh")!) == 0 && Get(Mine("Int", "Mesh Radius (m)")!) == 40 && Get(Mine("Int", "Mesh Detail (triangles)")!) == 3000,
+                "reading them with no RynthNav doesn't throw (off, RynthNav's defaults)");
+
+            // Not RynthAi settings: nothing about the mesh in the payload.
+            Type ctxType = _engine.GetType("RynthCore.Engine.UI.Data.RynthAiSettingsJsonContext", throwOnError: true)!;
+            object ctx = ctxType.GetProperty("Default", All)!.GetValue(null)!;
+            var info = (System.Text.Json.Serialization.Metadata.JsonTypeInfo)ctxType.GetProperty("RynthAiSettings", All)!.GetValue(ctx)!;
+            string json = System.Text.Json.JsonSerializer.Serialize(s, info);
+            Check(!json.Contains("Mesh", StringComparison.OrdinalIgnoreCase) && !json.Contains("Navmesh", StringComparison.OrdinalIgnoreCase),
+                "the RynthAi settings payload has no navmesh fields");
+
+            // The rules behind the rows (UI/Data/NavmeshView.cs).
+            Type view = _engine.GetType("RynthCore.Engine.UI.Data.NavmeshView", throwOnError: true)!;
+            Type statusType = _engine.GetType("RynthCore.Engine.UI.Data.RynthNavStatus", throwOnError: true)!;
+            object? Parse(string j) => statusType.GetMethod("Parse", All)!.Invoke(null, new object[] { j });
+            object? V(string name, params object?[] a) => view.GetMethod(name, All)!.Invoke(null, a);
+            object? older = Parse("{\"hasPose\":1}"), newer = Parse("{\"hasPose\":1,\"mesh\":{\"on\":1,\"floor\":0,\"walls\":1,\"radius\":70,\"triangles\":4200,\"drawn\":1840}}");
+            Check(older != null && newer != null, "RynthNav statuses parse");
+            Check(!(bool)V("Available", (object?)null)! && !(bool)V("Available", older)! && (bool)V("Available", newer)!, "the rows show only for a RynthNav that sends its mesh state (0.6.7+)");
+            Check(((string)V("Unavailable", older)!).Contains("0.6.7"), "an older RynthNav: the note says which version is needed");
+            Check((string)V("Unavailable", newer)! == "", "a new one: no note");
+            Check((bool)V("GetSwitch", newer, "Show Navmesh")! && !(bool)V("GetSwitch", newer, "Green Floor")! && (bool)V("GetSwitch", newer, "Red Walls")!, "the switches read RynthNav's on / floor / walls");
+            Check((string)V("Drawn", newer)! == "1840 triangles drawn now." && (string)V("Drawn", older)! == "", "the status line: triangles drawn while on");
+            Check((string)V("SwitchCommand", "Show Navmesh", true)! == "mesh on" && (string)V("SwitchCommand", "Show Navmesh", false)! == "mesh off", "Show Navmesh sends /rnav mesh on|off");
+            Check((string)V("SwitchCommand", "Green Floor", false)! == "mesh floor off" && (string)V("SwitchCommand", "Red Walls", true)! == "mesh walls on", "Green Floor / Red Walls send mesh floor|walls on|off");
+            Check((string)V("RadiusCommand", 70)! == "mesh radius 70" && (string)V("RadiusCommand", 999)! == "mesh radius 150" && (string)V("RadiusCommand", 0)! == "mesh radius 10", "Mesh Radius sends mesh radius N, 10..150");
+            Check((string)V("DetailCommand", 3700)! == "mesh triangles 3700" && (string)V("DetailCommand", 9000)! == "mesh triangles 7000" && (string)V("DetailCommand", 1)! == "mesh triangles 200", "Mesh Detail sends mesh triangles N, 200..7000");
+            Check((bool)V("IsMeshLabel", "Mesh Radius (m)")! && !(bool)V("IsMeshLabel", "Guide Line")! && !(bool)V("IsMeshLabel", (object?)null)!, "the drawer knows a pinned navmesh row");
         }
 
         // ── Settings > Looting's Loot Profile picker (2026-11-22) ──────────────────────────────
@@ -273,6 +351,7 @@ namespace SettingsLayoutTests
                 ("Targeting", "Combat/Targeting/Targeting"),
                 ("Attempts Before Blacklist", "Combat/Targeting/Attempts Before Blacklist"),
                 ("Enable Raycasting", "Combat/Line Of Sight/Enable Raycasting"),
+                ("Show Line of Sight", "Combat/Line Of Sight/Show Line of Sight"),   // 2026-11-26, next to Enable Raycasting
                 ("Magic Response", "Combat/Hitting the Environment/Magic Response"),
                 ("Enable Missile Crafting", "Combat/Missile Ammo Crafting/Enable Missile Crafting"),
                 ("Enable Autostack", "Inventory/Packs/Enable Autostack"),

@@ -5,7 +5,9 @@
     src\RynthCore.Engine\Compatibility\TellMemory.cs - who to reply / retell to, read off the
     chat lines, and the rewrite of "/r text" into "/tell Name, text";
     src\RynthCore.Engine\UI\Data\ChatInputPaste.cs - clipboard text made into one input line;
-    src\RynthCore.Engine\Compatibility\ChatLineRoute.cs - which lines are AC emotes, not speech.
+    src\RynthCore.Engine\Compatibility\ChatLineRoute.cs - which lines are AC emotes, not speech;
+    src\RynthCore.Engine\Compatibility\ChatSlashEmote.cs - "/wave" as AC's "*Wave*";
+    src\RynthCore.Engine\UI\Data\ChatTextSelection.cs - the chat's selected text and item lines as one.
     Nothing native: no AC, no engine state.
     Run: dotnet run -c Release   (exit 0 = pass, 1 = fail)
   -->
@@ -22,6 +24,8 @@
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\TellMemory.cs" Link="Engine\TellMemory.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatInputPaste.cs" Link="Engine\ChatInputPaste.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ChatLineRoute.cs" Link="Engine\ChatLineRoute.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ChatSlashEmote.cs" Link="Engine\ChatSlashEmote.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\UI\Data\ChatTextSelection.cs" Link="Engine\ChatTextSelection.cs" />
   </ItemGroup>
 
 </Project>

@@ -74,6 +74,9 @@ internal sealed class RynthAiSettings
     public int AutoVendorTries { get; set; } = 4;
     public int AutoVendorTriesTime { get; set; } = 5000;
     public bool LosDebugLog { get; set; }
+    // RynthAi's Show Line of Sight (2026-11-26, a testing aid, off by default). Null until RynthAi sends it;
+    // a save sends null back, which RynthAi leaves alone (an older RynthAi: the row is hidden).
+    public bool? ShowLosLine { get; set; }
     public float CrossbowArcVelocity { get; set; } = 40f;
     public float AtlatlArcVelocity { get; set; } = 22f;
     // Arc spells' horizontal speed: ACE flies every player arc at 40 m/s across the ground.
@@ -866,6 +869,22 @@ internal static class SettingsSchema
     private static SettingRow Button(string label, string buttonText, Action click, string? tip = null) =>
         new(SettingKind.Button, label, tip, ButtonText: buttonText, Click: click);
 
+    // "Use AC's bags" (Interface > Hide The Game's Own, Inventory > AC's Own Bags): the same as /rc inv ac.
+    // A refusal goes to chat (the Settings window has no line for a button's answer).
+    private const string UseAcBagsTip =
+        "Close RynthCore's Inventory window and open the game's own inventory, as AC's backpack button or key does.\n" +
+        "RynthCore never hides AC's bags; its Inventory window is an extra one (the RynthCore bar, or /rc inv).\n" +
+        "With Hide retail toolbar on, the game's backpack button and its buy / split number box are hidden too.\n" +
+        "Also: /rc inv ac, or right-click the Inventory window's title.";
+
+    private static void UseAcBagsClick()
+    {
+        var (ok, message) = ImGuiBackend.Panels.InventoryFace.UseAcBags();
+        if (!ok)
+            Compatibility.AcMainThreadQueue.EnqueueWriteToChat(Compatibility.ChatCommandReplies.ReplyPrefix + message,
+                Compatibility.ChatCommandReplies.FailChatType);
+    }
+
     // A button that runs a RynthAi chat command as if typed (it answers in chat), through RynthAi's
     // "sendchat" remote command: a one-shot action that has no setting of its own.
     private static SettingRow ChatButton(string label, string buttonText, string command, string? tip = null) =>
@@ -886,6 +905,26 @@ internal static class SettingsSchema
     // A one-line status RynthAi computes (read-only; empty = hidden).
     private static SettingRow Status(Func<RynthAiSettings, string> get) =>
         new(SettingKind.Status, "", GetText: get, VisibleWhen: s => !string.IsNullOrEmpty(get(s)));
+
+    // Settings > Spell Combat > Attack Spell Shapes: the Default monster rule's shapes. They ignore the
+    // settings object (the rules come from UiSources.MonsterRules and go back through DamageCommands).
+    private static SettingRow[] DefaultShapeRows()
+    {
+        var rows = new SettingRow[DefaultSpellShapes.Rows.Length];
+        for (int i = 0; i < rows.Length; i++)
+        {
+            var (field, label, tip) = DefaultSpellShapes.Rows[i];
+            rows[i] = Bool(label, _ => DefaultSpellShapes.Get(field), (_, v) => DefaultSpellShapes.Edit(field, v),
+                tip + "\n\n" + DefaultSpellShapes.SectionTip, when: _ => DefaultSpellShapes.Loaded);
+        }
+        return rows;
+    }
+
+    // Settings > Navigation > Navmesh View: one of RynthNav's navmesh switches (UI/Data/NavmeshView.cs).
+    // Shown while RynthNav sends its mesh state; a click sends /rnav mesh ..., never a RynthAi setting.
+    private static SettingRow NavmeshSwitch(string label, string tip) =>
+        Bool(label, _ => NavmeshView.GetSwitchNow(label), (_, v) => NavmeshView.SetSwitch(label, v),
+            tip + NavmeshView.SameAsGoTab, when: _ => NavmeshView.AvailableNow);
 
     private static SettingRow[] Tiers(Func<RynthAiSettings, int>[] get, Action<RynthAiSettings, int>[] set)
     {
@@ -1036,7 +1075,11 @@ internal static class SettingsSchema
             // Stored by the engine (RetailToolbarHooks, retail_ui.txt beside the vitals), not in the profile.
             Bool("Hide retail toolbar", _ => Compatibility.RetailToolbarHooks.HideRetailToolbar,
                 (_, v) => Compatibility.RetailToolbarHooks.HideRetailToolbar = v,
-                "Hide the game's toolbar panel: the combat button, the panel buttons, the selection's health, examine, the backpack and the shortcut slots.\nThe shortcut keys keep working while it's hidden. Saved for this PC. Also: /rc ui retailtoolbar on|off."),
+                "Hide the game's toolbar panel: the combat button, the panel buttons, the selection's health, examine, the backpack and the shortcut slots,\n" +
+                "and the number box where you type how many to buy from a vendor or split off a stack (RynthDefective's Selection window has its own).\n" +
+                "The shortcut keys keep working while it's hidden. Saved for this PC. Also: /rc ui retailtoolbar on|off."),
+            // 2026-11-26: RynthCore's Inventory window never hides AC's; this is the way back to the game's own.
+            Button("AC's own bags", "Use AC's bags", UseAcBagsClick, UseAcBagsTip),
             Spacer(),
             Section("Your Vitals"),
             Bool("Show Target Stamina / Mana", s => s.ShowTargetStaminaMana, (s, v) => s.ShowTargetStaminaMana = v,
@@ -1101,6 +1144,11 @@ internal static class SettingsSchema
             ConfirmButton("Reset This Character's Layout", "Reset...", () => PanelLayout.ResetConfirmText(), () => PanelLayout.ResetFromSettings(),
                 "Put this character's panel layout back to the default for new characters: open panels move to the default's places.\nAsks first. Also: /rc layout reset confirm.")
                 with { VisibleWhen = _ => Plugins.EngineSettings.PanelLayoutPerCharacter && PanelLayout.CanResetFromSettings },
+            // Pop-outs are their own windows on the desktop: lost behind another window or far from
+            // the game window, this lines them up on it again (2026-11-24 report). /rc layout here.
+            Button("Bring Windows Back", "Bring here", () => ImGuiBackend.ImGuiPopOuts.RequestGather(static (text, ok) =>
+                    Compatibility.AcMainThreadQueue.EnqueueWriteToChat("[RynthCore] " + text, ok ? 1 : 0x1A)),
+                "Move every popped-out window (panels, the popped-out bar) onto the game window, lined up from its\ntop-left corner, and save them there. For windows you lost off the game window or behind another one.\nAlso: /rc layout here."),
             Button("Save Layout Now", "Save", () => AcWindowChrome.SaveLayoutNow(),
                 "Write the open panels, the game window position (when Remember Game Window Position is on),\nthe Vision HUD and the ImGui window positions to disk now."),
         }, "RynthCore · this PC"),
@@ -1431,6 +1479,12 @@ internal static class SettingsSchema
             Spacer(HasWeaponSwaps),
             Section("Line Of Sight"),
             Bool("Enable Raycasting", s => s.EnableRaycasting, (s, v) => s.EnableRaycasting = v),
+            Bool("Show Line of Sight", s => s.ShowLosLine ?? false, (s, v) => s.ShowLosLine = v,
+                "A line from you to the combat target: green when RynthAi's line-of-sight raycast says clear,\n" +
+                "red when it says blocked, with a yellow marker where the raycast hit. Dashed green: clear without\n" +
+                "a geometry test (raycasting off or warming up, or no geometry near the path). Thin dim lines go\n" +
+                "to the other monsters in range. A testing aid; off by default. /ra losline [on|off].",
+                when: s => s.ShowLosLine.HasValue),
             Bool("Use Arcs for Missile LoS", s => s.UseArcs, (s, v) => s.UseArcs = v,
                 "A missile target must pass both the straight line and the real arrow arc, ceilings included (dungeons too).\nWhen off, all missile LoS checks are linear (eye-to-eye).", gates: true),
             Float("Bow", s => s.BowArcVelocity, (s, v) => s.BowArcVelocity = v, 10f, 60f, 0.5f,
@@ -1504,6 +1558,18 @@ internal static class SettingsSchema
         }),
 
         new("Spell Combat", Concat(
+            // The DEFAULT monster line's shapes (2026-11-26: "cast streaks instead of bolts" was only on
+            // the Damage panel's DEFAULT line). UI/Data/DefaultSpellShapes.cs; shown once RynthAi has
+            // sent its monster rules.
+            Section(DefaultSpellShapes.SectionLabel, _ => DefaultSpellShapes.Loaded),
+            Note("For every monster without its own entry. Each monster in Monsters can still have its own.",
+                _ => DefaultSpellShapes.Loaded),
+            DefaultShapeRows(),
+            Status(_ => DefaultSpellShapes.Loaded ? DefaultSpellShapes.SummaryNow() : string.Empty),
+            Button(DefaultSpellShapes.OpenMonstersLabel, "Open Monsters",
+                () => ImGuiBackend.ImGuiPanelHost.Open(ImGuiBackend.Panels.DamageFace.Title), DefaultSpellShapes.OpenMonstersTip)
+                with { VisibleWhen = _ => DefaultSpellShapes.Loaded },
+            Spacer(_ => DefaultSpellShapes.Loaded),
             Section("Casting"),
             Int("Attack Spell Delay (ms)", s => s.AttackSpellIntervalMs, (s, v) => s.AttackSpellIntervalMs = v, 0, 5000, 50,
                 "Least time between offensive (war/void) COMBAT casts at one target.\nThe next cast also waits until the last one is finished (the server's\nanswer and the casting animation), so 0 = cast again as soon as it is.\nDoes NOT affect buffing speed."),
@@ -1576,6 +1642,22 @@ internal static class SettingsSchema
                 "Text over the route's waypoints within 60 yd. Numbers: each point's number (as in the Nav panel).\nNumbers and names: also checkpoints and jumps, and what happens at a point\n(recall, chat, pause, portal, NPC, vendor) above it."),
             Bool("Guide Line", s => s.NavGuideLine, (s, v) => s.NavGuideLine = v,
                 "A line from your character to the waypoint nav is heading for."),
+            Spacer(),
+            // RynthNav's navmesh drawing (UI/Data/NavmeshView.cs): RynthNav's own settings, read from its
+            // status and sent as /rnav mesh commands; the RynthAi settings object is ignored.
+            Section(NavmeshView.SectionLabel),
+            Note(NavmeshView.Unavailable(null), _ => NavmeshView.Status == null),
+            Note(NavmeshView.Unavailable(new RynthNavStatus()), _ => NavmeshView.Status is { HasMesh: false }),
+            NavmeshSwitch(NavmeshView.ShowLabel, NavmeshView.ShowTip),
+            NavmeshSwitch(NavmeshView.FloorLabel, NavmeshView.FloorTip),
+            NavmeshSwitch(NavmeshView.WallsLabel, NavmeshView.WallsTip),
+            Int(NavmeshView.RadiusLabel, _ => NavmeshView.RadiusNow, (_, v) => NavmeshView.SetRadius(v),
+                NavmeshView.RadiusMin, NavmeshView.RadiusMax, NavmeshView.RadiusStep,
+                NavmeshView.RadiusTip + NavmeshView.SameAsGoTab, when: _ => NavmeshView.AvailableNow),
+            Int(NavmeshView.DetailLabel, _ => NavmeshView.DetailNow, (_, v) => NavmeshView.SetDetail(v),
+                NavmeshView.DetailMin, NavmeshView.DetailMax, NavmeshView.DetailStep,
+                NavmeshView.DetailTip + NavmeshView.SameAsGoTab, when: _ => NavmeshView.AvailableNow),
+            Status(_ => NavmeshView.Drawn(NavmeshView.Status)),
             Spacer(),
             Section("Doors"),
             Bool("Open Doors While Navigating", s => s.OpenDoors, (s, v) => s.OpenDoors = v,
@@ -1800,6 +1882,9 @@ internal static class SettingsSchema
         // New 2026-11-11: what happens to items once they are in your packs (from Looting, Misc and Display).
         new("Inventory", new[]
         {
+            Section("AC's Own Bags"),
+            Button("AC's own bags", "Use AC's bags", UseAcBagsClick, UseAcBagsTip),
+            Spacer(),
             Section("Packs"),
             Bool("Enable Autostack", s => s.EnableAutostack, (s, v) => s.EnableAutostack = v),
             Bool("Enable Autocram", s => s.EnableAutocram, (s, v) => s.EnableAutocram = v,

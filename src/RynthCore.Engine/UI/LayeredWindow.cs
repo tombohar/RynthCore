@@ -1172,12 +1172,7 @@ internal sealed unsafe class LayeredWindow : IDisposable
         var info = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
         if (monitor == IntPtr.Zero || !GetMonitorInfoW(monitor, ref info)) return false;
         RECT work = info.rcWork;
-        int x = Math.Clamp(left, work.Left, Math.Max(work.Left, work.Right - width));
-        int y = Math.Clamp(top, work.Top, Math.Max(work.Top, work.Bottom - height));
-        if (x == left && y == top) return false;
-        left = x;
-        top = y;
-        return true;
+        return PopOutPlacement.ClampInside(ref left, ref top, width, height, new ScreenRect(work.Left, work.Top, work.Right, work.Bottom));
     }
 
     /// <summary>The work area of the monitor nearest a rectangle (screen px). Any thread.</summary>

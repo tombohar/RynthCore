@@ -544,6 +544,30 @@ internal static class PlayerPhysicsHooks
     }
 
     /// <summary>
+    /// The first pending motion of CMotionInterp (0: none), for AcMainThreadQueue's gesture defer
+    /// (GestureDeferRule): the same pointer there for seconds is a motion that isn't playing.
+    /// Main thread only; the pointer value is read, never followed.
+    /// </summary>
+    public static bool TryGetPendingMotionHead(out IntPtr head)
+    {
+        head = IntPtr.Zero;
+        if (!MainThreadGuard.IsOnMainThread())
+            return false;
+        if (!TryGetCMotionInterp(out IntPtr cmi) || cmi == IntPtr.Zero)
+            return false;
+        try
+        {
+            head = Marshal.ReadIntPtr(cmi + CMotionPendingMotionsHeadOffset);
+            return true;
+        }
+        catch
+        {
+            head = IntPtr.Zero;
+            return false;
+        }
+    }
+
+    /// <summary>
     /// AC's local cast gate. True when CMotionInterp has a sequenced/one-shot
     /// motion queued — i.e. a spell-cast (or other action) gesture is currently
     /// animating. Empty queue = idle/ready. Returns the read success (false when

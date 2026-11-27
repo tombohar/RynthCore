@@ -443,6 +443,9 @@ internal static unsafe class Win32Backend
     /// crosses an ImGui window keeps its moves and its RBUTTONUP.</summary>
     private static bool _heldButtonsBelongToGame;
 
+    /// <summary>The mouse buttons held now were pressed on the game, not on an ImGui window (AC thread).</summary>
+    internal static bool HeldButtonsBelongToGame => _heldButtonsBelongToGame;
+
     /// <summary>io.WantTextInput from the last ImGui frame: an ImGui text box is
     /// being typed in. Vetoes chat Enter-capture the way AvaloniaTextInputActive
     /// does for Avalonia TextBoxes.</summary>
@@ -471,6 +474,8 @@ internal static unsafe class Win32Backend
     /// trailing WM_CHAR ('\r') + WM_KEYUP of that same keystroke are eaten too and never
     /// leak to the game (a lone '\r' can spuriously re-open AC's native chat bar).</summary>
     private static bool _swallowEnterTail;
+    // A Ctrl+C that copied a chat selection: its WM_CHAR (0x03) is eaten too.
+    private static bool _swallowCopyChar;
 
     // ── Chat input callbacks (set by RynthChatPanel) ─────────────────────
     /// <summary>Fired when Enter in-game activates chat (UI thread dispatch optional).</summary>
@@ -503,6 +508,13 @@ internal static unsafe class Win32Backend
     public static Action? OnChatCopy;
     /// <summary>Fired on Ctrl+X while capture is active.</summary>
     public static Action? OnChatCut;
+    /// <summary>
+    /// Ctrl+C / Ctrl+Insert, typing in RynthChat or not: copies the text selected in a chat
+    /// window and returns true, or returns false when none is selected (then the key does what
+    /// it did before: copies the input line while typing, reaches the game otherwise). Not while
+    /// another text box has the keyboard. AC's main thread.
+    /// </summary>
+    public static Func<bool>? OnChatSelectionCopy;
     private static int  _lastPanelClientX;     // last game-client pos over the panel (for wheel)
     private static int  _lastPanelClientY;
 
@@ -897,6 +909,9 @@ internal static unsafe class Win32Backend
             // updates to the panel on Avalonia's UI thread — no Avalonia focus needed.
             if (ChatCaptureActive && (IsKeyMessage(msg) || IsExtraCharMessage(msg)))
             {
+                // A popped-out chat draws the line: redraw it next frame (ImGuiPopOuts.NoteChatKey).
+                if (msg == WM_CHAR || msg == WM_KEYDOWN)
+                    ImGuiPopOuts.NoteChatKey();
                 if (msg == WM_CHAR)
                 {
                     int ch = (int)wParam;
@@ -910,7 +925,7 @@ internal static unsafe class Win32Backend
                     // control characters the branch above drops, so paste did nothing.
                     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
                     if      ((ctrl && vk == 'V') || (shift && !ctrl && vk == VK_INSERT)) { OnChatPaste?.Invoke(); }
-                    else if (ctrl && (vk == 'C' || vk == VK_INSERT))                     { OnChatCopy?.Invoke(); }
+                    else if (ctrl && (vk == 'C' || vk == VK_INSERT))                     { if (OnChatSelectionCopy?.Invoke() != true) OnChatCopy?.Invoke(); }
                     else if (ctrl && vk == 'X')                                          { OnChatCut?.Invoke(); }
                     else if (vk == VK_RETURN && !IsExtendedKey(lParam))  { ChatCaptureActive = false; _swallowEnterTail = true; PostMessage(_gameHwnd, WM_RYNTHCORE_CHAT, IntPtr.Zero, IntPtr.Zero); }
                     else if (vk == VK_ESCAPE)  { ChatCaptureActive = false; _swallowEnterTail = true; OnChatCancel?.Invoke(); }
@@ -1002,6 +1017,25 @@ internal static unsafe class Win32Backend
                     OnChatCaptureActivated.Invoke();
                     return IntPtr.Zero;
                 }
+            }
+
+            // ── Ctrl+C copies the text selected in a chat window ─────────
+            // The game keeps the keyboard, so the chat can't see the key itself. Only with text
+            // selected there; otherwise Ctrl+C goes on to AC (and ImGui) as before. Not while a
+            // text box of ours (or a pop-out's) has the keyboard: it copies its own text.
+            if (msg == WM_KEYDOWN && OnChatSelectionCopy != null && (int)wParam == 'C'
+                && (GetKeyState(VK_CONTROL) & 0x8000) != 0 && (GetKeyState(VK_MENU) & 0x8000) == 0 && (GetKeyState(VK_SHIFT) & 0x8000) == 0
+                && !AvaloniaTextInputActive && !ImGuiTextInputActive && !_wantCaptureKeyboard && !ImGuiPopOuts.HasTextFocus
+                && OnChatSelectionCopy.Invoke())
+            {
+                _swallowCopyChar = true;
+                return IntPtr.Zero;
+            }
+            // The Ctrl+C's WM_CHAR (0x03) after a copy: AC never sees the key, so not its char either.
+            if (_swallowCopyChar)
+            {
+                if (msg == WM_CHAR && (int)wParam == 0x03) { _swallowCopyChar = false; return IntPtr.Zero; }
+                if (msg == WM_KEYDOWN || msg == WM_CHAR) _swallowCopyChar = false;
             }
 
             // ── Restore focus to game when Avalonia acquires it ───────────

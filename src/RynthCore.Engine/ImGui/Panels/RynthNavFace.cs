@@ -325,7 +325,7 @@ internal sealed class RynthNavFace : IImGuiPanel
         if (Button("##go_stop", PhosphorIcons.Stop + " Stop", new Vector2(p.X + 3 * (bw + 4), p.Y), new Vector2(bw, 26),
                 walking ? Text : Red, walking ? StopBg : BtnFill, border: walking ? Red : 0))
             RynthNavCommands.Move(5);
-        SafeImGui.SetItemTooltip(walking ? "Stop walking" : "Stop any movement");
+        SafeImGui.SetItemTooltip(walking ? "Stop walking (the trip's markers go too)" : "Stop any movement and take a planned trip's markers off the ground");
         NextLine(p, 32);
 
         // Switches
@@ -721,7 +721,7 @@ internal sealed class RynthNavFace : IImGuiPanel
             RynthNavCommands.Command(st.MarkersOn ? "markers off" : "markers on");
         SafeImGui.SetItemTooltip("Show the planned trip on the ground, the way RynthAi shows its nav routes: rings at the\n"
             + "waypoints, lines between them, the portals, recalls and the goal in their own colours.\n"
-            + "They go when the trip ends, you stop, or you land somewhere that isn't on it."
+            + "They go when the trip ends, you stop, you reach a plan's goal, or you land somewhere that isn't on it."
             + (st.MarkerStatus.Length > 0 ? "\n\nNow: " + st.MarkerStatus : ""));
         if (Toggle("##mk_labels", "Labels", st.MarkerLabels, new Vector2(p.X + w1 + 4, p.Y), w2))
             RynthNavCommands.Command(st.MarkerLabels ? "markers labels off" : "markers labels on");
@@ -730,6 +730,17 @@ internal sealed class RynthNavFace : IImGuiPanel
             RynthNavCommands.Command(st.MarkerGuide ? "markers guide off" : "markers guide on");
         ImGuiNET.ImGui.SetItemTooltip("A line from your feet to the next waypoint (to the nearest marker for a plan you're not walking).");
         NextLine(p, 26);
+        // A trip on the ground now (a plan stays until you get there): take it off without the switch.
+        if (st.MarkersShown)
+        {
+            p = ImGuiNET.ImGui.GetCursorScreenPos();
+            const string ClearLabel = PhosphorIcons.Eraser + " Clear the trip's markers";
+            if (Button("##mk_clear", ClearLabel, p, new Vector2(w, 22), Text, BtnFill, leftAlign: true))
+                RynthNavCommands.Command("markers clear");
+            SafeImGui.SetItemTooltip("Take this trip's rings, lines and labels off the ground now (/rnav markers clear).\n"
+                + "Path markers stays on: the next Route or Go shows its own.");
+            NextLine(p, 26);
+        }
     }
 
     // The navmesh drawn in the world (RynthNav 0.6.7+): green where nav can walk, red walls where
@@ -741,7 +752,8 @@ internal sealed class RynthNavFace : IImGuiPanel
         if (Toggle("##ms_on", "Show navmesh", st.MeshOn, p, w1))
             RynthNavCommands.Command(st.MeshOn ? "mesh off" : "mesh on");
         SafeImGui.SetItemTooltip("Draw the navigation mesh in the world: green where nav can walk, red walls where the mesh ends\n"
-            + "(buildings, trees, rocks, cliffs, steep ground and the margin round them). Not drawn in dungeons."
+            + "(buildings, trees, rocks, cliffs, steep ground and the margin round them). In a dungeon it draws the dungeon's\n"
+            + "own mesh when RynthNav has one for it. It stays on (after a relog too) until you turn it off here (/rnav mesh off)."
             + (st.MeshOn ? $"\n\nNow: {st.MeshDrawn} triangles drawn." : ""));
         if (Toggle("##ms_floor", "Green", st.MeshFloor, new Vector2(p.X + w1 + 4, p.Y), w2))
             RynthNavCommands.Command(st.MeshFloor ? "mesh floor off" : "mesh floor on");

@@ -1206,6 +1206,34 @@ internal static class VendorTrade
     private static bool TradeAvailable(VendorSnapshot snap) =>
         _resolved && _vtablesVerified && snap.LayoutVerified && snap.ProfileRead;
 
+    // ── The Inventory panel's "Buy how many?" box (2026-11-26) ─────────────────
+
+    /// <summary>The open vendor while buying from it is possible, else null (any thread).</summary>
+    public static VendorSnapshot? TradableSnapshot
+    {
+        get
+        {
+            VendorSnapshot? snap = _snapshot;
+            return snap != null && TradeAvailable(snap) ? snap : null;
+        }
+    }
+
+    /// <summary>Whether <paramref name="id"/> is on the open vendor's list (any thread; AC's drop detour asks).</summary>
+    public static bool IsVendorItem(uint id) => id != 0 && _snapshot?.Find(id) != null;
+
+    /// <summary>What the player pays this vendor with: pyreals, or the vendor's own currency; -1 unknown.</summary>
+    public static long MoneyFor(VendorSnapshot snap) => snap.AltCurrencyWcid != 0 ? _altHave : _playerCoins;
+
+    /// <summary>"pyreals", or the vendor's own currency's name.</summary>
+    public static string CurrencyName(VendorSnapshot snap) => Currency(snap);
+
+    /// <summary>The last request's state: 1 queued, 2 sent, 3 done (result 1 accepted, 2 refused in chat, 3 no answer), 4 refused.</summary>
+    public static (uint Seq, int State, int Result, string Message) LastStatus()
+    {
+        lock (_statusLock)
+            return (_stSeq, _stState, _stResult, _stMessage);
+    }
+
     private static void SetStatus(Txn t, int state, int result, string message, long estimate = long.MinValue)
     {
         // Always the most recently UPDATED request; RequestId says which one. Plugins

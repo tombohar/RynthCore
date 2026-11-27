@@ -57,10 +57,48 @@ internal sealed class QuickSettingsDrawer : RynthAiDrawer
 
     public override void Update(bool showing)
     {
+        UpdateRulesFeed(showing);
         if (showing == _sub) return;
         _sub = showing;
         if (showing) { UiSources.Settings.Subscribe(); UiSources.Settings.RequestRefresh(); }
         else UiSources.Settings.Unsubscribe();
+    }
+
+    // A pinned Attack Spell Shapes row (Settings > Spell Combat) reads RynthAi's monster rules, and a pinned
+    // Navmesh View row (Settings > Navigation) RynthNav's status: polled while the drawer shows such a pin
+    // (checked once a second, not every frame).
+    private bool _rulesSub, _navSub;
+    private long _rulesCheckMs;
+
+    private void UpdateRulesFeed(bool showing)
+    {
+        bool want = _rulesSub, wantNav = _navSub;
+        if (!showing) want = wantNav = false;
+        else
+        {
+            long now = Environment.TickCount64;
+            if (now >= _rulesCheckMs)
+            {
+                _rulesCheckMs = now + 1000;
+                want = wantNav = false;
+                foreach (string key in QuickSettings.Pins)
+                {
+                    string? label = QuickSettings.RowOf(key)?.Label;
+                    want |= DefaultSpellShapes.IsShapeLabel(label);
+                    wantNav |= NavmeshView.IsMeshLabel(label);
+                }
+            }
+        }
+        if (wantNav != _navSub)
+        {
+            _navSub = wantNav;
+            if (wantNav) { UiSources.RynthNav.Subscribe(); UiSources.RynthNav.RequestRefresh(); }
+            else UiSources.RynthNav.Unsubscribe();
+        }
+        if (want == _rulesSub) return;
+        _rulesSub = want;
+        if (want) { UiSources.MonsterRules.Subscribe(); UiSources.MonsterRules.RequestRefresh(); }
+        else UiSources.MonsterRules.Unsubscribe();
     }
 
     public override void DrawPanel(Vector2 origin, float panelW, float panelH, float k)

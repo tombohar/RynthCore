@@ -79,5 +79,11 @@ internal static class PluginContractVersion
     /// <summary>The API version whose PluginShared RynthCore.LootSdk has Keep # per day.</summary>
     public const uint LootSdkPerDay = 98;
 
-    public const uint Current = 98;
+    // v99: CameraAction(action, pressed): AC's own camera keys from a plugin (Compatibility\AcCamera.cs) - turn,
+    //      raise, lower, closer and farther held until let go, the default view ("home") and first person - for
+    //      the phone's Live view (RynthRemote 0.11). The SDK's HasCameraAction / CameraAction / RynthCameraAction.
+    /// <summary>The API version with CameraAction.</summary>
+    public const uint Camera = 99;
+
+    public const uint Current = 99;
 }

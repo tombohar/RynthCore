@@ -139,6 +139,12 @@ internal interface IImGuiPanel
     int PopOutIdleHz => 10;
 
     /// <summary>
+    /// The face shows the chat line being typed (Win32Backend's chat capture, not an ImGui
+    /// text box): popped out, each chat key redraws it at once (ImGuiPopOuts.NoteChatKey).
+    /// </summary>
+    bool ShowsChatTyping => false;
+
+    /// <summary>
     /// True while the face has nothing to show docked (the Dungeon Map outdoors): it
     /// stays open and subscribed, but the host draws no window for it until this is
     /// false again. Popped out it is drawn as usual. AC thread; keep it cheap.
@@ -456,6 +462,14 @@ internal static class ImGuiPanelHost
         try { return Math.Clamp(entry?.Instance?.PopOutIdleHz ?? 10, 1, 30); } catch { return 10; }
     }
 
+    /// <summary>IImGuiPanel.ShowsChatTyping for a face. AC thread.</summary>
+    public static bool ShowsChatTyping(string title)
+    {
+        Entry? entry;
+        lock (Sync) Entries.TryGetValue(title, out entry);
+        try { return entry?.Instance?.ShowsChatTyping ?? false; } catch { return false; }
+    }
+
     /// <summary>For a face's own pop-out button: dock back (arrow in) while it is drawn in its own window, else pop out.</summary>
     public static string PopOutGlyph => ImGuiPopOuts.InPopOutFrame ? PhosphorIcons.ArrowSquareIn : PhosphorIcons.ArrowSquareOut;
 
@@ -608,6 +622,12 @@ internal static class ImGuiPanelHost
     /// </summary>
     public static bool UnderUiHovered { get; private set; }
 
+    /// <summary>
+    /// The last DrawAll: the title of the first panel found under the cursor (topmost not guaranteed
+    /// when panels overlap), or null. For logs only (ItemDragBridge). AC thread.
+    /// </summary>
+    public static string? HoveredTitle { get; private set; }
+
     // ── Frame (AC thread) ──────────────────────────────────────────────
 
     /// <summary>
@@ -623,6 +643,7 @@ internal static class ImGuiPanelHost
         _frameScale = uiScale;
         WheelWanted = false;
         UnderUiHovered = false;
+        HoveredTitle = null;
         float placeScale = PlacementScale();
         ApplyFaceChanges(placeScale);   // plugin windows taking over (or giving back) engine panels
         ApplyLayoutSwitch(placeScale);  // another character's panel layout (UI/PanelLayout)
@@ -959,16 +980,19 @@ internal static class ImGuiPanelHost
         Vector2 size = entry.Size;
         Vector2 origin = ImGuiPopOuts.ClientOriginOnScreen();
         int left = (int)(origin.X + entry.Pos.X), top = (int)(origin.Y + entry.Pos.Y);
+        bool atSavedSpot = false;
         if (PanelStateStore.TryGetPanel(entry.Title, out PanelStateStore.PanelEntry saved)
             && (saved.FloatingLeft != 0 || saved.FloatingTop != 0) && (fromSaved || saved.Floating))
         {
             left = (int)Math.Round(saved.FloatingLeft);
             top = (int)Math.Round(saved.FloatingTop);
+            atSavedSpot = true;   // follows the game window if it moved since (ImGuiPopOuts, UI/PopOutPlacement)
         }
         bool standard = entry.Spec.Chrome == PanelChrome.Standard;
         int caption = standard ? (int)(RynthTheme.HeaderHeight * s) : 0;
         int buttons = standard ? (int)HeaderButtonsWidth(entry, s, popped: true) : 0;
-        ImGuiPopOuts.Open(entry.Title, left, top, (int)size.X, (int)size.Y, caption, buttons, s, resizable: !entry.Spec.NoResize);
+        ImGuiPopOuts.Open(entry.Title, left, top, (int)size.X, (int)size.Y, caption, buttons, s, resizable: !entry.Spec.NoResize,
+            fromSaved: atSavedSpot);
         entry.Popped = true;
         PersistPopped(entry, open: true, left, top, (int)size.X, (int)size.Y, placeScale);
     }
@@ -1248,16 +1272,23 @@ internal static class ImGuiPanelHost
         // Popped out, a panel is always interactive (like the Avalonia pop-out was).
         if (!popped) try { clickThrough = entry.Instance?.ClickThrough ?? false; } catch { }
         // Under AC's UI: where an AC window covers the cursor the click is AC's (unless a press that
-        // began on this panel is still held, so a drag over an AC window isn't dropped). In portal space
-        // AC's portal-space view covers the 3D view; AcMouseOver counts it as the world, not a window.
+        // began on this panel is still held, so a drag over an AC window isn't dropped). A press that
+        // began on the game (an item dragged in AC's inventory) stays AC's: the panel behind must not
+        // catch its drop (AcMouseOverRules.UnderUiPanelClickThrough). In portal space AC's
+        // portal-space view covers the 3D view; AcMouseOver counts it as the world, not a window.
         bool underUi = spec.UnderUi && !popped;
-        if (underUi && !clickThrough && !ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left)
-            && Compatibility.AcMouseOver.Current() == Compatibility.AcMouseTarget.AcWindow)
+        if (underUi && !clickThrough
+            && Compatibility.AcMouseOverRules.UnderUiPanelClickThrough(Compatibility.AcMouseOver.Current(),
+                ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left), Win32Backend.HeldButtonsBelongToGame))
             clickThrough = true;
         if (clickThrough) flags |= ImGuiWindowFlags.NoInputs;
 
         bool childOpen = false;
         ImGuiNET.ImGui.Begin(entry.WindowId, flags);
+        // Which panel is under the cursor (ItemDragBridge names it when it keeps a drop from AC).
+        if (!clickThrough && HoveredTitle == null
+            && ImGuiNET.ImGui.IsWindowHovered(ImGuiHoveredFlags.ChildWindows | ImGuiHoveredFlags.AllowWhenBlockedByActiveItem))
+            HoveredTitle = underUi ? entry.Title + " (under AC's UI)" : entry.Title;
         if (underUi)
         {
             UnderUiLayer.AddWindowList(ImGuiNET.ImGui.GetWindowDrawList());

@@ -64,7 +64,7 @@ internal readonly record struct LayoutFiles(string PanelState, string ImGuiIni)
 }
 
 /// <summary>What /rc layout asks for.</summary>
-internal enum LayoutCommand { Invalid, Status, MakeDefault, ResetAsk, ResetConfirm }
+internal enum LayoutCommand { Invalid, Status, MakeDefault, ResetAsk, ResetConfirm, BringHere }
 
 /// <summary>The kinds of windows the engine hosts (ImGuiPanelHost): its own panels, plugins' manifest windows, script windows.</summary>
 internal enum WindowKind { EnginePanel, PluginWindow, ScriptWindow }
@@ -211,7 +211,7 @@ internal static class PanelLayoutPolicy
 
     // ── /rc layout ───────────────────────────────────────────────────────
 
-    public const string Usage = "Usage: /rc layout [status] | default | reset [confirm]";
+    public const string Usage = "Usage: /rc layout [status] | default | reset [confirm] | here";
 
     /// <summary>"/rc layout" and its arguments (any case, any spacing).</summary>
     public static LayoutCommand ParseCommand(string? args)
@@ -223,6 +223,8 @@ internal static class PanelLayoutPolicy
             "default" => LayoutCommand.MakeDefault,
             "reset" => LayoutCommand.ResetAsk,
             "reset confirm" => LayoutCommand.ResetConfirm,
+            // Every popped-out window back onto the game window (Settings > Interface "Bring Windows Back").
+            "here" => LayoutCommand.BringHere,
             _ => LayoutCommand.Invalid,
         };
     }

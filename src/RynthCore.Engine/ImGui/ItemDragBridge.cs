@@ -171,7 +171,7 @@ internal static unsafe class ItemDragBridge
     {
         pressLParam = _pressLParam;
         if (msg != WM_LBUTTONUP || _nativeItem == 0 || !_overImGui) return false;
-        RynthLog.UI($"ItemDragBridge: native drag 0x{_nativeItem:X8} released over an ImGui window; AC gets the drop back at its start ({_pressX},{_pressY}).");
+        RynthLog.UI($"ItemDragBridge: native drag 0x{_nativeItem:X8} released over an ImGui window ({ImGuiPanelHost.HoveredTitle ?? "not a panel"}); AC gets the drop back at its start ({_pressX},{_pressY}).");
         return true;
     }
 

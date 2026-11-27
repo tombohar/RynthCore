@@ -32,6 +32,7 @@ internal static class UiDropTargets
         public Vector2 Min, Max;   // ImGui coordinates of the game window's client area (docked)
         public long SeenMs;
         public bool Accepting;
+        public Predicate<uint>? Accepts;   // null: any item
         public bool HasDrop;
         public uint ItemId, SpellId;
     }
@@ -61,8 +62,9 @@ internal static class UiDropTargets
     /// body in screen coordinates as ImGui sees them (FaceKit.Begin's origin and size).
     /// <paramref name="accepting"/> false: drawn, but a drop now wouldn't be used (it then
     /// goes to AC as usual). Popped-out faces hit-test against their own window.
+    /// <paramref name="accepts"/>: which items it takes (null: any); any other item goes to AC.
     /// </summary>
-    public static void Publish(string key, string panelTitle, Vector2 min, Vector2 max, bool accepting)
+    public static void Publish(string key, string panelTitle, Vector2 min, Vector2 max, bool accepting, Predicate<uint>? accepts = null)
     {
         lock (Sync)
         {
@@ -72,6 +74,7 @@ internal static class UiDropTargets
             t.Min = min;
             t.Max = max;
             t.Accepting = accepting;
+            t.Accepts = accepts;
             t.SeenMs = Environment.TickCount64;
         }
     }
@@ -92,6 +95,8 @@ internal static class UiDropTargets
             {
                 if (!t.Accepting || now - t.SeenMs > StaleMs || !IsCursorOver(t))
                     continue;
+                if (t.Accepts != null && !SafeAccepts(t.Accepts, itemId))
+                    continue;   // not an item this target takes (it goes to AC as usual)
                 t.HasDrop = true;
                 t.ItemId = itemId;
                 t.SpellId = spellId;
@@ -100,6 +105,12 @@ internal static class UiDropTargets
             }
         }
         return false;
+    }
+
+    private static bool SafeAccepts(Predicate<uint> accepts, uint itemId)
+    {
+        try { return accepts(itemId); }
+        catch { return false; }
     }
 
     /// <summary>The face's draw: an item dropped on it since the last call.</summary>

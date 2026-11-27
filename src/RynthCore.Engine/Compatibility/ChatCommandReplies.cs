@@ -189,7 +189,8 @@ internal static class ChatCommandReplies
         V("title", "Usage: /rc title <title id>", a => uint.TryParse(a.Trim(), out uint t) && t != 0),
         V("hotkey", HotkeyUsage, null),
         V("rl", "Usage: /rc rl (reloads RynthCore, as the bar's RL button)", NoArgs, "reload"),
-        V("inventory", "Usage: /rc inventory (opens or closes the Inventory panel)", NoArgs, "inv"),
+        V("inventory", "Usage: /rc inventory (opens or closes the Inventory panel) | /rc inventory ac (closes it and opens AC's own bags)",
+            a => a.Length == 0 || Words("ac", "retail", "game")(a), "inv"),
         V("sense", RynthCore.Engine.UI.Data.SenseLayout.Usage, RynthCore.Engine.UI.Data.SenseLayout.IsValidArgs),
         V("characters", "Usage: /rc characters (opens or closes RynthNet's Characters window)", NoArgs, "chars"),
         V("itemcount", "Usage: /rc itemcount (opens or closes the Item Count panel)", NoArgs, "itemhud"),
@@ -198,7 +199,7 @@ internal static class ChatCommandReplies
         V("actionstate", "Usage: /rc actionstate (the client's item-action gates)", NoArgs, "actions"),
         V("unlockactions", "Usage: /rc unlockactions (opens the client's item-action gates now)", NoArgs, "unlock"),
         V("vitals", "Usage: /rc vitals (the old vitals HUD is gone: /rv plates self)", NoArgs, "hud"),
-        V("layout", "Usage: /rc layout [status] | default | reset [confirm]", LayoutArgs),
+        V("layout", "Usage: /rc layout [status] | default | reset [confirm] | here", LayoutArgs),
         // The extra chat windows (ImGui/Panels/ChatWindowFace); its handler checks the arguments
         // (UI/Data/ChatWindows.Parse, whose Usage is this same line).
         V("chatwindow", "Usage: /rc chatwindow [list] | open [tab] | close <2-7|all> | tab <2-7> <tab>", null, "chatwin", "chatwindows"),
@@ -210,10 +211,10 @@ internal static class ChatCommandReplies
     public const string UiCostUsage =
         "Usage: /rc uicost [on|off|<ms>|now|status]  (alone: now; <ms> = the slow-frame threshold, 5-2000)";
 
-    /// <summary>"/rc layout": nothing or status, default, reset, reset confirm (any spacing).</summary>
+    /// <summary>"/rc layout": nothing or status, default, reset, reset confirm, here (any spacing).</summary>
     private static bool LayoutArgs(string a) =>
         string.Join(' ', a.Split(' ', StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant()
-            is "" or "status" or "default" or "reset" or "reset confirm";
+            is "" or "status" or "default" or "reset" or "reset confirm" or "here";
 
     /// <summary>The verb <paramref name="word"/> names (its name or another spelling), or null.</summary>
     public static ChatVerb? Find(string word)

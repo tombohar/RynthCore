@@ -623,7 +623,7 @@ internal static class AcMainThreadQueue
     // Gesture-phase defer state for the action ring (mirrors the cast slot's
     // 56e6946 guard; see DrainDeferTickCap note below for why we PROCEED
     // rather than drop after the cap).
-    private static long _drainDeferSinceMs;
+    private static readonly GestureDeferRule _gestureDefer = new(DrainDeferMaxMs);
 
     public static void Drain()
     {
@@ -726,13 +726,22 @@ internal static class AcMainThreadQueue
         if (_ring.Count > 0)
         {
             // In milliseconds (was 250 Drain calls: 2 s to over 10 s depending on the frame rate).
-            if (PlayerPhysicsHooks.TryGetCastGestureInProgress(out bool gestureInFlight) && gestureInFlight)
+            // A head that stays the same motion past the cap is stuck, not playing, and is not
+            // waited on again until it changes (GestureDeferRule, R-20261123-152528-b02d).
+            if (PlayerPhysicsHooks.TryGetPendingMotionHead(out IntPtr motionHead))
             {
                 long nowDefer = NowMs;
-                if (_drainDeferSinceMs == 0) _drainDeferSinceMs = nowDefer;
-                gestureSafeOnly = nowDefer - _drainDeferSinceMs <= DrainDeferMaxMs;
+                gestureSafeOnly = _gestureDefer.Defer(motionHead, nowDefer, out bool becameWedged);
+                if (becameWedged)
+                {
+                    string line = $"AcMainThreadQueue: the character's motion queue has had the same motion first for {_gestureDefer.HeadAgeMs(nowDefer)} ms " +
+                                  $"(0x{motionHead.ToInt64():X}): taken as stuck, queued actions ({_ring.Count}) no longer wait for it until it changes.";
+                    try { RynthLog.Compat(line); } catch { }
+                    try { Net.FlightRecorder.Mark(Net.FlightMark.Note, text: line); } catch { }
+                }
             }
-            if (!gestureSafeOnly) _drainDeferSinceMs = 0;
+            else
+                _gestureDefer.Unread();
         }
         long runAt = NowMs;
         int epochNow = Volatile.Read(ref _loginEpoch);
@@ -896,7 +905,7 @@ internal static class AcMainThreadQueue
             }
         }
         // The gesture-safe entries emptied the ring: the next held entry gets its own full defer.
-        if (gestureSafeOnly && _ring.Count == 0) _drainDeferSinceMs = 0;
+        if (gestureSafeOnly && _ring.Count == 0) _gestureDefer.RingEmptied();
     }
 
     /// <summary>

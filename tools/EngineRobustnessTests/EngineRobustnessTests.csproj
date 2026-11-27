@@ -46,6 +46,7 @@
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\WorldTransitionState.cs" Link="Engine\WorldTransitionState.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\AddressSpace.cs" Link="Engine\AddressSpace.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ActionRing.cs" Link="Engine\ActionRing.cs" />
+    <Compile Include="..\..\src\RynthCore.Engine\Compatibility\GestureDeferRule.cs" Link="Engine\GestureDeferRule.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\CastStopRules.cs" Link="Engine\CastStopRules.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\MutatorGate.cs" Link="Engine\MutatorGate.cs" />
     <Compile Include="..\..\src\RynthCore.Engine\Compatibility\ReleasedObjectRetention.cs" Link="Engine\ReleasedObjectRetention.cs" />

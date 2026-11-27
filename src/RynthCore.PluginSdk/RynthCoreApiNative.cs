@@ -209,6 +209,8 @@ public struct RynthCoreApiNative
     public IntPtr WebPanelNavigateFn;        // int WebPanelNavigate(int handle, byte* url) -> 1 queued; -2 off-list; -6 stale
     public IntPtr WebPanelCloseFn;           // int WebPanelClose(int handle) -> 1 queued, 0 already closed, -6 stale
     public IntPtr WebPanelGetStateFn;        // int WebPanelGetState(int handle, WebPanelStateNative*) -> Status (non-live handle -> 6 Superseded), -1 bad args
+    // v99: AC's camera keys
+    public IntPtr CameraActionFn;            // int CameraAction(int action, int pressed) -> 1 queued, 0 not available, -1 bad action
 }
 
 /// <summary>

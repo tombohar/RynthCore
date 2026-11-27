@@ -14,6 +14,8 @@
 //      Tick): a client area that is not that size is resized to it at the restore, a saved
 //      size that differs is ignored (one log line), and a stretched window is never saved.
 //      Borderless windowed keeps the client area where it is (outer = client).
+//      Since 2026-11-26 a borderless game at (or above) its monitor's size fills that monitor
+//      exactly instead, taskbar included (BorderlessFill), and is kept there.
 //      While this is on, the launcher leaves the window's position to the engine.
 //  Original: SilentKelpie (RynthCore PR 6). Decisions live in AcWindowChromePolicy.
 //
@@ -60,7 +62,7 @@ internal static class AcWindowChrome
 
     private static readonly object Sync = new();
     private static readonly Action PostedWork = RunOnGameThread;
-    private static long _nextTickMs, _firstTickMs, _workPostedAtMs, _nextStyleActionMs;
+    private static long _nextTickMs, _firstTickMs, _workPostedAtMs, _nextStyleActionMs, _nextFillMs;
     private static int _workPosted;
     private static bool _loggedNoExecutor;
 
@@ -96,7 +98,8 @@ internal static class AcWindowChrome
         {
             // AC's resolution, for the window's size (2026-11-21): the back buffer it draws into. Read
             // here because the device belongs to the render thread; the game thread uses the copy.
-            if (EngineSettings.RememberAcWindowPosition)
+            // Borderless windowed uses it too (2026-11-26): a game at its monitor's size fills it.
+            if (EngineSettings.RememberAcWindowPosition || EngineSettings.BorderlessWindowed)
                 Interlocked.Exchange(ref _drawSize,
                     ImGuiBackend.DX9Backend.TryGetBackBufferSize(device, out int bw, out int bh) ? ((long)bw << 32) | (uint)bh : 0);
 
@@ -115,6 +118,11 @@ internal static class AcWindowChrome
             bool work = now >= Interlocked.Read(ref _nextStyleActionMs)
                 && DecideBorderless(EngineSettings.BorderlessWindowed, ReadMarker(hwnd), style,
                     LooksExclusiveFullscreen(hwnd, style)).Action != ChromeAction.None;
+
+            // A window we made borderless that should fill its monitor and does not (AC resized it, or
+            // the restore moved it): put it back on the monitor, at most once per StyleRetryMs.
+            if (!work && now >= Interlocked.Read(ref _nextFillMs) && FillNeeded(hwnd, style) != null)
+                work = true;
 
             // Posted every tick until the restore is decided: it waits for AC's size to settle.
             if (EngineSettings.RememberAcWindowPosition && !PlacementDone(hwnd) && InWorld() && KeyReady(now, out _))
@@ -189,20 +197,85 @@ internal static class AcWindowChrome
         {
             case ChromeAction.Strip:
                 SetProp(hwnd, StyleProp, new IntPtr(d.NewMarker));
-                SetStyleKeepingClient(hwnd, d.NewStyle);
-                RynthLog.UI("AcWindowChrome: borderless windowed on.");
+                // A game at its monitor's size fills the monitor (2026-11-26); a smaller one keeps
+                // its client area where it is (2026-11-21). Decided from the framed window.
+                if (StripFill(hwnd) is Rect fill)
+                {
+                    SetWindowLong(hwnd, GwlStyle, d.NewStyle);
+                    FillMonitor(hwnd, fill);
+                    RynthLog.UI(FormattableString.Invariant(
+                        $"AcWindowChrome: borderless windowed on, full screen on the monitor at ({fill.Left},{fill.Top}) {fill.Width}x{fill.Height}."));
+                }
+                else
+                {
+                    SetStyleKeepingClient(hwnd, d.NewStyle, pullOnScreen: false);
+                    RynthLog.UI("AcWindowChrome: borderless windowed on.");
+                }
                 break;
             case ChromeAction.Restore:
                 RemoveProp(hwnd, StyleProp);
-                SetStyleKeepingClient(hwnd, d.NewStyle);
+                // The frame grows around the client area; a full screen one would put the caption
+                // above the monitor, so the window is pulled onto the work area.
+                SetStyleKeepingClient(hwnd, d.NewStyle, pullOnScreen: true);
                 RynthLog.UI("AcWindowChrome: window borders restored.");
                 break;
             case ChromeAction.ClearMarker:
                 RemoveProp(hwnd, StyleProp);
                 RynthLog.UI("AcWindowChrome: borderless marker cleared (" + d.Reason + ").");
                 break;
+            case ChromeAction.None:
+                if (Environment.TickCount64 >= Interlocked.Read(ref _nextFillMs) && FillNeeded(hwnd, style) is Rect again)
+                {
+                    Interlocked.Exchange(ref _nextFillMs, Environment.TickCount64 + StyleRetryMs);
+                    FillMonitor(hwnd, again);
+                    RynthLog.UI(FormattableString.Invariant(
+                        $"AcWindowChrome: borderless full screen put back on the monitor at ({again.Left},{again.Top}) {again.Width}x{again.Height}."));
+                }
+                break;
         }
     }
+
+    /// <summary>The window's rect and client size, and the full rect of the monitor it is (mostly) on.</summary>
+    private static bool TryReadWindow(IntPtr hwnd, out Rect outer, out Size client, out Rect monitor)
+    {
+        outer = default; client = default; monitor = default;
+        if (!GetWindowRect(hwnd, out RECT wr) || !GetClientRect(hwnd, out RECT cr)) return false;
+        IntPtr mon = MonitorFromWindow(hwnd, 2 /* MONITOR_DEFAULTTONEAREST */);
+        if (mon == IntPtr.Zero) return false;
+        var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+        if (!GetMonitorInfo(mon, ref mi)) return false;
+        outer = new Rect(wr.Left, wr.Top, wr.Right, wr.Bottom);
+        client = new Size(cr.Right - cr.Left, cr.Bottom - cr.Top);
+        monitor = new Rect(mi.rcMonitor.Left, mi.rcMonitor.Top, mi.rcMonitor.Right, mi.rcMonitor.Bottom);
+        return true;
+    }
+
+    /// <summary>At a strip (the window still framed): the monitor it must fill, else null.</summary>
+    private static Rect? StripFill(IntPtr hwnd)
+    {
+        if (IsIconic(hwnd) || IsZoomed(hwnd)) return null;
+        return TryReadWindow(hwnd, out Rect outer, out Size client, out Rect monitor)
+            ? BorderlessFill(outer, client, DrawSize(), monitor)
+            : null;
+    }
+
+    /// <summary>
+    /// A window we made borderless (our marker, no caption, setting on) that should fill its monitor
+    /// and is not exactly on it: the monitor rect, else null. Reads only.
+    /// </summary>
+    private static Rect? FillNeeded(IntPtr hwnd, int style)
+    {
+        if (!EngineSettings.BorderlessWindowed || ReadMarker(hwnd) == 0 || (style & WsCaption) != 0) return null;
+        if (IsIconic(hwnd) || IsZoomed(hwnd)) return null;
+        return TryReadWindow(hwnd, out Rect outer, out Size client, out Rect monitor)
+            ? BorderlessFillNeeded(outer, client, DrawSize(), monitor)
+            : null;
+    }
+
+    /// <summary>Borderless full screen: the window covers its monitor exactly (no topmost: Windows moves the taskbar aside).</summary>
+    private static void FillMonitor(IntPtr hwnd, Rect fill)
+        => SetWindowPos(hwnd, IntPtr.Zero, fill.Left, fill.Top, fill.Width, fill.Height,
+            SwpNozorder | SwpNoactivate | SwpFramechanged);
 
     // Style change only: same outer rect, non-client area rebuilt.
     private static void Refresh(IntPtr hwnd)
@@ -215,8 +288,10 @@ internal static class AcWindowChrome
     /// with the chrome back, the frame grows around it again. Keeping the outer rect instead, as
     /// before, grew or shrank the client area by the frame, so AC stretched its picture by a few
     /// pixels and the overlay was off by as much. Minimised or maximised: the style only.
+    /// <paramref name="pullOnScreen"/> (chrome back, 2026-11-26): the framed rect is pulled onto a
+    /// work area, so a caption grown above a full screen window's top edge stays reachable.
     /// </summary>
-    private static void SetStyleKeepingClient(IntPtr hwnd, int newStyle)
+    private static void SetStyleKeepingClient(IntPtr hwnd, int newStyle, bool pullOnScreen)
     {
         RECT client = default;
         bool keep = !IsIconic(hwnd) && !IsZoomed(hwnd) && GetClientRect(hwnd, out client);
@@ -233,6 +308,12 @@ internal static class AcWindowChrome
             if (AdjustWindowRectEx(ref outer, newStyle, false, GetWindowLong(hwnd, GwlExStyle)))
             {
                 int outerW = outer.Right - outer.Left, outerH = outer.Bottom - outer.Top;
+                if (pullOnScreen)
+                {
+                    var areas = new List<AcWindowPlacementRule.WorkArea>();
+                    foreach (Rect a in WorkAreas()) areas.Add(new AcWindowPlacementRule.WorkArea(a.Left, a.Top, a.Right, a.Bottom));
+                    (outer.Left, outer.Top) = AcWindowPlacementRule.ClampToWorkArea(outer.Left, outer.Top, outerW, outerH, areas);
+                }
                 SetWindowPos(hwnd, IntPtr.Zero, outer.Left, outer.Top, outerW, outerH,
                     SwpNozorder | SwpNoactivate | SwpFramechanged);
                 return;

@@ -599,6 +599,7 @@ internal static class ClientHelperHooks
         if (IsFullOwnedContainer(targetContainerId))
             return false;
 
+        SplitGlobals keep = SplitGlobals.Read();
         try
         {
             // P0 (2026-06-24): defensively restore the whole-move split globals to
@@ -621,6 +622,63 @@ internal static class ClientHelperHooks
             // where the slot must be honored, callers should use
             // SplitStackInternal instead.
             _moveItemInternal(IntPtr.Zero, objectId, targetContainerId, slot, amount);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            // 2026-11-26: the two globals are also the retail toolbar's quantity (the number a
+            // player types to buy or split several, which AC's vendor and pack drags read). They are
+            // read inside the call only, so AC's own values go back afterwards: Autocram, RynthSort
+            // or the Inventory panel moving an item no longer turns the player's number into 1.
+            keep.Restore();
+        }
+    }
+
+    /// <summary>
+    /// AC's split_amount / total_stack as they were before one of our moves, put back after it.
+    /// Main thread (the callers run there). An unreadable pair is left alone.
+    /// </summary>
+    private readonly struct SplitGlobals
+    {
+        private readonly int _split, _total;
+        private readonly bool _ok;
+
+        private SplitGlobals(int split, int total) { _split = split; _total = total; _ok = true; }
+
+        public static SplitGlobals Read()
+        {
+            try
+            {
+                return new SplitGlobals(Marshal.ReadInt32(new IntPtr(_splitAmountAddr)), Marshal.ReadInt32(new IntPtr(_totalStackAddr)));
+            }
+            catch
+            {
+                return default;
+            }
+        }
+
+        public void Restore()
+        {
+            if (!_ok) return;
+            try { Marshal.WriteInt32(new IntPtr(_splitAmountAddr), _split); } catch { }
+            try { Marshal.WriteInt32(new IntPtr(_totalStackAddr), _total); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// AC's split_amount: the retail toolbar's quantity (how many of the selected stack or vendor item
+    /// a drag takes). False when it can't be read. Main thread.
+    /// </summary>
+    public static bool TryReadSplitAmount(out int amount)
+    {
+        amount = 0;
+        try
+        {
+            amount = Marshal.ReadInt32(new IntPtr(_splitAmountAddr));
             return true;
         }
         catch
@@ -650,6 +708,7 @@ internal static class ClientHelperHooks
         if (slot < 0) return false;
         if (amount <= 0) return false;
 
+        SplitGlobals keep = SplitGlobals.Read();
         try
         {
             // Force split_amount < total_stack so FUN_00588f70 takes the split
@@ -673,8 +732,9 @@ internal static class ClientHelperHooks
             // onto the 0x55 specific-slot path. DORMANT today (AutoStack uses
             // MergeStackInternal) but fixed defensively. Writes are individually
             // try/caught so a failed restore can't escape the finally.
-            try { Marshal.WriteInt32(new IntPtr(_splitAmountAddr), 1); } catch { }
-            try { Marshal.WriteInt32(new IntPtr(_totalStackAddr), 1); } catch { }
+            // 2026-11-26: AC's own values go back (the retail toolbar's quantity, see
+            // MoveItemInternal), and MoveItemInternal forces 1/1 for its own call anyway.
+            keep.Restore();
         }
     }
 

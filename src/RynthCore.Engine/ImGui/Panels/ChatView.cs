@@ -16,12 +16,17 @@
 //  under itself. Lines keep the colour and highlights the rules gave them
 //  (ChatLine.Route, worked out on the pump - no regex runs here); a line with
 //  highlights is laid out by hand (LayoutSpans) so each run can take its own
-//  colour. Drag across lines to copy them (the keyboard stays with the game,
-//  so copy is mouse-driven). Right-click a line to copy it or to make a rule
+//  colour. Drag across text to select it, down to the character and across
+//  lines (2026-11-26; whole lines before): the mouse-up copies it, Ctrl+C
+//  copies it again (Win32Backend.OnChatSelectionCopy: the keyboard stays with
+//  the game, so the WndProc asks), and the line menu has Copy selection. Only
+//  the line under the mouse and the selection's two end lines are laid out by
+//  character (LineRows, cached), never the whole history. A RynthAi item info
+//  line offers "Copy item as one line". Right-click a line to copy it or to make a rule
 //  from it: move / copy lines like it to a tab, hide them, colour or highlight
 //  them (a "Highlight line" rule: a band behind the whole line). A line
-//  with map coordinates in it ("42.1N, 33.6E") also offers "Arrow to" and "Go
-//  to" them, sent to RynthNav (UI/Data/ChatCoords.cs finds them). The
+//  with map coordinates in it ("42.1N, 33.6E") also offers "Arrow to", "Route
+//  to" and "Go to" them, sent to RynthNav (UI/Data/ChatCoords.cs finds them). The
 //  coordinates are also drawn as underlined links: click points RynthNav's
 //  arrow there (its overlay opens), Ctrl+click walks there.
 //  Follows the newest line until you scroll up; the scroll for new lines is set
@@ -119,12 +124,20 @@ internal sealed class ChatView
     private const float ListScrollbarW = 10f;
     private float _wrapFix;
 
-    // Selection: indices into _vis.
+    // Selection: lines as indices into _vis, and the character in each line's Text where it
+    // starts and ends (2026-11-26: it took whole lines only). Drag across text to select;
+    // the mouse-up copies it, Ctrl+C copies it again, and the right-click menu has Copy selection.
     private int _selAnchor = -1, _selEnd = -1;
+    private int _selAnchorChar, _selEndChar;
     private bool _selDragging, _selMoved;
     private Vector2 _selDown;
     private string? _flash;
     private double _flashUntil;
+    // A copy made from Ctrl+C (the WndProc, outside any ImGui frame): flashed at the next draw.
+    private string? _pendingFlash;
+
+    /// <summary>The view whose selection Ctrl+C copies: the last one a selection was made in. AC thread.</summary>
+    private static ChatView? _selectionOwner;
 
     // Unread lines per tab since it was last on screen (Id of the newest line seen there).
     private readonly Dictionary<string, long> _seenId = new(StringComparer.OrdinalIgnoreCase);
@@ -136,6 +149,9 @@ internal sealed class ChatView
     private string? _ctxTab, _renameFrom;
     private ChatLine? _ctxLine;
     private string _ctxPattern = "";
+    // The right-clicked line's item (RynthAi's item info) as one line, or null: "Copy item as one line".
+    private string? _ctxItemOneLine;
+    private int _ctxItemLines;
     // Map coordinates in the right-clicked line (ChatCoords, found when the menu opens):
     // its menu offers "Arrow to" / "Go to" them, through RynthNav.
     private List<ChatCoord> _ctxCoords = new();
@@ -154,7 +170,11 @@ internal sealed class ChatView
         _unreadLines = _unreadRoutes = -1;   // a full recount
     }
 
-    public void OnHidden() => OnScreen.Remove(_viewKey);
+    public void OnHidden()
+    {
+        OnScreen.Remove(_viewKey);
+        ClearSelection();   // Ctrl+C never copies from a closed window
+    }
 
     /// <summary>Follow the newest line again (Auto-scroll turned on).</summary>
     public void Restick() => _stick = true;
@@ -561,7 +581,7 @@ internal sealed class ChatView
         float viewH = ImGuiNET.ImGui.GetWindowHeight();
         var dl = ImGuiNET.ImGui.GetWindowDrawList();
         int first = FirstAtOrBelow(scrollY, n);
-        int lo = Math.Min(_selAnchor, _selEnd), hi = Math.Max(_selAnchor, _selEnd);
+        OrderedSelection(out int lo, out int loChar, out int hi, out int hiChar);
         for (int i = first; i < n && _tops[i] < scrollY + viewH; i++)
         {
             Vector2 p = basePos + new Vector2(0, _tops[i]);
@@ -574,7 +594,7 @@ internal sealed class ChatView
             if (route.Mention)
                 dl.AddRectFilled(p, p + new Vector2(wrapW + 6, _h[i]), MentionBg);
             if (lo >= 0 && i >= lo && i <= hi)
-                dl.AddRectFilled(p, p + new Vector2(wrapW + 6, _h[i]), SelBg);
+                DrawSelection(dl, font, i, p, tsW, textW, wrapW, i == lo ? loChar : 0, i == hi ? hiChar : line.Text.Length);
             uint col = RynthTheme.Argb(ChatModel.LineArgb(line));
             if (showTs) dl.AddText(font, font.FontSize, p + new Vector2(3, 0), TsColor, line.Timestamp);
             Vector2 tp = p + new Vector2(3 + tsW, 0);
@@ -594,10 +614,12 @@ internal sealed class ChatView
         }
         ImGuiNET.ImGui.Dummy(new Vector2(wrapW, Math.Max(1, total)));
         HoverLink(basePos, tsW, n, out ChatCoord? hoveredLink);
-        HandleSelection(basePos, wrapW, scrollY, viewH, n, hoveredLink);
+        HandleSelection(font, basePos, tsW, textW, wrapW, scrollY, viewH, n, hoveredLink);
         HandleLineMenu(basePos, wrapW, n);
 
         _lastScrollY = scrollY;
+
+        if (_pendingFlash != null) { Flash(_pendingFlash, 1.5); _pendingFlash = null; }
 
         // "Copied N lines" / "Rule added", top-right, for a moment.
         if (_flash != null)
@@ -733,6 +755,8 @@ internal sealed class ChatView
         public required Seg[] Segs;
         /// <summary>The line's map coordinates (ChatCoords), when any are drawn as links.</summary>
         public ChatCoord[]? Links;
+        /// <summary>Each drawn row as [RowStarts[r], RowEnds[r]) of the line's Text (text selection).</summary>
+        public required int[] RowStarts, RowEnds;
     }
 
     /// <summary>Coordinate links in chat lines: soft teal, underlined (0xAARRGGBB, like ChatSpan.Argb).</summary>
@@ -820,7 +844,14 @@ internal sealed class ChatView
             }
             if (c < b) segs.Add(new Seg(text[c..b], new Vector2(sx, y), 0));
         }
-        return new SpanLayout { Height = Math.Max(1, rows.Count) * size, Segs = segs.ToArray(), Links = links?.ToArray() };
+        var rowStarts = new int[rows.Count];
+        var rowEnds = new int[rows.Count];
+        for (int r = 0; r < rows.Count; r++) { rowStarts[r] = rows[r].Start; rowEnds[r] = rows[r].End; }
+        return new SpanLayout
+        {
+            Height = Math.Max(1, rows.Count) * size, Segs = segs.ToArray(), Links = links?.ToArray(),
+            RowStarts = rowStarts, RowEnds = rowEnds,
+        };
     }
 
     /// <summary>Index of the line containing content y (clamped to the list).</summary>
@@ -876,12 +907,14 @@ internal sealed class ChatView
         }
         else
         {
+            ArrowTarget.NoteChat(c.Ns, c.Ew);   // the arrow window says "Chat coords"
             RynthNavCommands.Arrow(c.Text, c.Ns, c.Ew);
             Flash("Arrow: " + c.Text, 1.5);
         }
     }
 
-    private void HandleSelection(Vector2 basePos, float wrapW, float scrollY, float viewH, int n, ChatCoord? hoveredLink = null)
+    private void HandleSelection(ImFontPtr font, Vector2 basePos, float tsW, float textW, float wrapW, float scrollY, float viewH, int n,
+        ChatCoord? hoveredLink = null)
     {
         if (n == 0) { ClearSelection(); return; }
         Vector2 mouse = ImGuiNET.ImGui.GetMousePos();
@@ -894,7 +927,8 @@ internal sealed class ChatView
                 return;
             ClearSelection();
             if (contentY < 0 || contentY >= _tops[n]) return;
-            _selAnchor = _selEnd = FirstAtOrBelow(contentY, n);
+            (_selAnchor, _selAnchorChar) = HitTest(font, mouse, basePos, tsW, textW, n);
+            (_selEnd, _selEndChar) = (_selAnchor, _selAnchorChar);
             _selDragging = true;
             _selMoved = false;
             _selDown = mouse;
@@ -903,7 +937,8 @@ internal sealed class ChatView
         }
 
         if (Math.Abs(mouse.X - _selDown.X) > 3 || Math.Abs(mouse.Y - _selDown.Y) > 3) _selMoved = true;
-        _selEnd = FirstAtOrBelow(Math.Clamp(contentY, 0, _tops[n] - 1), n);
+        // Only the line under the mouse is hit-tested (its rows are cached): nothing walks the history.
+        (_selEnd, _selEndChar) = HitTest(font, mouse, basePos, tsW, textW, n);
 
         // Dragging past the edges scrolls.
         Vector2 wp = ImGuiNET.ImGui.GetWindowPos();
@@ -912,22 +947,236 @@ internal sealed class ChatView
 
         if (ImGuiNET.ImGui.IsMouseDown(ImGuiMouseButton.Left)) return;
         _selDragging = false;
-        // A drag (even within one line) copies; a plain click just clears, or follows a
+        // A drag copies what it went across; a plain click just clears, or follows a
         // coordinate link it was pressed on.
-        if (!_selMoved && _selEnd == _selAnchor)
+        if (!_selMoved || !HasSelection)
         {
-            ChatCoord? link = _downLink;
+            ChatCoord? link = _selMoved ? null : _downLink;
             ClearSelection();
             if (link is { } c) ClickLink(c);
             return;
         }
-        int lo = Math.Min(_selAnchor, _selEnd), hi = Math.Max(_selAnchor, _selEnd);
-        var parts = new List<string>(hi - lo + 1);
-        for (int i = lo; i <= hi && i < _vis.Count; i++) parts.Add(CopyText(_vis[i]));
-        Flash(ChatModel.CopyLines(parts), 1.5);
+        _selectionOwner = this;
+        Flash(CopySelectionText() ?? "Nothing selected", 1.5);
     }
 
     private static string CopyText(ChatLine line) => ChatModel.ShowTimestamps ? line.FormattedText : line.Text;
+
+    /// <summary>A selection that isn't empty and isn't being dragged.</summary>
+    private bool HasSelection =>
+        _selAnchor >= 0 && _selEnd >= 0 && _selAnchor < _vis.Count && _selEnd < _vis.Count
+        && (_selAnchor != _selEnd || _selAnchorChar != _selEndChar);
+
+    /// <summary>The selection's ends in reading order; lo = -1 when there is none.</summary>
+    private void OrderedSelection(out int lo, out int loChar, out int hi, out int hiChar)
+    {
+        lo = _selAnchor; loChar = _selAnchorChar; hi = _selEnd; hiChar = _selEndChar;
+        if (lo < 0 || hi < 0) { lo = hi = -1; loChar = hiChar = 0; return; }
+        ChatTextSelection.Order(ref lo, ref loChar, ref hi, ref hiChar);
+    }
+
+    /// <summary>The selected text, one line per chat line (a line copied from its start keeps its timestamp).</summary>
+    private string? SelectedText(out int lines)
+    {
+        lines = 0;
+        if (!HasSelection) return null;
+        OrderedSelection(out int lo, out int loChar, out int hi, out int hiChar);
+        var sb = new System.Text.StringBuilder();
+        bool ts = ChatModel.ShowTimestamps;
+        for (int i = lo; i <= hi && i < _vis.Count; i++)
+        {
+            ChatLine line = _vis[i];
+            if (i > lo) sb.Append("\r\n");
+            sb.Append(ChatTextSelection.Part(line.Text, ts ? line.Timestamp : null, i == lo ? loChar : 0, i == hi ? hiChar : line.Text.Length));
+            lines++;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Copies the selection; returns the message to show, or null when nothing is selected.</summary>
+    private string? CopySelectionText()
+    {
+        string? text = SelectedText(out int lines);
+        if (text == null) return null;
+        if (!ChatModel.SetClipboardText(text)) return "Clipboard busy — try again";
+        return lines > 1 ? $"Copied {lines} lines" : "Copied";
+    }
+
+    /// <summary>
+    /// Ctrl+C (Win32Backend.OnChatSelectionCopy, AC's thread, in the WndProc): copies the text
+    /// selected in the chat, if any. False when nothing is selected (the key goes on as before).
+    /// </summary>
+    internal static bool CopyActiveSelection()
+    {
+        ChatView? view = _selectionOwner;
+        if (view == null || view._selDragging || !view.HasSelection) return false;
+        view._pendingFlash = view.CopySelectionText();   // shown at its next draw, in its own ImGui context
+        return view._pendingFlash != null;
+    }
+
+    // ── Where the characters are (text selection) ───────────────────────
+
+    // The rows of a few lines, as ImGui wraps them: the lines a selection starts and ends on and
+    // the one under the mouse. Worked out once per line, width and font, never for the whole history.
+    private sealed class LineRows
+    {
+        public ChatLine? Line;
+        public float TextW, Font;
+        public SpanLayout? Lay;
+        public readonly List<int> Starts = new(4), Ends = new(4);
+        public long Used;
+    }
+
+    private readonly LineRows[] _rowCache = { new(), new(), new() };
+    private long _rowUse;
+    private byte[] _utf8 = new byte[256];
+    private int[] _byteOfChar = new int[257];
+    private ImFontPtr _advFont;
+    private string _advText = "";
+    private Func<int, float>? _advance;
+
+    /// <summary>The rows line <paramref name="i"/> is drawn in (chat font pushed).</summary>
+    private LineRows RowsOf(ImFontPtr font, int i, float textW)
+    {
+        ChatLine line = _vis[i];
+        SpanLayout? lay = _lay[i];
+        float size = font.FontSize;
+        LineRows? slot = null;
+        foreach (LineRows c in _rowCache)
+            if (ReferenceEquals(c.Line, line) && c.TextW == textW && c.Font == size && ReferenceEquals(c.Lay, lay)) { slot = c; break; }
+        if (slot == null)
+        {
+            slot = _rowCache[0];
+            foreach (LineRows c in _rowCache) if (c.Used < slot.Used) slot = c;
+            slot.Line = line; slot.TextW = textW; slot.Font = size; slot.Lay = lay;
+            slot.Starts.Clear(); slot.Ends.Clear();
+            if (lay != null)
+                for (int r = 0; r < lay.RowStarts.Length; r++) { slot.Starts.Add(lay.RowStarts[r]); slot.Ends.Add(lay.RowEnds[r]); }
+            else
+                WrapRows(font, line.Text, textW, slot.Starts, slot.Ends);
+            if (slot.Starts.Count == 0) { slot.Starts.Add(0); slot.Ends.Add(line.Text.Length); }
+        }
+        slot.Used = ++_rowUse;
+        return slot;
+    }
+
+    /// <summary>
+    /// The rows ImDrawList.AddText draws <paramref name="text"/> in, wrapped to <paramref name="wrapW"/>:
+    /// the same steps as ImFont::RenderText (ImGui 1.91), with its own word-wrap function, on the
+    /// same UTF-8 bytes; the rows go out as character ranges of the string.
+    /// </summary>
+    private unsafe void WrapRows(ImFontPtr font, string text, float wrapW, List<int> starts, List<int> ends)
+    {
+        int max = System.Text.Encoding.UTF8.GetMaxByteCount(text.Length);
+        if (_utf8.Length < max + 1) _utf8 = new byte[Math.Max(max + 1, _utf8.Length * 2)];
+        if (_byteOfChar.Length < text.Length + 1) _byteOfChar = new int[Math.Max(text.Length + 1, _byteOfChar.Length * 2)];
+        int nBytes = System.Text.Encoding.UTF8.GetBytes(text, _utf8);
+        // Where each character starts in the bytes (a surrogate pair is one 4-byte character).
+        for (int k = 0, b = 0; k <= text.Length; k++)
+        {
+            _byteOfChar[k] = b;
+            if (k == text.Length) break;
+            char c = text[k];
+            if (char.IsHighSurrogate(c) && k + 1 < text.Length && char.IsLowSurrogate(text[k + 1])) { _byteOfChar[++k] = b; b += 4; }
+            else b += c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
+        }
+        fixed (byte* p = _utf8)
+        {
+            int s = 0, eol = -1, rowStart = 0;
+            while (s < nBytes)
+            {
+                if (eol < 0) eol = (int)(ImGuiNative.ImFont_CalcWordWrapPositionA(font.NativePtr, 1f, p + s, p + nBytes, wrapW) - p);
+                if (s >= eol)
+                {
+                    AddRow(rowStart, s);
+                    eol = -1;
+                    // ImGui skips the blanks after a wrap, and one line break.
+                    while (s < nBytes && (p[s] == ' ' || p[s] == '\t')) s++;
+                    if (s < nBytes && p[s] == '\n') s++;
+                    rowStart = s;
+                    continue;
+                }
+                byte c = p[s];
+                if (c == '\n') { AddRow(rowStart, s); s++; rowStart = s; continue; }
+                s += c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+            }
+            AddRow(rowStart, nBytes);
+        }
+
+        void AddRow(int b0, int b1) { starts.Add(CharAt(b0, text.Length)); ends.Add(CharAt(b1, text.Length)); }
+    }
+
+    /// <summary>The character starting at byte <paramref name="b"/> (WrapRows' table).</summary>
+    private int CharAt(int b, int length)
+    {
+        int lo = 0, hi = length;   // first k with _byteOfChar[k] >= b
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >> 1;
+            if (_byteOfChar[mid] < b) lo = mid + 1; else hi = mid;
+        }
+        return lo;
+    }
+
+    /// <summary>The drawn width of the character at an index of _advText (ImGui's advance, no kerning in 1.91).</summary>
+    private float AdvanceAt(int k)
+    {
+        char c = _advText[k];
+        if (char.IsHighSurrogate(c)) return _advFont.GetCharAdvance(0xFFFD);   // beyond ImWchar16: drawn as the replacement glyph
+        if (c == '\r') return 0f;
+        return _advFont.GetCharAdvance(c);
+    }
+
+    /// <summary>The x of character <paramref name="k"/> in a row starting at <paramref name="start"/>.</summary>
+    private float XOf(ImFontPtr font, string text, int start, int k)
+    {
+        _advFont = font;
+        _advText = text;
+        float x = 0f;
+        for (int j = start; j < k && j < text.Length; j++) x += AdvanceAt(j);
+        return x;
+    }
+
+    /// <summary>The line and character under the mouse: above the lines the first one's start, below them the last one's end.</summary>
+    private (int Line, int Char) HitTest(ImFontPtr font, Vector2 mouse, Vector2 basePos, float tsW, float textW, int n)
+    {
+        float contentY = mouse.Y - basePos.Y;
+        if (contentY < 0) return (0, 0);
+        if (contentY >= _tops[n]) return (n - 1, _vis[n - 1].Text.Length);
+        int i = FirstAtOrBelow(contentY, n);
+        LineRows rows = RowsOf(font, i, textW);
+        int r = Math.Clamp((int)((contentY - _tops[i]) / font.FontSize), 0, rows.Starts.Count - 1);
+        string text = _vis[i].Text;
+        _advFont = font;
+        _advText = text;
+        _advance ??= AdvanceAt;
+        return (i, ChatTextSelection.CharAtX(text, rows.Starts[r], rows.Ends[r], mouse.X - (basePos.X + 3 + tsW), _advance));
+    }
+
+    /// <summary>The selection band behind line <paramref name="i"/>: all of it, or the characters [from, to) row by row.</summary>
+    private void DrawSelection(ImDrawListPtr dl, ImFontPtr font, int i, Vector2 p, float tsW, float textW, float wrapW, int from, int to)
+    {
+        ChatLine line = _vis[i];
+        if (from <= 0 && to >= line.Text.Length)
+        {
+            dl.AddRectFilled(p, p + new Vector2(wrapW + 6, _h[i]), SelBg);
+            return;
+        }
+        if (to <= from) return;
+        LineRows rows = RowsOf(font, i, textW);
+        float rowH = font.FontSize;
+        Vector2 tp = p + new Vector2(3 + tsW, 0);
+        for (int r = 0; r < rows.Starts.Count; r++)
+        {
+            int rs = rows.Starts[r], re = rows.Ends[r];
+            int a = Math.Max(from, rs), b = Math.Min(to, re);
+            if (b <= a) continue;
+            // From the line's start, the timestamp is copied too: the band covers it.
+            float x0 = a == 0 ? p.X - tp.X : XOf(font, line.Text, rs, a);
+            float x1 = XOf(font, line.Text, rs, b);
+            dl.AddRectFilled(tp + new Vector2(x0, r * rowH), tp + new Vector2(x1, (r + 1) * rowH), SelBg);
+        }
+    }
 
     /// <summary>Right-click on a line: its menu (drawn in DrawPopups).</summary>
     private void HandleLineMenu(Vector2 basePos, float wrapW, int n)
@@ -937,17 +1186,39 @@ internal sealed class ChatView
         Vector2 mouse = ImGuiNET.ImGui.GetMousePos();
         float contentY = mouse.Y - basePos.Y;
         if (mouse.X > basePos.X + wrapW + 6 || contentY < 0 || contentY >= _tops[n]) return;
-        _ctxLine = _vis[FirstAtOrBelow(contentY, n)];
+        int index = FirstAtOrBelow(contentY, n);
+        _ctxLine = _vis[index];
         _ctxPattern = ChatModel.PatternFor(_ctxLine);
         _ctxCoords = ImGuiPanelHost.HasFace(RynthNavFace.Title) ? ChatCoords.Find(_ctxLine.Text) : new List<ChatCoord>();
+        FindItemAround(index);
         _openLineMenu = true;
+    }
+
+    /// <summary>
+    /// The right-clicked line is RynthAi item info: the item's lines (its name line and the ones
+    /// indented under it) as one line, for "Copy item as one line". On the right-click, never per frame.
+    /// </summary>
+    private void FindItemAround(int index)
+    {
+        _ctxItemOneLine = null;
+        _ctxItemLines = 0;
+        if (!ChatTextSelection.IsItemLine(_vis[index].Text)) return;
+        const int Reach = 12;
+        int from = Math.Max(0, index - Reach), to = Math.Min(_vis.Count - 1, index + Reach);
+        var texts = new List<string>(to - from + 1);
+        for (int k = from; k <= to; k++) texts.Add(_vis[k].Text);
+        if (!ChatTextSelection.ItemRun(texts, index - from, out int first, out int last)) return;
+        _ctxItemOneLine = ChatTextSelection.ItemOneLine(texts, first, last);
+        _ctxItemLines = last - first + 1;
     }
 
     private void ClearSelection()
     {
         _selAnchor = _selEnd = -1;
+        _selAnchorChar = _selEndChar = 0;
         _selDragging = _selMoved = false;
         _downLink = null;
+        if (_selectionOwner == this) _selectionOwner = null;
     }
 
     /// <summary>The coordinate link the left button went down on (acted on if it comes up without a drag).</summary>
@@ -1145,13 +1416,35 @@ internal sealed class ChatView
             ChatCoord c = _ctxCoords[i];
             ImGuiNET.ImGui.PushID(i);
             if (ImGuiNET.ImGui.MenuItem(PhosphorIcons.NavigationArrow + "  Arrow to " + c.Text))
+            {
+                ArrowTarget.NoteChat(c.Ns, c.Ew);
                 RynthNavCommands.Arrow(c.Text, c.Ns, c.Ew);
+            }
+            // Route here: RynthNav plans the trip (portals, recalls) and the arrow follows it.
+            if (ImGuiNET.ImGui.MenuItem(PhosphorIcons.Path + "  Route to " + c.Text))
+            {
+                RynthNavCommands.Route(c.Text, c.Ns, c.Ew);
+                RynthNavArrowFace.Show();
+            }
             if (ImGuiNET.ImGui.MenuItem(PhosphorIcons.Play + "  Go to " + c.Text))
                 RynthNavCommands.Go(c.Text, c.Ns, c.Ew);
             ImGuiNET.ImGui.PopID();
         }
         if (_ctxCoords.Count > 0) ImGuiNET.ImGui.Separator();
+        if (HasSelection)
+        {
+            if (ImGuiNET.ImGui.MenuItem("Copy selection", "Ctrl+C")) Flash(CopySelectionText() ?? "Nothing selected", 1.5);
+            ImGuiNET.ImGui.SetItemTooltip("Copy the text you dragged across (Ctrl+C does it too)");
+        }
         if (ImGuiNET.ImGui.MenuItem("Copy line")) Flash(ChatModel.CopyLines(new[] { CopyText(line) }), 1.5);
+        if (_ctxItemOneLine != null)
+        {
+            if (ImGuiNET.ImGui.MenuItem("Copy item as one line"))
+                Flash(ChatModel.SetClipboardText(_ctxItemOneLine) ? "Copied the item" : "Clipboard busy — try again", 1.5);
+            ImGuiNET.ImGui.SetItemTooltip(_ctxItemLines > 1
+                ? $"This item's {_ctxItemLines} info lines, joined into one line"
+                : "This item's info line, without the [RynthAi Item] tag\n(Item Info's one-line layout prints every item on one line)");
+        }
         ImGuiNET.ImGui.Separator();
         ImGuiNET.ImGui.PushStyleColor(ImGuiCol.Text, Mute);
         ImGuiNET.ImGui.PushTextWrapPos(ImGuiNET.ImGui.GetCursorPosX() + 400);

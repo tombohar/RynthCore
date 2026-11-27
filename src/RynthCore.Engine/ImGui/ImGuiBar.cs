@@ -297,7 +297,7 @@ internal static class ImGuiBar
             ImGuiPopOuts.Open(PopOutTitle, (int)at.X, (int)at.Y, (int)(400 * s), (int)(28 * s), 0, 0, s,
                 draw: DrawPopped,
                 onMoved: static (x, y) => UiBackgroundWriter.Enqueue("persist bar", () => PanelStateStore.SetBarFloatingState(true, x, y)),
-                sizeToContent: true);
+                sizeToContent: true, fromSaved: saved.HasValue);
         }
         else if (!PoppedOut && have)
         {

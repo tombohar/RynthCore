@@ -3,14 +3,16 @@
 //  The Sense panel's pure part (no AC, no ImGui, no files), so tools\SenseTests
 //  can compile it in:
 //
-//    SensePattern     one watch-list term (moved here from SenseData.cs).
+//    SensePattern     one watch-list term (moved here from SenseData.cs): the name
+//                     contains it, the whole name matches its * and ?, or (Exact,
+//                     2026-11-26) the whole name is it, any case.
 //    SenseLayoutMode  how the panel looks: Full (the add row, term chips, status
 //                     and the match rows), Compact (only the match rows, tighter,
 //                     no frame or background, clicks pass through except on the
 //                     rows; item-counter.lua's bare look) and Collapsed (one line,
 //                     "Sense: N", that opens back to Compact on a click).
-//    SenseFile        sense.txt read and written as text: the terms, the alerts
-//                     and the look (view=full|compact|collapsed).
+//    SenseFile        sense.txt read and written as text: the terms (and which
+//                     are exact), the alerts and the look (view=full|compact|collapsed).
 //    SenseLayout      the compact view's layout decisions (which columns fit,
 //                     row height, which row the mouse is on) and /rc sense's
 //                     look commands (compact on|off, collapse on|off, view ...)
@@ -29,23 +31,40 @@ namespace RynthCore.Engine.UI.Data;
 /// <summary>One watch-list term. Immutable.</summary>
 internal sealed class SensePattern
 {
-    public SensePattern(string text, bool enabled)
+    public SensePattern(string text, bool enabled, bool exact = false)
     {
         Text = (text ?? string.Empty).Trim();
         Enabled = enabled;
-        IsGlob = Text.IndexOfAny(Wildcards) >= 0;
+        Exact = exact;
+        IsGlob = !exact && Text.IndexOfAny(Wildcards) >= 0;
     }
 
     private static readonly char[] Wildcards = { '*', '?' };
 
     public string Text { get; }
     public bool Enabled { get; }
-    /// <summary>True when the term has * or ?: the whole name must match it.</summary>
+    /// <summary>
+    /// Exact match (2026-11-26, asked for in #rynthsuite): the whole name is the term, any case and
+    /// nothing more ("Drake" finds "Drake", not "Dragon's Isle Drake"). * and ? are plain letters
+    /// then. Off for every term from before it, so they match as they did.
+    /// </summary>
+    public bool Exact { get; }
+    /// <summary>True when the term has * or ? (and isn't Exact): the whole name must match it.</summary>
     public bool IsGlob { get; }
+
+    /// <summary>How the term matches, in a word: "exact", "wildcards", "contains".</summary>
+    public string MatchKind => Exact ? "exact" : IsGlob ? "wildcards" : "contains";
+
+    /// <summary>This term with <see cref="Enabled"/> set (Exact kept).</summary>
+    public SensePattern WithEnabled(bool enabled) => enabled == Enabled ? this : new SensePattern(Text, enabled, Exact);
+
+    /// <summary>This term with <see cref="Exact"/> set (on/off kept).</summary>
+    public SensePattern WithExact(bool exact) => exact == Exact ? this : new SensePattern(Text, Enabled, exact);
 
     public bool Matches(string name)
     {
         if (Text.Length == 0 || string.IsNullOrEmpty(name)) return false;
+        if (Exact) return string.Equals(name.Trim(), Text, StringComparison.OrdinalIgnoreCase);
         return IsGlob ? Glob(name, Text) : name.Contains(Text, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -104,13 +123,16 @@ internal static class SenseFile
 
     /// <summary>
     /// Reads the lines of sense.txt: "alertChat=1", "alertBeep=0", "view=compact", "term=1|name"
-    /// (1 on, 0 off; a bare "term=name" is on). Comments (#), blank lines and unknown keys are
-    /// skipped; a duplicate term (any case), an empty one or one past <see cref="MaxTerms"/> is
-    /// dropped; an unknown view is Full.
+    /// (1 on, 0 off; a bare "term=name" is on) and "exact=name" (2026-11-26: that term matches the
+    /// whole name only; written on its own line after the term, so an engine from before it still
+    /// reads the term, as a contains term). An exact= line with no term= of that name adds the term,
+    /// on. Comments (#), blank lines and unknown keys are skipped; a duplicate term (any case), an
+    /// empty one or one past <see cref="MaxTerms"/> is dropped; an unknown view is Full.
     /// </summary>
     public static SenseFileData Parse(IEnumerable<string> lines)
     {
         var data = new SenseFileData();
+        var exact = new List<string>();
         foreach (string raw in lines)
         {
             string line = (raw ?? string.Empty).Trim();
@@ -141,7 +163,20 @@ internal static class SenseFile
                         data.Terms.Add(new SensePattern(text, on));
                     break;
                 }
+                case "exact":
+                {
+                    string text = Clean(val);
+                    if (text.Length > 0) exact.Add(text);
+                    break;
+                }
             }
+        }
+        // After every term= line, so the order of the two kinds of line doesn't matter.
+        foreach (string text in exact)
+        {
+            int at = IndexOf(data.Terms, text);
+            if (at >= 0) data.Terms[at] = data.Terms[at].WithExact(true);
+            else if (data.Terms.Count < MaxTerms) data.Terms.Add(new SensePattern(text, true, exact: true));
         }
         return data;
     }
@@ -152,14 +187,23 @@ internal static class SenseFile
         var sb = new StringBuilder();
         sb.AppendLine("# RynthCore Sense watch list - auto-generated, hand-edits OK. /rc sense in game.");
         sb.AppendLine("# term=1|name (1 on, 0 off). No * or ?: the name contains it. With * or ?: the whole name matches.");
+        sb.AppendLine("# exact=name after a term: only that whole name, any case (the Exact box on its chip).");
         sb.AppendLine("# view=full|compact|collapsed (/rc sense compact on|off, /rc sense collapse on|off).");
         sb.AppendLine(alertChat ? "alertChat=1" : "alertChat=0");
         sb.AppendLine(alertBeep ? "alertBeep=1" : "alertBeep=0");
         sb.Append("view=").AppendLine(SenseLayout.LayoutName(layout));
         foreach (SensePattern t in terms)
+        {
             sb.Append("term=").Append(t.Enabled ? '1' : '0').Append('|').AppendLine(t.Text);
+            if (t.Exact) sb.Append("exact=").AppendLine(t.Text);
+        }
         return sb.ToString();
     }
+
+    /// <summary>The line after a term's Exact box is switched (the chip's = and its right-click menu).</summary>
+    public static string ExactReply(string text, bool exact) => exact
+        ? $"\"{text}\": exact match, only that whole name."
+        : $"\"{text}\": names containing it match.";
 
     /// <summary>One line, trimmed, at most <see cref="MaxTermLength"/> characters.</summary>
     public static string Clean(string text)
@@ -185,7 +229,8 @@ internal readonly record struct SenseMerge(SensePattern[] Terms, int Added, int 
 /// Documents\Decal Plugins\Virindi Sense\patterns.txt: the first line is how many names follow,
 /// then one name per line, matched anywhere in an object's name, any case (as Sense's terms
 /// without wildcards). The format is from a real file (CRLF, 163 names, repeats in it, no
-/// wildcards or other marks); nothing else about Virindi Sense is used. Pure.
+/// wildcards or other marks; no match-type field either, so imported names stay "contains", as
+/// Virindi Sense matched them, 2026-11-26); nothing else about Virindi Sense is used. Pure.
 /// </summary>
 internal static class SenseImport
 {
@@ -289,13 +334,31 @@ internal static class SenseLayout
     public const float CompactNameRoom = 110f;
 
     public const string Usage =
-        "Usage: /rc sense [compact on|off | collapse on|off | view full|compact|collapsed | addselected | import [file]] (alone: opens or closes the Sense panel)";
+        "Usage: /rc sense [compact on|off | collapse on|off | view full|compact|collapsed | addselected [contains] | import [file]] (alone: opens or closes the Sense panel)";
 
     /// <summary>"/rc sense addselected" (or "add selected"): the selected object's name onto the list.</summary>
-    public static bool IsAddSelected(string args)
+    public static bool IsAddSelected(string args) => IsAddSelected(args, out _);
+
+    /// <summary>
+    /// "/rc sense addselected [exact|contains]": the selected object's name onto the list, as an exact
+    /// term (the default since 2026-11-26) or, with "contains", one any name containing it matches.
+    /// </summary>
+    public static bool IsAddSelected(string args, out bool exact)
     {
+        exact = true;
         string a = string.Join(' ', (args ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries)).ToLowerInvariant();
-        return a is "addselected" or "add selected" or "addsel";
+        foreach (string head in new[] { "add selected", "addselected", "addsel" })
+        {
+            if (a == head) return true;
+            if (!a.StartsWith(head + " ", StringComparison.Ordinal)) continue;
+            switch (a[(head.Length + 1)..])
+            {
+                case "exact": return true;
+                case "contains": case "contain": case "part": exact = false; return true;
+                default: return false;
+            }
+        }
+        return false;
     }
 
     /// <summary>"/rc sense import [file]": Virindi Sense's list (or the file given). <paramref name="file"/> is empty for the usual place.</summary>

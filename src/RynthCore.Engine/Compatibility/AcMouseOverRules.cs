@@ -86,4 +86,15 @@ internal static class AcMouseOverRules
     /// the plates keep today's behaviour when AC's UI can't be read).
     /// </summary>
     public static bool UnderUiOverlayMayTakeClick(AcMouseTarget target) => target != AcMouseTarget.AcWindow;
+
+    /// <summary>
+    /// Should a panel drawn under AC's windows (PanelSpec.UnderUi) let the mouse through this frame?
+    /// Where an AC window covers the cursor, yes, unless the left button is held on a press that
+    /// began on the panel itself (its own drag carries on over the AC window). A press that began on
+    /// the game (an item dragged in AC's inventory) is AC's: the panel behind must not catch its
+    /// drop (problem report R-20261126-194457-f7d8: every inventory move snapped back while a
+    /// DreamWeave panel sat behind AC's inventory).
+    /// </summary>
+    public static bool UnderUiPanelClickThrough(AcMouseTarget target, bool leftDown, bool pressBelongsToGame) =>
+        target == AcMouseTarget.AcWindow && (!leftDown || pressBelongsToGame);
 }

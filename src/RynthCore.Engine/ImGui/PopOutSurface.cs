@@ -73,7 +73,8 @@ internal sealed unsafe class PopOutSurface : IDisposable
     /// and pushes the latest finished frame to <paramref name="window"/>. False when
     /// the device refused (logged, retried next frame).
     /// </summary>
-    public bool Render(IntPtr device, ImDrawDataPtr drawData, int width, int height, Placement placement, LayeredWindow window)
+    public bool Render(IntPtr device, ImDrawDataPtr drawData, int width, int height, Placement placement, LayeredWindow window,
+        bool sameFrame = false, long keyAt = 0)
     {
         if (device == IntPtr.Zero || width <= 0 || height <= 0) return false;
         if ((width != _width || height != _height || _targets[0] == IntPtr.Zero) && !Create(device, width, height))
@@ -97,6 +98,7 @@ internal sealed unsafe class PopOutSurface : IDisposable
                 device, 0, IntPtr.Zero, D3DCLEAR_TARGET, 0x00000000, 1f, 0);
             DX9Backend.RenderDrawData(drawData, device);
             _placements[_current] = placement;
+            _keyAt[_current] = keyAt;
         }
         finally
         {
@@ -109,7 +111,9 @@ internal sealed unsafe class PopOutSurface : IDisposable
         }
 
         // Read back the target the GPU has finished: last frame's, or this one on the first frame.
-        int read = _previousValid ? 1 - _current : _current;
+        // While a text box is being typed in, this frame's own (sameFrame): the readback waits for
+        // the GPU, but a typed letter shows a frame sooner (11-26: typing in a popped-out chat lagged).
+        int read = _previousValid && !sameFrame ? 1 - _current : _current;
         bool pushed = Push(device, vt, read, window);
         _unpushed = read != _current;   // this frame's picture is still to be shown
         _previousValid = true;
@@ -118,6 +122,17 @@ internal sealed unsafe class PopOutSurface : IDisposable
     }
 
     private bool _unpushed;
+    private readonly long[] _keyAt = new long[2];
+
+    private long _pushedKeyAt;
+
+    /// <summary>When the oldest key shown by the pushes since the last call was pressed (Stopwatch ticks), 0 if none. Read after Render/Flush.</summary>
+    public long TakePushedKeyAt()
+    {
+        long at = _pushedKeyAt;
+        _pushedKeyAt = 0;
+        return at;
+    }
 
     /// <summary>
     /// Shows the last rendered frame if it hasn't been shown yet (the readback
@@ -135,6 +150,8 @@ internal sealed unsafe class PopOutSurface : IDisposable
     {
         IntPtr target = _targets[index];
         Placement at = _placements[index];
+        if (_keyAt[index] != 0 && (_pushedKeyAt == 0 || _keyAt[index] < _pushedKeyAt)) _pushedKeyAt = _keyAt[index];
+        _keyAt[index] = 0;
         if (((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, IntPtr, int>)vt[GetRenderTargetDataSlot])(device, target, _readback) < 0)
             return Fail("GetRenderTargetData");
         void** svt = *(void***)_readback;

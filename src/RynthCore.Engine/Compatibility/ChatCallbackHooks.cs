@@ -93,6 +93,27 @@ internal static class ChatCallbackHooks
     private static IntPtr _lastOutgoingThis;
     private static uint _lastOutgoingSource = 8;
 
+    // The client's one ClientCommunicationSystem (the 'this' every OnChatCommand gets: the
+    // chat bar fetches it with ClientCommunicationSystem::GetCommunicationSystem, which is just
+    // "mov eax, [s_pCommunicationSystem]; ret"). Read live, so the direct route works before the
+    // player has ever pressed Enter in AC's own chat bar. With RynthChat standing in for that
+    // bar (its "Hide retail chat"), nobody ever did, so every line the dispatcher hands to AC's
+    // parser (emotes, *wave*, /e, /a, /f, any other command) fell back to typing keystrokes into
+    // the hidden chat bar (2026-11-24: "I have to activate the old chat window to do emotes").
+    // Found by its code-xref only (never a guessed address): zero when the pattern isn't unique.
+    private static IntPtr _commSystemGlobal;
+    private static bool _commSystemLogged;
+    /// <summary>OnChatCommand's i_idCommandSource for the main chat window (ChatWindowId.Main).</summary>
+    private const uint MainChatWindowSource = 1;
+    // GetCommunicationSystem (0x0056F230): A1 <s_pCommunicationSystem> C3, its padding and the
+    // next function's first bytes (unique in the 4,841,472-byte client, checked 2026-11-26).
+    private static readonly byte?[] PatXrefCommunicationSystem =
+    [
+        0xA1, null, null, null, null, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        0x85, 0xC9, 0x74, 0x14, 0x8D, 0x41, 0x08, 0x8B, 0x0D
+    ];
+    private const int CommunicationSystemFallbackVa = 0x008717FC;
+
     public static bool IncomingInstalled { get; private set; }
     public static bool OutgoingInstalled { get; private set; }
     public static bool IsInstalled => (!EnableIncomingHook || IncomingInstalled) && (!EnableOutgoingHook || OutgoingInstalled);
@@ -150,6 +171,7 @@ internal static class ChatCallbackHooks
                         MinHook.Enable(_outgoingAddress);
                         OutgoingInstalled = true;
                         outgoingStatus = $"0x{_outgoingAddress.ToInt32():X8} ({outgoingResolution})";
+                        ResolveCommunicationSystem(textSection);
                     }
                     catch (Exception ex)
                     {
@@ -758,17 +780,54 @@ internal static class ChatCallbackHooks
         return opcode is 0xE9 or 0xE8 or 0xEB or 0x68 or 0xFF;
     }
 
-    /// <summary>True once a chat-manager 'this' has been captured from a live submit.</summary>
+    /// <summary>True when a line can go straight to AC's chat parser: a 'this' captured from a live
+    /// submit, or the client's communication system read from its global.</summary>
     public static bool CanDispatchDirect =>
-        OutgoingInstalled && _originalOutgoingChat != null && _lastOutgoingThis != IntPtr.Zero;
+        OutgoingInstalled && _originalOutgoingChat != null
+        && (_lastOutgoingThis != IntPtr.Zero || ReadCommunicationSystem() != IntPtr.Zero);
+
+    /// <summary>Finds s_pCommunicationSystem by its code-xref. Once, with the outgoing hook.</summary>
+    private static void ResolveCommunicationSystem(AcClientTextSection textSection)
+    {
+        try
+        {
+            var r = HookResolver.ResolveData(textSection, "ChatCallback.CommunicationSystem",
+                PatXrefCommunicationSystem, 1, CommunicationSystemFallbackVa);
+            // A guessed address is never read: without the pattern the direct route needs a live submit, as before.
+            _commSystemGlobal = r.Source == HookResolver.ResolveSource.PatternScan ? r.Address : IntPtr.Zero;
+            RynthLog.Compat(_commSystemGlobal != IntPtr.Zero
+                ? $"Compat: chat parser reachable without a chat-bar send (communication system @ 0x{_commSystemGlobal.ToInt32():X8})."
+                : "Compat: communication system not found: lines for AC's chat parser need one chat-bar send first, as before.");
+        }
+        catch (Exception ex)
+        {
+            _commSystemGlobal = IntPtr.Zero;
+            RynthLog.Compat($"Compat: communication system lookup failed - {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>The client's ClientCommunicationSystem right now, or zero (not found, not in the world, unreadable).</summary>
+    private static IntPtr ReadCommunicationSystem()
+    {
+        IntPtr global = _commSystemGlobal;
+        if (global == IntPtr.Zero || !LoginLifecycleHooks.HasObservedLoginComplete) return IntPtr.Zero;
+        try
+        {
+            if (!MemoryProbe.IsAccessible(global)) return IntPtr.Zero;
+            IntPtr self = Marshal.ReadIntPtr(global);
+            return self != IntPtr.Zero && MemoryProbe.IsAccessible(self) ? self : IntPtr.Zero;
+        }
+        catch { return IntPtr.Zero; }
+    }
 
     /// <summary>
     /// Dispatches a chat line by calling AC's outgoing-chat function directly — the
     /// same path AC takes when you press Enter on the native chat bar, but with no
     /// keystroke simulation and no chat-bar state, so it is repeatable. Uses the
     /// 'this' + command source captured by <see cref="OutgoingChatDetour"/> from a
-    /// prior real submit. Returns false if the hook isn't installed or no 'this' has
-    /// been captured yet — the caller then falls back to keystroke simulation, whose
+    /// prior real submit, else (2026-11-26) the client's communication system and the
+    /// main chat window as the source. Returns false if the hook isn't installed or
+    /// neither is there — the caller then falls back to keystroke simulation, whose
     /// first successful send seeds the capture for all subsequent calls.
     /// Plugin pre-dispatch / engine-command handling is the caller's responsibility
     /// (already done in ChatCommandDispatcher.Dispatch), so this goes straight to AC.
@@ -778,9 +837,24 @@ internal static class ChatCallbackHooks
         if (!OutgoingInstalled || _originalOutgoingChat == null)
             return false;
 
-        IntPtr self = _lastOutgoingThis;
-        if (self == IntPtr.Zero || string.IsNullOrWhiteSpace(text))
+        if (string.IsNullOrWhiteSpace(text))
             return false;
+        IntPtr self = _lastOutgoingThis;
+        uint source = _lastOutgoingSource;
+        if (self == IntPtr.Zero)
+        {
+            // No chat-bar send seen (RynthChat owns the chat): the client's own communication
+            // system, as the main chat window's bar would use.
+            self = ReadCommunicationSystem();
+            if (self == IntPtr.Zero)
+                return false;
+            source = MainChatWindowSource;
+            if (!_commSystemLogged)
+            {
+                _commSystemLogged = true;
+                RynthLog.Compat("Compat: chat line sent to AC's parser through the communication system (no chat-bar send seen yet).");
+            }
+        }
 
         string line = text!.TrimEnd('\r', '\n');
         if (line.Length == 0)
@@ -801,7 +875,7 @@ internal static class ChatCallbackHooks
             {
                 // 'wide' is a stack local (unmanaged struct) — its address is stable
                 // for the synchronous call, so no 'fixed' pin is needed (or allowed).
-                _originalOutgoingChat(self, (IntPtr)(&wide), _lastOutgoingSource);
+                _originalOutgoingChat(self, (IntPtr)(&wide), source);
                 return true;
             }
             finally { wide.Dispose(); }

@@ -1917,6 +1917,23 @@ public readonly unsafe struct RynthCoreHost
         return true;
     }
 
+    // ── v99: AC's camera ─────────────────────────────────────────────────────
+
+    /// <summary>v99: <see cref="CameraAction"/>. True only on an engine at API 99 or newer that fills it.</summary>
+    public bool HasCameraAction => _api.Version >= 99 && _api.CameraActionFn != IntPtr.Zero;
+
+    /// <summary>
+    /// v99: presses (<paramref name="pressed"/> true) or lets go of AC's own camera key for
+    /// <paramref name="action"/>, on AC's game thread before its tick. The turns, raise, lower, closer and
+    /// farther go on while pressed, as the keys do, until let go; Home (the default view behind the character)
+    /// and FirstPerson act on the press. True when queued. Any thread.
+    /// </summary>
+    public bool CameraAction(RynthCameraAction action, bool pressed)
+    {
+        if (!HasCameraAction) return false;
+        return ((delegate* unmanaged[Cdecl]<int, int, int>)_api.CameraActionFn)((int)action, pressed ? 1 : 0) == 1;
+    }
+
     // ── v94: a web panel over the game window (number provisional) ───────────
 
     /// <summary>

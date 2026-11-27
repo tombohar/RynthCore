@@ -229,6 +229,15 @@ internal static class RynthCoreChatCommands
             return;
         }
 
+        // /rc inv ac: close RynthCore's Inventory window and open AC's own bags (2026-11-26). Alone,
+        // /rc inv opens or closes the window (the switch below).
+        if ((IsVerb(sub, "inv", out string invArgs) || IsVerb(sub, "inventory", out invArgs)) && invArgs.Length > 0)
+        {
+            var (ok, message) = ImGuiBackend.Panels.InventoryFace.UseAcBags();
+            if (ok) Reply(message); else Fail(message);
+            return;
+        }
+
         // /rc vendor [list|info|status|buy <id|sel> [n]|sell <id|sel> [id ...]]: VendorTrade's own
         // "[RC]" lines are the reply (to chat from the main-thread drain, and to the log).
         if (IsVerb(sub, "vendor", out string vendorArgs))
@@ -1284,9 +1293,10 @@ internal static class RynthCoreChatCommands
             return;
         }
         // The list (2026-11-22): the selected object's name, and Virindi Sense's list brought over.
-        if (UI.Data.SenseLayout.IsAddSelected(args))
+        // An exact term (whole name) by default since 2026-11-26; "addselected contains" for a contains one.
+        if (UI.Data.SenseLayout.IsAddSelected(args, out bool exactName))
         {
-            bool added = UI.Data.SenseStore.AddSelected(out string message);
+            bool added = UI.Data.SenseStore.AddSelected(out string message, exactName);
             Answer(added, "Sense: " + message, "Sense: " + message);
             return;
         }
@@ -1823,6 +1833,10 @@ internal static class RynthCoreChatCommands
                 Answer(problem == null, ask, problem ?? "");
                 return;
             }
+            case UI.LayoutCommand.BringHere:
+                // Answered from the game thread once the windows have moved (ImGuiPopOuts.Gather).
+                ImGuiBackend.ImGuiPopOuts.RequestGather(LaterReply());
+                return;
             case UI.LayoutCommand.MakeDefault:
             case UI.LayoutCommand.ResetConfirm:
             {

@@ -84,6 +84,7 @@ internal sealed class ChatFace : IImGuiPanel
 
     /// <summary>New lines arrive a few times a second at most; popped out and idle, 5 Hz is plenty.</summary>
     public int PopOutIdleHz => 5;
+    public bool ShowsChatTyping => true;
 
     public void OnShown()
     {
@@ -312,7 +313,7 @@ internal sealed class ChatFace : IImGuiPanel
         ImGuiNET.ImGui.SetCursorScreenPos(p);
         if (ImGuiNET.ImGui.InvisibleButton("##chat_input", new Vector2(boxW, h)))
             ChatModel.BeginTyping();
-        if (!typing && ChatHooks.RynthChatOwnsChat) ImGuiNET.ImGui.SetItemTooltip("Click or press Enter to chat (Ctrl+V pastes; /r replies, /rt retells)");
+        if (!typing && ChatHooks.RynthChatOwnsChat) ImGuiNET.ImGui.SetItemTooltip("Click or press Enter to chat (Ctrl+V pastes; /r replies, /rt retells;\n/me, /e, *wave* and /wave emote, @ and / commands work as in the game's chat)");
         dl.AddRectFilled(p, p + new Vector2(boxW, h), InputBg, 3);
         dl.AddRect(p, p + new Vector2(boxW, h), typing ? InputActive : InputBorder, 3);
 

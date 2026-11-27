@@ -210,9 +210,11 @@ internal static unsafe class ChatCommandDispatcher
             if (StartsWithCmd(trimmed, "/emote "))
                 return DispatchEmote(trimmed.Substring(7));
 
-            // /e message (soul emote — client-side)
-            if (StartsWithCmd(trimmed, "/me "))
-                return DispatchSoulEmote(trimmed.Substring(4));
+            // /me message: AC's @emote ("Name looks menacingly at the mob"). It sent a soul emote
+            // (the text half of an action emote) until 2026-11-26. "/me" alone: AC's own @emote
+            // answers with how to use it. (/e and /em are AC's own: they take the parser path below.)
+            if (ChatLineRoute.IsMeEmote(trimmed, out string meText))
+                return meText.Length > 0 ? DispatchEmote(meText) : DispatchRaw("@emote");
 
             // /tell Name, message
             if (StartsWithCmd(trimmed, "/tell "))
@@ -233,9 +235,22 @@ internal static unsafe class ChatCommandDispatcher
             if (ChatLineRoute.IsAcEmoteLine(trimmed))
                 return DispatchRaw(trimmed);
 
+            // Any other @command (@loc, @friends, @age, @myquests): AC's parser too, as its chat
+            // bar does, so the client's own commands work and the rest still reach the server.
+            if (ChatLineRoute.IsAtCommand(trimmed))
+                return DispatchAtCommand(trimmed);
+
             // Bare text → say
             if (!trimmed.StartsWith("/", StringComparison.Ordinal))
                 return DispatchSay(trimmed);
+
+            // Last of all: "/wave" alone (and AC's other standard emotes, ChatSlashEmote.cs) is AC's
+            // "*Wave*". Only here, after the engine's /rc, every plugin's commands (Lua's too), the
+            // routes above and AC's own command words (none is an emote name) had their turn, so a
+            // real command always wins. Through the Decal bridge too: DispatchRaw hands "*Wave*" to
+            // Decal's InvokeChatParser, the same route a typed "*wave*" already takes there.
+            if (ChatSlashEmote.TryMatch(trimmed, out string emoteLine))
+                return DispatchRaw(emoteLine);
 
             // Everything else (arbitrary slash commands like /smite) → raw chat path
             return DispatchRaw(trimmed);
@@ -385,6 +400,20 @@ internal static unsafe class ChatCommandDispatcher
         if (ChatCallbackHooks.TryDispatchDirect(command))
             return true;
         return SimulateChatInput(command);
+    }
+
+    /// <summary>
+    /// An @command for AC's parser. Only the direct routes: where AC's parser can't be reached
+    /// that way the line goes out as speech text, as every @command did before 2026-11-26 (the
+    /// server still runs its own commands), never as simulated keystrokes.
+    /// </summary>
+    private static bool DispatchAtCommand(string command)
+    {
+        if (DecalBridgeHost.Active)
+            return DecalBridgeHost.TryInvokeChatParser(command);
+        if (ChatCallbackHooks.TryDispatchDirect(command))
+            return true;
+        return DispatchSay(command);
     }
 
     /// <summary>
